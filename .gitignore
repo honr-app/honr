@@ -1,0 +1,7 @@
+/target
+/honr.json
+/honr.json.tmp
+node_modules
+web/dist
+.DS_Store
+web/tsconfig.tsbuildinfo

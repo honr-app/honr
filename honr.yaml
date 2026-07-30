@@ -1,0 +1,44 @@
+# Level schema — your ladder, not mine (§4).
+#
+# The engine never reads these names; it reads the tree. Two facts are
+# structural: does a node have children (container vs claimable leaf), and
+# where does it sit relative to the commitment line. Everything below just
+# drives labels, default gates, and what the UI asks a human to fill in.
+
+levels:
+  - name: Vision
+    horizon: 18mo
+    owner: human
+    elaborate: never
+  - name: Project
+    horizon: 2q
+    owner: human
+    elaborate: on_commit
+  - name: Epic
+    horizon: 6w
+    owner: human
+    requires: [acceptance_criteria]
+  - name: Story
+    horizon: 1w
+    owner: planner
+    requires: [definition_of_done]
+  - name: Task
+    horizon: 1d
+    owner: agent
+    claimable: true
+
+# Simulated fleet tuning. Compresses a day of agent work into minutes so the
+# attention design can actually be evaluated. Replaced wholesale when a real
+# Executor lands.
+fleet:
+  size: 7
+  tick_ms: 2000
+  lease_secs: 45
+  # Per-tick outcome weights for a running item.
+  escalate_p: 0.04
+  split_p: 0.03
+  die_p: 0.01
+  # Applied once, when a card reaches Verify.
+  gate_fail_p: 0.20
+  # Expected heartbeat interval; cards decay visibly past this.
+  heartbeat_expect_secs: 6
