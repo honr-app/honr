@@ -119,7 +119,7 @@ function Node({
     <>
       <div
         className={`onode ${isLeaf ? "leaf" : "branch"} ${machine ? "machine" : ""}`}
-        style={{ paddingLeft: 12 + depth * 22 }}
+        style={{ "--depth": depth } as React.CSSProperties}
         onClick={() => onOpen(item.id)}
         role="button"
         tabIndex={0}
@@ -136,7 +136,7 @@ function Node({
           {shut ? "▸" : "▾"}
         </button>
 
-        <span className="olevel">{item.level ?? "·"}</span>
+        <span className={`olevel lvl-${item.level ?? "story"}`}>{item.level ?? "·"}</span>
         <span className="otitle">{item.title}</span>
 
         {named && <span className="onote">named only</span>}
@@ -158,7 +158,11 @@ function Node({
       {/* The intent chain is the highest-leverage payload in the system, so a
           container shows its contract inline rather than hiding it a click
           away. Leaves don't — at that density it would drown the tree. */}
-      {!isLeaf && !shut && <div className="ointent" style={{ paddingLeft: 46 + depth * 22 }}>{item.intent}</div>}
+      {!isLeaf && !shut && (
+        <div className="ointent" style={{ "--depth": depth } as React.CSSProperties}>
+          {item.intent}
+        </div>
+      )}
 
       {!shut &&
         kids.map((k) => (

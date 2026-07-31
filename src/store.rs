@@ -29,6 +29,8 @@ pub struct BoardState {
     /// they will be right to.
     #[serde(default)]
     pub stories: BTreeMap<ItemId, Vec<StoryLine>>,
+    #[serde(skip)]
+    pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +104,7 @@ pub struct ClaimGrant {
     pub notes: Vec<String>,
     pub lease_expires_at: DateTime<Utc>,
     pub budget_remaining_cents: Option<u64>,
+    pub engine: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -323,6 +326,20 @@ impl Board {
             .collect()
     }
 
+    pub fn append_agent_log(&self, id: ItemId, line: impl Into<String>) {
+        let mut s = self.state.write().unwrap();
+        let logs = s.agent_logs.entry(id).or_default();
+        if logs.len() >= 300 {
+            logs.pop_front();
+        }
+        logs.push_back(line.into());
+    }
+
+    pub fn get_agent_logs(&self, id: ItemId) -> Vec<String> {
+        let s = self.state.read().unwrap();
+        s.agent_logs.get(&id).map(|l| l.iter().cloned().collect()).unwrap_or_default()
+    }
+
     fn unresolved_blockers(s: &BoardState, item: &WorkItem) -> Vec<ItemId> {
         item.blocked_by
             .iter()
@@ -362,6 +379,10 @@ impl Board {
         }
         if to == State::Ready {
             item.progress = 0.0;
+            if by == "human" {
+                item.run_failures = 0;
+                item.escalation = None;
+            }
         }
         let mut item_out = item.clone();
         Self::populate_blockers(s, &mut item_out);
@@ -545,6 +566,40 @@ impl Board {
         self.emit(&item);
     }
 
+    /// Tweak an item's title, intent, or definition of done in Shaping before approving it.
+    pub fn update_item(
+        &self,
+        id: ItemId,
+        title: Option<String>,
+        intent: Option<String>,
+        definition_of_done: Option<String>,
+        engine: Option<String>,
+    ) -> Result<WorkItem, String> {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
+            if let Some(t) = title {
+                if !t.trim().is_empty() {
+                    it.title = t;
+                }
+            }
+            if let Some(i) = intent {
+                if !i.trim().is_empty() {
+                    it.intent = i;
+                }
+            }
+            if let Some(d) = definition_of_done {
+                it.definition_of_done = if d.trim().is_empty() { None } else { Some(d) };
+            }
+            if let Some(e) = engine {
+                it.engine = if e.trim().is_empty() { None } else { Some(e) };
+            }
+            it.clone()
+        };
+        self.emit(&item);
+        Ok(item)
+    }
+
     // ------------------------------------------------------- the agent verbs
 
     /// A card still leased to this agent — survives a restart mid-flight. The
@@ -621,6 +676,7 @@ impl Board {
             notes: item.notes.iter().map(|n| n.text.clone()).collect(),
             lease_expires_at: expires_at,
             budget_remaining_cents: item.budget_cents.map(|b| b.saturating_sub(item.cost_cents)),
+            engine: item.engine.clone(),
         })
     }
 
@@ -870,6 +926,8 @@ impl Board {
             let mut s = self.state.write().unwrap();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             it.notes.push(Note { at: Utc::now(), author: "human".into(), text });
+            it.run_failures = 0;
+            it.escalation = None;
             it.clone()
         };
         self.emit(&item);

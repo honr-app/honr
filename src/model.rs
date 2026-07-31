@@ -252,6 +252,9 @@ pub struct WorkItem {
     /// again instead of orphaning them.
     #[serde(default)]
     pub environment: Option<String>,
+    /// Selected agent engine (`claude` vs `agy`).
+    #[serde(default)]
+    pub engine: Option<String>,
     /// The pull request the agent opened. Review is a real PR: approving here
     /// surfaces it, merging stays a human action.
     #[serde(default)]
@@ -294,6 +297,7 @@ impl WorkItem {
             pinned: Vec::new(),
             release_target: None,
             environment: None,
+            engine: None,
             pr_url: None,
             created_at: now,
             entered_state_at: now,

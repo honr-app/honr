@@ -202,8 +202,10 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         if fleet.in_flight.load(Ordering::Relaxed) as usize >= fleet.agents.max_concurrent {
             continue;
         }
-        if SPENT_TODAY.load(Ordering::Relaxed) >= fleet.agents.daily_budget_cents {
-            continue;
+        if let Some(daily) = fleet.agents.daily_budget_cents {
+            if daily > 0 && SPENT_TODAY.load(Ordering::Relaxed) >= daily {
+                continue;
+            }
         }
         if fleet.cooldown.lock().unwrap().is_some_and(|t| std::time::Instant::now() < t) {
             continue;
@@ -540,6 +542,7 @@ async fn run_inside(
 ) -> anyhow::Result<()> {
     let id = grant.item_id;
     let short = Duration::from_secs(180);
+    board.clear_agent_logs(id);
 
     // Setup emits no agent output, so without this the card looks dead from
     // the moment it is claimed until `claude` produces its first line — long
@@ -550,6 +553,7 @@ async fn run_inside(
         let _ = board.heartbeat(id, agent_id, p, 0, lease_secs);
     };
 
+    let _ = os.delete(&spec.name).await;
     os.create(spec).await?;
     beat(0.01);
 
@@ -587,8 +591,12 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
 
     // ---- the agent -------------------------------------------------------
 
-    let briefing = briefing(grant, branch_state, branch, &cfg.repo.upstream, &cfg.repo.base);
-    let start = os.exec(name, &start_script(cfg, &briefing), short).await?;
+    let briefing_text = briefing(grant, branch_state, branch, &cfg.repo.upstream, &cfg.repo.base);
+    let engine = grant.engine.as_deref().unwrap_or(&cfg.engine);
+    if engine == "agy" {
+        setup_agy_auth(os, name, &cfg.vertex.project).await?;
+    }
+    let start = os.exec(name, &start_script(cfg, &briefing_text, engine), short).await?;
     anyhow::ensure!(start.ok(), "agent did not start: {}", outerr(&start));
     beat(0.04);
 
@@ -650,12 +658,14 @@ async fn watch_agent(
                 SPENT_TODAY.fetch_add(delta, Ordering::Relaxed);
             }
 
+            // Buffer live agent output lines for UI stream view.
+            board2.append_agent_log(id, line.to_string());
+
             // Every line is an activity ping. A stream-format change therefore
             // degrades to "still alive" rather than crashing the supervisor.
             let _ = board2.heartbeat(id, &agent_owned, progress, delta, lease_secs);
         })
         .await?;
-
     Ok((run, spent.load(Ordering::Relaxed)))
 }
 
@@ -897,9 +907,10 @@ async fn finish(
     spent: u64,
 ) -> anyhow::Result<()> {
     let short = Duration::from_secs(180);
-    let budget = cfg.per_card_budget_cents;
-    if spent > budget {
-        anyhow::bail!("per-card budget breached: {spent}c > {budget}c");
+    if let Some(card_cap) = cfg.per_card_budget_cents {
+        if card_cap > 0 && spent > card_cap {
+            anyhow::bail!("per-card budget breached: {spent}c > {card_cap}c");
+        }
     }
 
     if process_verdict(board, os, cfg, agent_id, id, name, branch).await? {
@@ -981,14 +992,18 @@ async fn finish(
 ///   already single-quoted for the outer shell, and quoting it a second time
 ///   for the inner `bash -c` is exactly the sort of thing that works until a
 ///   card description contains an apostrophe.
-fn start_script(cfg: &AgentConfig, briefing: &str) -> String {
+fn start_script(cfg: &AgentConfig, briefing: &str, engine: &str) -> String {
     let secs = cfg.agent_timeout_secs;
+    let cmd = match engine {
+        "agy" => "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\"".to_string(),
+        _ => "claude -p \"$HONR_BRIEFING\" --output-format stream-json --verbose --permission-mode bypassPermissions".to_string(),
+    };
     format!(
         r#"set -e
 rm -f {AGENT_PID} {AGENT_STATUS}
 : > {AGENT_LOG}
 export HONR_BRIEFING={brief}
-setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} claude -p "$HONR_BRIEFING" --output-format stream-json --verbose --permission-mode bypassPermissions >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
+setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} {cmd} >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
 for i in $(seq 1 40); do
   if [ -s {AGENT_PID} ]; then exit 0; fi
   sleep 0.25
@@ -1056,12 +1071,30 @@ async fn stop_agent(os: &OpenShell, name: &str) {
     let _ = os.exec(name, &script, Duration::from_secs(30)).await;
 }
 
+async fn setup_agy_auth(os: &OpenShell, name: &str, project: &str) -> anyhow::Result<()> {
+    let script = format!(
+        r#"set -e
+mkdir -p /sandbox/.gemini/antigravity-cli
+echo '{{"enableTelemetry":false,"gcp":{{"project":"{project}","location":"global"}}}}' > /sandbox/.gemini/antigravity-cli/settings.json
+"#
+    );
+    let _ = os.exec(name, &script, Duration::from_secs(10)).await;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let host_token = format!("{home}/.gemini/antigravity-cli/antigravity-oauth-token");
+    if std::path::Path::new(&host_token).exists() {
+        let _ = os.upload(name, &host_token, "/sandbox/.gemini/antigravity-cli/antigravity-oauth-token").await;
+    }
+    Ok(())
+}
+
 fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
     vec![
         ("CLAUDE_CODE_USE_VERTEX".into(), "1".into()),
         ("ANTHROPIC_VERTEX_PROJECT_ID".into(), cfg.vertex.project.clone()),
         ("CLOUD_ML_REGION".into(), cfg.vertex.location.clone()),
         ("ANTHROPIC_MODEL".into(), cfg.vertex.model.clone()),
+        ("GOOGLE_CLOUD_PROJECT".into(), cfg.vertex.project.clone()),
+        ("GOOGLE_CLOUD_REGION".into(), cfg.vertex.location.clone()),
         // Point google-auth at the shim instead of the blocked metadata server.
         ("GCE_METADATA_HOST".into(), "127.0.0.1:8127".into()),
         ("DISABLE_TELEMETRY".into(), "1".into()),
@@ -1486,7 +1519,7 @@ mod tests {
     /// and left deleting the sandbox as the only honest option.
     #[test]
     fn the_agent_outlives_the_exec_that_starts_it() {
-        let s = start_script(&repo_cfg(), "do the thing");
+        let s = start_script(&repo_cfg(), "do the thing", "claude");
         assert!(s.contains("setsid nohup"), "must be detached: {s}");
         assert!(s.trim_end().contains("&\n") || s.contains("2>&1 &"), "must background it: {s}");
         // The three files are the whole contract with whoever watches next.
@@ -1506,7 +1539,7 @@ mod tests {
     fn the_agent_carries_its_own_deadline() {
         let mut cfg = repo_cfg();
         cfg.agent_timeout_secs = 900;
-        let s = start_script(&cfg, "b");
+        let s = start_script(&cfg, "b", "claude");
         assert!(s.contains("timeout --foreground 900 claude"), "{s}");
     }
 
@@ -1516,9 +1549,9 @@ mod tests {
     /// apostrophe in it — which is most of them.
     #[test]
     fn the_briefing_crosses_the_inner_shell_intact() {
-        let s = start_script(&repo_cfg(), "it's a card; rm -rf /");
+        let s = start_script(&repo_cfg(), "it's a card; rm -rf /", "claude");
         assert!(s.contains(r"it'\''s a card; rm -rf /"), "must be escaped once: {s}");
-        assert!(s.contains(r#"claude -p "$HONR_BRIEFING""#), "inner shell reads the var: {s}");
+        assert!(s.contains(r#"$HONR_BRIEFING"#), "inner shell reads the var: {s}");
     }
 
     /// Following is a *reader*. It can start part-way through, which is what
@@ -1642,6 +1675,7 @@ mod tests {
             notes: vec![],
             lease_expires_at: chrono::Utc::now(),
             budget_remaining_cents: None,
+            engine: None,
         }
     }
 

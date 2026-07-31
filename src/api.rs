@@ -34,7 +34,9 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/digest", get(digest))
         .route("/items", post(create_item))
         .route("/items/{id}", get(item_detail))
+        .route("/items/{id}/logs", get(item_logs))
         .route("/items/{id}/transition", post(transition))
+        .route("/items/{id}/update", post(update_item))
         .route("/items/{id}/steer", post(steer))
         .route("/items/{id}/pin", post(pin))
         .route("/items/{id}/halt", post(halt))
@@ -83,6 +85,34 @@ async fn item_detail(
         children: b.children_of(id),
         item,
     }))
+}
+
+#[derive(Serialize)]
+pub struct LogResponse {
+    pub claude: Vec<String>,
+    pub openshell: Vec<String>,
+}
+
+async fn item_logs(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+) -> ApiResult<LogResponse> {
+    let item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
+    let claude = b.get_agent_logs(id);
+
+    let env_name = item
+        .environment
+        .clone()
+        .unwrap_or_else(|| format!("honr-card-{id}-a{}", item.run_failures + 1));
+
+    let os = crate::openshell::OpenShell::default();
+    let openshell = if let Ok(logs) = os.logs(&env_name, 60).await {
+        logs.lines().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Json(LogResponse { claude, openshell }))
 }
 
 #[derive(Deserialize)]
@@ -156,6 +186,22 @@ async fn pin(
     Json(req): Json<TextReq>,
 ) -> ApiResult<WorkItem> {
     Ok(Json(b.pin(id, req.text).map_err(ApiError)?))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateItemReq {
+    title: Option<String>,
+    intent: Option<String>,
+    definition_of_done: Option<String>,
+    engine: Option<String>,
+}
+
+async fn update_item(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+    Json(req): Json<UpdateItemReq>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(b.update_item(id, req.title, req.intent, req.definition_of_done, req.engine).map_err(ApiError)?))
 }
 
 async fn halt(

@@ -17,6 +17,7 @@ export const api = {
   board: (): Promise<Snapshot> => fetch("/api/board").then(jsonOrThrow),
   digest: () => fetch("/api/digest").then(jsonOrThrow),
   detail: (id: number) => fetch(`/api/items/${id}`).then(jsonOrThrow),
+  logs: (id: number): Promise<{ claude: string[]; openshell: string[] }> => fetch(`/api/items/${id}/logs`).then(jsonOrThrow),
 
   // The human verbs. Each costs the system something different.
   steer: (id: number, text: string): Promise<WorkItem> =>
@@ -30,6 +31,10 @@ export const api = {
   approve: (id: number): Promise<WorkItem> => post(`/items/${id}/approve`),
   requestChanges: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/request-changes`, { text }),
+  transition: (id: number, to: string, reason?: string): Promise<WorkItem> =>
+    post(`/items/${id}/transition`, { to, reason }),
+  update: (id: number, fields: { title?: string; intent?: string; definition_of_done?: string; engine?: string }): Promise<WorkItem> =>
+    post(`/items/${id}/update`, fields),
   cut: (id: number, reason?: string): Promise<number[]> =>
     post(`/items/${id}/cut`, { reason }),
 };
