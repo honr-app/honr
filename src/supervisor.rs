@@ -6,16 +6,19 @@
 //! review. (OpenShell only forwards host→sandbox anyway, which independently
 //! forces this shape.)
 //!
-//! Two properties are load-bearing:
+//! Three properties are load-bearing:
 //!
 //! - **Liveness and cost are observed, never self-reported.** Both come from
 //!   parsing the agent's `stream-json` as it arrives, so a hung agent cannot
 //!   claim to be fine and a chatty one cannot under-report spend.
 //! - **Everything fails as a hang.** Every exec carries a deadline, and silence
 //!   is treated as failure rather than patience.
+//! - **The supervisor reads the run; it does not own it.** The agent is started
+//!   detached and writes to a log, so watching is a thing a *different* honr
+//!   process can pick up after a restart. See `reconcile`.
 
-use crate::model::{ItemId, State};
-use crate::openshell::{OpenShell, SandboxSpec, LABEL_ITEM};
+use crate::model::{ItemId, State, WorkItem};
+use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_ITEM};
 use crate::schema::{AgentConfig, ExecutionConfig};
 use crate::store::{ClaimGrant, SharedBoard};
 
@@ -34,17 +37,32 @@ const SHIM_LOCAL: &str = "sandbox/metadata-shim.py";
 const SHIM_DEST_DIR: &str = "/tmp";
 const SHIM_REMOTE: &str = "/tmp/metadata-shim.py";
 
-pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
-    tokio::spawn(sweeper_loop(board.clone(), cfg.clone()));
+/// The agent's output, its process group, and its exit code — in `/tmp` rather
+/// than the checkout, so the agent's own `git clean` cannot take the record of
+/// its run with it. These three files are the entire contract between a run and
+/// whichever supervisor happens to be watching it.
+const AGENT_LOG: &str = "/tmp/agent.log";
+const AGENT_PID: &str = "/tmp/agent.pid";
+const AGENT_STATUS: &str = "/tmp/agent.status";
 
+type Active = Arc<std::sync::Mutex<std::collections::HashSet<ItemId>>>;
+type Cooldown = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
+
+pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     if !cfg.agents.enabled {
         tracing::info!("execution.agents.enabled = false; board runs with no executor");
+        tokio::spawn(sweeper_loop(board, cfg));
         return;
     }
     if let Err(e) = cfg.agents.validate() {
         tracing::error!("agents enabled but misconfigured: {e}");
+        tokio::spawn(sweeper_loop(board, cfg));
         return;
     }
+    // The sweeper starts *inside* `dispatch_loop`, once reconciliation has
+    // finished. A card that was mid-run when honr died has not been
+    // heartbeaten since, so a sweep that lands first requeues a run that is
+    // still going — and then dispatch starts a second agent on the same branch.
     tokio::spawn(dispatch_loop(board, cfg));
 }
 
@@ -87,75 +105,46 @@ fn is_infrastructure(err: &str) -> bool {
     SIGNS.iter().any(|s| err.contains(s))
 }
 
-async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
-    let os = Arc::new(OpenShell::default());
-    let agents = Arc::new(cfg.agents.clone());
-    let in_flight = Arc::new(AtomicU64::new(0));
-    // Which cards this process is actively running.
-    //
-    // The lease is time-based and cannot see in-process state: a long silent
-    // tool call lets the sweeper requeue a card whose supervisor task is still
-    // alive, and dispatch would then claim it again and race itself on one
-    // branch. A sandbox label is *not* the right evidence here — failed
-    // sandboxes are deliberately kept for inspection, so the label outlives
-    // the run and would deadlock every retry.
-    let active: Arc<std::sync::Mutex<std::collections::HashSet<ItemId>>> = Arc::default();
-    let cooldown_until: Arc<std::sync::Mutex<Option<std::time::Instant>>> = Arc::default();
+/// What every run shares with the loop it belongs to.
+///
+/// Bundled rather than threaded through as six arguments, because dispatch and
+/// adoption both need all of it and the bookkeeping around a run must not
+/// differ by how the run started.
+#[derive(Clone)]
+struct Fleet {
+    board: SharedBoard,
+    os: Arc<OpenShell>,
+    agents: Arc<AgentConfig>,
+    in_flight: Arc<AtomicU64>,
+    /// Which cards this process is actively running.
+    ///
+    /// The lease is time-based and cannot see in-process state: a long silent
+    /// tool call lets the sweeper requeue a card whose supervisor task is still
+    /// alive, and dispatch would then claim it again and race itself on one
+    /// branch. A sandbox label is *not* the right evidence here — failed
+    /// sandboxes are deliberately kept for inspection, so the label outlives
+    /// the run and would deadlock every retry. `reconcile` is the one place
+    /// that reads labels, and it cross-checks them against the card.
+    active: Active,
+    cooldown: Cooldown,
+    lease_secs: i64,
+}
 
-    reap_orphans(&os, &board).await;
-
-    let mut tick = tokio::time::interval(Duration::from_secs(3));
-    loop {
-        tick.tick().await;
-
-        if in_flight.load(Ordering::Relaxed) as usize >= agents.max_concurrent {
-            continue;
-        }
-        if SPENT_TODAY.load(Ordering::Relaxed) >= agents.daily_budget_cents {
-            continue;
-        }
-        if cooldown_until.lock().unwrap().is_some_and(|t| std::time::Instant::now() < t) {
-            continue;
-        }
-        // The podman machine stops on its own. Claiming a card we can't run
-        // would strand it until the lease lapsed.
-        if !os.healthy().await {
-            tracing::warn!("openshell gateway unhealthy; not claiming");
-            continue;
-        }
-
-        let ready = board.list_ready(&["any".to_string()]);
-        let Some(item) = ready
-            .into_iter()
-            .find(|i| !active.lock().unwrap().contains(&i.id))
-        else {
-            continue;
-        };
-
-        let agent_id = format!("sandbox-{}", item.id);
-        let grant = match board.claim(item.id, &agent_id, Some(agents.vertex.model.clone()), cfg.lease_secs) {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::debug!("claim of #{} refused: {e}", item.id);
-                continue;
-            }
-        };
-
-        in_flight.fetch_add(1, Ordering::Relaxed);
-        active.lock().unwrap().insert(item.id);
-        let (board, os, agents, in_flight2, active2, cooldown2) = (
-            board.clone(),
-            os.clone(),
-            agents.clone(),
-            in_flight.clone(),
-            active.clone(),
-            cooldown_until.clone(),
-        );
-        let lease = cfg.lease_secs;
+impl Fleet {
+    /// Everything that has to happen around a run, whichever way it started.
+    ///
+    /// Adopted runs go through here too, so a run that survived a restart
+    /// cannot quietly get different failure accounting from a fresh one.
+    fn supervise<F>(&self, id: ItemId, agent_id: String, work: F)
+    where
+        F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        self.active.lock().unwrap().insert(id);
+        let f = self.clone();
         tokio::spawn(async move {
-            let id = grant.item_id;
-            match run_card(&board, &os, &agents, &agent_id, grant, lease).await {
-                Ok(()) => board.clear_run_failures(id),
+            match work.await {
+                Ok(()) => f.board.clear_run_failures(id),
                 Err(e) => {
                     let msg = e.to_string();
                     if is_infrastructure(&msg) {
@@ -163,9 +152,9 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
                         // dispatching for a while rather than spending the
                         // card's retry budget on a broken machine.
                         tracing::warn!("#{id}: infrastructure failure, not counting it: {msg}");
-                        *cooldown2.lock().unwrap() =
+                        *f.cooldown.lock().unwrap() =
                             Some(std::time::Instant::now() + INFRA_COOLDOWN);
-                        let _ = board.release(id, &agent_id);
+                        let _ = f.board.release(id, &agent_id);
                     } else {
                         tracing::error!("#{id} failed: {msg}");
                         // Count it. A run that dies early spends nothing, so no
@@ -173,54 +162,228 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
                         // after `max_attempts` this becomes a human's problem
                         // instead of an overnight loop.
                         if let Err(e2) =
-                            board.record_run_failure(id, &msg, agents.max_attempts)
+                            f.board.record_run_failure(id, &msg, f.agents.max_attempts)
                         {
                             tracing::error!("#{id}: could not record failure: {e2}");
                         }
                     }
                 }
             }
-            active2.lock().unwrap().remove(&id);
-            in_flight2.fetch_sub(1, Ordering::Relaxed);
+            f.active.lock().unwrap().remove(&id);
+            f.in_flight.fetch_sub(1, Ordering::Relaxed);
         });
     }
 }
 
-/// A restarted honr must find sandboxes it started before the restart. honr is
-/// rebuilt constantly while honr is what's being built, so without this every
-/// `cargo run` orphans a live sandbox and leaks real money.
-async fn reap_orphans(os: &OpenShell, board: &SharedBoard) {
-    let Ok(ours) = os.list_ours().await else {
-        tracing::warn!("could not list sandboxes; skipping reap");
-        return;
+async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
+    let fleet = Fleet {
+        board: board.clone(),
+        os: Arc::new(OpenShell::default()),
+        agents: Arc::new(cfg.agents.clone()),
+        in_flight: Arc::default(),
+        active: Arc::default(),
+        cooldown: Arc::default(),
+        lease_secs: cfg.lease_secs,
     };
+
+    // Pick up whatever survived the last process before anything else — the
+    // sweeper included — gets a chance to act on those cards.
+    for a in reconcile(&fleet.os, &board, cfg.lease_secs).await {
+        let (id, agent_id) = (a.item_id, a.agent_id.clone());
+        fleet.supervise(id, agent_id, adopt_card(fleet.clone(), a));
+    }
+
+    tokio::spawn(sweeper_loop(board.clone(), cfg.clone()));
+
+    let mut tick = tokio::time::interval(Duration::from_secs(3));
+    loop {
+        tick.tick().await;
+
+        if fleet.in_flight.load(Ordering::Relaxed) as usize >= fleet.agents.max_concurrent {
+            continue;
+        }
+        if SPENT_TODAY.load(Ordering::Relaxed) >= fleet.agents.daily_budget_cents {
+            continue;
+        }
+        if fleet.cooldown.lock().unwrap().is_some_and(|t| std::time::Instant::now() < t) {
+            continue;
+        }
+        // The podman machine stops on its own. Claiming a card we can't run
+        // would strand it until the lease lapsed.
+        if !fleet.os.healthy().await {
+            tracing::warn!("openshell gateway unhealthy; not claiming");
+            continue;
+        }
+
+        let ready = board.list_ready(&["any".to_string()]);
+        let Some(item) = ready
+            .into_iter()
+            .find(|i| !fleet.active.lock().unwrap().contains(&i.id))
+        else {
+            continue;
+        };
+
+        let agent_id = format!("sandbox-{}", item.id);
+        let grant = match board.claim(
+            item.id,
+            &agent_id,
+            Some(fleet.agents.vertex.model.clone()),
+            cfg.lease_secs,
+        ) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::debug!("claim of #{} refused: {e}", item.id);
+                continue;
+            }
+        };
+
+        fleet.supervise(item.id, agent_id.clone(), run_card(fleet.clone(), agent_id, grant));
+    }
+}
+
+// ------------------------------------------------------ surviving a restart
+
+/// A run that outlived the process supervising it.
+///
+/// honr is rebuilt constantly while honr is what's being built, so a restart
+/// mid-run is the normal case, not an incident. Killing the sandbox was the
+/// safe stopgap: correct, and it threw away a five-minute run and its spend
+/// every time. Re-adopting keeps the run going and the card Running.
+#[derive(Debug, Clone)]
+struct Adoption {
+    item_id: ItemId,
+    agent_id: String,
+    sandbox: String,
+    /// First log line this process has not already accounted for. Everything
+    /// before it was streamed — and charged — by the process that died.
+    from_line: u64,
+    /// The run's cumulative spend as of that line. The stream reports a running
+    /// total and the supervisor charges the *difference*, so without a starting
+    /// point the next cost line would bill the whole run a second time.
+    seen_cents: u64,
+}
+
+/// The card this sandbox belongs to, if the sandbox is worth adopting.
+///
+/// The card decides, not the sandbox. A failed sandbox is deliberately *kept*
+/// for inspection, so its existence proves nothing about whether a run is live;
+/// and a retry leaves the previous attempt's sandbox behind under the same
+/// `honr.item` label, so the label alone cannot say which one to watch.
+/// `environment` names the current attempt, and that is the only thing that
+/// can. Everything this rejects gets reaped.
+fn adoptable<'a>(item: Option<&'a WorkItem>, sandbox: &str) -> Option<&'a WorkItem> {
+    item.filter(|i| {
+        matches!(i.state, State::Claimed | State::Running)
+            && i.environment.as_deref() == Some(sandbox)
+    })
+}
+
+/// Match live sandboxes back to the board, before anything else touches them.
+async fn reconcile(os: &OpenShell, board: &SharedBoard, lease_secs: i64) -> Vec<Adoption> {
+    let Ok(ours) = os.list_ours().await else {
+        tracing::warn!("could not list sandboxes; skipping reconciliation");
+        return Vec::new();
+    };
+
+    let mut adopted = Vec::new();
     for sb in ours {
         let Some(id) = sb.item_id() else { continue };
-        let still_running =
-            board.get(id).map(|i| matches!(i.state, State::Claimed | State::Running)).unwrap_or(false);
-        if still_running {
-            // The card is mid-flight but the task driving it died with the old
-            // process. Nothing is watching the sandbox, so the honest move is
-            // to drop it and let the lease requeue the card.
-            tracing::warn!("#{id}: sandbox {} outlived its supervisor; deleting", sb.name);
-        } else {
+        let card = board.get(id);
+        let Some(item) = adoptable(card.as_ref(), &sb.name) else {
             tracing::info!("reaping orphaned sandbox {}", sb.name);
+            let _ = os.delete(&sb.name).await;
+            continue;
+        };
+
+        match adopt(os, board, item, &sb.name, lease_secs).await {
+            Some(a) => {
+                tracing::info!("#{id}: re-attached to {} from line {}", sb.name, a.from_line);
+                adopted.push(a);
+            }
+            None => {
+                // The sandbox is up but nothing is running in it — honr died
+                // during setup, or the agent exited and nothing cleaned up
+                // after it. There is no run to watch, so give the card back.
+                // A restart is not the card's fault, so it costs no retry
+                // budget; it just gets dispatched again from the top.
+                tracing::warn!("#{id}: {} has no live agent; requeueing", sb.name);
+                let _ = os.delete(&sb.name).await;
+                board.set_environment(id, None);
+                let _ = board.transition(
+                    id,
+                    State::Ready,
+                    "supervisor",
+                    Some("honr restarted and found no live agent in the sandbox".into()),
+                );
+            }
         }
-        let _ = os.delete(&sb.name).await;
-        board.set_environment(id, None);
     }
+    adopted
+}
+
+/// Ask a sandbox what its agent is doing, and take over if there is one.
+async fn adopt(
+    os: &OpenShell,
+    board: &SharedBoard,
+    item: &WorkItem,
+    sandbox: &str,
+    lease_secs: i64,
+) -> Option<Adoption> {
+    let id = item.id;
+    // A probe that hangs is a sandbox we cannot reason about, and this stack
+    // fails as a hang. Treat it as "no live run" and give the card back rather
+    // than watching something that may not be there.
+    let out = match os.exec(sandbox, &probe_script(), Duration::from_secs(30)).await {
+        Ok(o) if o.ok() => o,
+        Ok(o) => {
+            tracing::warn!("#{id}: probe of {sandbox} failed: {}", outerr(&o));
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("#{id}: could not probe {sandbox}: {e}");
+            return None;
+        }
+    };
+    let (from_line, seen_cents) = probe_of(&out.stdout)?;
+
+    let agent_id = item
+        .lease
+        .as_ref()
+        .map(|l| l.agent_id.clone())
+        .unwrap_or_else(|| format!("sandbox-{id}"));
+
+    // Renew the lease now. It has not been touched since before the restart,
+    // and the sweeper is seconds from deciding this card is dead.
+    let _ = board.heartbeat(id, &agent_id, item.progress, 0, lease_secs);
+    board.story(id, format!("honr restarted; picked {sandbox} back up rather than killing it."));
+
+    Some(Adoption {
+        item_id: id,
+        agent_id,
+        sandbox: sandbox.to_string(),
+        from_line,
+        seen_cents,
+    })
+}
+
+/// Where a live run had got to, or `None` if nothing is running.
+fn probe_of(stdout: &str) -> Option<(u64, u64)> {
+    if !stdout.contains(MARK_ALIVE) && !stdout.contains(MARK_EXITED) {
+        return None;
+    }
+    let lines: u64 = stdout.lines().find_map(|l| l.strip_prefix(MARK_LINES))?.trim().parse().ok()?;
+    let seen = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix(MARK_COST))
+        .and_then(parse_cost_cents)
+        .unwrap_or(0);
+    Some((lines + 1, seen))
 }
 
 // ----------------------------------------------------------- the lifecycle
 
-async fn run_card(
-    board: &SharedBoard,
-    os: &OpenShell,
-    cfg: &AgentConfig,
-    agent_id: &str,
-    grant: ClaimGrant,
-    lease_secs: i64,
-) -> anyhow::Result<()> {
+async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Result<()> {
+    let (board, os, cfg) = (&f.board, &f.os, &f.agents);
     let id = grant.item_id;
     // Attempt-scoped, because a failed sandbox is *kept* for inspection and a
     // retry would otherwise collide with its name. The `honr.item` label is
@@ -230,7 +393,7 @@ async fn run_card(
     let branch = format!("honr/card-{id}");
 
     // Recorded before creation so a crash between here and `create` still
-    // leaves a name to reconcile against.
+    // leaves a name to reconcile against — and, now, a name to re-adopt.
     board.set_environment(id, Some(name.clone()));
 
     let spec = SandboxSpec {
@@ -244,18 +407,59 @@ async fn run_card(
         memory: cfg.memory.clone(),
     };
 
-    let result = run_inside(board, os, cfg, agent_id, &grant, &name, &branch, lease_secs, &spec).await;
+    let result =
+        run_inside(board, os, cfg, &agent_id, &grant, &name, &branch, f.lease_secs, &spec).await;
+    finalize(os, board, id, &name, &result).await;
+    result
+}
 
-    // Keep the sandbox on failure: `openshell logs` is the tool that actually
-    // answers questions, and a deleted sandbox answers none.
-    match &result {
+/// Take over a run this process did not start: join it at the watch step, with
+/// the setup already done and the briefing already delivered.
+async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
+    let (board, os, cfg) = (&f.board, &f.os, &f.agents);
+    let id = a.item_id;
+    let branch = format!("honr/card-{id}");
+    let result = async {
+        let (run, spent) = watch_agent(
+            board,
+            os,
+            cfg,
+            &a.agent_id,
+            id,
+            &a.sandbox,
+            a.from_line,
+            a.seen_cents,
+            f.lease_secs,
+        )
+        .await?;
+        finish(board, os, cfg, &a.agent_id, id, &a.sandbox, &branch, &run, spent).await
+    }
+    .await;
+    finalize(os, board, id, &a.sandbox, &result).await;
+    result
+}
+
+async fn finalize(
+    os: &OpenShell,
+    board: &SharedBoard,
+    id: ItemId,
+    name: &str,
+    result: &anyhow::Result<()>,
+) {
+    match result {
         Ok(_) => {
-            let _ = os.delete(&name).await;
+            let _ = os.delete(name).await;
             board.set_environment(id, None);
         }
-        Err(e) => tracing::error!("#{id}: keeping sandbox {name} for inspection: {e}"),
+        // Keep the sandbox on failure: `openshell logs` is the tool that
+        // actually answers questions, and a deleted sandbox answers none. Stop
+        // the agent first, though — it is detached now, so dropping the exec
+        // that was watching it no longer stops it spending.
+        Err(e) => {
+            stop_agent(os, name).await;
+            tracing::error!("#{id}: keeping sandbox {name} for inspection: {e}");
+        }
     }
-    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -319,29 +523,57 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
 
     // ---- the agent -------------------------------------------------------
 
-    let budget = cfg.per_card_budget_cents;
-    let spent = Arc::new(AtomicU64::new(0));
     let briefing = briefing(grant, branch_state, branch, &cfg.repo.upstream, &cfg.repo.base);
+    let start = os.exec(name, &start_script(cfg, &briefing), short).await?;
+    anyhow::ensure!(start.ok(), "agent did not start: {}", outerr(&start));
+    beat(0.04);
 
-    let script = format!(
-        "cd {WORKDIR} && claude -p {} --output-format stream-json --verbose --permission-mode \
-         bypassPermissions 2>&1",
-        shell_quote(&briefing)
-    );
+    // From the top of the log with nothing spent: this run is ours from its
+    // first line. An adopted run joins here instead, further in.
+    let (run, spent) =
+        watch_agent(board, os, cfg, agent_id, id, name, 1, 0, lease_secs).await?;
+    finish(board, os, cfg, agent_id, id, name, branch, &run, spent).await
+}
 
+/// Watch a detached agent to completion: heartbeat on every line it writes,
+/// charge cost as it arrives, and hand back its exit status.
+///
+/// `from_line` and `seen_cents` are the whole reason this is a separate step.
+/// They make watching *resumable*: a supervisor that starts halfway through a
+/// run skips the lines a previous one already streamed, and starts its cost
+/// arithmetic from what that one already charged.
+#[allow(clippy::too_many_arguments)]
+async fn watch_agent(
+    board: &SharedBoard,
+    os: &OpenShell,
+    cfg: &AgentConfig,
+    agent_id: &str,
+    id: ItemId,
+    name: &str,
+    from_line: u64,
+    seen_cents: u64,
+    lease_secs: i64,
+) -> anyhow::Result<(Output, u64)> {
+    let spent = Arc::new(AtomicU64::new(seen_cents));
     let started = std::time::Instant::now();
-    let timeout = Duration::from_secs(cfg.agent_timeout_secs);
+    // The agent carries its own deadline inside the sandbox; this one only has
+    // to outlast it, so a hung *follower* still fails rather than waiting.
+    let timeout = Duration::from_secs(cfg.agent_timeout_secs) + Duration::from_secs(120);
+    // An adopted run is already part-way along, and a card whose progress bar
+    // walks backwards after a restart is the board lying about the run.
+    let floor = board.get(id).map(|i| i.progress).unwrap_or(0.0);
+
     let (board2, spent2) = (board.clone(), spent.clone());
     let agent_owned = agent_id.to_string();
 
     let run = os
-        .exec_streaming(name, &script, timeout, move |line| {
+        .exec_streaming(name, &follow_script(from_line), timeout, move |line| {
             // Progress is not knowable from the stream, so it is reported as
             // elapsed-against-deadline and capped below 1.0 — honest about
             // being an estimate, and monotonic, which is what the card face
             // needs. Only `report` sets 1.0.
             let frac = started.elapsed().as_secs_f32() / timeout.as_secs_f32();
-            let progress = frac.clamp(0.0, 0.95);
+            let progress = frac.max(floor).clamp(0.0, 0.95);
 
             let cents = parse_cost_cents(line);
             let delta = cents
@@ -356,15 +588,33 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
 
             // Every line is an activity ping. A stream-format change therefore
             // degrades to "still alive" rather than crashing the supervisor.
-            let _ = board2.heartbeat(grant.item_id, &agent_owned, progress, delta, lease_secs);
+            let _ = board2.heartbeat(id, &agent_owned, progress, delta, lease_secs);
         })
         .await?;
 
-    let final_cents = spent.load(Ordering::Relaxed);
-    if final_cents > budget {
-        anyhow::bail!("per-card budget breached: {final_cents}c > {budget}c");
+    Ok((run, spent.load(Ordering::Relaxed)))
+}
+
+/// Settle a finished run: check what it cost, check it succeeded, and put the
+/// PR on the board.
+#[allow(clippy::too_many_arguments)]
+async fn finish(
+    board: &SharedBoard,
+    os: &OpenShell,
+    cfg: &AgentConfig,
+    agent_id: &str,
+    id: ItemId,
+    name: &str,
+    branch: &str,
+    run: &Output,
+    spent: u64,
+) -> anyhow::Result<()> {
+    let short = Duration::from_secs(180);
+    let budget = cfg.per_card_budget_cents;
+    if spent > budget {
+        anyhow::bail!("per-card budget breached: {spent}c > {budget}c");
     }
-    anyhow::ensure!(run.ok(), "agent exited {}: {}", run.code, outerr(&run));
+    anyhow::ensure!(run.ok(), "agent exited {}: {}", run.code, outerr(run));
 
     // ---- verify what the agent published ---------------------------------
     //
@@ -414,6 +664,101 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
 }
 
 // --------------------------------------------------------------- scripts
+
+/// Start the agent **detached**, so it outlives the exec that launched it —
+/// and therefore outlives honr.
+///
+/// This is what makes re-adoption possible at all. As a child of the exec
+/// session the agent died whenever the process watching it died, so every
+/// `cargo run` threw away a live run; the supervisor had no honest option but
+/// to delete the sandbox. Detached, the supervisor is a *reader of a log*
+/// rather than the owner of a process, and a reader can be replaced.
+///
+/// Two consequences are deliberate:
+///
+/// - `timeout` runs inside the sandbox. Nothing out here can bound a process it
+///   does not own, and an agent nobody is watching still spends money.
+///   `--foreground` is load-bearing: without it `timeout` puts the command in a
+///   process group of its own, so signalling the wrapper's group leaves
+///   `claude` orphaned and still billing. Observed, not assumed.
+/// - The briefing travels in an exported variable rather than inline. It is
+///   already single-quoted for the outer shell, and quoting it a second time
+///   for the inner `bash -c` is exactly the sort of thing that works until a
+///   card description contains an apostrophe.
+fn start_script(cfg: &AgentConfig, briefing: &str) -> String {
+    let secs = cfg.agent_timeout_secs;
+    format!(
+        r#"set -e
+rm -f {AGENT_PID} {AGENT_STATUS}
+: > {AGENT_LOG}
+export HONR_BRIEFING={brief}
+setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} claude -p "$HONR_BRIEFING" --output-format stream-json --verbose --permission-mode bypassPermissions >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
+for i in $(seq 1 40); do
+  if [ -s {AGENT_PID} ]; then exit 0; fi
+  sleep 0.25
+done
+echo agent-did-not-start >&2; exit 1"#,
+        brief = shell_quote(briefing)
+    )
+}
+
+/// Follow the agent's output from `from_line`, then exit with the agent's own
+/// status.
+///
+/// A pure reader: running it twice, or from a different honr process, does not
+/// disturb the run. The pid it waits on is the wrapper's, and the wrapper
+/// writes the status file before exiting, so by the time `tail` notices the
+/// process is gone the exit code is already on disk.
+fn follow_script(from_line: u64) -> String {
+    format!(
+        r#"if [ -f {AGENT_STATUS} ]; then
+  tail -n +{from_line} {AGENT_LOG} 2>/dev/null || true
+  exit "$(cat {AGENT_STATUS})"
+fi
+tail -n +{from_line} -f --pid="$(cat {AGENT_PID})" {AGENT_LOG}
+for i in $(seq 1 40); do
+  if [ -f {AGENT_STATUS} ]; then break; fi
+  sleep 0.25
+done
+exit "$(cat {AGENT_STATUS} 2>/dev/null || echo 1)""#
+    )
+}
+
+pub const MARK_ALIVE: &str = "HONR-AGENT-ALIVE";
+pub const MARK_EXITED: &str = "HONR-AGENT-EXITED";
+pub const MARK_GONE: &str = "HONR-AGENT-GONE";
+pub const MARK_LINES: &str = "HONR-LOG-LINES=";
+pub const MARK_COST: &str = "HONR-LOG-COST=";
+
+/// Ask a sandbox whether its agent is still going, and how far its log got.
+///
+/// The line count is what a new supervisor resumes from, and the last cost line
+/// is what its arithmetic starts from — both because the previous supervisor
+/// already streamed, and charged for, everything before them.
+fn probe_script() -> String {
+    format!(
+        r#"if [ -f {AGENT_STATUS} ]; then echo {MARK_EXITED}
+elif [ -s {AGENT_PID} ] && kill -0 "$(cat {AGENT_PID})" 2>/dev/null; then echo {MARK_ALIVE}
+else echo {MARK_GONE}
+fi
+printf '%s%s\n' '{MARK_LINES}' "$(wc -l < {AGENT_LOG} 2>/dev/null || echo 0)"
+printf '%s%s\n' '{MARK_COST}' "$(grep -h total_cost_usd {AGENT_LOG} 2>/dev/null | tail -1)""#
+    )
+}
+
+/// Stop a detached agent, best effort.
+///
+/// Only the failure path needs this. The sandbox is kept for inspection, and
+/// the agent is no longer a child of anything we hold — so without this a run
+/// we have already given up on keeps burning Vertex spend until its own
+/// timeout. `setsid` made the wrapper a process-group leader, so negating the
+/// pid takes `claude` with it.
+async fn stop_agent(os: &OpenShell, name: &str) {
+    let script = format!(
+        r#"if [ -s {AGENT_PID} ]; then kill -TERM -"$(cat {AGENT_PID})" 2>/dev/null || true; fi"#
+    );
+    let _ = os.exec(name, &script, Duration::from_secs(30)).await;
+}
 
 fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
     vec![
@@ -788,6 +1133,112 @@ mod tests {
         g.notes = vec!["Changes requested: rebase onto latest, api.rs only.".into()];
         let b = briefing(&g, BranchState::Rebased, "honr/card-7", "shanemcd/honr", "main");
         assert!(b.contains("rebase onto latest, api.rs only."), "{b}");
+    }
+
+    // ---- surviving a restart ------------------------------------------
+
+    /// The agent must not be a child of the exec that starts it. As a child it
+    /// died whenever honr did, which made every rebuild throw away a live run
+    /// and left deleting the sandbox as the only honest option.
+    #[test]
+    fn the_agent_outlives_the_exec_that_starts_it() {
+        let s = start_script(&repo_cfg(), "do the thing");
+        assert!(s.contains("setsid nohup"), "must be detached: {s}");
+        assert!(s.trim_end().contains("&\n") || s.contains("2>&1 &"), "must background it: {s}");
+        // The three files are the whole contract with whoever watches next.
+        assert!(s.contains(AGENT_LOG) && s.contains(AGENT_PID) && s.contains(AGENT_STATUS), "{s}");
+        // Starting must return once the run is up, not hold the exec open.
+        assert!(s.contains("exit 0"), "must return as soon as the pid lands: {s}");
+    }
+
+    /// The deadline has to live inside the sandbox. Once the agent is detached
+    /// nothing on this side owns the process, and an agent nobody is watching
+    /// still spends money.
+    ///
+    /// `--foreground` is not cosmetic: without it `timeout` moves the command
+    /// into its own process group, and `stop_agent` then signals a group the
+    /// agent is not in.
+    #[test]
+    fn the_agent_carries_its_own_deadline() {
+        let mut cfg = repo_cfg();
+        cfg.agent_timeout_secs = 900;
+        let s = start_script(&cfg, "b");
+        assert!(s.contains("timeout --foreground 900 claude"), "{s}");
+    }
+
+    /// The briefing is quoted once, for the outer shell, and reaches the inner
+    /// shell as an environment variable. Interpolating it into a second layer
+    /// of single quotes breaks on the first card description with an
+    /// apostrophe in it — which is most of them.
+    #[test]
+    fn the_briefing_crosses_the_inner_shell_intact() {
+        let s = start_script(&repo_cfg(), "it's a card; rm -rf /");
+        assert!(s.contains(r"it'\''s a card; rm -rf /"), "must be escaped once: {s}");
+        assert!(s.contains(r#"claude -p "$HONR_BRIEFING""#), "inner shell reads the var: {s}");
+    }
+
+    /// Following is a *reader*. It can start part-way through, which is what
+    /// lets a restarted honr take over a run instead of killing it.
+    #[test]
+    fn following_can_start_part_way_through() {
+        let s = follow_script(118);
+        assert!(s.contains("tail -n +118"), "{s}");
+        assert!(s.contains("--pid="), "must stop when the agent does: {s}");
+        assert!(s.contains(AGENT_STATUS), "must exit with the agent's own code: {s}");
+        assert!(!s.contains("claude"), "following must not start anything: {s}");
+    }
+
+    /// A run can finish while honr is down. Waiting on a pid that is already
+    /// gone would hang, so the finished case is handled before the wait.
+    #[test]
+    fn a_finished_run_is_not_waited_on() {
+        let s = follow_script(1);
+        let wait = s.find("--pid=").expect("waits somewhere");
+        let done = s.find(&format!("if [ -f {AGENT_STATUS} ]")).expect("checks for the status");
+        assert!(done < wait, "the already-finished case must come first: {s}");
+    }
+
+    /// The card decides what happens to a sandbox, not the sandbox.
+    #[test]
+    fn only_the_cards_own_live_sandbox_is_adopted() {
+        let mut item = WorkItem::new(9, "t", "i");
+        item.state = State::Running;
+        item.environment = Some("honr-card-9-a2".into());
+        assert!(adoptable(Some(&item), "honr-card-9-a2").is_some());
+
+        // The previous attempt's sandbox is kept for inspection and carries the
+        // same `honr.item` label. Adopting it would attach to a dead log while
+        // the real run went unwatched.
+        assert!(adoptable(Some(&item), "honr-card-9-a1").is_none(), "reap the old attempt");
+
+        // Not running: whatever is out there is debris.
+        item.state = State::Review;
+        assert!(adoptable(Some(&item), "honr-card-9-a2").is_none(), "reap a finished card's box");
+
+        // A sandbox for a card that no longer exists.
+        assert!(adoptable(None, "honr-card-9-a2").is_none());
+    }
+
+    /// Where to resume, and what has already been paid for.
+    ///
+    /// The stream reports a *cumulative* total and the supervisor charges the
+    /// difference, so a fresh process that started its arithmetic at zero would
+    /// bill the whole run again on the very next cost line.
+    #[test]
+    fn a_probe_says_where_to_resume_and_what_was_already_charged() {
+        let out = format!(
+            "{MARK_ALIVE}\n{MARK_LINES}117\n{MARK_COST}{{\"total_cost_usd\":0.88}}\n"
+        );
+        assert_eq!(probe_of(&out), Some((118, 88)));
+
+        // A run that finished while honr was down still has a PR to record.
+        let done = format!("{MARK_EXITED}\n{MARK_LINES}4\n{MARK_COST}\n");
+        assert_eq!(probe_of(&done), Some((5, 0)));
+
+        // Nothing running means there is nothing to adopt — the card goes back
+        // in the queue rather than being watched forever.
+        let gone = format!("{MARK_GONE}\n{MARK_LINES}0\n{MARK_COST}\n");
+        assert_eq!(probe_of(&gone), None);
     }
 
     /// Cross-fork PRs need `owner:branch` as the head, or gh silently looks for

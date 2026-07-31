@@ -299,7 +299,13 @@ metadata-server problem was found.
   destination must also **already exist** — uploading to a fresh path fails with
   `ssh tar extract exited with status exit status: 1`.
 - **A lingering background process does *not* hold `sandbox exec` open.** `nohup … &` then exiting
-  returns in ~25ms, so the shim can be started in its own exec and outlive it.
+  returns in ~25ms, so the shim can be started in its own exec and outlive it. The supervisor now
+  leans on this for the agent itself: `setsid nohup` it, write its pid and exit code to `/tmp`, and
+  follow the log with `tail -n +N -f --pid=…`. That makes watching a run something a *different*
+  honr process can pick up after a restart, which is the whole of re-adoption.
+- **`timeout` gives the command its own process group** unless you pass `--foreground`. So
+  `kill -TERM -$pgid` against the wrapper kills `timeout` and leaves `claude` orphaned and still
+  billing. Verified by watching the pgids, not inferred.
 - **Binary paths in policy are matched literally** and symlink resolution warns constantly. Git's
   real binary is `/usr/lib/git-core/git-remote-http` (note: **not** `-https`).
 - **OpenShell is alpha.** Sandbox startup is seconds, not milliseconds. Don't plan for a 2s tick or

@@ -116,7 +116,30 @@ openshell sandbox list                  # phases; Deleting still appears here
 A sandbox is **kept, not deleted, when a card fails** — `openshell logs` is the
 tool that answers questions and a deleted sandbox answers none. Names are
 attempt-scoped (`honr-card-8-a2`), so retries don't collide with the one kept
-for inspection. `reap_orphans` clears them on the next startup.
+for inspection. `reconcile` clears them on the next startup.
+
+## Restarting honr while a card is running
+
+Safe. The agent runs **detached** inside its sandbox — `/tmp/agent.log` for its
+output, `/tmp/agent.pid` for its process group, `/tmp/agent.status` for its exit
+code — so it does not die with the process watching it. On startup `reconcile`
+lists the sandboxes honr labelled, matches each against its card's
+`environment`, and for a card still Claimed or Running probes the sandbox and
+picks the run back up from the line its log had reached. The card stays Running,
+the lease is renewed before the sweeper gets a turn, and no second sandbox is
+created. Everything else it finds is reaped.
+
+Three things worth knowing:
+
+- The story line `honr restarted; picked <sandbox> back up` is how you tell an
+  adopted run from a fresh one.
+- Spend during the downtime is not billed to the card. The supervisor charges
+  the *difference* between cost lines and resumes from the last one already in
+  the log, so it under-reports rather than double-counting. The per-card budget
+  check still sees the run's real total.
+- If the sandbox is up but nothing is running in it — honr died during setup,
+  say — the card returns to Ready without spending a retry. That was the
+  restart's fault, not the card's.
 
 Failure signatures worth recognising:
 
