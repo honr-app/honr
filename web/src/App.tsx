@@ -2,19 +2,19 @@ import { useMemo, useState } from "react";
 import { Board } from "./components/Board";
 import { DetailDrawer } from "./components/Detail";
 import { Digest } from "./components/Digest";
-import { Tree } from "./components/Tree";
+import { Overview } from "./components/Overview";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
 import { money } from "./api";
 import type { WorkItem } from "./types";
 
-type Tab = "digest" | "board" | "tree";
+type Tab = "overview" | "board" | "needs";
 
 export default function App() {
   const b = useBoard();
   const now = useNow();
-  // Diff-first: the session opens on what changed, and the board is one click
-  // behind it. If the digest works, the tab can stay closed.
-  const [tab, setTab] = useState<Tab>("digest");
+  // Land on comprehension, not triage. A first visit has no "right now" yet —
+  // it has "what is this system doing?", and nothing else answers that.
+  const [tab, setTab] = useState<Tab>("overview");
   const [open, setOpen] = useState<number | null>(null);
 
   const { goalOf, breadcrumbOf } = useMemo(() => buildLookups(b.items), [b.items]);
@@ -33,19 +33,30 @@ export default function App() {
       <header className="top">
         <div className="brand">honr</div>
         <nav>
-          {(["digest", "board", "tree"] as Tab[]).map((t) => (
+          {/* Named for the question each answers, not for its data structure. */}
+          {(
+            [
+              ["overview", "Overview"],
+              ["board", "Activity"],
+              ["needs", "Needs you"],
+            ] as [Tab, string][]
+          ).map(([t, label]) => (
             <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-              {t === "digest" ? "Digest" : t === "board" ? "Board" : "Tree"}
+              {label}
+              {t === "needs" && totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
             </button>
           ))}
         </nav>
+        {/* Numbers need a subject. "$24.18 / $50.00" on its own tells you
+            nothing about what is being managed or spent against. */}
         <div className="stats">
+          <span className="dim">spent</span>
           <span>
             {money(totalSpend)}
-            {totalBudget > 0 && <span className="dim"> / {money(totalBudget)}</span>}
+            {totalBudget > 0 && <span className="dim"> of {money(totalBudget)}</span>}
           </span>
-          <span className="live">● {live} agents live</span>
-          {totalNeedsYou > 0 && <span className="alarm">⚠ {totalNeedsYou} need you</span>}
+          <span className="sep">·</span>
+          <span className="live">{live} working</span>
           <span className={b.connected ? "conn ok" : "conn off"}>
             {b.connected ? "live" : "reconnecting…"}
           </span>
@@ -68,7 +79,7 @@ export default function App() {
       <main className={open ? "with-drawer" : ""}>
         {!b.loaded ? (
           <div className="dim pad">loading board…</div>
-        ) : tab === "digest" ? (
+        ) : tab === "needs" ? (
           <Digest onOpen={(id) => { setOpen(id); setTab("board"); }} onChanged={b.refresh} />
         ) : tab === "board" ? (
           <Board
@@ -82,7 +93,7 @@ export default function App() {
             onOpen={setOpen}
           />
         ) : (
-          <Tree items={b.items} onOpen={setOpen} />
+          <Overview items={b.items} onOpen={setOpen} />
         )}
 
         {open != null && (
@@ -90,10 +101,6 @@ export default function App() {
         )}
       </main>
 
-      <footer className="bottom dim">
-        The board should never require watching. If your honest workflow is
-        "keep the tab open and glance at it", the design has failed.
-      </footer>
     </div>
   );
 }

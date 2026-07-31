@@ -119,10 +119,27 @@ export function DetailDrawer({
           <p className="dim">
             +{d.diff_added} −{d.diff_removed} · gates {d.gates.map((g) => g.name).join(", ")}
           </p>
+          {d.pr_url && (
+            <p>
+              <a className="pr-link" href={d.pr_url} target="_blank" rel="noreferrer">
+                ↗ review the pull request
+              </a>
+            </p>
+          )}
+          {/* The note lives with the button that sends it. Previously it was a
+              shared textarea in a different section, so it was not obvious
+              that Request changes needed one — or that it took the note at all. */}
+          <textarea
+            rows={2}
+            value={text}
+            placeholder="What needs to change? This reaches the next agent that picks it up."
+            onChange={(e) => setText(e.target.value)}
+          />
           <div className="btns">
             <button className="primary" onClick={() => act(api.approve(d.id))}>Approve</button>
             <button
               disabled={!text.trim()}
+              title={text.trim() ? "" : "Say what needs changing first"}
               onClick={() => { act(api.requestChanges(d.id, text)); setText(""); }}
             >
               Request changes
@@ -131,27 +148,15 @@ export function DetailDrawer({
         </Section>
       )}
 
-      <Section title="Act">
-        <textarea
-          rows={2}
-          value={text}
-          placeholder="A note to steer, or a constraint to pin…"
-          onChange={(e) => setText(e.target.value)}
-        />
-        <div className="btns">
-          <button disabled={!text.trim()} onClick={() => { act(api.steer(d.id, text)); setText(""); }}>
-            Steer <span className="dim">free</span>
-          </button>
-          <button disabled={!text.trim()} onClick={() => { act(api.pin(d.id, text)); setText(""); }}>
-            Pin <span className="dim">binds descendants</span>
-          </button>
-          <button onClick={() => act(api.halt(d.id, "halted from the board"))}>
-            Halt <span className="dim">loses work</span>
-          </button>
-          <button className="danger" onClick={() => act(api.cut(d.id, "scope cut from the board"))}>
-            Cut scope
-          </button>
-        </div>
+      {/* Steer, Pin, Halt and Cut moved to the agent. They all want prose — a
+          reason, a constraint, a judgement — and a textarea with four buttons
+          made Steer look like it would reach a running agent, which it cannot.
+          What stays here is what is genuinely one tap. */}
+      <Section title="Ask the agent">
+        <p className="dim">
+          To steer this, pin a constraint, halt it or cut it, tell the agent —
+          those need a reason, and it can act on one.
+        </p>
       </Section>
 
       {d.notes.length > 0 && (

@@ -12,7 +12,10 @@
  *   node ui-fixture.mjs > /tmp/honr-ui/honr.json
  */
 
-const NOW = Date.parse("2026-07-31T04:00:00Z");
+// Relative to *now*, not a fixed instant: leases have to still be live when
+// honr boots, or the sweeper requeues every Running card before the first
+// screenshot and the board you capture is not the board you described.
+const NOW = Date.now();
 const iso = (secsAgo) => new Date(NOW - secsAgo * 1000).toISOString();
 
 let next = 1;

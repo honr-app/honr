@@ -65,25 +65,25 @@ const DESKTOP = { width: 1600, height: 1000 };
 const PHONE = { width: 390, height: 844 };
 
 const tab = (name) => async (page) => {
-  await page.getByRole("button", { name, exact: true }).click();
+  await page.getByRole("button", { name }).first().click();
   await sleep(500);
 };
 
 console.log("capturing:");
-await shoot("desktop-digest", DESKTOP, tab("Digest"));
-await shoot("desktop-board", DESKTOP, tab("Board"));
-await shoot("desktop-tree", DESKTOP, tab("Tree"));
-await shoot("phone-digest", PHONE, tab("Digest"));
-await shoot("phone-board", PHONE, tab("Board"));
+await shoot("desktop-overview", DESKTOP, tab("Overview"));
+await shoot("desktop-board", DESKTOP, tab("Activity"));
+await shoot("desktop-needs", DESKTOP, tab("Needs you"));
+await shoot("phone-overview", PHONE, tab("Overview"));
+await shoot("phone-needs", PHONE, tab("Needs you"));
 
 // The drawer is where a human actually decides, so it needs its own look.
 await shoot("desktop-drawer-needs-you", DESKTOP, async (page) => {
-  await tab("Board")(page);
+  await tab("Activity")(page);
   await page.locator(".column-needs_you .card").first().click();
   await sleep(600);
 });
 await shoot("desktop-drawer-review", DESKTOP, async (page) => {
-  await tab("Board")(page);
+  await tab("Activity")(page);
   await page.locator(".column-review .card").first().click();
   await sleep(600);
 });
