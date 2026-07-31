@@ -374,6 +374,7 @@ pub const MARK_CONFLICT: &str = "HONR-BRANCH-CONFLICT";
 /// Not shallow. A rebase against base needs real history, and honr is small.
 fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
     let fork = &cfg.repo.fork;
+    let upstream = &cfg.repo.upstream;
     let base = &cfg.repo.base;
     format!(
         r#"set -e
@@ -383,21 +384,26 @@ git -c '{GIT_CRED}' clone -q --branch {base} https://github.com/{fork}.git {WORK
 cd {WORKDIR}
 git config user.email "agent@honr.local"
 git config user.name "honr agent"
+# The fork's own base drifts the moment upstream moves, and nothing syncs it.
+# The PR targets upstream, so upstream is the only base worth rebasing onto.
+git remote add upstream https://github.com/{upstream}.git
+git -c '{GIT_CRED}' fetch -q upstream {base}
 if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
   git -c '{GIT_CRED}' fetch -q origin {branch}
   git checkout -q -B {branch} origin/{branch}
-  # Rebase so the branch is reviewable against current base. A conflict is not
-  # a supervisor failure — resolving it is the agent's job, so leave the branch
-  # untouched and say so in the briefing.
-  if git rebase -q origin/{base} >/dev/null 2>&1; then
-    echo {MARK_REBASED}
-  else
-    git rebase --abort >/dev/null 2>&1 || true
-    echo {MARK_CONFLICT}
-  fi
 else
-  git checkout -q -b {branch}
+  git checkout -q -B {branch} upstream/{base}
   echo {MARK_FRESH}
+  exit 0
+fi
+# Rebase so the branch is reviewable against what it will actually merge into.
+# A conflict is not a supervisor failure — resolving it needs the semantics of
+# the change, so leave the branch alone and say so in the briefing.
+if git rebase -q upstream/{base} >/dev/null 2>&1; then
+  echo {MARK_REBASED}
+else
+  git rebase --abort >/dev/null 2>&1 || true
+  echo {MARK_CONFLICT}
 fi"#
     )
 }
@@ -621,12 +627,27 @@ mod tests {
         let s = clone_script(&cfg, "honr/card-8");
         assert!(s.contains("ls-remote --exit-code --heads origin honr/card-8"), "{s}");
         assert!(s.contains("checkout -q -B honr/card-8 origin/honr/card-8"), "{s}");
-        assert!(s.contains("rebase -q origin/main"), "{s}");
+        assert!(s.contains("rebase -q upstream/main"), "{s}");
         // A conflict is the agent's problem to resolve, so the supervisor must
         // back out rather than leave a half-applied rebase behind.
         assert!(s.contains("rebase --abort"), "{s}");
         // Shallow history cannot be rebased reliably.
         assert!(!s.contains("--depth"), "clone must not be shallow: {s}");
+    }
+
+    /// Nothing syncs the fork, so its own base freezes at the moment it was
+    /// created while upstream moves on — 6 commits, within a day, in practice.
+    /// Rebasing onto the fork's base would tell the agent it was current when
+    /// it was not, and produce a PR that conflicts with what it targets.
+    #[test]
+    fn base_comes_from_upstream_not_the_fork() {
+        let s = clone_script(&repo_cfg(), "honr/card-8");
+        assert!(s.contains("git remote add upstream https://github.com/shanemcd/honr.git"), "{s}");
+        assert!(s.contains("fetch -q upstream main"), "{s}");
+        assert!(s.contains("rebase -q upstream/main"), "{s}");
+        // A brand-new card must also start from upstream, not the stale fork.
+        assert!(s.contains("checkout -q -B honr/card-8 upstream/main"), "{s}");
+        assert!(!s.contains("rebase -q origin/main"), "must not rebase onto the fork: {s}");
     }
 
     /// A rebased branch cannot fast-forward, and plain --force races the agent.
