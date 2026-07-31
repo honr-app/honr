@@ -125,14 +125,17 @@ pub struct AgentConfig {
     #[serde(default)]
     pub memory: Option<String>,
     /// Sandboxes are heavy and this is alpha software. Do not start at seven.
+    /// Primary agent CLI engine (`claude` vs `agy`).
+    #[serde(default = "d_engine")]
+    pub engine: String,
     #[serde(default = "d_concurrent")]
     pub max_concurrent: usize,
     /// Real money. Breaching this stops the sandbox rather than truncating
-    /// the work silently.
-    #[serde(default = "d_card_budget")]
-    pub per_card_budget_cents: u64,
-    #[serde(default = "d_daily_budget")]
-    pub daily_budget_cents: u64,
+    /// the work silently. Optional — no budget limit by default.
+    #[serde(default)]
+    pub per_card_budget_cents: Option<u64>,
+    #[serde(default)]
+    pub daily_budget_cents: Option<u64>,
     /// Hard ceiling on one agent run. Everything here fails as a hang.
     #[serde(default = "d_agent_timeout")]
     pub agent_timeout_secs: u64,
@@ -145,9 +148,8 @@ pub struct AgentConfig {
 
 fn d_image() -> String { "honr-sandbox:latest".into() }
 fn d_policy() -> String { "sandbox/policy.yaml".into() }
+fn d_engine() -> String { "claude".into() }
 fn d_concurrent() -> usize { 2 }
-fn d_card_budget() -> u64 { 200 }
-fn d_daily_budget() -> u64 { 2000 }
 fn d_agent_timeout() -> u64 { 1800 }
 fn d_max_attempts() -> u32 { 3 }
 
@@ -162,9 +164,10 @@ impl Default for AgentConfig {
             vertex: VertexConfig::default(),
             cpu: None,
             memory: None,
+            engine: d_engine(),
             max_concurrent: d_concurrent(),
-            per_card_budget_cents: d_card_budget(),
-            daily_budget_cents: d_daily_budget(),
+            per_card_budget_cents: None,
+            daily_budget_cents: None,
             agent_timeout_secs: d_agent_timeout(),
             max_attempts: d_max_attempts(),
         }

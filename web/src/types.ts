@@ -74,6 +74,7 @@ export interface WorkItem {
   pinned: string[];
   release_target: string | null;
   environment: string | null;
+  engine?: string | null;
   pr_url: string | null;
   created_at: string;
   entered_state_at: string;

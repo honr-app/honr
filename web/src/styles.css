@@ -128,13 +128,20 @@ main > :first-child { flex: 1; min-width: 0; }
 }
 
 .column { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.col-head { font-size: 11px; letter-spacing: 0.08em; color: var(--dim); padding-bottom: 2px; }
-.column-needs_you .col-head { color: var(--needs-human); }
-.column-review .col-head { color: var(--review); }
-.count { opacity: 0.6; }
-.empty { color: #38424f; padding: 4px; }
+.col-head { font-size: 11px; letter-spacing: 0.08em; color: var(--dim); padding-bottom: 2px; text-transform: uppercase; display: flex; align-items: center; justify-content: space-between; }
+.column-needs_you .col-head { color: var(--needs-human); font-weight: 600; }
+.column-review .col-head { color: var(--review); font-weight: 600; }
+.column-running .col-head { color: var(--accent); font-weight: 600; }
+.count { opacity: 0.7; font-weight: 400; background: rgba(255, 255, 255, 0.06); padding: 1px 5px; border-radius: 8px; font-size: 10px; }
+.empty { color: #38424f; padding: 4px; font-style: italic; }
 
 /* ------------------------------------------------------------------- cards */
+
+@keyframes pulse-subtle {
+  0% { box-shadow: 0 0 0 0 rgba(111, 168, 255, 0.25); }
+  50% { box-shadow: 0 0 8px 1px rgba(111, 168, 255, 0.4); }
+  100% { box-shadow: 0 0 0 0 rgba(111, 168, 255, 0.25); }
+}
 
 .card {
   background: var(--panel-2);
@@ -143,32 +150,32 @@ main > :first-child { flex: 1; min-width: 0; }
   border-radius: 4px;
   padding: 6px 8px;
   cursor: pointer;
-  transition: opacity 0.4s, filter 0.4s;
+  transition: opacity 0.4s, filter 0.4s, border-color 0.2s, box-shadow 0.2s;
 }
-.card:hover { border-color: var(--accent); }
+.card:hover { border-color: var(--accent); transform: translateY(-1px); }
 
 /* Dashed = machine-born. The tree stays honest about what a person asked for
    versus what the system decided on its own. */
 .card.machine { border-style: dashed; }
 
 .card.col-ready { border-left-color: var(--ready); }
-.card.col-running { border-left-color: var(--accent); }
-.card.col-needs_you { border-left-color: var(--needs-human); background: #2a1a1d; }
+.card.col-running { border-left-color: var(--accent); animation: pulse-subtle 3s infinite ease-in-out; }
+.card.col-needs_you { border-left-color: var(--needs-human); background: #2a1a1d; border-color: rgba(255, 107, 107, 0.3); }
 .card.col-verify { border-left-color: var(--warn); }
-.card.col-review { border-left-color: var(--review); }
+.card.col-review { border-left-color: var(--review); background: #232219; }
 .card.col-done { border-left-color: var(--ok); opacity: 0.65; }
 
-.card-title { margin-bottom: 4px; word-break: break-word; }
-.card .id { color: var(--dim); }
+.card-title { margin-bottom: 4px; word-break: break-word; font-weight: 500; }
+.card .id { color: var(--dim); font-family: inherit; }
 
 .row { display: flex; justify-content: space-between; gap: 6px; font-size: 12px; align-items: center; }
 .tag { color: var(--dim); }
 .tag.ok { color: var(--ok); }
 .crumb { font-size: 11px; color: var(--dim); margin-top: 3px; }
 .blocked { color: var(--warn); }
-.diff { color: var(--ok); }
-.question { font-size: 12px; margin: 2px 0 5px; }
-.blocked-for { color: var(--needs-human); }
+.diff { color: var(--ok); font-weight: 500; }
+.question { font-size: 12px; margin: 2px 0 5px; font-weight: 500; }
+.blocked-for { color: var(--needs-human); font-weight: 500; }
 
 /* Blocker chips: friendly, human-readable chips on cards */
 .blocker-chips {
@@ -234,8 +241,33 @@ main > :first-child { flex: 1; min-width: 0; }
 }
 
 .hb { color: var(--ok); }
-.hb.stale { color: var(--needs-human); }
+.hb.stale { color: var(--needs-human); font-weight: 600; }
 .card.stale { border-left-style: dotted; }
+
+/* Filter bar above Activity board */
+.board-filter {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-bottom: -4px;
+}
+.search-input {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 220px;
+}
+.search-input:focus { border-color: var(--accent); outline: none; }
+.filter-btn { font-size: 11px; padding: 2px 8px; border-radius: 12px; opacity: 0.7; }
+.filter-btn.active { opacity: 1; background: var(--accent); color: #0b1017; border-color: var(--accent); font-weight: 600; }
 
 /* Chunking, not compression: smaller *and* answers the question. */
 .chunk {
@@ -391,7 +423,7 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 5px 16px 5px 0;
+  padding: 5px 16px 5px calc(12px + var(--depth, 0) * 20px);
   cursor: pointer;
   border-left: 2px solid transparent;
 }
@@ -416,13 +448,19 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 
 .olevel {
   flex: none;
-  width: 58px;
+  width: 60px;
   font-size: 9px;
   letter-spacing: 0.08em;
   color: #7d8899;
   text-transform: uppercase;
+  font-weight: 600;
 }
-.otitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.olevel.lvl-vision { color: #a78bfa; }
+.olevel.lvl-project { color: #38bdf8; }
+.olevel.lvl-epic { color: #60a5fa; }
+.olevel.lvl-story { color: #64748b; }
+
+.otitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 
 .onote {
   flex: none;
@@ -432,7 +470,7 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   border-radius: 3px;
   padding: 0 5px;
 }
-.oalarm { flex: none; color: #ff7a7a; font-size: 11px; }
+.oalarm { flex: none; color: #ff7a7a; font-size: 11px; font-weight: 600; }
 
 .obar {
   flex: none;
@@ -448,15 +486,26 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 .obar-live { background: #7fb2ff66; left: auto; right: 0; }
 
 .ocount { flex: none; width: 48px; text-align: right; font-size: 11px; color: #8b98a9; }
-.ospend { flex: none; width: 54px; text-align: right; font-size: 11px; color: #8b98a9; }
+.ospend { flex: none; width: 54px; text-align: right; font-size: 11px; color: #8b98a9; font-weight: 500; }
 
-.ostate { flex: none; width: 72px; text-align: right; font-size: 11px; color: #8b98a9; }
-.ostate.s-running { color: #7fb2ff; }
-.ostate.s-needs_human { color: #ff7a7a; }
-.ostate.s-review { color: #e5c07b; }
-.ostate.s-done { color: #4ba36a; }
+.ostate {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 10px;
+  text-align: center;
+  font-size: 10px;
+  color: #8b98a9;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.ostate.s-running { color: #38bdf8; background: rgba(56, 189, 248, 0.12); border-color: rgba(56, 189, 248, 0.25); font-weight: 600; }
+.ostate.s-needs_human { color: #ff6b6b; background: rgba(255, 107, 107, 0.15); border-color: rgba(255, 107, 107, 0.3); font-weight: 600; }
+.ostate.s-review { color: #facc15; background: rgba(250, 204, 21, 0.12); border-color: rgba(250, 204, 21, 0.25); font-weight: 600; }
+.ostate.s-done { color: #4ba36a; background: rgba(75, 163, 106, 0.12); border-color: rgba(75, 163, 106, 0.25); }
+.ostate.s-ready { color: #94a3b8; }
 
 .ointent {
+  padding-left: calc(46px + var(--depth, 0) * 20px);
   padding-right: 16px;
   padding-bottom: 6px;
   font-size: 12px;
@@ -486,6 +535,10 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   header.top { flex-wrap: wrap; gap: 6px 10px; }
   header.top .stats { width: 100%; justify-content: flex-start; gap: 8px; font-size: 11px; }
 
+  /* Fluid indenting on mobile */
+  .onode { padding-left: calc(4px + var(--depth, 0) * 8px); gap: 6px; }
+  .ointent { padding-left: calc(20px + var(--depth, 0) * 8px); }
+
   /* The escalation rendered one word per line with the buttons over the top
      of it — on the one view meant to be read on a phone. `.qrow` is a flex
      row, so the buttons took the width and squeezed the question to ~40px.
@@ -505,8 +558,9 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   .columns { display: block; }
   .column { width: auto; margin-bottom: 14px; }
   .drawer { position: static; width: auto; }
-  .olevel { width: 44px; }
-  .obar { width: 56px; }
+  .olevel { width: 38px; font-size: 8px; }
+  .ostate { width: auto; font-size: 10px; }
+  .obar { width: 44px; }
   .ospend { display: none; }
 }
 

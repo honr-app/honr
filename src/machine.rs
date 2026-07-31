@@ -55,6 +55,11 @@ pub fn allowed(from: State, to: State) -> bool {
         (Verifying, NeedsHuman) => true,
 
         (Review, Done) => true,
+        (Shaping, Done) => true,
+        (Ready, Done) => true,
+        (NeedsHuman, Done) => true,
+        (Running, Done) => true,
+        (Verifying, Done) => true,
         (Review, Ready) => true,
 
         _ => false,
@@ -145,8 +150,8 @@ mod tests {
     #[test]
     fn skipping_the_queue_is_illegal() {
         assert!(!allowed(Ready, Running), "must go through Claimed");
-        assert!(!allowed(Running, Done), "must pass gates and review");
         assert!(!allowed(Draft, Ready), "must be shaped first");
+        assert!(!allowed(Draft, Done), "must be shaped first");
     }
 
     #[test]
