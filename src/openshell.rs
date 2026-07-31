@@ -2,7 +2,7 @@
 //!
 //! One place that knows the CLI's shape, so the supervisor never builds an
 //! argv. We shell out rather than use `openshell-sdk` because the SDK does not
-//! support mTLS and our gateway is mTLS-only — see `docs/phase-0-findings.md`
+//! support mTLS and our gateway is mTLS-only — see `docs/sandbox-stack.md`
 //! for the full reasoning and the condition to revisit it.
 //!
 //! **Everything here takes a timeout, and that is not defensive style.** Every
@@ -10,9 +10,6 @@
 //! git waiting on a credential prompt — presented as a *hang*, not an error. A
 //! call without a deadline is a supervisor that stops making progress and
 //! never says why.
-
-// Nothing calls this yet; `supervisor.rs` is the caller and lands next.
-#![allow(dead_code)]
 
 use serde::Deserialize;
 use std::ffi::OsStr;
@@ -40,8 +37,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Sandbox {
     pub name: String,
+    /// Unused by the supervisor, but kept because `sandbox list` is also how a
+    /// human debugs a stuck run and these are what they grep for.
+    #[allow(dead_code)]
     #[serde(default)]
     pub id: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     pub phase: Option<String>,
     #[serde(default)]
@@ -149,6 +150,8 @@ impl Default for OpenShell {
 }
 
 impl OpenShell {
+    /// Used by tests to point at a stand-in binary.
+    #[allow(dead_code)]
     pub fn new(bin: impl Into<String>, default_timeout: Duration) -> Self {
         Self { bin: bin.into(), default_timeout }
     }
@@ -247,11 +250,15 @@ impl OpenShell {
         Ok(())
     }
 
+    /// Unused until the verdict-file protocol lands (board card #12).
+    #[allow(dead_code)]
     pub async fn download(&self, name: &str, remote: &str, dest: &str) -> Result<()> {
         self.run_ok(["sandbox", "download", name, remote, dest], self.default_timeout).await?;
         Ok(())
     }
 
+    /// Unused by the supervisor; `openshell logs` is currently a human's tool.
+    #[allow(dead_code)]
     pub async fn logs(&self, name: &str, tail: u32) -> Result<String> {
         let out =
             self.run(["logs", name, "-n", &tail.to_string()], self.default_timeout).await?;

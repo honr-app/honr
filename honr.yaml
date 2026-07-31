@@ -42,7 +42,7 @@ execution:
 
   # Real agents in OpenShell sandboxes. Off by default so the board runs on a
   # machine with no podman, no gateway and no credentials. Turning this on
-  # spends real money — see docs/phase-0-findings.md before you do.
+  # spends real money — see docs/sandbox-stack.md before you do.
   agents:
     enabled: false
 
