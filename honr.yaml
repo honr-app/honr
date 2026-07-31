@@ -31,7 +31,12 @@ levels:
 # is what makes a dead agent survivable, and cards decay visibly once their
 # heartbeat is older than expected.
 execution:
-  lease_secs: 45
+  # A heartbeat only fires when the agent emits output, and a long tool call is
+  # silent: `cargo build --offline` alone runs ~30s with nothing on the stream.
+  # Tuned at 45s (the simulated fleet's 2s tick) this reaped healthy cards
+  # mid-build and let dispatch start a second agent on the same branch. Set it
+  # to cover the longest legitimate silence, not the expected one.
+  lease_secs: 600
   heartbeat_expect_secs: 6
   sweep_interval_ms: 2000
 

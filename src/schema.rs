@@ -28,6 +28,9 @@ pub struct Level {
 /// expected heartbeat interval is what the UI decays a card against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionConfig {
+    /// How long a card may go without a heartbeat before the sweeper requeues
+    /// it. Must exceed the longest *legitimate* silence: heartbeats come from
+    /// agent output, and a build emits none while it runs.
     #[serde(default = "d_lease")]
     pub lease_secs: i64,
     /// Expected heartbeat interval; cards decay visibly past this.
@@ -42,7 +45,7 @@ pub struct ExecutionConfig {
     pub agents: AgentConfig,
 }
 
-fn d_lease() -> i64 { 45 }
+fn d_lease() -> i64 { 600 }
 fn d_hb() -> i64 { 6 }
 fn d_sweep() -> u64 { 2000 }
 

@@ -168,6 +168,22 @@ async fn run_card(
     let name = format!("honr-card-{id}-a{attempt}");
     let branch = format!("honr/card-{id}");
 
+    // Refuse to start a second run for a card that already has a live sandbox.
+    //
+    // The lease is time-based, so a long silence — a `cargo build` emits no
+    // stream lines for ~30s — lets the sweeper requeue a card whose supervisor
+    // task is still very much alive. Dispatch then claims it again and two
+    // agents race on one branch. The lease cannot see in-process state, but a
+    // sandbox labelled with this card is hard evidence someone got there first.
+    if let Ok(existing) = os.list_ours().await {
+        if let Some(live) = existing.iter().find(|s| s.item_id() == Some(id)) {
+            anyhow::bail!(
+                "refusing to double-run #{id}: sandbox {} is already working it",
+                live.name
+            );
+        }
+    }
+
     // Recorded before creation so a crash between here and `create` still
     // leaves a name to reconcile against.
     board.set_environment(id, Some(name.clone()));
@@ -212,7 +228,17 @@ async fn run_inside(
     let id = grant.item_id;
     let short = Duration::from_secs(180);
 
+    // Setup emits no agent output, so without this the card looks dead from
+    // the moment it is claimed until `claude` produces its first line — long
+    // enough for the sweeper to requeue a healthy run. Each call marks a step
+    // that actually completed, so this stays evidence of progress rather than
+    // an assertion of liveness.
+    let beat = |p: f32| {
+        let _ = board.heartbeat(id, agent_id, p, 0, lease_secs);
+    };
+
     os.create(spec).await?;
+    beat(0.01);
 
     // Preamble. Without the shim there is no Vertex auth at all: google-auth
     // walks its ADC chain to the GCE metadata server, which OpenShell blocks
@@ -236,6 +262,7 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
         )
         .await?;
     anyhow::ensure!(up.ok(), "metadata shim never came up: {}", up.stderr.trim());
+    beat(0.02);
 
     // Clone the fork. GIT_TERMINAL_PROMPT=0 is not optional: without it a
     // missing credential blocks forever on an interactive username prompt,
@@ -243,6 +270,7 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
     let clone = os.exec(name, &clone_script(cfg, branch), short).await?;
     anyhow::ensure!(clone.ok(), "clone failed: {}", clone.stderr.trim());
     let branch_state = branch_state_of(&clone.stdout);
+    beat(0.03);
 
     // ---- the agent -------------------------------------------------------
 
