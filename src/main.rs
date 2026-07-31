@@ -78,8 +78,11 @@ async fn main() -> anyhow::Result<()> {
         .layer(CorsLayer::permissive())
         .with_state(board);
 
-    let addr = "127.0.0.1:8080";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // Overridable so a scratch instance (the UI screenshot harness) can run
+    // alongside the real one instead of fighting it for the port.
+    let port = std::env::var("HONR_PORT").unwrap_or_else(|_| "8080".into());
+    let addr = format!("127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("honr listening on http://{addr}  (MCP at /mcp)");
 
     axum::serve(listener, app)
