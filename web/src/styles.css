@@ -294,6 +294,15 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 }
 .pr-link:hover { border-bottom-style: solid; }
 
+/* Quiet: the sandbox name is what you reach for when the PR does not explain
+   itself, not something to read on every card. */
+.sandbox {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--dim);
+  margin-top: 3px;
+}
+
 /* Stale data must be loud. A control plane that silently shows history is
    worse than one that shows an error. */
 .err.bar button.link {

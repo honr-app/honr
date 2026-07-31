@@ -119,6 +119,9 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }:
               ↗ {prLabel(item.pr_url)}
             </a>
           )}
+          {/* Where it ran. The sandbox is gone by now, but the name is what
+              the logs and any post-mortem are filed under. */}
+          {item.environment && <div className="sandbox">⬚ {item.environment}</div>}
           {breadcrumb && <div className="crumb">↑ {breadcrumb}</div>}
         </>
       )}
