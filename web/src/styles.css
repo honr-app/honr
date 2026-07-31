@@ -437,3 +437,16 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   .obar { width: 56px; }
   .ospend { display: none; }
 }
+
+/* "What changed" sits above the columns: context for reading the board, not a
+   footnote to it. Newest first, each line timestamped. */
+.story-line { display: flex; gap: 10px; align-items: baseline; }
+.story-when {
+  flex: none;
+  width: 52px;
+  text-align: right;
+  font-size: 11px;
+  color: #6d7889;
+  font-variant-numeric: tabular-nums;
+}
+.story-label { text-transform: uppercase; letter-spacing: 0.08em; font-size: 9px; }

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Card } from "./Card";
 import { BOARD_COLUMNS, COLUMN_OF } from "../types";
 import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types";
-import { money } from "../api";
+import { money, since } from "../api";
 
 interface Props {
   goals: GoalView[];
@@ -60,6 +60,25 @@ function Swimlane({ goal, ...p }: Props & { goal: GoalView }) {
 
       {open && (
         <>
+          {/* Above the columns, not below them: this is what just happened,
+              which is context for reading the board rather than a footnote to
+              it. Goal-level, so it stands whether or not a card is selected. */}
+          {story.length > 0 && (
+            <div className="story">
+              <span className="story-label">what changed</span>
+              <div className="story-lines">
+                {story.slice(-3).reverse().map((s, n) => (
+                  <div key={n} className="story-line">
+                    {/* A narrative with no time is not a narrative — you could
+                        not tell a line from 30s ago from one from last week. */}
+                    <span className="story-when">{since(s.at, p.now)}</span>
+                    <span>{s.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="columns">
             {BOARD_COLUMNS.map((col) => {
               const cards = mine
@@ -80,18 +99,6 @@ function Swimlane({ goal, ...p }: Props & { goal: GoalView }) {
             })}
           </div>
 
-          {/* Humans chunk time into stories. Most people will read this
-              instead of the board, and they will be right to. */}
-          {story.length > 0 && (
-            <div className="story">
-              <span className="story-label">story</span>
-              <div className="story-lines">
-                {story.slice(-3).map((s, n) => (
-                  <div key={n}>{s.text}</div>
-                ))}
-              </div>
-            </div>
-          )}
         </>
       )}
     </section>
