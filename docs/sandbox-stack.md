@@ -1,12 +1,13 @@
-# Phase 0 — real agents in OpenShell sandboxes: what we proved
+# The sandbox stack: how an agent runs, and everything that bit us
 
-**Status: both gates PASSED.** A Claude Code agent runs inside an OpenShell sandbox,
-authenticates to Vertex with no API key and no credential in the sandbox, and opens a real
-GitHub PR. Proof: [clankrshq/honr-sandbox-probe#1](https://github.com/clankrshq/honr-sandbox-probe/pull/1).
+**Status: working.** A Claude Code agent runs inside an OpenShell sandbox,
+authenticates to Vertex with no API key and no credential in the sandbox, builds
+and tests honr offline, and opens a real GitHub PR.
 
-Everything below is verified on this machine, not inferred. Where something is a workaround for an
-upstream bug, that's called out.
-
+Everything below is verified on a real machine, not inferred. Where something is
+a workaround for an upstream bug, that's called out. If you are about to change
+anything under `sandbox/` or the supervisor's exec scripts, read this first —
+most of it was found by watching something hang.
 ---
 
 ## The one hard problem, and its answer
