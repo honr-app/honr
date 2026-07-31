@@ -858,7 +858,20 @@ async fn process_verdict(
             } else {
                 rep.gates
             };
-            board.report(id, agent_id, rep.added, rep.removed, gates)?;
+            let (added, removed) = if rep.added == 0 && rep.removed == 0 {
+                if let Ok(out) = os.exec(name, &diffstat_script(cfg), short).await {
+                    if out.ok() {
+                        parse_diffstat(&out.stdout)
+                    } else {
+                        (rep.added, rep.removed)
+                    }
+                } else {
+                    (rep.added, rep.removed)
+                }
+            } else {
+                (rep.added, rep.removed)
+            };
+            board.report(id, agent_id, added, removed, gates)?;
             board
                 .settle_gates(id, true, "agent-reported; supervisor-run gates not implemented yet")
                 .map_err(|e| anyhow::anyhow!("settle_gates: {e}"))?;
@@ -934,7 +947,11 @@ async fn finish(
     // deleted there is nothing else to settle it — a card would sit in Verify
     // forever. Settling here keeps the lifecycle closed, and names the gate
     // honestly so the board never implies more assurance than we have.
-    board.report(id, agent_id, 0, 0, vec!["agent-reported".into()])?;
+    let (added, removed) = match os.exec(name, &diffstat_script(cfg), short).await {
+        Ok(out) if out.ok() => parse_diffstat(&out.stdout),
+        _ => (0, 0),
+    };
+    board.report(id, agent_id, added, removed, vec!["agent-reported".into()])?;
     board
         .settle_gates(id, true, "agent-reported; supervisor-run gates not implemented yet")
         .map_err(|e| anyhow::anyhow!("settle_gates: {e}"))?;
@@ -1137,6 +1154,38 @@ if [ -n "$url" ]; then echo "{PR_URL_MARK}$url"; fi"#
 /// Prefix so the URL is read from a line we chose, not guessed at.
 pub const PR_URL_MARK: &str = "HONR-PR-URL=";
 
+/// Script to run `git diff --numstat` against the base branch.
+fn diffstat_script(cfg: &AgentConfig) -> String {
+    let base = &cfg.repo.base;
+    format!(
+        r#"set -e
+cd {WORKDIR}
+git diff --numstat upstream/{base}"#
+    )
+}
+
+/// Parse `git diff --numstat` output into (added, removed) line counts.
+pub fn parse_diffstat(stdout: &str) -> (u32, u32) {
+    let mut added = 0u32;
+    let mut removed = 0u32;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            if let Ok(a) = parts[0].parse::<u32>() {
+                added += a;
+            }
+            if let Ok(r) = parts[1].parse::<u32>() {
+                removed += r;
+            }
+        }
+    }
+    (added, removed)
+}
+
 /// What the agent is walking into, read back from the clone step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchState {
@@ -1224,6 +1273,13 @@ fn briefing(
          Write `.honr/split.json` (or `/work/.honr/split.json`) with an array of `children` \
          (each having `title`, `intent`, and optional `definition_of_done`), then exit.\n",
     );
+
+    b.push_str(&format!(
+        "\nWhen the work is done, write `.honr/report.json` (or `/work/.honr/report.json`) \
+         with your diffstat (`added` and `removed` line counts matching `git diff --numstat` against `{base}`), \
+         optional `gates` passed, and `pr_url`.\n",
+        base = base,
+    ));
 
     b.push_str(&format!(
         "\nRun the project's own checks before you finish — `cargo test --offline --locked` and \
@@ -1634,6 +1690,24 @@ mod tests {
     fn briefing_mentions_verdict_split_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", "shanemcd/honr", "main");
         assert!(b.contains("split.json"), "briefing must mention split.json: {b}");
+    }
+
+    #[test]
+    fn briefing_mentions_verdict_report_protocol() {
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", "shanemcd/honr", "main");
+        assert!(b.contains("report.json"), "briefing must mention report.json: {b}");
+        assert!(b.contains("diffstat"), "briefing must mention diffstat: {b}");
+    }
+
+    #[test]
+    fn parse_diffstat_sums_numstat_lines() {
+        let sample = "10\t2\tsrc/main.rs\n3\t0\tREADME.md\n-\t-\timage.png\n";
+        let (added, removed) = parse_diffstat(sample);
+        assert_eq!(added, 13);
+        assert_eq!(removed, 2);
+
+        let empty = "";
+        assert_eq!(parse_diffstat(empty), (0, 0));
     }
 
     #[test]
