@@ -29,6 +29,7 @@ type ApiResult<T> = Result<Json<T>, ApiError>;
 
 pub fn routes() -> Router<SharedBoard> {
     Router::new()
+        .route("/version", get(version))
         .route("/board", get(board))
         .route("/digest", get(digest))
         .route("/items", post(create_item))
@@ -41,6 +42,15 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/items/{id}/approve", post(approve))
         .route("/items/{id}/request-changes", post(request_changes))
         .route("/items/{id}/cut", post(cut_scope))
+}
+
+#[derive(Serialize)]
+pub struct Version {
+    version: &'static str,
+}
+
+async fn version() -> Json<Version> {
+    Json(Version { version: env!("CARGO_PKG_VERSION") })
 }
 
 async fn board(AxState(b): AxState<SharedBoard>) -> Json<crate::store::Snapshot> {
@@ -190,4 +200,19 @@ async fn cut_scope(
     Json(req): Json<ReasonReq>,
 ) -> ApiResult<Vec<ItemId>> {
     Ok(Json(b.cut_scope(id, req.reason).map_err(ApiError)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn version_reports_the_crate_version() {
+        let Json(v) = version().await;
+        assert_eq!(v.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            serde_json::to_value(&v).unwrap(),
+            serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }),
+        );
+    }
 }
