@@ -306,3 +306,134 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   font: inherit;
   cursor: pointer;
 }
+
+/* ---- Overview: the front door ------------------------------------------ */
+
+.overview { padding: 14px 0 40px; }
+
+.overview.empty { padding: 80px 40px; max-width: 520px; }
+.overview.empty h2 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+.overview.empty p { color: var(--dim, #8b98a9); line-height: 1.6; }
+
+.onode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 16px 5px 0;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+/* The old tree was clickable but said nothing about it. */
+.onode:hover { background: #ffffff0a; border-left-color: #7fb2ff88; }
+.onode:focus-visible { outline: 1px solid #7fb2ff; outline-offset: -1px; }
+.onode.branch .otitle { font-weight: 600; }
+.onode.leaf .otitle { color: #c7d2de; }
+.onode.machine .olevel { border-style: dashed; }
+
+.twist {
+  background: none;
+  border: 0;
+  color: #7d8899;
+  cursor: pointer;
+  font-size: 11px;
+  width: 16px;
+  padding: 0;
+  flex: none;
+}
+.twist.hidden { visibility: hidden; }
+
+.olevel {
+  flex: none;
+  width: 58px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: #7d8899;
+  text-transform: uppercase;
+}
+.otitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.onote {
+  flex: none;
+  font-size: 10px;
+  color: #8b98a9;
+  border: 1px dashed #3a4557;
+  border-radius: 3px;
+  padding: 0 5px;
+}
+.oalarm { flex: none; color: #ff7a7a; font-size: 11px; }
+
+.obar {
+  flex: none;
+  position: relative;
+  width: 92px;
+  height: 6px;
+  border-radius: 3px;
+  background: #2a3341;
+  overflow: hidden;
+}
+.obar-done, .obar-live { position: absolute; top: 0; bottom: 0; left: 0; }
+.obar-done { background: #4ba36a; }
+.obar-live { background: #7fb2ff66; left: auto; right: 0; }
+
+.ocount { flex: none; width: 48px; text-align: right; font-size: 11px; color: #8b98a9; }
+.ospend { flex: none; width: 54px; text-align: right; font-size: 11px; color: #8b98a9; }
+
+.ostate { flex: none; width: 72px; text-align: right; font-size: 11px; color: #8b98a9; }
+.ostate.s-running { color: #7fb2ff; }
+.ostate.s-needs_human { color: #ff7a7a; }
+.ostate.s-review { color: #e5c07b; }
+.ostate.s-done { color: #4ba36a; }
+
+.ointent {
+  padding-right: 16px;
+  padding-bottom: 6px;
+  font-size: 12px;
+  color: #8b98a9;
+  line-height: 1.5;
+}
+
+/* Tab badge, so "Needs you" carries its own count. */
+.pip {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #c0392b;
+  color: #fff;
+  font-size: 10px;
+  text-align: center;
+}
+
+.stats .sep { color: #46516333; }
+
+/* ---- Phone: the digest is the whole point of the small screen ---------- */
+
+@media (max-width: 620px) {
+  .app { overflow-x: hidden; }
+  header.top { flex-wrap: wrap; gap: 6px 10px; }
+  header.top .stats { width: 100%; justify-content: flex-start; gap: 8px; font-size: 11px; }
+
+  /* The escalation rendered one word per line with the buttons over the top
+     of it — on the one view meant to be read on a phone. `.qrow` is a flex
+     row, so the buttons took the width and squeezed the question to ~40px.
+     Stack them instead: question first, then the answers. */
+  .qrow { display: block; }
+  .qq { margin-bottom: 8px; }
+  .qrow .btns { display: flex; flex-direction: column; align-items: stretch; }
+  .qrow .btns button { width: 100%; text-align: left; }
+
+  /* Same shape in the drawer: option label above its explanation. */
+  .option { display: block; margin-bottom: 10px; }
+  .option button { width: 100%; text-align: left; margin-bottom: 4px; }
+
+  .chips { display: block; }
+  .chip { display: inline-block; margin: 2px 0; }
+
+  .columns { display: block; }
+  .column { width: auto; margin-bottom: 14px; }
+  .drawer { position: static; width: auto; }
+  .olevel { width: 44px; }
+  .obar { width: 56px; }
+  .ospend { display: none; }
+}
