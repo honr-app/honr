@@ -290,7 +290,15 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
 
     // Gates are the agent's own claim for now; a clean-checkout verifier the
     // agent cannot influence is the next hardening step.
+    //
+    // `report` hands the card to the verifier, and with the simulated verifier
+    // deleted there is nothing else to settle it — a card would sit in Verify
+    // forever. Settling here keeps the lifecycle closed, and names the gate
+    // honestly so the board never implies more assurance than we have.
     board.report(id, agent_id, 0, 0, vec!["agent-reported".into()])?;
+    board
+        .settle_gates(id, true, "agent-reported; supervisor-run gates not implemented yet")
+        .map_err(|e| anyhow::anyhow!("settle_gates: {e}"))?;
     tracing::info!("#{id} reported; pr={}", url.unwrap_or_else(|| "none".into()));
     Ok(())
 }
@@ -309,6 +317,14 @@ fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
         ("DISABLE_ERROR_REPORTING".into(), "1".into()),
         ("DISABLE_AUTOUPDATER".into(), "1".into()),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        // The image's own ENV does NOT reach `sandbox exec` — PATH arrives as
+        // the base image's default and CARGO_HOME arrives empty, so cargo is
+        // invisible and rustup cannot pick a toolchain. Baking ENV into the
+        // Containerfile is not sufficient; it has to be passed explicitly.
+        ("RUSTUP_HOME".into(), "/opt/rust".into()),
+        ("CARGO_HOME".into(), "/opt/cargo".into()),
+        ("NPM_CONFIG_CACHE".into(), "/opt/npm-cache".into()),
+        ("PATH".into(), "/opt/cargo/bin:/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin".into()),
     ]
 }
 

@@ -3,8 +3,12 @@ version: 1
 
 filesystem_policy:
   include_workdir: true
-  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
-  read_write: [/sandbox, /tmp, /dev/null]
+  # /opt/rust is the toolchain itself; /opt/cargo and /opt/npm-cache are the
+  # pre-warmed registries baked by sandbox/Containerfile. Cargo and npm both
+  # write to their caches during a build, so those two must be read_write —
+  # without them a build fails on permissions, which surfaces as a hang.
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log, /opt/rust]
+  read_write: [/sandbox, /tmp, /dev/null, /opt/cargo, /opt/npm-cache]
 
 landlock:
   compatibility: best_effort

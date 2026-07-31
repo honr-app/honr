@@ -179,7 +179,25 @@ Rebuild it whenever `Cargo.lock` changes materially, or the warm cache just goes
 fetches the delta — which still needs crates.io egress, so treat a stale image as a real failure
 mode rather than a slow path.
 
-**Verified**, as the unprivileged `sandbox` user with the source mounted read-only:
+### The image's `ENV` does not reach `sandbox exec`
+
+Baking `ENV RUSTUP_HOME=... CARGO_HOME=... PATH=...` into the Containerfile is **not enough**.
+Inside `openshell sandbox exec`, `PATH` arrives as the base image's default and `CARGO_HOME` arrives
+empty, so `cargo` is not on the path — and invoking `/opt/cargo/bin/cargo` directly then fails with
+*"rustup could not choose a version of cargo to run"*, because `RUSTUP_HOME` is unset too. The
+toolchain vars have to be passed explicitly as `--env` at sandbox creation. `supervisor.rs` does
+this in `agent_env`.
+
+Related: `/opt` itself is not listable under the policy (`ls /opt` → permission denied) even though
+`/opt/cargo` and `/opt/rust` are reachable. Listing the specific subpaths is what matters; the
+parent does not need to be granted.
+
+**Verified end to end** in a sandbox created with `sandbox/policy.yaml` as the unprivileged
+`sandbox` user: `git clone` of honr, then `cargo build --offline --locked` in **29s**, then
+`cargo test --offline --locked` → **24 passed**. That is the whole gate chain running under policy,
+with no crates.io access.
+
+**Also verified** on the host, with the source mounted read-only:
 
 | Gate | Result |
 |---|---|
