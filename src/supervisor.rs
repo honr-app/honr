@@ -242,12 +242,13 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
     // which looks exactly like a slow clone.
     let clone = os.exec(name, &clone_script(cfg, branch), short).await?;
     anyhow::ensure!(clone.ok(), "clone failed: {}", clone.stderr.trim());
+    let branch_state = branch_state_of(&clone.stdout);
 
     // ---- the agent -------------------------------------------------------
 
     let budget = cfg.per_card_budget_cents;
     let spent = Arc::new(AtomicU64::new(0));
-    let briefing = briefing(grant);
+    let briefing = briefing(grant, branch_state);
 
     let script = format!(
         "cd {WORKDIR} && claude -p {} --output-format stream-json --verbose --permission-mode \
@@ -302,8 +303,15 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
 
     let pr = os.exec(name, &pr_script(cfg, branch, grant), short).await?;
     anyhow::ensure!(pr.ok(), "pr create failed: {}", tail(&pr.stdout, 400));
-    let url = pr.stdout.lines().rev().find(|l| l.starts_with("http")).map(str::to_string);
-    board.set_pr_url(id, url.clone());
+    let url = pr
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix(PR_URL_MARK))
+        .map(str::to_string)
+        // A Review card with no PR is a card you cannot action, so this is a
+        // failure rather than a quietly empty field.
+        .ok_or_else(|| anyhow::anyhow!("no PR url in output: {}", tail(&pr.stdout, 300)))?;
+    board.set_pr_url(id, Some(url.clone()));
 
     // Gates are the agent's own claim for now; a clean-checkout verifier the
     // agent cannot influence is the next hardening step.
@@ -316,7 +324,7 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
     board
         .settle_gates(id, true, "agent-reported; supervisor-run gates not implemented yet")
         .map_err(|e| anyhow::anyhow!("settle_gates: {e}"))?;
-    tracing::info!("#{id} reported; pr={}", url.unwrap_or_else(|| "none".into()));
+    tracing::info!("#{id} reported; pr={url}");
     Ok(())
 }
 
@@ -350,6 +358,20 @@ fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
 const GIT_CRED: &str =
     r#"credential.helper=!f(){ echo username=x-access-token; echo password=$GITHUB_TOKEN; };f"#;
 
+/// Marker lines the supervisor reads back out of the clone step, so the
+/// briefing can tell the agent what it is walking into.
+pub const MARK_FRESH: &str = "HONR-BRANCH-FRESH";
+pub const MARK_REBASED: &str = "HONR-BRANCH-REBASED";
+pub const MARK_CONFLICT: &str = "HONR-BRANCH-CONFLICT";
+
+/// Clone, and **resume the card's branch if it already exists.**
+///
+/// Always branching from base was wrong the moment a card could be re-run:
+/// the agent would start over from scratch and its push would be rejected as
+/// non-fast-forward against its own earlier work. That is precisely the
+/// "changes requested, go fix it" path.
+///
+/// Not shallow. A rebase against base needs real history, and honr is small.
 fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
     let fork = &cfg.repo.fork;
     let base = &cfg.repo.base;
@@ -357,11 +379,26 @@ fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
         r#"set -e
 export GIT_TERMINAL_PROMPT=0
 rm -rf {WORKDIR}
-git -c '{GIT_CRED}' clone -q --depth 50 --branch {base} https://github.com/{fork}.git {WORKDIR}
+git -c '{GIT_CRED}' clone -q --branch {base} https://github.com/{fork}.git {WORKDIR}
 cd {WORKDIR}
-git checkout -q -b {branch}
 git config user.email "agent@honr.local"
-git config user.name "honr agent""#
+git config user.name "honr agent"
+if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
+  git -c '{GIT_CRED}' fetch -q origin {branch}
+  git checkout -q -B {branch} origin/{branch}
+  # Rebase so the branch is reviewable against current base. A conflict is not
+  # a supervisor failure — resolving it is the agent's job, so leave the branch
+  # untouched and say so in the briefing.
+  if git rebase -q origin/{base} >/dev/null 2>&1; then
+    echo {MARK_REBASED}
+  else
+    git rebase --abort >/dev/null 2>&1 || true
+    echo {MARK_CONFLICT}
+  fi
+else
+  git checkout -q -b {branch}
+  echo {MARK_FRESH}
+fi"#
     )
 }
 
@@ -375,14 +412,24 @@ if [ -n "$(git status --porcelain)" ]; then
   git add -A
   git commit -q -m "honr card #{id}"
 fi
-git -c '{GIT_CRED}' push -q --set-upstream https://github.com/{fork}.git {branch}"#
+git -c '{GIT_CRED}' push -q --force-with-lease --set-upstream https://github.com/{fork}.git {branch}"#
     )
 }
 
+/// Open the PR if there isn't one, then **ask GitHub for the URL** rather than
+/// scraping it out of `gh pr create`'s human-readable stdout.
+///
+/// Two bugs in one: `gh pr create` errors outright when a PR already exists, so
+/// any re-run of a card died at this step; and the URL was previously taken as
+/// "the last stdout line starting with http", which silently stored nothing if
+/// gh ever changed what it prints. `gh pr list --json url` is structured and
+/// idempotent — it answers the same way whether we just created the PR or it
+/// was already there.
 fn pr_script(cfg: &AgentConfig, branch: &str, grant: &ClaimGrant) -> String {
     let upstream = &cfg.repo.upstream;
     let base = &cfg.repo.base;
-    // Cross-fork head is `owner:branch`.
+    // Cross-fork head is `owner:branch` for create; `pr list --head` wants the
+    // bare branch name. They are genuinely different.
     let fork_owner = cfg.repo.fork.split('/').next().unwrap_or_default();
     let title = format!("{} (honr #{})", grant.title, grant.item_id);
     let body = format!(
@@ -394,16 +441,51 @@ fn pr_script(cfg: &AgentConfig, branch: &str, grant: &ClaimGrant) -> String {
     format!(
         r#"set -e
 cd {WORKDIR}
-GH_TOKEN=$GITHUB_TOKEN gh pr create --repo {upstream} --base {base} \
-  --head {fork_owner}:{branch} --title {} --body {}"#,
+export GH_TOKEN=$GITHUB_TOKEN
+existing=$(gh pr list --repo {upstream} --head {branch} --state open --json url --jq '.[0].url // empty')
+if [ -z "$existing" ]; then
+  gh pr create --repo {upstream} --base {base} \
+    --head {fork_owner}:{branch} --title {} --body {} >/dev/null
+fi
+url=$(gh pr list --repo {upstream} --head {branch} --state open --json url --jq '.[0].url // empty')
+if [ -z "$url" ]; then
+  echo "no open PR for {branch} after create" >&2
+  exit 1
+fi
+echo "{PR_URL_MARK}$url""#,
         shell_quote(&title),
         shell_quote(&body)
     )
 }
 
+/// Prefix so the URL is read from a line we chose, not guessed at.
+pub const PR_URL_MARK: &str = "HONR-PR-URL=";
+
+/// What the agent is walking into, read back from the clone step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchState {
+    /// New branch off base — nothing done on this card yet.
+    Fresh,
+    /// The card's branch already existed and rebased cleanly onto base.
+    Rebased,
+    /// The branch exists but conflicts with base. Resolving that is the agent's
+    /// job, not the supervisor's — it needs the semantics to do it safely.
+    Conflicted,
+}
+
+fn branch_state_of(stdout: &str) -> BranchState {
+    if stdout.contains(MARK_CONFLICT) {
+        BranchState::Conflicted
+    } else if stdout.contains(MARK_REBASED) {
+        BranchState::Rebased
+    } else {
+        BranchState::Fresh
+    }
+}
+
 /// The intent chain is the highest-leverage payload in the system, and a fresh
 /// `claude -p` in an empty container has none of it.
-fn briefing(grant: &ClaimGrant) -> String {
+fn briefing(grant: &ClaimGrant, branch: BranchState) -> String {
     let mut b = String::new();
     b.push_str("You are working on one card in a larger plan. Do exactly this card.\n\n");
 
@@ -433,12 +515,30 @@ fn briefing(grant: &ClaimGrant) -> String {
         }
     }
 
+    b.push_str(match branch {
+        BranchState::Fresh => {
+            "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n"
+        }
+        BranchState::Rebased => {
+            "\nThis card has been worked before. You are on its existing branch, already rebased \
+             onto the current base — review what is there and address the notes above rather \
+             than starting over.\n"
+        }
+        // The supervisor deliberately does not resolve this: only something
+        // that understands the change can decide what the merged result means.
+        BranchState::Conflicted => {
+            "\nThis card has been worked before and its branch CONFLICTS with the base. The \
+             rebase was left un-applied, so you are on the branch as it was. Rebase onto \
+             `origin/<base>` yourself and resolve the conflicts, keeping the intent of both \
+             sides. Do this before any other work.\n"
+        }
+    });
+
     b.push_str(
-        "\nYou are in a git clone on a branch of your own. Make the change and leave the tree \
-         clean; the supervisor commits, pushes and opens the PR. Run the project's own checks \
-         before you finish — `cargo test --offline --locked` and `cargo clippy --offline -- -D \
-         warnings`, both of which work with no network. Do not push, do not open a PR, and do \
-         not touch git remotes.\n",
+        "\nMake the change and leave the tree clean; the supervisor commits, pushes and opens \
+         the PR. Run the project's own checks before you finish — `cargo test --offline \
+         --locked` and `cargo clippy --offline -- -D warnings`, both of which work with no \
+         network. Do not push, do not open a PR, and do not touch git remotes.\n",
     );
     b
 }
@@ -511,14 +611,89 @@ mod tests {
         assert!(q.contains(r"'\''"), "single quotes must be escaped: {q}");
     }
 
+    /// Re-running a card must resume its branch, not start over. Always
+    /// branching from base meant the push was rejected as non-fast-forward
+    /// against the card's own earlier work — which is exactly the
+    /// "changes requested, go fix it" path.
+    #[test]
+    fn clone_resumes_an_existing_branch() {
+        let cfg = repo_cfg();
+        let s = clone_script(&cfg, "honr/card-8");
+        assert!(s.contains("ls-remote --exit-code --heads origin honr/card-8"), "{s}");
+        assert!(s.contains("checkout -q -B honr/card-8 origin/honr/card-8"), "{s}");
+        assert!(s.contains("rebase -q origin/main"), "{s}");
+        // A conflict is the agent's problem to resolve, so the supervisor must
+        // back out rather than leave a half-applied rebase behind.
+        assert!(s.contains("rebase --abort"), "{s}");
+        // Shallow history cannot be rebased reliably.
+        assert!(!s.contains("--depth"), "clone must not be shallow: {s}");
+    }
+
+    /// A rebased branch cannot fast-forward, and plain --force races the agent.
+    #[test]
+    fn push_uses_force_with_lease() {
+        let s = push_script(&repo_cfg(), "honr/card-8", 8);
+        assert!(s.contains("--force-with-lease"), "{s}");
+        assert!(!s.contains("--force "), "plain --force is unsafe here: {s}");
+    }
+
+    /// `gh pr create` errors when a PR already exists, which killed every
+    /// re-run. Query first, create only if absent, then read the URL back.
+    #[test]
+    fn pr_step_is_idempotent_and_reads_the_url_back() {
+        let s = pr_script(&repo_cfg(), "honr/card-8", &grant());
+        assert!(s.contains("gh pr list"), "must look before creating: {s}");
+        assert!(s.contains("--head clankrshq:honr/card-8"), "cross-fork create head: {s}");
+        assert!(s.contains("--head honr/card-8"), "pr list wants a bare branch: {s}");
+        assert!(s.contains(PR_URL_MARK), "url must come from a marked line: {s}");
+        // No PR at the end is a failure, not an empty field.
+        assert!(s.contains("exit 1"), "{s}");
+    }
+
+    #[test]
+    fn branch_state_is_read_from_the_clone_output() {
+        assert_eq!(branch_state_of("HONR-BRANCH-FRESH\n"), BranchState::Fresh);
+        assert_eq!(branch_state_of("noise\nHONR-BRANCH-REBASED\n"), BranchState::Rebased);
+        assert_eq!(branch_state_of("HONR-BRANCH-CONFLICT\n"), BranchState::Conflicted);
+        // Unrecognised output must not silently claim a clean rebase.
+        assert_eq!(branch_state_of("something else"), BranchState::Fresh);
+    }
+
+    /// An agent resuming a conflicted branch has to be told, or it will build
+    /// on top of a branch that cannot merge.
+    #[test]
+    fn the_briefing_tells_the_agent_about_a_conflict() {
+        let conflicted = briefing(&grant(), BranchState::Conflicted);
+        assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
+        assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
+
+        let fresh = briefing(&grant(), BranchState::Fresh);
+        assert!(!fresh.contains("CONFLICTS"));
+        assert!(fresh.contains("new branch"));
+    }
+
+    /// Changes-requested notes are the whole steering mechanism: they reach the
+    /// next run only by way of the briefing.
+    #[test]
+    fn steering_notes_reach_the_briefing() {
+        let mut g = grant();
+        g.notes = vec!["Changes requested: rebase onto latest, api.rs only.".into()];
+        let b = briefing(&g, BranchState::Rebased);
+        assert!(b.contains("rebase onto latest, api.rs only."), "{b}");
+    }
+
     /// Cross-fork PRs need `owner:branch` as the head, or gh silently looks for
     /// the branch on upstream and fails.
-    #[test]
-    fn pr_head_is_namespaced_to_the_fork() {
+    fn repo_cfg() -> AgentConfig {
         let mut cfg = AgentConfig::default();
         cfg.repo.upstream = "shanemcd/honr".into();
         cfg.repo.fork = "clankrshq/honr".into();
-        let grant = ClaimGrant {
+        cfg.repo.base = "main".into();
+        cfg
+    }
+
+    fn grant() -> ClaimGrant {
+        ClaimGrant {
             item_id: 7,
             title: "t".into(),
             definition_of_done: None,
@@ -527,8 +702,12 @@ mod tests {
             notes: vec![],
             lease_expires_at: chrono::Utc::now(),
             budget_remaining_cents: None,
-        };
-        let s = pr_script(&cfg, "honr/card-7", &grant);
+        }
+    }
+
+    #[test]
+    fn pr_head_is_namespaced_to_the_fork() {
+        let s = pr_script(&repo_cfg(), "honr/card-7", &grant());
         assert!(s.contains("--head clankrshq:honr/card-7"), "{s}");
         assert!(s.contains("--repo shanemcd/honr"), "{s}");
     }
