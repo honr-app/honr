@@ -52,17 +52,11 @@ impl Default for ExecutionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Schema {
     pub levels: Vec<Level>,
     #[serde(default)]
     pub execution: ExecutionConfig,
-}
-
-impl Default for Schema {
-    fn default() -> Self {
-        Self { levels: Vec::new(), execution: ExecutionConfig::default() }
-    }
 }
 
 impl Schema {

@@ -5,6 +5,7 @@ mod events;
 mod machine;
 mod mcp;
 mod model;
+mod openshell;
 mod schema;
 mod sse;
 mod store;

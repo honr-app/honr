@@ -1,0 +1,476 @@
+//! Typed async wrapper over the `openshell` CLI.
+//!
+//! One place that knows the CLI's shape, so the supervisor never builds an
+//! argv. We shell out rather than use `openshell-sdk` because the SDK does not
+//! support mTLS and our gateway is mTLS-only — see `docs/phase-0-findings.md`
+//! for the full reasoning and the condition to revisit it.
+//!
+//! **Everything here takes a timeout, and that is not defensive style.** Every
+//! failure mode observed in phase 0 — blocked metadata server, denied egress,
+//! git waiting on a credential prompt — presented as a *hang*, not an error. A
+//! call without a deadline is a supervisor that stops making progress and
+//! never says why.
+
+// Nothing calls this yet; `supervisor.rs` is the caller and lands next.
+#![allow(dead_code)]
+
+use serde::Deserialize;
+use std::ffi::OsStr;
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("`openshell {argv}` timed out after {secs}s")]
+    Timeout { argv: String, secs: u64 },
+    #[error("`openshell {argv}` exited {code}: {stderr}")]
+    Failed { argv: String, code: i32, stderr: String },
+    #[error("could not spawn `openshell`: {0}")]
+    Spawn(#[source] std::io::Error),
+    #[error("could not parse `openshell {argv}` output: {source}")]
+    Parse { argv: String, #[source] source: serde_json::Error },
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// One sandbox, as `sandbox list -o json` reports it. Deliberately partial:
+/// unknown fields are ignored so a CLI that grows a field doesn't break us.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Sandbox {
+    pub name: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
+impl Sandbox {
+    /// The work item this sandbox belongs to, from the `honr.item` label.
+    pub fn item_id(&self) -> Option<u64> {
+        self.labels.get(LABEL_ITEM)?.parse().ok()
+    }
+}
+
+/// How a sandbox is created. Mirrors the flags proven in phase 0.
+#[derive(Debug, Clone)]
+pub struct SandboxSpec {
+    pub name: String,
+    /// `--from`. **Not** `--image`: a bare name resolves against the community
+    /// registry, a path builds a Dockerfile, a tag is an image reference.
+    pub from: String,
+    pub providers: Vec<String>,
+    pub policy: Option<String>,
+    pub env: Vec<(String, String)>,
+    pub labels: Vec<(String, String)>,
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+}
+
+/// What a finished command produced.
+#[derive(Debug, Clone)]
+pub struct Output {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Output {
+    pub fn ok(&self) -> bool {
+        self.code == 0
+    }
+}
+
+pub const LABEL_ITEM: &str = "honr.item";
+
+/// Argv for `sandbox create`, split out from the call so it can be asserted
+/// without a gateway. Worth testing on its own: the flags are exactly the kind
+/// of thing that breaks silently — the image flag is `--from`, not `--image`,
+/// and getting it wrong yields a confusing registry lookup rather than an error.
+fn create_args(spec: &SandboxSpec) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "sandbox".into(),
+        "create".into(),
+        "--name".into(),
+        spec.name.clone(),
+        "--from".into(),
+        spec.from.clone(),
+        "--no-tty".into(),
+    ];
+
+    for p in &spec.providers {
+        args.push("--provider".into());
+        args.push(p.clone());
+    }
+    if let Some(policy) = &spec.policy {
+        args.push("--policy".into());
+        args.push(policy.clone());
+    }
+    for (k, v) in &spec.env {
+        args.push("--env".into());
+        args.push(format!("{k}={v}"));
+    }
+    for (k, v) in &spec.labels {
+        args.push("--label".into());
+        args.push(format!("{k}={v}"));
+    }
+    if let Some(cpu) = &spec.cpu {
+        args.push("--cpu".into());
+        args.push(cpu.clone());
+    }
+    if let Some(mem) = &spec.memory {
+        args.push("--memory".into());
+        args.push(mem.clone());
+    }
+
+    // The policy must be passed at creation: filesystem and process sections
+    // are immutable on a live sandbox, and `policy set --wait` costs ~50s.
+    args.push("--".into());
+    args.push("echo".into());
+    args.push("up".into());
+    args
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenShell {
+    bin: String,
+    /// Applies to control-plane calls (create, list, delete). Exec carries its
+    /// own, because an agent legitimately runs for minutes.
+    default_timeout: Duration,
+}
+
+impl Default for OpenShell {
+    fn default() -> Self {
+        Self { bin: "openshell".into(), default_timeout: Duration::from_secs(120) }
+    }
+}
+
+impl OpenShell {
+    pub fn new(bin: impl Into<String>, default_timeout: Duration) -> Self {
+        Self { bin: bin.into(), default_timeout }
+    }
+
+    // ------------------------------------------------------------- plumbing
+
+    /// Run to completion under a deadline. On timeout the child is killed —
+    /// otherwise a hung CLI outlives the supervisor that gave up on it.
+    async fn run<I, S>(&self, args: I, timeout: Duration) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args: Vec<String> =
+            args.into_iter().map(|a| a.as_ref().to_string_lossy().into_owned()).collect();
+        let argv = args.join(" ");
+
+        let child = Command::new(&self.bin)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(Error::Spawn)?;
+
+        let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(r) => r.map_err(Error::Spawn)?,
+            Err(_) => {
+                return Err(Error::Timeout { argv, secs: timeout.as_secs() });
+            }
+        };
+
+        Ok(Output {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    /// Run, and treat a non-zero exit as an error.
+    async fn run_ok<I, S>(&self, args: I, timeout: Duration) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args: Vec<String> =
+            args.into_iter().map(|a| a.as_ref().to_string_lossy().into_owned()).collect();
+        let argv = args.join(" ");
+        let out = self.run(args, timeout).await?;
+        if !out.ok() {
+            return Err(Error::Failed {
+                argv,
+                code: out.code,
+                stderr: out.stderr.trim().to_string(),
+            });
+        }
+        Ok(out)
+    }
+
+    // -------------------------------------------------------- the verbs
+
+    /// Is the gateway reachable? Cheap enough to call before claiming a card,
+    /// and worth it: the podman machine stops on its own.
+    pub async fn healthy(&self) -> bool {
+        self.run(["status"], Duration::from_secs(15)).await.map(|o| o.ok()).unwrap_or(false)
+    }
+
+    pub async fn list(&self) -> Result<Vec<Sandbox>> {
+        let out = self.run_ok(["sandbox", "list", "-o", "json"], self.default_timeout).await?;
+        serde_json::from_str(&out.stdout)
+            .map_err(|source| Error::Parse { argv: "sandbox list".into(), source })
+    }
+
+    /// Sandboxes this honr created, keyed by work item.
+    pub async fn list_ours(&self) -> Result<Vec<Sandbox>> {
+        Ok(self.list().await?.into_iter().filter(|s| s.item_id().is_some()).collect())
+    }
+
+    /// Create and keep alive; we exec into it afterwards. The trailing command
+    /// is a no-op that just proves the sandbox came up.
+    pub async fn create(&self, spec: &SandboxSpec) -> Result<()> {
+        // Sandbox startup is seconds, not milliseconds, and this is alpha
+        // software — give creation more room than a control-plane call.
+        self.run_ok(create_args(spec), Duration::from_secs(300)).await?;
+        Ok(())
+    }
+
+    pub async fn delete(&self, name: &str) -> Result<()> {
+        self.run_ok(["sandbox", "delete", name], self.default_timeout).await?;
+        Ok(())
+    }
+
+    pub async fn upload(&self, name: &str, local: &str, dest: &str) -> Result<()> {
+        self.run_ok(["sandbox", "upload", name, local, dest], self.default_timeout).await?;
+        Ok(())
+    }
+
+    pub async fn download(&self, name: &str, remote: &str, dest: &str) -> Result<()> {
+        self.run_ok(["sandbox", "download", name, remote, dest], self.default_timeout).await?;
+        Ok(())
+    }
+
+    pub async fn logs(&self, name: &str, tail: u32) -> Result<String> {
+        let out =
+            self.run(["logs", name, "-n", &tail.to_string()], self.default_timeout).await?;
+        Ok(out.stdout)
+    }
+
+    /// Run a command in a sandbox and wait for it.
+    ///
+    /// Note both timeouts. `--timeout` is the CLI's own, which the gateway
+    /// enforces remotely; the outer one covers the CLI process itself wedging.
+    /// A remote timeout leaves us a diagnosable exit code, so it is set
+    /// slightly tighter.
+    pub async fn exec(&self, name: &str, script: &str, timeout: Duration) -> Result<Output> {
+        let remote = timeout.as_secs().saturating_sub(5).max(1);
+        self.run(
+            [
+                "sandbox",
+                "exec",
+                "-n",
+                name,
+                "--timeout",
+                &remote.to_string(),
+                "--",
+                "bash",
+                "-lc",
+                script,
+            ],
+            timeout,
+        )
+        .await
+    }
+
+    /// Run a command and hand every stdout line to `on_line` as it arrives.
+    ///
+    /// This is how liveness and cost stay *observed rather than self-reported*:
+    /// the supervisor watches `claude --output-format stream-json` go by and
+    /// heartbeats on real activity, so a hung agent cannot claim to be fine.
+    ///
+    /// `on_line` is called from the read loop, so it must not block.
+    pub async fn exec_streaming<F>(
+        &self,
+        name: &str,
+        script: &str,
+        timeout: Duration,
+        mut on_line: F,
+    ) -> Result<Output>
+    where
+        F: FnMut(&str) + Send,
+    {
+        let remote = timeout.as_secs().saturating_sub(5).max(1);
+        let args = [
+            "sandbox",
+            "exec",
+            "-n",
+            name,
+            "--timeout",
+            &remote.to_string(),
+            "--",
+            "bash",
+            "-lc",
+            script,
+        ];
+        let argv = format!("sandbox exec -n {name}");
+
+        let mut child = Command::new(&self.bin)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(Error::Spawn)?;
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+
+        let collect_err = tokio::spawn(async move {
+            let mut buf = String::new();
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                buf.push_str(&l);
+                buf.push('\n');
+            }
+            buf
+        });
+
+        let pump = async {
+            let mut out = String::new();
+            let mut lines = BufReader::new(stdout).lines();
+            while let Some(line) = lines.next_line().await.map_err(Error::Spawn)? {
+                on_line(&line);
+                out.push_str(&line);
+                out.push('\n');
+            }
+            let status = child.wait().await.map_err(Error::Spawn)?;
+            Ok::<_, Error>((status, out))
+        };
+
+        match tokio::time::timeout(timeout, pump).await {
+            Ok(res) => {
+                let (status, stdout) = res?;
+                Ok(Output {
+                    code: status.code().unwrap_or(-1),
+                    stdout,
+                    stderr: collect_err.await.unwrap_or_default(),
+                })
+            }
+            Err(_) => Err(Error::Timeout { argv, secs: timeout.as_secs() }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> SandboxSpec {
+        SandboxSpec {
+            name: "honr-card-7".into(),
+            from: "honr-sandbox:latest".into(),
+            providers: vec!["vertex".into(), "gh-clankr".into()],
+            policy: Some("sandbox/policy.yaml".into()),
+            env: vec![("CLAUDE_CODE_USE_VERTEX".into(), "1".into())],
+            labels: vec![(LABEL_ITEM.into(), "7".into())],
+            cpu: Some("2".into()),
+            memory: Some("4Gi".into()),
+        }
+    }
+
+    /// The image flag is `--from`. `--image` does not exist, and passing it
+    /// fails in a way that reads like a registry problem.
+    #[test]
+    fn image_is_passed_as_from() {
+        let args = create_args(&spec());
+        let i = args.iter().position(|a| a == "--from").expect("--from present");
+        assert_eq!(args[i + 1], "honr-sandbox:latest");
+        assert!(!args.iter().any(|a| a == "--image"));
+    }
+
+    /// Repeated flags, not comma-joined lists — one `--provider` each.
+    #[test]
+    fn each_provider_gets_its_own_flag() {
+        let args = create_args(&spec());
+        let providers: Vec<_> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_str() == "--provider")
+            .map(|(i, _)| args[i + 1].clone())
+            .collect();
+        assert_eq!(providers, vec!["vertex", "gh-clankr"]);
+    }
+
+    /// Env and labels are `KEY=VALUE`; the label is what reconciliation reads
+    /// after a restart to match a live sandbox back to its card.
+    #[test]
+    fn env_and_labels_are_key_equals_value() {
+        let args = create_args(&spec());
+        assert!(args.contains(&"CLAUDE_CODE_USE_VERTEX=1".to_string()));
+        assert!(args.contains(&"honr.item=7".to_string()));
+    }
+
+    /// The policy has to be there at creation — it cannot be added later.
+    #[test]
+    fn policy_is_passed_at_creation() {
+        let args = create_args(&spec());
+        let i = args.iter().position(|a| a == "--policy").expect("--policy present");
+        assert_eq!(args[i + 1], "sandbox/policy.yaml");
+    }
+
+    #[test]
+    fn item_id_round_trips_through_the_label() {
+        let json = r#"[{"name":"honr-card-7","phase":"Running","labels":{"honr.item":"7"}}]"#;
+        let boxes: Vec<Sandbox> = serde_json::from_str(json).unwrap();
+        assert_eq!(boxes[0].item_id(), Some(7));
+    }
+
+    /// Unknown fields must not break parsing: the CLI is alpha and will grow
+    /// keys, and a sandbox list that fails to parse strands live sandboxes.
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let json = r#"[{"name":"x","brand_new_field":42,"labels":{}}]"#;
+        let boxes: Vec<Sandbox> = serde_json::from_str(json).unwrap();
+        assert_eq!(boxes[0].name, "x");
+        assert_eq!(boxes[0].item_id(), None);
+    }
+
+    /// The failure mode that matters: everything in this stack fails as a
+    /// *hang*, so a deadline must produce `Timeout` rather than a supervisor
+    /// that quietly stops making progress. `sleep` stands in for a wedged CLI.
+    #[tokio::test]
+    async fn a_hang_becomes_a_timeout() {
+        let os = OpenShell::default();
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            OpenShell::new("sleep", Duration::from_secs(30)).run(["30"], Duration::from_millis(250)),
+        )
+        .await
+        .expect("the deadline itself must not hang")
+        .expect_err("a 30s sleep under a 250ms deadline must fail");
+
+        assert!(matches!(err, Error::Timeout { .. }), "got {err:?}");
+        let _ = os;
+    }
+
+    // ---- gateway-backed. `cargo test -- --ignored` with podman + gateway up.
+    // Ignored by default so the suite stays hermetic: these assert against the
+    // real CLI, which is the only way to catch a flag or output-shape change.
+
+    #[tokio::test]
+    #[ignore = "needs a running OpenShell gateway"]
+    async fn gateway_is_reachable() {
+        assert!(OpenShell::default().healthy().await);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a running OpenShell gateway"]
+    async fn list_parses_real_cli_output() {
+        // Asserting it parses, not what it contains — an empty gateway is fine.
+        OpenShell::default().list().await.expect("sandbox list -o json parses");
+    }
+
+}

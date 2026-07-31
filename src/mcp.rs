@@ -5,7 +5,7 @@
 //! Two families share one state machine:
 //!   * cockpit tools — what a liaison agent needs to triage and decide
 //!   * worker verbs  — `list_ready` `claim` `heartbeat` `split` `escalate`
-//!                     `report` `release`, and nothing else
+//!     `report` `release`, and nothing else
 //!
 //! If the worker surface grows past roughly that size, the orchestrator has
 //! started leaking its own complexity into the workers.

@@ -96,6 +96,38 @@ The GitHub credential key **must** be `GITHUB_TOKEN` or `GH_TOKEN` — the profi
 
 ---
 
+## Why `openshell.rs` shells out to the CLI instead of using the gRPC API
+
+OpenShell is Rust and ships `crates/openshell-sdk`, "the shared async Rust client for OpenShell
+gateways", plus 9 `.proto` files. Talking to the gateway directly looks like the obvious choice. It
+isn't, for one decisive reason and three supporting ones.
+
+**The SDK does not support mTLS.** Its README says so outright: plaintext, server-authenticated
+TLS, OIDC bearer, Cloudflare Access, and insecure-TLS — "mTLS (client certificates) is not
+supported." Our gateway is mTLS-only (`openshell status` → `Authenticated (mTLS transport)`, certs
+in `~/.config/openshell/gateways/openshell/mtls/`). Using the SDK would mean reconfiguring the
+gateway away from mTLS: a weaker posture, and a departure from the setup phase 0 was proven on.
+
+Supporting reasons:
+
+- **Nothing is published to crates.io.** A search returns no OpenShell crates at all, so the SDK
+  can only be a git dependency pinned to a rev of a large alpha workspace — which also fights the
+  offline sandbox image, since `cargo fetch --locked` would need to clone OpenShell at build time.
+- **The curated surface can't stream exec**, and streaming is the whole point: liveness and real
+  cost come from parsing `claude`'s `stream-json` line by line. That forces the `raw` tonic clients,
+  the protos, `protoc` in our build, and generated code we'd own.
+- **Alpha churn argues for looser coupling.** We already route around #2478. CLI flags move more
+  slowly than internal proto messages.
+
+The CLI's usual weakness barely applies: `sandbox list -o json` emits clean JSON, `exec` propagates
+the remote exit code, and process-spawn overhead is noise against sandbox operations measured in
+seconds.
+
+**Revisit when both change:** the gateway moves off mTLS *and* the crates are published. Same shape
+as the `inference.local` note above.
+
+---
+
 ## The image has no Rust toolchain — which matters for self-hosting
 
 Probed directly (`docker run --rm <image> -c '...'`, arm64):
@@ -132,8 +164,13 @@ Build and point OpenShell at it:
 ```bash
 # from the repo root — Cargo.lock and web/package-lock.json must be in context
 docker build -f sandbox/Containerfile -t honr-sandbox:latest .
-openshell sandbox create --name <NAME> --image honr-sandbox:latest ...
+openshell sandbox create --name <NAME> --from honr-sandbox:latest ...
 ```
+
+The image flag is `--from`, **not** `--image`. It doubles as a build trigger: given a Dockerfile or
+a directory it builds into the local Docker daemon, and a bare name like `ollama` is resolved
+against `ghcr.io/nvidia/openshell-community/sandboxes/`. A local tag such as `honr-sandbox:latest`
+is taken as an image reference.
 
 It also needs companion entries in `policy.yaml` (`/opt/cargo` + `/opt/npm-cache` read-write,
 `/opt/rust` read-only) — the Containerfile documents them inline.
