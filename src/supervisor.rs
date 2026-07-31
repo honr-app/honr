@@ -188,7 +188,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
 
     // Pick up whatever survived the last process before anything else — the
     // sweeper included — gets a chance to act on those cards.
-    for a in reconcile(&fleet.os, &board, cfg.lease_secs).await {
+    for a in reconcile_once_reachable(&fleet.os, &board, cfg.lease_secs, GATEWAY_GRACE).await {
         let (id, agent_id) = (a.item_id, a.agent_id.clone());
         fleet.supervise(id, agent_id, adopt_card(fleet.clone(), a));
     }
@@ -278,6 +278,60 @@ fn adoptable<'a>(item: Option<&'a WorkItem>, sandbox: &str) -> Option<&'a WorkIt
     })
 }
 
+/// How long startup waits for the gateway before giving up on reconciling.
+///
+/// Generous, because the podman machine takes tens of seconds to come up and
+/// honr and podman tend to start at the same time. Bounded, because a gateway
+/// that is never coming back must not leave every Running card frozen.
+const GATEWAY_GRACE: Duration = Duration::from_secs(180);
+const GATEWAY_POLL: Duration = Duration::from_secs(5);
+
+/// Reconcile, but only once the gateway can actually answer.
+///
+/// Skipping reconciliation is not the neutral choice it looks like. If honr
+/// cannot enumerate sandboxes then it does not know which runs are still live,
+/// and the sweeper — which starts immediately after this returns — requeues a
+/// card whose agent is still working. Dispatch then claims it again and races a
+/// second agent onto the branch the first one is already pushing to. That is
+/// exactly the failure re-adoption exists to prevent, reached from the other
+/// side, and "the podman machine stops on its own" makes it reachable.
+///
+/// Waiting costs nothing. Dispatch refuses to claim without a healthy gateway
+/// anyway, so a sweep during an outage cannot produce work — it can only turn
+/// live runs into lies about them.
+async fn reconcile_once_reachable(
+    os: &OpenShell,
+    board: &SharedBoard,
+    lease_secs: i64,
+    grace: Duration,
+) -> Vec<Adoption> {
+    let deadline = std::time::Instant::now() + grace;
+    let mut announced = false;
+    while !os.healthy().await {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            // Loud, because the board is about to be less trustworthy than
+            // usual: anything that survived the restart is now invisible to us.
+            tracing::error!(
+                "gateway unreachable after {}s; starting without reconciling. A run that \
+                 survived the restart will not be adopted and may be requeued.",
+                grace.as_secs()
+            );
+            return Vec::new();
+        }
+        if !announced {
+            tracing::warn!(
+                "gateway unreachable; holding dispatch and the sweeper until it answers"
+            );
+            announced = true;
+        }
+        // Never sleep past the deadline — the point is a bounded wait, not a
+        // wait rounded up to the poll interval.
+        tokio::time::sleep(GATEWAY_POLL.min(left)).await;
+    }
+    reconcile(os, board, lease_secs).await
+}
+
 /// Match live sandboxes back to the board, before anything else touches them.
 async fn reconcile(os: &OpenShell, board: &SharedBoard, lease_secs: i64) -> Vec<Adoption> {
     let Ok(ours) = os.list_ours().await else {
@@ -353,8 +407,16 @@ async fn adopt(
         .unwrap_or_else(|| format!("sandbox-{id}"));
 
     // Renew the lease now. It has not been touched since before the restart,
-    // and the sweeper is seconds from deciding this card is dead.
-    let _ = board.heartbeat(id, &agent_id, item.progress, 0, lease_secs);
+    // and the sweeper is seconds from deciding this card is dead. This is also
+    // what puts a Claimed card back into Running.
+    //
+    // A failure here is not a reason to abandon the run: the agent is alive
+    // either way, and watching it beats leaving it to spend unobserved. But it
+    // does mean the sweeper may requeue a live card, so it must not pass
+    // silently.
+    if let Err(e) = board.heartbeat(id, &agent_id, item.progress, 0, lease_secs) {
+        tracing::error!("#{id}: adopted {sandbox} but could not renew its lease: {e}");
+    }
     board.story(id, format!("honr restarted; picked {sandbox} back up rather than killing it."));
 
     Some(Adoption {
@@ -1239,6 +1301,43 @@ mod tests {
         // in the queue rather than being watched forever.
         let gone = format!("{MARK_GONE}\n{MARK_LINES}0\n{MARK_COST}\n");
         assert_eq!(probe_of(&gone), None);
+    }
+
+    /// The other way to lose a live run to a restart.
+    ///
+    /// Reconciliation used to no-op when the gateway could not answer, and the
+    /// sweeper started regardless — so a podman machine that was merely slow to
+    /// come up got a still-running card requeued and a second agent dispatched
+    /// onto its branch. `false` stands in for a gateway that is not there.
+    #[tokio::test]
+    async fn startup_waits_for_a_gateway_that_is_not_up_yet() {
+        let os = OpenShell::new("false", Duration::from_secs(5));
+        let board = test_board();
+        let grace = Duration::from_millis(300);
+
+        let began = std::time::Instant::now();
+        let adopted = reconcile_once_reachable(&os, &board, 600, grace).await;
+
+        assert!(adopted.is_empty(), "nothing can be adopted through a dead gateway");
+        assert!(began.elapsed() >= grace, "must wait for the gateway, not skip past it");
+    }
+
+    /// The wait is bounded on purpose. A gateway that is never coming back must
+    /// not hold the sweeper — and therefore every Running card — forever.
+    #[tokio::test]
+    async fn a_gateway_that_never_answers_does_not_freeze_the_board() {
+        let os = OpenShell::new("false", Duration::from_secs(5));
+        let began = std::time::Instant::now();
+        reconcile_once_reachable(&os, &test_board(), 600, Duration::from_millis(50)).await;
+        assert!(began.elapsed() < Duration::from_secs(30), "gave up in bounded time");
+    }
+
+    /// Never flushed, so the path is only ever a name.
+    fn test_board() -> SharedBoard {
+        Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join("honr-test-reconcile.json"),
+        ))
     }
 
     /// Cross-fork PRs need `owner:branch` as the head, or gh silently looks for

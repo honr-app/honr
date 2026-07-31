@@ -129,10 +129,17 @@ picks the run back up from the line its log had reached. The card stays Running,
 the lease is renewed before the sweeper gets a turn, and no second sandbox is
 created. Everything else it finds is reaped.
 
-Three things worth knowing:
+Four things worth knowing:
 
 - The story line `honr restarted; picked <sandbox> back up` is how you tell an
   adopted run from a fresh one.
+- **Startup waits up to 3 minutes for the gateway** before reconciling, and
+  holds the sweeper for as long as it waits. honr and the podman machine tend to
+  start together, and reconciling blind is worse than reconciling late: without
+  a sandbox listing honr cannot tell which runs are live, so the sweeper would
+  requeue one that is still going and dispatch would race a second agent onto
+  its branch. If the wait runs out you get a loud `gateway unreachable after
+  180s; starting without reconciling` — treat any Running card as suspect.
 - Spend during the downtime is not billed to the card. The supervisor charges
   the *difference* between cost lines and resumes from the last one already in
   the log, so it under-reports rather than double-counting. The per-card budget
