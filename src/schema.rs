@@ -133,6 +133,11 @@ pub struct AgentConfig {
     /// Hard ceiling on one agent run. Everything here fails as a hang.
     #[serde(default = "d_agent_timeout")]
     pub agent_timeout_secs: u64,
+    /// Runs that die without producing work before the card becomes a human's
+    /// problem. The money caps do not cover this: an early failure spends
+    /// nothing, so without a count it requeues forever.
+    #[serde(default = "d_max_attempts")]
+    pub max_attempts: u32,
 }
 
 fn d_image() -> String { "honr-sandbox:latest".into() }
@@ -141,6 +146,7 @@ fn d_concurrent() -> usize { 2 }
 fn d_card_budget() -> u64 { 200 }
 fn d_daily_budget() -> u64 { 2000 }
 fn d_agent_timeout() -> u64 { 1800 }
+fn d_max_attempts() -> u32 { 3 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -157,6 +163,7 @@ impl Default for AgentConfig {
             per_card_budget_cents: d_card_budget(),
             daily_budget_cents: d_daily_budget(),
             agent_timeout_secs: d_agent_timeout(),
+            max_attempts: d_max_attempts(),
         }
     }
 }

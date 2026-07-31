@@ -68,3 +68,8 @@ execution:
     per_card_budget_cents: 200
     daily_budget_cents: 2000
     agent_timeout_secs: 1800
+
+    # Runs that die without producing work before the card becomes a human's
+    # problem. The money caps don't cover this: an early failure spends nothing,
+    # so without a count it requeues every lease period, forever.
+    max_attempts: 3

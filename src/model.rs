@@ -214,6 +214,13 @@ pub struct WorkItem {
     pub gates: Vec<GateRun>,
     #[serde(default)]
     pub gate_failures: u32,
+    /// Runs that died before producing anything — sandbox wouldn't start, clone
+    /// failed, agent overran. Distinct from `gate_failures`, which means the
+    /// work arrived and was judged wrong. Both have a retry budget; this one
+    /// exists because a card that fails early costs nothing, so no budget stops
+    /// it looping forever.
+    #[serde(default)]
+    pub run_failures: u32,
     #[serde(default)]
     pub diff_added: u32,
     #[serde(default)]
@@ -269,6 +276,7 @@ impl WorkItem {
             escalation: None,
             gates: Vec::new(),
             gate_failures: 0,
+            run_failures: 0,
             diff_added: 0,
             diff_removed: 0,
             notes: Vec::new(),

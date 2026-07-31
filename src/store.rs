@@ -400,6 +400,87 @@ impl Board {
         self.emit(&item);
     }
 
+    /// A run died without producing work. Requeue while there is budget left,
+    /// then hand it to a human.
+    ///
+    /// This exists because the money caps do not cover it: a card that fails
+    /// *early* — sandbox won't start, clone rejected — spends nothing, so
+    /// nothing stops the sweeper requeueing it every lease period forever.
+    /// Left alone overnight that is an infinite loop building and destroying
+    /// sandboxes. Mirrors the retry budget `settle_gates` already applies to
+    /// gate failures.
+    pub fn record_run_failure(
+        &self,
+        id: ItemId,
+        reason: &str,
+        max_attempts: u32,
+    ) -> Result<WorkItem, String> {
+        let (failures, title, state) = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or("no such item")?;
+            it.run_failures += 1;
+            (it.run_failures, it.title.clone(), it.state)
+        };
+
+        // A run that died before its first heartbeat is still Claimed, and
+        // Claimed -> NeedsHuman is not a legal edge. Promote first so the
+        // escalation below has somewhere to go.
+        if state == State::Claimed {
+            let _ = self.transition(id, State::Running, "supervisor", None);
+        }
+
+        if failures < max_attempts {
+            let item = self
+                .transition(id, State::Ready, "supervisor", Some(format!("run failed: {reason}")))
+                .map_err(|e| e.to_string())?;
+            self.story(
+                id,
+                format!("{title} failed to run ({failures}/{max_attempts}): {reason}"),
+            );
+            return Ok(item);
+        }
+
+        self.escalate(
+            id,
+            "supervisor",
+            format!(
+                "{title} failed to run {failures} times without producing any work. \
+                 Last failure: {reason}"
+            ),
+            vec![
+                EscalationOption {
+                    label: "Investigate the environment".into(),
+                    detail: "Repeated early failure usually means the sandbox, policy or \
+                             credentials are wrong rather than the card being wrong. \
+                             `openshell logs` on the kept sandbox is the place to start."
+                        .into(),
+                },
+                EscalationOption {
+                    label: "Cut scope".into(),
+                    detail: "Retire the card if it is not worth the environment work it is \
+                             asking for."
+                        .into(),
+                },
+            ],
+            0,
+        )
+    }
+
+    /// A run produced work, so the retry budget resets. Without this a card
+    /// that failed twice long ago would escalate on its next single failure.
+    pub fn clear_run_failures(&self, id: ItemId) {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let Some(it) = s.items.get_mut(&id) else { return };
+            if it.run_failures == 0 {
+                return;
+            }
+            it.run_failures = 0;
+            it.clone()
+        };
+        self.emit(&item);
+    }
+
     /// Which sandbox this card is running in. Written before the agent starts,
     /// so a honr that dies mid-run can still find the sandbox on restart.
     pub fn set_environment(&self, id: ItemId, sandbox: Option<String>) {
@@ -782,6 +863,10 @@ impl Board {
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             let esc = it.escalation.as_mut().ok_or("that item is not waiting on anyone")?;
             esc.answer = Some(choice.clone());
+            // A human has looked at it, so the run budget starts over —
+            // otherwise the next single failure would escalate again
+            // immediately and the answer would have bought nothing.
+            it.run_failures = 0;
             // The answer becomes standing context for whoever picks it up next.
             it.notes.push(Note {
                 at: Utc::now(),
@@ -1107,5 +1192,90 @@ impl Board {
             .collect();
 
         Digest { since: self.started_at, goals }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Origin;
+
+    /// A board with one leaf sitting in Ready, claimed by `agent`.
+    fn claimed_leaf() -> (Board, ItemId) {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nowrite.json"));
+        let parent = b.create(None, "goal", "why", None, Origin::Human, true, None);
+        let _ = b.transition(parent.id, State::Shaping, "t", None);
+        let leaf = b.create(
+            Some(parent.id),
+            "leaf",
+            "do a thing",
+            Some("it is done".into()),
+            Origin::Human,
+            false,
+            None,
+        );
+        let _ = b.transition(leaf.id, State::Shaping, "t", None);
+        let _ = b.transition(leaf.id, State::Ready, "t", None);
+        b.claim(leaf.id, "agent", None, 45).expect("claim");
+        (b, leaf.id)
+    }
+
+    /// Failures under the cap requeue, so a transient problem self-heals.
+    #[test]
+    fn early_failures_requeue_while_budget_remains() {
+        let (b, id) = claimed_leaf();
+        let it = b.record_run_failure(id, "sandbox would not start", 3).expect("recorded");
+        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.run_failures, 1);
+    }
+
+    /// The whole point: without this a card that fails early spends nothing,
+    /// so no money cap stops it looping every lease period, forever.
+    #[test]
+    fn repeated_failures_become_a_humans_problem() {
+        let (b, id) = claimed_leaf();
+        for _ in 0..2 {
+            b.record_run_failure(id, "clone refused", 3).expect("requeued");
+            b.claim(id, "agent", None, 45).expect("reclaim");
+        }
+        let it = b.record_run_failure(id, "clone refused", 3).expect("escalated");
+        assert_eq!(it.state, State::NeedsHuman);
+        assert_eq!(it.run_failures, 3);
+
+        // An escalation a human cannot act on in one tap is not a decision.
+        let esc = it.escalation.expect("escalation present");
+        assert!(esc.options.len() >= 2, "needs at least two concrete options");
+        assert!(esc.question.contains("clone refused"), "must say what went wrong");
+    }
+
+    /// A run that dies before its first heartbeat is still Claimed, and
+    /// Claimed -> NeedsHuman is not a legal edge. Escalating must still work.
+    #[test]
+    fn escalation_works_from_claimed_without_a_heartbeat() {
+        let (b, id) = claimed_leaf();
+        assert_eq!(b.get(id).unwrap().state, State::Claimed, "no heartbeat yet");
+        let it = b.record_run_failure(id, "died instantly", 1).expect("escalated");
+        assert_eq!(it.state, State::NeedsHuman);
+    }
+
+    #[test]
+    fn success_resets_the_retry_budget() {
+        let (b, id) = claimed_leaf();
+        b.record_run_failure(id, "flake", 3).expect("requeued");
+        b.clear_run_failures(id);
+        assert_eq!(b.get(id).unwrap().run_failures, 0);
+    }
+
+    /// Answering must buy a fresh budget, or the next single failure
+    /// re-escalates immediately and the human's answer bought nothing.
+    #[test]
+    fn answering_an_escalation_resets_the_retry_budget() {
+        let (b, id) = claimed_leaf();
+        b.record_run_failure(id, "boom", 1).expect("escalated");
+        assert_eq!(b.get(id).unwrap().run_failures, 1);
+        b.answer_escalation(id, "Investigate the environment".into()).expect("answered");
+        let it = b.get(id).unwrap();
+        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.run_failures, 0);
     }
 }

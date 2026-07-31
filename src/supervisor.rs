@@ -101,11 +101,19 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         let lease = cfg.lease_secs;
         tokio::spawn(async move {
             let id = grant.item_id;
-            if let Err(e) = run_card(&board, &os, &agents, &agent_id, grant, lease).await {
-                tracing::error!("#{id} failed: {e}");
-                // Say nothing to the board and let the lease lapse — the
-                // sweeper requeues it. Reporting a failure we don't understand
-                // would be worse than letting the card come back.
+            match run_card(&board, &os, &agents, &agent_id, grant, lease).await {
+                Ok(()) => board.clear_run_failures(id),
+                Err(e) => {
+                    tracing::error!("#{id} failed: {e}");
+                    // Count it. A run that dies early spends nothing, so no
+                    // money cap stops the sweeper requeueing it forever —
+                    // after `max_attempts` this becomes a human's problem
+                    // instead of an overnight loop.
+                    if let Err(e2) = board.record_run_failure(id, &e.to_string(), agents.max_attempts)
+                    {
+                        tracing::error!("#{id}: could not record failure: {e2}");
+                    }
+                }
             }
             in_flight2.fetch_sub(1, Ordering::Relaxed);
         });
@@ -148,7 +156,11 @@ async fn run_card(
     lease_secs: i64,
 ) -> anyhow::Result<()> {
     let id = grant.item_id;
-    let name = format!("honr-card-{id}");
+    // Attempt-scoped, because a failed sandbox is *kept* for inspection and a
+    // retry would otherwise collide with its name. The `honr.item` label is
+    // what reconciliation matches on, so it stays stable across attempts.
+    let attempt = board.get(id).map(|i| i.run_failures).unwrap_or(0) + 1;
+    let name = format!("honr-card-{id}-a{attempt}");
     let branch = format!("honr/card-{id}");
 
     // Recorded before creation so a crash between here and `create` still
