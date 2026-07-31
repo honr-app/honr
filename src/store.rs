@@ -1314,4 +1314,56 @@ mod tests {
         let (b, id) = claimed_leaf();
         assert!(b.answer_escalation(id, "whatever".into()).is_err());
     }
+
+    #[test]
+    fn split_creates_children_and_hatches_parent() {
+        let (b, id) = claimed_leaf();
+        let _ = b.transition(id, State::Running, "agent", None);
+        let children = vec![
+            ("Part 1".into(), "Do part 1".into(), "Part 1 done".into()),
+            ("Part 2".into(), "Do part 2".into(), "Part 2 done".into()),
+        ];
+        let made = b.split(id, "agent", children, 7, 5).expect("split should succeed");
+        assert_eq!(made.len(), 2);
+        assert_eq!(made[0].parent, Some(id));
+        assert_eq!(made[0].state, State::Ready);
+        assert_eq!(made[1].parent, Some(id));
+        assert_eq!(made[1].state, State::Ready);
+
+        let parent = b.get(id).expect("parent exists");
+        assert_eq!(parent.state, State::Shaping);
+    }
+
+    #[test]
+    fn split_refused_below_minimum_children() {
+        let (b, id) = claimed_leaf();
+        let _ = b.transition(id, State::Running, "agent", None);
+        let children = vec![("Single".into(), "Only one".into(), "Done".into())];
+        let err = b.split(id, "agent", children, 7, 5).unwrap_err();
+        assert!(err.contains("at least two children"), "got error: {err}");
+    }
+
+    #[test]
+    fn split_refused_exceeding_fanout_governor() {
+        let (b, id) = claimed_leaf();
+        let _ = b.transition(id, State::Running, "agent", None);
+        let children: Vec<_> = (1..=6)
+            .map(|i| (format!("Child {i}"), format!("Intent {i}"), format!("DoD {i}")))
+            .collect();
+        let err = b.split(id, "agent", children, 7, 5).unwrap_err();
+        assert!(err.contains("exceeds max_children_per_split=5"), "got error: {err}");
+    }
+
+    #[test]
+    fn split_refused_exceeding_depth_governor() {
+        let (b, id) = claimed_leaf();
+        let _ = b.transition(id, State::Running, "agent", None);
+        // id is a child of goal, so depth(id) is 1. If max_depth is 1, depth + 1 = 2 > 1.
+        let children = vec![
+            ("Child 1".into(), "Intent 1".into(), "DoD 1".into()),
+            ("Child 2".into(), "Intent 2".into(), "DoD 2".into()),
+        ];
+        let err = b.split(id, "agent", children, 1, 5).unwrap_err();
+        assert!(err.contains("max_depth=1"), "got error: {err}");
+    }
 }

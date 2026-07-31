@@ -698,7 +698,12 @@ struct SplitFile {
 struct RawSplitChild {
     title: String,
     intent: String,
-    #[serde(default, rename = "definition_of_done")]
+    #[serde(
+        default,
+        rename = "definition_of_done",
+        alias = "dod",
+        alias = "definitionOfDone"
+    )]
     dod: Option<String>,
 }
 
@@ -803,11 +808,34 @@ async fn process_verdict(
                     (c.title, c.intent, dod)
                 })
                 .collect();
-            board
-                .split(id, agent_id, children, 7, 5)
-                .map_err(|e| anyhow::anyhow!("split: {e}"))?;
-            tracing::info!("#{id}: agent split via verdict file");
-            Ok(true)
+            match board.split(id, agent_id, children, 7, 5) {
+                Ok(_) => {
+                    tracing::info!("#{id}: agent split via verdict file");
+                    Ok(true)
+                }
+                Err(e) => {
+                    tracing::warn!("#{id}: split refused: {e}");
+                    board
+                        .escalate(
+                            id,
+                            agent_id,
+                            format!("Agent requested a split, but it was refused by governor: {e}"),
+                            vec![
+                                crate::model::EscalationOption {
+                                    label: "Decompose manually".into(),
+                                    detail: "Break down the card into smaller children manually.".into(),
+                                },
+                                crate::model::EscalationOption {
+                                    label: "Revise scope".into(),
+                                    detail: "Narrow the definition of done so the work fits in one card.".into(),
+                                },
+                            ],
+                            0,
+                        )
+                        .map_err(|esc_err| anyhow::anyhow!("split refused ({e}) and failed to escalate: {esc_err}"))?;
+                    Ok(true)
+                }
+            }
         }
         "report" => {
             let rep: ReportFile = serde_json::from_str(&content)
@@ -1189,7 +1217,10 @@ fn briefing(
     b.push_str(
         "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
          Write `.honr/escalate.json` (or `/work/.honr/escalate.json`) with your question, options, \
-         and recommended choice index, then exit. Options must supply at least two concrete choices.\n",
+         and recommended choice index, then exit. Options must supply at least two concrete choices.\n\
+         \nIf work is discovered to be bigger than one card, do not overrun. \
+         Write `.honr/split.json` (or `/work/.honr/split.json`) with an array of `children` \
+         (each having `title`, `intent`, and optional `definition_of_done`), then exit.\n",
     );
 
     b.push_str(&format!(
@@ -1595,5 +1626,39 @@ mod tests {
     fn briefing_mentions_verdict_escalate_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", "shanemcd/honr", "main");
         assert!(b.contains("escalate.json"), "briefing must mention escalate.json: {b}");
+    }
+
+    #[test]
+    fn briefing_mentions_verdict_split_protocol() {
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", "shanemcd/honr", "main");
+        assert!(b.contains("split.json"), "briefing must mention split.json: {b}");
+    }
+
+    #[test]
+    fn split_file_deserializes_children() {
+        let json = r#"{
+            "children": [
+                {
+                    "title": "Part 1",
+                    "intent": "Do part 1",
+                    "definition_of_done": "Part 1 complete"
+                },
+                {
+                    "title": "Part 2",
+                    "intent": "Do part 2",
+                    "dod": "Part 2 complete"
+                },
+                {
+                    "title": "Part 3",
+                    "intent": "Do part 3"
+                }
+            ]
+        }"#;
+        let split: SplitFile = serde_json::from_str(json).unwrap();
+        assert_eq!(split.children.len(), 3);
+        assert_eq!(split.children[0].title, "Part 1");
+        assert_eq!(split.children[0].dod.as_deref(), Some("Part 1 complete"));
+        assert_eq!(split.children[1].dod.as_deref(), Some("Part 2 complete"));
+        assert_eq!(split.children[2].dod, None);
     }
 }
