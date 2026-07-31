@@ -657,6 +657,188 @@ async fn watch_agent(
     Ok((run, spent.load(Ordering::Relaxed)))
 }
 
+// ---------------------------------------------------- verdict file protocol
+
+#[derive(Debug, serde::Deserialize)]
+struct EscalateFile {
+    question: String,
+    options: Vec<RawEscalationOption>,
+    #[serde(default)]
+    recommended: usize,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum RawEscalationOption {
+    Struct { label: String, detail: Option<String> },
+    String(String),
+}
+
+impl RawEscalationOption {
+    fn into_escalation_option(self) -> crate::model::EscalationOption {
+        match self {
+            RawEscalationOption::Struct { label, detail } => crate::model::EscalationOption {
+                detail: detail.unwrap_or_else(|| label.clone()),
+                label,
+            },
+            RawEscalationOption::String(s) => crate::model::EscalationOption {
+                label: s.clone(),
+                detail: s,
+            },
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SplitFile {
+    children: Vec<RawSplitChild>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawSplitChild {
+    title: String,
+    intent: String,
+    #[serde(default, rename = "definition_of_done")]
+    dod: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ReportFile {
+    #[serde(default)]
+    added: u32,
+    #[serde(default)]
+    removed: u32,
+    #[serde(default)]
+    gates: Vec<String>,
+    #[serde(default)]
+    pr_url: Option<String>,
+}
+
+fn probe_verdict_script() -> String {
+    format!(
+        r#"for dir in {WORKDIR}/.honr /work/.honr /sandbox/.honr /tmp/.honr; do
+  if [ -f "$dir/escalate.json" ]; then
+    echo "escalate:$dir/escalate.json"
+    exit 0
+  elif [ -f "$dir/split.json" ]; then
+    echo "split:$dir/split.json"
+    exit 0
+  elif [ -f "$dir/report.json" ]; then
+    echo "report:$dir/report.json"
+    exit 0
+  fi
+done"#
+    )
+}
+
+async fn process_verdict(
+    board: &SharedBoard,
+    os: &OpenShell,
+    cfg: &AgentConfig,
+    agent_id: &str,
+    id: ItemId,
+    name: &str,
+    branch: &str,
+) -> anyhow::Result<bool> {
+    let short = Duration::from_secs(30);
+    let probe = match os.exec(name, &probe_verdict_script(), short).await {
+        Ok(out) if out.ok() => out.stdout,
+        _ => return Ok(false),
+    };
+
+    let line = probe.trim();
+    if line.is_empty() {
+        return Ok(false);
+    }
+
+    let Some((vtype, remote_path)) = line.split_once(':') else {
+        return Ok(false);
+    };
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "honr-verdict-{id}-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let local_dest = tmp_dir.join(format!("{vtype}.json"));
+    let local_dest_str = local_dest.to_string_lossy().to_string();
+
+    if let Err(e) = os.download(name, remote_path, &local_dest_str).await {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(anyhow::anyhow!("could not download verdict file {remote_path}: {e}"));
+    }
+
+    let content = match std::fs::read_to_string(&local_dest) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(anyhow::anyhow!("could not read downloaded verdict file: {e}"));
+        }
+    };
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    match vtype {
+        "escalate" => {
+            let esc: EscalateFile = serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("invalid escalate.json: {e}"))?;
+            let options = esc
+                .options
+                .into_iter()
+                .map(|o| o.into_escalation_option())
+                .collect();
+            board
+                .escalate(id, agent_id, esc.question, options, esc.recommended)
+                .map_err(|e| anyhow::anyhow!("escalate: {e}"))?;
+            tracing::info!("#{id}: agent escalated via verdict file");
+            Ok(true)
+        }
+        "split" => {
+            let split: SplitFile = serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("invalid split.json: {e}"))?;
+            let children = split
+                .children
+                .into_iter()
+                .map(|c| {
+                    let dod = c.dod.unwrap_or_else(|| format!("{} completed.", c.title));
+                    (c.title, c.intent, dod)
+                })
+                .collect();
+            board
+                .split(id, agent_id, children, 7, 5)
+                .map_err(|e| anyhow::anyhow!("split: {e}"))?;
+            tracing::info!("#{id}: agent split via verdict file");
+            Ok(true)
+        }
+        "report" => {
+            let rep: ReportFile = serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("invalid report.json: {e}"))?;
+            let pr_url = if let Some(url) = rep.pr_url {
+                url
+            } else {
+                let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
+                pr.stdout
+                    .lines()
+                    .find_map(|l| l.strip_prefix(PR_URL_MARK))
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?
+            };
+            board.set_pr_url(id, Some(pr_url.clone()));
+            let gates = if rep.gates.is_empty() {
+                vec!["agent-reported".into()]
+            } else {
+                rep.gates
+            };
+            board.report(id, agent_id, rep.added, rep.removed, gates)?;
+            board
+                .settle_gates(id, true, "agent-reported; supervisor-run gates not implemented yet")
+                .map_err(|e| anyhow::anyhow!("settle_gates: {e}"))?;
+            tracing::info!("#{id}: agent reported via verdict file; pr={pr_url}");
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Settle a finished run: check what it cost, check it succeeded, and put the
 /// PR on the board.
 #[allow(clippy::too_many_arguments)]
@@ -676,6 +858,11 @@ async fn finish(
     if spent > budget {
         anyhow::bail!("per-card budget breached: {spent}c > {budget}c");
     }
+
+    if process_verdict(board, os, cfg, agent_id, id, name, branch).await? {
+        return Ok(());
+    }
+
     anyhow::ensure!(run.ok(), "agent exited {}: {}", run.code, outerr(run));
 
     // ---- verify what the agent published ---------------------------------
@@ -998,6 +1185,12 @@ fn briefing(
              sides. Do this before any other work.\n"
         }
     });
+
+    b.push_str(
+        "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
+         Write `.honr/escalate.json` (or `/work/.honr/escalate.json`) with your question, options, \
+         and recommended choice index, then exit. Options must supply at least two concrete choices.\n",
+    );
 
     b.push_str(&format!(
         "\nRun the project's own checks before you finish — `cargo test --offline --locked` and \
@@ -1361,5 +1554,46 @@ mod tests {
             lease_expires_at: chrono::Utc::now(),
             budget_remaining_cents: None,
         }
+    }
+
+    #[test]
+    fn probe_verdict_script_checks_locations() {
+        let s = probe_verdict_script();
+        assert!(s.contains("escalate.json"), "{s}");
+        assert!(s.contains(".honr"), "{s}");
+        assert!(s.contains("/work/.honr"), "{s}");
+        assert!(s.contains("/sandbox/.honr"), "{s}");
+    }
+
+    #[test]
+    fn escalate_file_deserializes_structs_and_strings() {
+        let json1 = r#"{
+            "question": "Which database?",
+            "options": [
+                {"label": "Postgres", "detail": "Relational"},
+                {"label": "SQLite", "detail": "Embedded"}
+            ],
+            "recommended": 0
+        }"#;
+        let esc1: EscalateFile = serde_json::from_str(json1).unwrap();
+        assert_eq!(esc1.question, "Which database?");
+        assert_eq!(esc1.options.len(), 2);
+        assert_eq!(esc1.recommended, 0);
+
+        let json2 = r#"{
+            "question": "Which database?",
+            "options": ["Postgres", "SQLite"]
+        }"#;
+        let esc2: EscalateFile = serde_json::from_str(json2).unwrap();
+        let opts: Vec<_> = esc2.options.into_iter().map(|o| o.into_escalation_option()).collect();
+        assert_eq!(opts[0].label, "Postgres");
+        assert_eq!(opts[0].detail, "Postgres");
+        assert_eq!(opts[1].label, "SQLite");
+    }
+
+    #[test]
+    fn briefing_mentions_verdict_escalate_protocol() {
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", "shanemcd/honr", "main");
+        assert!(b.contains("escalate.json"), "briefing must mention escalate.json: {b}");
     }
 }
