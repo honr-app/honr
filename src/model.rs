@@ -230,10 +230,15 @@ pub struct WorkItem {
     /// These vary independently.
     #[serde(default)]
     pub release_target: Option<String>,
-    /// STUB. Where an agent actually runs is an open design question — this
-    /// field marks the seam, nothing reads it yet.
+    /// The sandbox this card ran in, e.g. `honr-card-7`. Set by the supervisor
+    /// at creation, and the key that lets a restarted honr find live sandboxes
+    /// again instead of orphaning them.
     #[serde(default)]
     pub environment: Option<String>,
+    /// The pull request the agent opened. Review is a real PR: approving here
+    /// surfaces it, merging stays a human action.
+    #[serde(default)]
+    pub pr_url: Option<String>,
 
     pub created_at: DateTime<Utc>,
     pub entered_state_at: DateTime<Utc>,
@@ -270,6 +275,7 @@ impl WorkItem {
             pinned: Vec::new(),
             release_target: None,
             environment: None,
+            pr_url: None,
             created_at: now,
             entered_state_at: now,
             history: Vec::new(),

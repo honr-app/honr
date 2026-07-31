@@ -400,6 +400,30 @@ impl Board {
         self.emit(&item);
     }
 
+    /// Which sandbox this card is running in. Written before the agent starts,
+    /// so a honr that dies mid-run can still find the sandbox on restart.
+    pub fn set_environment(&self, id: ItemId, sandbox: Option<String>) {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let Some(it) = s.items.get_mut(&id) else { return };
+            it.environment = sandbox;
+            it.clone()
+        };
+        self.emit(&item);
+    }
+
+    /// The PR an agent opened. Set before `report`, so the card arrives in
+    /// Review with somewhere to go.
+    pub fn set_pr_url(&self, id: ItemId, url: Option<String>) {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let Some(it) = s.items.get_mut(&id) else { return };
+            it.pr_url = url;
+            it.clone()
+        };
+        self.emit(&item);
+    }
+
     /// Unused until real dependencies are declared through the cockpit.
     #[allow(dead_code)]
     pub fn set_blocked_by(&self, id: ItemId, blockers: Vec<ItemId>) {
