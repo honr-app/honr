@@ -306,14 +306,14 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
             short,
         )
         .await?;
-    anyhow::ensure!(up.ok(), "metadata shim never came up: {}", up.stderr.trim());
+    anyhow::ensure!(up.ok(), "metadata shim never came up: {}", outerr(&up));
     beat(0.02);
 
     // Clone the fork. GIT_TERMINAL_PROMPT=0 is not optional: without it a
     // missing credential blocks forever on an interactive username prompt,
     // which looks exactly like a slow clone.
     let clone = os.exec(name, &clone_script(cfg, branch), short).await?;
-    anyhow::ensure!(clone.ok(), "clone failed: {}", clone.stderr.trim());
+    anyhow::ensure!(clone.ok(), "clone failed: {}", outerr(&clone));
     let branch_state = branch_state_of(&clone.stdout);
     beat(0.03);
 
@@ -321,7 +321,7 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
 
     let budget = cfg.per_card_budget_cents;
     let spent = Arc::new(AtomicU64::new(0));
-    let briefing = briefing(grant, branch_state);
+    let briefing = briefing(grant, branch_state, branch, &cfg.repo.upstream, &cfg.repo.base);
 
     let script = format!(
         "cd {WORKDIR} && claude -p {} --output-format stream-json --verbose --permission-mode \
@@ -364,18 +364,28 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
     if final_cents > budget {
         anyhow::bail!("per-card budget breached: {final_cents}c > {budget}c");
     }
-    anyhow::ensure!(run.ok(), "agent exited {}: {}", run.code, tail(&run.stdout, 400));
+    anyhow::ensure!(run.ok(), "agent exited {}: {}", run.code, outerr(&run));
 
-    // ---- publish ---------------------------------------------------------
+    // ---- verify what the agent published ---------------------------------
     //
-    // The supervisor pushes and opens the PR, not the agent. Deterministic,
-    // and it keeps `gh` out of the agent's hands.
-
-    let push = os.exec(name, &push_script(cfg, branch, grant.item_id), short).await?;
-    anyhow::ensure!(push.ok(), "push failed: {}", tail(&push.stdout, 400));
-
-    let pr = os.exec(name, &pr_script(cfg, branch, grant), short).await?;
-    anyhow::ensure!(pr.ok(), "pr create failed: {}", tail(&pr.stdout, 400));
+    // The agent pushes and opens the PR; the supervisor only asks GitHub what
+    // happened. That split is deliberate, and it is a reversal.
+    //
+    // The supervisor used to script the publish itself, justified as
+    // "deterministic, and it keeps gh out of the agent's hands". The second
+    // half was never true — gh is in the image and GITHUB_TOKEN is in the
+    // environment, so the agent always had this capability. And the
+    // determinism bought nothing: every one of upload-dest-is-a-directory,
+    // non-idempotent `gh pr create`, URL-scraped-from-stdout and
+    // --force-with-lease-against-a-URL was a failure in *our* shell, not in
+    // the agent. Meanwhile the agent resolved a seven-commit rebase conflict
+    // unaided.
+    //
+    // What is left here is a *query*, not a script that has to keep working.
+    // Containment comes from GitHub: the bot has no write access to upstream,
+    // so the worst it can do is make a mess of a disposable fork.
+    let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
+    anyhow::ensure!(pr.ok(), "could not ask GitHub about the PR: {}", outerr(&pr));
     let url = pr
         .stdout
         .lines()
@@ -383,7 +393,9 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
         .map(str::to_string)
         // A Review card with no PR is a card you cannot action, so this is a
         // failure rather than a quietly empty field.
-        .ok_or_else(|| anyhow::anyhow!("no PR url in output: {}", tail(&pr.stdout, 300)))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("agent finished but opened no PR for {branch}")
+        })?;
     board.set_pr_url(id, Some(url.clone()));
 
     // Gates are the agent's own claim for now; a clean-checkout verifier the
@@ -481,59 +493,20 @@ fi"#
     )
 }
 
-fn push_script(cfg: &AgentConfig, branch: &str, id: ItemId) -> String {
-    let fork = &cfg.repo.fork;
-    format!(
-        r#"set -e
-export GIT_TERMINAL_PROMPT=0
-cd {WORKDIR}
-if [ -n "$(git status --porcelain)" ]; then
-  git add -A
-  git commit -q -m "honr card #{id}"
-fi
-git -c '{GIT_CRED}' push -q --force-with-lease --set-upstream https://github.com/{fork}.git {branch}"#
-    )
-}
-
-/// Open the PR if there isn't one, then **ask GitHub for the URL** rather than
-/// scraping it out of `gh pr create`'s human-readable stdout.
+/// Ask GitHub whether the agent actually opened a PR.
 ///
-/// Two bugs in one: `gh pr create` errors outright when a PR already exists, so
-/// any re-run of a card died at this step; and the URL was previously taken as
-/// "the last stdout line starting with http", which silently stored nothing if
-/// gh ever changed what it prints. `gh pr list --json url` is structured and
-/// idempotent — it answers the same way whether we just created the PR or it
-/// was already there.
-fn pr_script(cfg: &AgentConfig, branch: &str, grant: &ClaimGrant) -> String {
+/// Not "create a PR" — the agent does that. This is the supervisor checking a
+/// fact it is going to put on the board, which is the one thing it must not
+/// take on trust. A query keeps working when tool output changes; a script
+/// that creates things has to be right about flags, idempotency and failure
+/// modes, and ours repeatedly was not.
+fn pr_lookup_script(cfg: &AgentConfig, branch: &str) -> String {
     let upstream = &cfg.repo.upstream;
-    let base = &cfg.repo.base;
-    // Cross-fork head is `owner:branch` for create; `pr list --head` wants the
-    // bare branch name. They are genuinely different.
-    let fork_owner = cfg.repo.fork.split('/').next().unwrap_or_default();
-    let title = format!("{} (honr #{})", grant.title, grant.item_id);
-    let body = format!(
-        "Opened by a honr agent for card #{}.\n\n**Intent:** {}\n\n**Definition of done:** {}\n",
-        grant.item_id,
-        grant.ancestry.last().map(|a| a.intent.as_str()).unwrap_or(""),
-        grant.definition_of_done.as_deref().unwrap_or("(none)"),
-    );
     format!(
         r#"set -e
-cd {WORKDIR}
 export GH_TOKEN=$GITHUB_TOKEN
-existing=$(gh pr list --repo {upstream} --head {branch} --state open --json url --jq '.[0].url // empty')
-if [ -z "$existing" ]; then
-  gh pr create --repo {upstream} --base {base} \
-    --head {fork_owner}:{branch} --title {} --body {} >/dev/null
-fi
 url=$(gh pr list --repo {upstream} --head {branch} --state open --json url --jq '.[0].url // empty')
-if [ -z "$url" ]; then
-  echo "no open PR for {branch} after create" >&2
-  exit 1
-fi
-echo "{PR_URL_MARK}$url""#,
-        shell_quote(&title),
-        shell_quote(&body)
+if [ -n "$url" ]; then echo "{PR_URL_MARK}$url"; fi"#
     )
 }
 
@@ -564,7 +537,13 @@ fn branch_state_of(stdout: &str) -> BranchState {
 
 /// The intent chain is the highest-leverage payload in the system, and a fresh
 /// `claude -p` in an empty container has none of it.
-fn briefing(grant: &ClaimGrant, branch: BranchState) -> String {
+fn briefing(
+    grant: &ClaimGrant,
+    branch: BranchState,
+    branch_name: &str,
+    upstream: &str,
+    base: &str,
+) -> String {
     let mut b = String::new();
     b.push_str("You are working on one card in a larger plan. Do exactly this card.\n\n");
 
@@ -613,12 +592,21 @@ fn briefing(grant: &ClaimGrant, branch: BranchState) -> String {
         }
     });
 
-    b.push_str(
-        "\nMake the change and leave the tree clean; the supervisor commits, pushes and opens \
-         the PR. Run the project's own checks before you finish — `cargo test --offline \
-         --locked` and `cargo clippy --offline -- -D warnings`, both of which work with no \
-         network. Do not push, do not open a PR, and do not touch git remotes.\n",
-    );
+    b.push_str(&format!(
+        "\nRun the project's own checks before you finish — `cargo test --offline --locked` and \
+         `cargo clippy --offline -- -D warnings`. Both work with no network; if either needs to \
+         reach the network, something is wrong and you should say so rather than work around it.\n\
+         \nWhen the work is done, publish it yourself:\n\
+         \n  1. Commit on `{branch}`. Do not commit to any other branch.\n\
+           2. Push to `origin` (the fork). Force-push is fine on your own branch.\n\
+           3. Open a pull request against `{upstream}` base `{base}`, or update the existing \
+              one if a PR for this branch is already open.\n\
+         \nThe PR is how a human reviews this, so it is part of the work, not an afterthought. \
+         Leave `{base}` alone.\n",
+        branch = branch_name,
+        upstream = upstream,
+        base = base,
+    ));
     b
 }
 
@@ -644,6 +632,20 @@ fn parse_cost_cents(line: &str) -> Option<u64> {
         .or_else(|| v.pointer("/result/total_cost_usd"))?
         .as_f64()?;
     Some((usd * 100.0).round().max(0.0) as u64)
+}
+
+/// Both streams. git writes its actual error to stderr, so reporting only
+/// stdout produced `push failed:` with nothing after the colon — a failure
+/// message that says less than no message at all.
+fn outerr(o: &crate::openshell::Output) -> String {
+    let mut s = o.stderr.trim().to_string();
+    if !o.stdout.trim().is_empty() {
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(o.stdout.trim());
+    }
+    tail(&s, 500)
 }
 
 fn tail(s: &str, n: usize) -> String {
@@ -723,48 +725,37 @@ mod tests {
         assert!(!s.contains("rebase -q origin/main"), "must not rebase onto the fork: {s}");
     }
 
-    /// A rebased branch cannot fast-forward, and plain --force races the agent.
+    /// The supervisor asks GitHub a question; it does not create anything.
+    /// Every publish failure today came from our shell being wrong about a
+    /// tool the agent already knows how to drive.
     #[test]
-    fn push_uses_force_with_lease() {
-        let s = push_script(&repo_cfg(), "honr/card-8", 8);
-        assert!(s.contains("--force-with-lease"), "{s}");
-        assert!(!s.contains("--force "), "plain --force is unsafe here: {s}");
-    }
-
-    /// `gh pr create` errors when a PR already exists, which killed every
-    /// re-run. Query first, create only if absent, then read the URL back.
-    #[test]
-    fn pr_step_is_idempotent_and_reads_the_url_back() {
-        let s = pr_script(&repo_cfg(), "honr/card-8", &grant());
-        assert!(s.contains("gh pr list"), "must look before creating: {s}");
-        assert!(s.contains("--head clankrshq:honr/card-8"), "cross-fork create head: {s}");
+    fn the_supervisor_only_looks_up_the_pr() {
+        let s = pr_lookup_script(&repo_cfg(), "honr/card-8");
+        assert!(s.contains("gh pr list"), "{s}");
         assert!(s.contains("--head honr/card-8"), "pr list wants a bare branch: {s}");
         assert!(s.contains(PR_URL_MARK), "url must come from a marked line: {s}");
-        // No PR at the end is a failure, not an empty field.
-        assert!(s.contains("exit 1"), "{s}");
+        assert!(!s.contains("gh pr create"), "creating is the agent's job now: {s}");
+        assert!(!s.contains("push"), "pushing is the agent's job now: {s}");
     }
 
-    /// A dead podman socket must not spend the card's retry budget. The board
-    /// reported "failed to run 3 times without producing any work" about a card
-    /// that never got the chance to run — two of those three were the machine.
+    /// If the agent did not open a PR, the card must not reach Review looking
+    /// finished — a Review card you cannot open is not a review.
     #[test]
-    fn infrastructure_failures_are_told_apart_from_card_failures() {
-        for infra in [
-            "`openshell sandbox create ...` exited 1: create sandbox failed: connection error: \
-             /Users/x/.local/share/containers/podman/machine/podman.sock: No such file or directory",
-            "create sandbox failed: connection closed before message completed",
-        ] {
-            assert!(is_infrastructure(infra), "should be infra: {infra}");
-        }
+    fn no_pr_means_no_url_to_report() {
+        let s = pr_lookup_script(&repo_cfg(), "honr/card-8");
+        assert!(s.contains("// empty"), "must yield nothing rather than error: {s}");
+    }
 
-        for card in [
-            "agent exited 1: timeout: failed to run command 'cargo': No such file or directory",
-            "metadata shim never came up: shim-down",
-            "per-card budget breached: 250c > 200c",
-            "no PR url in output",
-        ] {
-            assert!(!is_infrastructure(card), "should NOT be infra: {card}");
-        }
+    /// Publishing moved into the agent's job, so the briefing is now the only
+    /// place that says how. If it stops saying it, nothing pushes at all.
+    #[test]
+    fn the_briefing_tells_the_agent_to_publish() {
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-7", "shanemcd/honr", "main");
+        assert!(b.contains("honr/card-7"), "must name the branch: {b}");
+        assert!(b.contains("shanemcd/honr"), "must name the PR target: {b}");
+        assert!(b.to_lowercase().contains("push"), "{b}");
+        assert!(b.to_lowercase().contains("pull request"), "{b}");
+        assert!(b.contains("cargo test --offline --locked"), "gates must be named: {b}");
     }
 
     #[test]
@@ -780,11 +771,11 @@ mod tests {
     /// on top of a branch that cannot merge.
     #[test]
     fn the_briefing_tells_the_agent_about_a_conflict() {
-        let conflicted = briefing(&grant(), BranchState::Conflicted);
+        let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", "shanemcd/honr", "main");
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
         assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
 
-        let fresh = briefing(&grant(), BranchState::Fresh);
+        let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", "shanemcd/honr", "main");
         assert!(!fresh.contains("CONFLICTS"));
         assert!(fresh.contains("new branch"));
     }
@@ -795,7 +786,7 @@ mod tests {
     fn steering_notes_reach_the_briefing() {
         let mut g = grant();
         g.notes = vec!["Changes requested: rebase onto latest, api.rs only.".into()];
-        let b = briefing(&g, BranchState::Rebased);
+        let b = briefing(&g, BranchState::Rebased, "honr/card-7", "shanemcd/honr", "main");
         assert!(b.contains("rebase onto latest, api.rs only."), "{b}");
     }
 
@@ -820,12 +811,5 @@ mod tests {
             lease_expires_at: chrono::Utc::now(),
             budget_remaining_cents: None,
         }
-    }
-
-    #[test]
-    fn pr_head_is_namespaced_to_the_fork() {
-        let s = pr_script(&repo_cfg(), "honr/card-7", &grant());
-        assert!(s.contains("--head clankrshq:honr/card-7"), "{s}");
-        assert!(s.contains("--repo shanemcd/honr"), "{s}");
     }
 }
