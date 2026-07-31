@@ -5,3 +5,6 @@ node_modules
 web/dist
 .DS_Store
 web/tsconfig.tsbuildinfo
+
+# UI screenshots, regenerated on demand
+web/shots
