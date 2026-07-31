@@ -64,6 +64,29 @@ async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig) {
 /// that resets on restart is a backstop against a runaway loop, not accounting.
 static SPENT_TODAY: AtomicU64 = AtomicU64::new(0);
 
+/// Wait this long after the infrastructure fails before trying again. The
+/// podman machine stops on its own — three times in one session — and retrying
+/// every 3s just converts an outage into a wall of identical errors.
+const INFRA_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// Did this run fail because of the machinery rather than the card?
+///
+/// It matters because the two get different treatment. A card that genuinely
+/// cannot be done should exhaust its retries and ask a human. A dead podman
+/// socket must not burn those retries — otherwise the board reports "failed to
+/// run 3 times without producing any work" about a card that never got the
+/// chance to run at all, which is exactly what it did report.
+fn is_infrastructure(err: &str) -> bool {
+    const SIGNS: [&str; 5] = [
+        "podman.sock",
+        "connection error",
+        "connection closed before message completed",
+        "create sandbox failed",
+        "gateway",
+    ];
+    SIGNS.iter().any(|s| err.contains(s))
+}
+
 async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     let os = Arc::new(OpenShell::default());
     let agents = Arc::new(cfg.agents.clone());
@@ -77,6 +100,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     // sandboxes are deliberately kept for inspection, so the label outlives
     // the run and would deadlock every retry.
     let active: Arc<std::sync::Mutex<std::collections::HashSet<ItemId>>> = Arc::default();
+    let cooldown_until: Arc<std::sync::Mutex<Option<std::time::Instant>>> = Arc::default();
 
     reap_orphans(&os, &board).await;
 
@@ -88,6 +112,9 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
             continue;
         }
         if SPENT_TODAY.load(Ordering::Relaxed) >= agents.daily_budget_cents {
+            continue;
+        }
+        if cooldown_until.lock().unwrap().is_some_and(|t| std::time::Instant::now() < t) {
             continue;
         }
         // The podman machine stops on its own. Claiming a card we can't run
@@ -116,22 +143,40 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
 
         in_flight.fetch_add(1, Ordering::Relaxed);
         active.lock().unwrap().insert(item.id);
-        let (board, os, agents, in_flight2, active2) =
-            (board.clone(), os.clone(), agents.clone(), in_flight.clone(), active.clone());
+        let (board, os, agents, in_flight2, active2, cooldown2) = (
+            board.clone(),
+            os.clone(),
+            agents.clone(),
+            in_flight.clone(),
+            active.clone(),
+            cooldown_until.clone(),
+        );
         let lease = cfg.lease_secs;
         tokio::spawn(async move {
             let id = grant.item_id;
             match run_card(&board, &os, &agents, &agent_id, grant, lease).await {
                 Ok(()) => board.clear_run_failures(id),
                 Err(e) => {
-                    tracing::error!("#{id} failed: {e}");
-                    // Count it. A run that dies early spends nothing, so no
-                    // money cap stops the sweeper requeueing it forever —
-                    // after `max_attempts` this becomes a human's problem
-                    // instead of an overnight loop.
-                    if let Err(e2) = board.record_run_failure(id, &e.to_string(), agents.max_attempts)
-                    {
-                        tracing::error!("#{id}: could not record failure: {e2}");
+                    let msg = e.to_string();
+                    if is_infrastructure(&msg) {
+                        // Not the card's fault. Give it back untouched and stop
+                        // dispatching for a while rather than spending the
+                        // card's retry budget on a broken machine.
+                        tracing::warn!("#{id}: infrastructure failure, not counting it: {msg}");
+                        *cooldown2.lock().unwrap() =
+                            Some(std::time::Instant::now() + INFRA_COOLDOWN);
+                        let _ = board.release(id, &agent_id);
+                    } else {
+                        tracing::error!("#{id} failed: {msg}");
+                        // Count it. A run that dies early spends nothing, so no
+                        // money cap stops the sweeper requeueing it forever —
+                        // after `max_attempts` this becomes a human's problem
+                        // instead of an overnight loop.
+                        if let Err(e2) =
+                            board.record_run_failure(id, &msg, agents.max_attempts)
+                        {
+                            tracing::error!("#{id}: could not record failure: {e2}");
+                        }
                     }
                 }
             }
@@ -697,6 +742,29 @@ mod tests {
         assert!(s.contains(PR_URL_MARK), "url must come from a marked line: {s}");
         // No PR at the end is a failure, not an empty field.
         assert!(s.contains("exit 1"), "{s}");
+    }
+
+    /// A dead podman socket must not spend the card's retry budget. The board
+    /// reported "failed to run 3 times without producing any work" about a card
+    /// that never got the chance to run — two of those three were the machine.
+    #[test]
+    fn infrastructure_failures_are_told_apart_from_card_failures() {
+        for infra in [
+            "`openshell sandbox create ...` exited 1: create sandbox failed: connection error: \
+             /Users/x/.local/share/containers/podman/machine/podman.sock: No such file or directory",
+            "create sandbox failed: connection closed before message completed",
+        ] {
+            assert!(is_infrastructure(infra), "should be infra: {infra}");
+        }
+
+        for card in [
+            "agent exited 1: timeout: failed to run command 'cargo': No such file or directory",
+            "metadata shim never came up: shim-down",
+            "per-card budget breached: 250c > 200c",
+            "no PR url in output",
+        ] {
+            assert!(!is_infrastructure(card), "should NOT be infra: {card}");
+        }
     }
 
     #[test]

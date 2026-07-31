@@ -49,6 +49,26 @@ COPY web/package.json web/package-lock.json ./web/
 RUN cd web && npm ci --ignore-scripts --no-audit --no-fund \
  && rm -rf /opt/warm/web/node_modules
 
+# The toolchain must work from ANY shell, not just one that inherited our env.
+#
+# `ENV` here does not reach `openshell sandbox exec`, and passing PATH via
+# --env is not enough either: the agent runs its own tool calls in subshells
+# that do not necessarily carry it. The observed failure was
+# `timeout: failed to run command 'cargo': No such file or directory` (exit
+# 127) — the agent simply could not see cargo, on a card whose whole job is to
+# build this project.
+#
+# Wrapper scripts in /usr/local/bin (always on the default PATH) that set
+# RUSTUP_HOME and CARGO_HOME themselves. Plain symlinks would not do: the
+# binaries are rustup shims and fail with "could not choose a version of cargo
+# to run" when RUSTUP_HOME is unset.
+RUN for b in cargo rustc rustup clippy-driver cargo-clippy cargo-fmt rustfmt; do \
+      printf '#!/bin/sh\nexport RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/cargo\nexec /opt/cargo/bin/%s "$@"\n' "$b" \
+        > "/usr/local/bin/$b" && chmod 0755 "/usr/local/bin/$b"; \
+    done \
+ && printf 'export RUSTUP_HOME=/opt/rust\nexport CARGO_HOME=/opt/cargo\nexport NPM_CONFIG_CACHE=/opt/npm-cache\nexport PATH=/opt/cargo/bin:$PATH\n' \
+      > /etc/profile.d/rust.sh && chmod 0644 /etc/profile.d/rust.sh
+
 # Cargo and npm both write to their caches during a build, so these must stay
 # group-writable for the unprivileged `sandbox` user.
 RUN chmod -R a+rX /opt/rust \
