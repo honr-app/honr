@@ -250,8 +250,7 @@ impl OpenShell {
         Ok(())
     }
 
-    /// Unused until the verdict-file protocol lands (board card #12).
-    #[allow(dead_code)]
+    /// Download a file from a sandbox to the host (verdict file protocol).
     pub async fn download(&self, name: &str, remote: &str, dest: &str) -> Result<()> {
         self.run_ok(["sandbox", "download", name, remote, dest], self.default_timeout).await?;
         Ok(())
