@@ -25,6 +25,8 @@ pub fn allowed(from: State, to: State) -> bool {
         (Ready, Shaping) => true,
 
         (Claimed, Running) => true,
+        (Claimed, Splitting) => true,
+        (Claimed, NeedsHuman) => true,
         // Graceful release before any work happened.
         (Claimed, Ready) => true,
 
@@ -166,6 +168,12 @@ mod tests {
         assert!(allowed(Running, NeedsHuman));
         assert!(allowed(NeedsHuman, Running));
         assert!(allowed(NeedsHuman, Ready));
+    }
+
+    #[test]
+    fn claimed_can_split_or_escalate() {
+        assert!(allowed(Claimed, Splitting));
+        assert!(allowed(Claimed, NeedsHuman));
     }
 
     #[test]
