@@ -44,7 +44,7 @@ execution:
   # machine with no podman, no gateway and no credentials. Turning this on
   # spends real money — see docs/phase-0-findings.md before you do.
   agents:
-    enabled: true
+    enabled: false
 
     # Needs a Rust toolchain to build honr: docker build -f sandbox/Containerfile .
     image: honr-sandbox:latest
