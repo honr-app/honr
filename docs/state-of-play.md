@@ -147,7 +147,7 @@ showing an error.
 1. Read [`docs/operating.md`](operating.md) — how to run it and what breaks.
 2. Read [`docs/sandbox-stack.md`](sandbox-stack.md) before touching anything
    under `sandbox/` or the supervisor's exec scripts.
-3. `cargo test` (39, all hermetic) and `cargo clippy --all-targets -- -D warnings`
+3. `cargo test` (48, all hermetic) and `cargo clippy --all-targets -- -D warnings`
    should both be clean before and after any change.
 4. `npm --prefix web run shots` renders the UI to `web/shots/` so you can look
    at it rather than reason about it.
