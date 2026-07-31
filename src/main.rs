@@ -2,14 +2,13 @@
 
 mod api;
 mod events;
-mod fleet;
 mod machine;
 mod mcp;
 mod model;
 mod schema;
-mod seed;
 mod sse;
 mod store;
+mod supervisor;
 
 use crate::schema::Schema;
 use crate::store::{Board, SharedBoard};
@@ -35,17 +34,12 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("could not read honr.yaml ({e}); falling back to defaults");
         Schema::default()
     });
-    let fleet_cfg = schema.fleet.clone();
+    let exec_cfg = schema.execution.clone();
 
     let board: SharedBoard = Arc::new(Board::load_or_new(schema, PathBuf::from("honr.json")));
 
-    if board.is_empty() {
-        tracing::info!("empty board — seeding Billing v2");
-        seed::billing_v2(&board);
-    }
-
-    // Persist on an interval rather than per mutation, so a heartbeating fleet
-    // doesn't turn into a write storm. Paired with a flush on shutdown, or the
+    // Persist on an interval rather than per mutation, so heartbeating agents
+    // don't turn into a write storm. Paired with a flush on shutdown, or the
     // last half-second of state is lost on every exit.
     let persist = board.clone();
     {
@@ -59,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    fleet::spawn(board.clone(), fleet_cfg);
+    supervisor::spawn(board.clone(), exec_cfg);
 
     let web_dist = PathBuf::from("web/dist");
     let mut app = Router::new()

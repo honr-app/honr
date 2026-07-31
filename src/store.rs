@@ -182,10 +182,6 @@ impl Board {
         self.tx.subscribe()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.state.read().unwrap().items.is_empty()
-    }
-
     fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -392,6 +388,8 @@ impl Board {
         item
     }
 
+    /// Unused until the supervisor enforces a per-card cents cap.
+    #[allow(dead_code)]
     pub fn set_budget(&self, id: ItemId, cents: u64) {
         let item = {
             let mut s = self.state.write().unwrap();
@@ -402,6 +400,8 @@ impl Board {
         self.emit(&item);
     }
 
+    /// Unused until real dependencies are declared through the cockpit.
+    #[allow(dead_code)]
     pub fn set_blocked_by(&self, id: ItemId, blockers: Vec<ItemId>) {
         let item = {
             let mut s = self.state.write().unwrap();
@@ -412,26 +412,12 @@ impl Board {
         self.emit(&item);
     }
 
-    /// Seeding only: push a card's clock back so the board opens with realistic
-    /// staleness rather than everything one second old.
-    pub fn seed_backdate(&self, id: ItemId, secs: i64) {
-        let item = {
-            let mut s = self.state.write().unwrap();
-            let Some(it) = s.items.get_mut(&id) else { return };
-            let back = Duration::seconds(secs);
-            it.created_at -= back;
-            it.entered_state_at -= back;
-            if let Some(e) = it.escalation.as_mut() {
-                e.blocked_since -= back;
-            }
-            it.clone()
-        };
-        self.emit(&item);
-    }
-
     // ------------------------------------------------------- the agent verbs
 
-    /// A card still leased to this agent — survives a restart mid-flight.
+    /// A card still leased to this agent — survives a restart mid-flight. The
+    /// supervisor's startup reconciliation is the next caller: honr restarts
+    /// constantly while honr is what's being built, and sandboxes outlive it.
+    #[allow(dead_code)]
     pub fn leased_to(&self, agent_id: &str) -> Option<ItemId> {
         let s = self.state.read().unwrap();
         s.items
@@ -669,6 +655,9 @@ impl Board {
 
     // --------------------------------------------------------- the verifier
 
+    /// Unused until the supervisor runs honr's real gates (`cargo test`,
+    /// `clippy`, the web build) in the sandbox and reports the outcome.
+    #[allow(dead_code)]
     pub fn settle_gates(&self, id: ItemId, passed: bool, detail: &str) -> Result<WorkItem, String> {
         let (retries_left, title) = {
             let mut s = self.state.write().unwrap();
@@ -874,7 +863,7 @@ impl Board {
             levels: self.schema.levels.clone(),
             goals,
             server_time: now,
-            heartbeat_expect_secs: self.schema.fleet.heartbeat_expect_secs,
+            heartbeat_expect_secs: self.schema.execution.heartbeat_expect_secs,
             seq: self.seq.load(Ordering::Relaxed),
         }
     }
@@ -916,7 +905,7 @@ impl Board {
                 members.iter().filter(|i| i.state.column() == column).collect();
             columns.push(ColumnView {
                 column,
-                summary: Self::chunk(column, &in_col, s, now, self.schema.fleet.heartbeat_expect_secs),
+                summary: Self::chunk(column, &in_col, s, now, self.schema.execution.heartbeat_expect_secs),
             });
         }
 
@@ -1067,7 +1056,7 @@ impl Board {
                     .iter()
                     .filter(|i| matches!(i.state, State::Claimed | State::Running | State::Splitting))
                     .collect();
-                let hb = self.schema.fleet.heartbeat_expect_secs;
+                let hb = self.schema.execution.heartbeat_expect_secs;
 
                 Some(GoalDigest {
                     goal_id: gid,

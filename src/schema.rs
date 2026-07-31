@@ -23,42 +23,31 @@ pub struct Level {
     pub claimable: bool,
 }
 
+/// How work actually gets executed. Timings here are control-plane facts, not
+/// simulation knobs: the lease is what makes a dead agent survivable, and the
+/// expected heartbeat interval is what the UI decays a card against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FleetConfig {
-    #[serde(default = "d_size")]
-    pub size: usize,
-    #[serde(default = "d_tick")]
-    pub tick_ms: u64,
+pub struct ExecutionConfig {
     #[serde(default = "d_lease")]
     pub lease_secs: i64,
-    #[serde(default)]
-    pub escalate_p: f64,
-    #[serde(default)]
-    pub split_p: f64,
-    #[serde(default)]
-    pub die_p: f64,
-    #[serde(default)]
-    pub gate_fail_p: f64,
+    /// Expected heartbeat interval; cards decay visibly past this.
     #[serde(default = "d_hb")]
     pub heartbeat_expect_secs: i64,
+    /// How often to check for expired leases.
+    #[serde(default = "d_sweep")]
+    pub sweep_interval_ms: u64,
 }
 
-fn d_size() -> usize { 7 }
-fn d_tick() -> u64 { 2000 }
 fn d_lease() -> i64 { 45 }
 fn d_hb() -> i64 { 6 }
+fn d_sweep() -> u64 { 2000 }
 
-impl Default for FleetConfig {
+impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
-            size: d_size(),
-            tick_ms: d_tick(),
             lease_secs: d_lease(),
-            escalate_p: 0.04,
-            split_p: 0.03,
-            die_p: 0.01,
-            gate_fail_p: 0.20,
             heartbeat_expect_secs: d_hb(),
+            sweep_interval_ms: d_sweep(),
         }
     }
 }
@@ -67,12 +56,12 @@ impl Default for FleetConfig {
 pub struct Schema {
     pub levels: Vec<Level>,
     #[serde(default)]
-    pub fleet: FleetConfig,
+    pub execution: ExecutionConfig,
 }
 
 impl Default for Schema {
     fn default() -> Self {
-        Self { levels: Vec::new(), fleet: FleetConfig::default() }
+        Self { levels: Vec::new(), execution: ExecutionConfig::default() }
     }
 }
 

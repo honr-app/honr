@@ -14,6 +14,22 @@ sandbox, and `policy set --wait` costs ~50s.
 Binary paths are matched literally, so the lists are deliberately generous (git's real remote helper
 is `/usr/lib/git-core/git-remote-http`, note **not** `-https`).
 
+## `Containerfile`
+
+The base image has no Rust toolchain and the `sandbox` user has no sudo, so an agent cannot build
+or test honr out of the box. This adds `cargo`/`clippy` and pre-warms the cargo and npm caches, so
+a card doesn't pay a rustup install and a cold crates.io fetch every run — and so crates.io never
+needs to be reachable from an agent sandbox at all.
+
+Build from the **repo root**, not this directory:
+
+```bash
+docker build -f sandbox/Containerfile -t honr-sandbox:latest .
+```
+
+Rebuild when `Cargo.lock` changes. It needs matching `/opt` entries in `policy.yaml`; the
+Containerfile documents them inline.
+
 ## `metadata-shim.py`
 
 A minimal GCE metadata server, uploaded to the sandbox and run on `127.0.0.1:8127` for the lifetime

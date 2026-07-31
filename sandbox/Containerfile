@@ -1,0 +1,72 @@
+# honr agent sandbox = the OpenShell base image + a Rust toolchain + a warm
+# dependency cache.
+#
+# Why this exists: the base image ships node, git, gh and claude but no cargo,
+# so an agent cannot build or test honr. Installing rustup per card would cost
+# minutes of wall-clock and real Vertex spend on every run, and would require
+# opening three more egress destinations permanently. Baking it means
+# crates.io never has to be reachable from an agent sandbox at all.
+#
+# Build from the REPO ROOT, so Cargo.lock and web/package-lock.json are in context:
+#   docker build -f sandbox/Containerfile -t honr-sandbox:latest .
+#
+# Then pair it with policy.yaml's companion entries — see the note at the bottom.
+
+FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
+
+USER root
+
+# Match the host toolchain. Cargo.toml declares rust-version = "1.88", so this
+# only needs to be >= that; pinning keeps sandbox builds reproducible.
+ARG RUST_VERSION=1.97.1
+
+# Toolchain lives outside $HOME because /sandbox is the agent's writable
+# workdir and gets overlaid at runtime — anything installed there would vanish.
+ENV RUSTUP_HOME=/opt/rust \
+    CARGO_HOME=/opt/cargo \
+    NPM_CONFIG_CACHE=/opt/npm-cache \
+    PATH=/opt/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal \
+           --default-toolchain "${RUST_VERSION}" \
+           --component clippy \
+ && cargo --version && clippy-driver --version
+
+# ---- warm the dependency caches -------------------------------------------
+# Fetch against the real manifests so the common case is a cache hit. A card
+# that adds a dependency will still reach for crates.io and hang under the
+# current policy — treat a stale image as a failure mode, not a slow path, and
+# rebuild when Cargo.lock changes.
+
+WORKDIR /opt/warm
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
+ && cargo fetch --locked \
+ && rm -rf /opt/warm/src
+
+COPY web/package.json web/package-lock.json ./web/
+RUN cd web && npm ci --ignore-scripts --no-audit --no-fund \
+ && rm -rf /opt/warm/web/node_modules
+
+# Cargo and npm both write to their caches during a build, so these must stay
+# group-writable for the unprivileged `sandbox` user.
+RUN chmod -R a+rX /opt/rust \
+ && chmod -R a+rwX /opt/cargo /opt/npm-cache \
+ && rm -rf /opt/warm
+
+USER sandbox
+WORKDIR /sandbox
+
+# ---- policy.yaml companion changes ----------------------------------------
+# OpenShell matches binary paths LITERALLY and does not follow the toolchain's
+# own symlinks, so policy.yaml needs, at minimum:
+#
+#   filesystem_policy.read_write:  add /opt/cargo and /opt/npm-cache
+#   filesystem_policy.read_only:   add /opt/rust
+#
+# and, only if you accept live dependency fetches rather than rebuilding this
+# image, a network policy allowing index.crates.io / static.crates.io /
+# registry.npmjs.org for /opt/cargo/bin/cargo and /usr/bin/npm. Leaving those
+# closed is the stronger default: a cache miss then fails loudly at build time
+# instead of silently widening what an agent can reach.

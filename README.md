@@ -17,7 +17,7 @@ you ──chat──> Claude Code (the cockpit)
             │  one state machine │
             └────────────────────┘
                     ▲ seven verbs
-            simulated fleet (in-process)
+              supervisor ──> agents in OpenShell sandboxes
 ```
 
 The UI and the agent API are **two renderings of one state machine**. Every
@@ -40,10 +40,15 @@ Connect the cockpit:
 claude mcp add --transport http honr http://localhost:8080/mcp
 ```
 
-Then ask for a digest, answer an escalation, pin a constraint — and watch it
-land in the browser.
+Then create a goal, propose a breakdown, approve the plan — and watch it land in
+the browser.
 
-State lives in `honr.json` (gitignored). Delete it to reseed.
+**The board starts empty and nothing claims cards yet.** The simulated fleet
+that used to populate it has been removed; the supervisor that replaces it is
+still being built (see Phase 2 below). Cards you create will sit in Ready until
+it lands — that's correct, not a hang.
+
+State lives in `honr.json` (gitignored). Delete it to start over.
 
 ## Layout
 
@@ -54,9 +59,8 @@ State lives in `honr.json` (gitignored). Delete it to reseed.
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
 | `src/api.rs` `src/sse.rs` | The human face. |
 | `src/mcp.rs` | The cockpit and worker face. |
-| `src/fleet.rs` | `Executor` trait + simulated workers. |
-| `src/seed.rs` | The Billing v2 tree from the doc's wireframe. |
-| `honr.yaml` | Level schema and fleet tuning. |
+| `src/supervisor.rs` | Lease sweeping now; the per-card sandbox lifecycle next. |
+| `honr.yaml` | Level schema and execution timings. |
 | `web/` | React board, tree and digest. |
 
 ## What's implemented
@@ -103,14 +107,18 @@ brew services start openshell        # gateway on :17670 (not 8080 — no confli
 openshell status                     # expect Connected + Authenticated
 ```
 
-The remaining honr-side work — `openshell.rs`, `supervisor.rs`, the execution config — is listed at
-the end of the findings doc. `mode: simulated` stays the default, so the board still runs with no
-infrastructure at all.
+The remaining honr-side work — `openshell.rs`, the per-card lifecycle in `supervisor.rs`, the
+execution config — is listed at the end of the findings doc.
 
-## A note on what you'll see
+## The goal: honr builds honr
 
-Review fills up and Ready drains. That isn't a bug: it's §0's premise showing
-up on screen — a handful of agents generate review surface faster than one
-person absorbs it, and once nothing is Ready the board is telling you the
-planner is the bottleneck. Approving reviews (from the drawer, or by asking the
-cockpit) puts work back in motion.
+The point of phase 2 is to point honr at its own remaining work: cards describing honr's source,
+agents that clone the repo in a sandbox and open a real PR, review that happens on GitHub, merging
+that stays a human action.
+
+Two consequences worth knowing before you read the code:
+
+- **The first pieces can't be built this way.** `openshell.rs` and `supervisor.rs` *are* the
+  execution path, so they're hand-written. Only once they work can honr take a card against itself.
+- **An agent editing honr's source cannot affect the running honr.** The live binary was built
+  before the edit; self-modification only takes effect on a deliberate rebuild.

@@ -74,8 +74,9 @@ Until then, going direct sidesteps the bug entirely.
 | Vertex project | `shanemcd-rh` | |
 | Vertex location | **`global`** | `us-east5` is quota-exhausted; `us-central1` does not serve the model |
 | Vertex model | `claude-opus-5` | |
-| Sandbox image | `ghcr.io/nvidia/openshell-community/sandboxes/base:latest` | ships `claude` 2.1.156, `gh` 2.93, git, node 22, python 3.14 |
-| Sandbox `HOME` | `/sandbox` | writable |
+| Sandbox image | `ghcr.io/nvidia/openshell-community/sandboxes/base:latest` | Ubuntu 24.04.3, multi-arch (amd64 + arm64). Ships `claude` 2.1.156, `gh` 2.93, git, node 22 + npm, python 3.14. **No Rust toolchain** — see below. |
+| Sandbox `HOME` | `/sandbox` | writable; user is `sandbox`, **no sudo** |
+| Image `ENTRYPOINT` | `/bin/bash` | so `docker run <image> sh -c '…'` fails with `cannot execute binary file` — bash reads `sh` as a *script*. Use `-c '…'` directly, or `--entrypoint`. |
 | GitHub identity | `clankrshq` (bot) | active `gh` account; `shanemcd` still present but inactive |
 
 ### Providers configured on the gateway
@@ -92,6 +93,68 @@ The GitHub credential key **must** be `GITHUB_TOKEN` or `GH_TOKEN` — the profi
 > ⚠️ `gh-clankr` currently holds the bot's OAuth token, which reaches **all 9** of clankrshq's repos
 > (including forks of OpenShell and NemoClaw). Swapping it for a fine-grained PAT scoped to one repo
 > is a one-line provider recreate, and is the right move before agents run unattended.
+
+---
+
+## The image has no Rust toolchain — which matters for self-hosting
+
+Probed directly (`docker run --rm <image> -c '...'`, arm64):
+
+```
+cargo MISSING   rustc MISSING   rustup MISSING
+node  v22.22.1  npm ✓   gh ✓   git ✓   claude 2.1.156
+Ubuntu 24.04.3 LTS · user=sandbox · no sudo · $HOME=/sandbox (writable) · nproc=7
+```
+
+Fine for the probe repo. **Blocking for honr**, which is Rust: an agent cannot run `cargo build` or
+`cargo test`, so it cannot satisfy any definition of done on this codebase.
+
+Two constraints shape the fix:
+
+- **No sudo**, so `apt-get install` is not available to the agent. `rustup` is the only in-sandbox
+  route, and it works only because it installs to `$HOME/.cargo` and `/sandbox` is already
+  `read_write` in `policy.yaml`.
+- **Egress is the real cost.** `policy.yaml` allows Vertex and GitHub only. rustup needs
+  `static.rust-lang.org`; the build then needs `index.crates.io` and `static.crates.io`; `web/`
+  needs `registry.npmjs.org`. All four are default-denied today, and **denial presents as a hang.**
+  Binary paths are matched literally, so `/sandbox/.cargo/bin/cargo` must be listed explicitly.
+
+### Prefer a prebuilt image over per-card rustup
+
+Installing rustup and cold-fetching honr's dependency graph (1383-line `Cargo.lock`) on *every card*
+costs minutes of wall-clock and real Vertex spend per run, and permanently widens the policy by
+three destinations. `sandbox/Containerfile` bakes the toolchain and pre-warms the cargo registry
+instead, which drops per-card cost to near zero and means **crates.io never has to be reachable from
+an agent sandbox at all**.
+
+Build and point OpenShell at it:
+
+```bash
+# from the repo root — Cargo.lock and web/package-lock.json must be in context
+docker build -f sandbox/Containerfile -t honr-sandbox:latest .
+openshell sandbox create --name <NAME> --image honr-sandbox:latest ...
+```
+
+It also needs companion entries in `policy.yaml` (`/opt/cargo` + `/opt/npm-cache` read-write,
+`/opt/rust` read-only) — the Containerfile documents them inline.
+
+Rebuild it whenever `Cargo.lock` changes materially, or the warm cache just goes stale and cargo
+fetches the delta — which still needs crates.io egress, so treat a stale image as a real failure
+mode rather than a slow path.
+
+**Verified**, as the unprivileged `sandbox` user with the source mounted read-only:
+
+| Gate | Result |
+|---|---|
+| `cargo build --offline --locked` | ✅ 14.2s from cold `target/` |
+| `cargo test --offline --locked` | ✅ 8 passed |
+| `npm ci --offline` | ✅ 68 packages in 0.7s |
+| `npm run build` | ✅ 449ms |
+
+`cargo 1.97.1`, `clippy 0.1.97`, 139 crates pre-cached. The `--offline` flags are the point: both
+gates complete with **no network at all**, so the agent's policy never needs crates.io or npm.
+Pass `--offline` explicitly in the gate commands so a cache miss fails loudly instead of hanging on
+a denied fetch.
 
 ---
 

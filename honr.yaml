@@ -27,18 +27,10 @@ levels:
     owner: agent
     claimable: true
 
-# Simulated fleet tuning. Compresses a day of agent work into minutes so the
-# attention design can actually be evaluated. Replaced wholesale when a real
-# Executor lands.
-fleet:
-  size: 7
-  tick_ms: 2000
+# Execution. These are control-plane timings, not simulation knobs: the lease
+# is what makes a dead agent survivable, and cards decay visibly once their
+# heartbeat is older than expected.
+execution:
   lease_secs: 45
-  # Per-tick outcome weights for a running item.
-  escalate_p: 0.04
-  split_p: 0.03
-  die_p: 0.01
-  # Applied once, when a card reaches Verify.
-  gate_fail_p: 0.20
-  # Expected heartbeat interval; cards decay visibly past this.
   heartbeat_expect_secs: 6
+  sweep_interval_ms: 2000
