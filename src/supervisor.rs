@@ -842,7 +842,7 @@ async fn process_verdict(
         "report" => {
             let rep: ReportFile = serde_json::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("invalid report.json: {e}"))?;
-            let pr_url = if let Some(url) = rep.pr_url {
+            let pr_url = if let Some(url) = rep.pr_url.filter(|s| !s.trim().is_empty()) {
                 url
             } else {
                 let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
@@ -1662,5 +1662,30 @@ mod tests {
         assert_eq!(split.children[0].dod.as_deref(), Some("Part 1 complete"));
         assert_eq!(split.children[1].dod.as_deref(), Some("Part 2 complete"));
         assert_eq!(split.children[2].dod, None);
+    }
+
+    #[test]
+    fn report_file_deserializes_and_filters_pr_url() {
+        let json = r#"{
+            "added": 10,
+            "removed": 2,
+            "gates": ["agent-reported"],
+            "pr_url": "https://github.com/shanemcd/honr/pull/42"
+        }"#;
+        let rep: ReportFile = serde_json::from_str(json).unwrap();
+        assert_eq!(rep.added, 10);
+        assert_eq!(rep.removed, 2);
+        assert_eq!(
+            rep.pr_url.filter(|s| !s.trim().is_empty()),
+            Some("https://github.com/shanemcd/honr/pull/42".to_string())
+        );
+
+        let json_empty_url = r#"{
+            "added": 5,
+            "removed": 0,
+            "pr_url": ""
+        }"#;
+        let rep_empty: ReportFile = serde_json::from_str(json_empty_url).unwrap();
+        assert_eq!(rep_empty.pr_url.filter(|s| !s.trim().is_empty()), None);
     }
 }
