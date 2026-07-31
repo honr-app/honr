@@ -27,6 +27,11 @@ use std::time::Duration;
 /// the policy's `read_write` list has to agree with this.
 const WORKDIR: &str = "/sandbox/repo";
 const SHIM_LOCAL: &str = "sandbox/metadata-shim.py";
+/// `sandbox upload` takes a destination **directory**, not a destination file:
+/// uploading to `/tmp/metadata-shim.py` creates a *directory* of that name with
+/// the file inside it, and python then reports
+/// `can't find '__main__' module in '/tmp/metadata-shim.py'`.
+const SHIM_DEST_DIR: &str = "/tmp";
 const SHIM_REMOTE: &str = "/tmp/metadata-shim.py";
 
 pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
@@ -212,7 +217,7 @@ async fn run_inside(
     // Preamble. Without the shim there is no Vertex auth at all: google-auth
     // walks its ADC chain to the GCE metadata server, which OpenShell blocks
     // permanently as SSRF hardening. The shim must outlive the agent.
-    os.upload(name, SHIM_LOCAL, SHIM_REMOTE).await?;
+    os.upload(name, SHIM_LOCAL, SHIM_DEST_DIR).await?;
     let up = os
         .exec(
             name,

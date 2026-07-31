@@ -282,3 +282,27 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 .ttitle { flex: 1; }
 .tnote { font-size: 11px; color: var(--warn); font-style: italic; }
 .tstate { font-size: 11px; color: var(--dim); }
+
+/* Review is a PR; the card has to be able to reach it. */
+.pr-link {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #7fb2ff;
+  text-decoration: none;
+  border-bottom: 1px dotted #7fb2ff55;
+}
+.pr-link:hover { border-bottom-style: solid; }
+
+/* Stale data must be loud. A control plane that silently shows history is
+   worse than one that shows an error. */
+.err.bar button.link {
+  margin-left: 10px;
+  background: none;
+  border: 1px solid currentColor;
+  color: inherit;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font: inherit;
+  cursor: pointer;
+}

@@ -106,6 +106,19 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }:
               +{item.diff_added} −{item.diff_removed}
             </span>
           </div>
+          {/* Review *is* the PR. Without a way to reach it the column asks a
+              question you cannot answer from the board. */}
+          {item.pr_url && (
+            <a
+              className="pr-link"
+              href={item.pr_url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+            >
+              ↗ {prLabel(item.pr_url)}
+            </a>
+          )}
           {breadcrumb && <div className="crumb">↑ {breadcrumb}</div>}
         </>
       )}
@@ -120,4 +133,10 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }:
       )}
     </div>
   );
+}
+
+/** `https://github.com/owner/repo/pull/1` -> `owner/repo#1`. */
+function prLabel(url: string): string {
+  const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  return m ? `${m[1]}/${m[2]}#${m[3]}` : "pull request";
 }

@@ -291,6 +291,14 @@ metadata-server problem was found.
 - **A stale `~/.config/openshell/gateway.toml`** with Kubernetes paths (`/etc/openshell-tls/...`,
   `/home/shanemcd/...`) will silently break the brew-installed gateway. Ours is backed up at
   `gateway.toml.k8s-stale.bak`. If the gateway won't start, check this first.
+- **`sandbox upload` takes a destination *directory*, not a destination file.** `upload NAME
+  local/metadata-shim.py /tmp/metadata-shim.py` creates a **directory** `/tmp/metadata-shim.py`
+  with the file inside it, and python then fails with
+  `can't find '__main__' module in '/tmp/metadata-shim.py'`. Upload to `/tmp` instead. The
+  destination must also **already exist** — uploading to a fresh path fails with
+  `ssh tar extract exited with status exit status: 1`.
+- **A lingering background process does *not* hold `sandbox exec` open.** `nohup … &` then exiting
+  returns in ~25ms, so the shim can be started in its own exec and outlive it.
 - **Binary paths in policy are matched literally** and symlink resolution warns constantly. Git's
   real binary is `/usr/lib/git-core/git-remote-http` (note: **not** `-https`).
 - **OpenShell is alpha.** Sandbox startup is seconds, not milliseconds. Don't plan for a 2s tick or

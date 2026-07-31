@@ -82,6 +82,19 @@ export function DetailDrawer({
         </Section>
       )}
 
+      {(d.pr_url || d.environment) && (
+        <Section title="This run">
+          {d.pr_url && (
+            <p>
+              <a className="pr-link" href={d.pr_url} target="_blank" rel="noreferrer">
+                ↗ {d.pr_url}
+              </a>
+            </p>
+          )}
+          {d.environment && <p className="dim">sandbox {d.environment}</p>}
+        </Section>
+      )}
+
       {d.escalation && (
         <Section title="Waiting on you">
           <p className="question">{d.escalation.question}</p>

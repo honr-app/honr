@@ -10,6 +10,8 @@ interface BoardState {
   heartbeatExpect: number;
   loaded: boolean;
   connected: boolean;
+  /** When the last successful load happened. Drives the staleness warning. */
+  lastLoadedAt: number | null;
 }
 
 type Action =
@@ -25,6 +27,7 @@ const initial: BoardState = {
   heartbeatExpect: 6,
   loaded: false,
   connected: false,
+  lastLoadedAt: null,
 };
 
 function reduce(s: BoardState, a: Action): BoardState {
@@ -40,6 +43,7 @@ function reduce(s: BoardState, a: Action): BoardState {
         serverTime: a.snap.server_time,
         heartbeatExpect: a.snap.heartbeat_expect_secs,
         loaded: true,
+        lastLoadedAt: Date.now(),
       };
     }
     case "event": {
@@ -58,9 +62,17 @@ function reduce(s: BoardState, a: Action): BoardState {
   }
 }
 
+/** Past this with no successful load, what you are looking at is history. */
+export const STALE_AFTER_MS = 12_000;
+
 /**
  * Snapshot once, then apply deltas. Goal rollups are recomputed server-side on
  * a slower cadence — the deltas keep the cards live in between.
+ *
+ * A failed poll deliberately leaves the last snapshot on screen rather than
+ * blanking the board — but it must then *say so*. Silently rendering stale
+ * state as though it were current is the worst thing a control plane can do:
+ * it looks healthy while you make decisions against a frozen picture.
  */
 export function useBoard() {
   const [state, dispatch] = useReducer(reduce, initial);
@@ -73,7 +85,11 @@ export function useBoard() {
     const load = () =>
       api
         .board()
-        .then((snap) => alive && dispatch({ type: "snapshot", snap }))
+        .then((snap) => {
+          if (!alive) return;
+          dispatch({ type: "snapshot", snap });
+          setError(null);
+        })
         .catch((e) => alive && setError(String(e)));
 
     load();

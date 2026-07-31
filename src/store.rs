@@ -861,8 +861,16 @@ impl Board {
         let title = {
             let mut s = self.state.write().unwrap();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
-            let esc = it.escalation.as_mut().ok_or("that item is not waiting on anyone")?;
-            esc.answer = Some(choice.clone());
+            if it.escalation.is_none() {
+                return Err("that item is not waiting on anyone".into());
+            }
+            // Clear it, don't just annotate it. An answered escalation that
+            // stays attached keeps rendering as a live question — the card goes
+            // on saying "blocked 15m" while the agent is happily working, which
+            // is the board lying about the one thing it exists to tell you.
+            // The decision is not lost: it becomes a note below, and the
+            // transition history records it.
+            it.escalation = None;
             // A human has looked at it, so the run budget starts over —
             // otherwise the next single failure would escalate again
             // immediately and the answer would have bought nothing.
@@ -1277,5 +1285,33 @@ mod tests {
         let it = b.get(id).unwrap();
         assert_eq!(it.state, State::Ready);
         assert_eq!(it.run_failures, 0);
+    }
+
+    /// An answered escalation must not stay attached. Leaving it there made a
+    /// running card keep reporting "blocked 15m" against a question that had
+    /// already been resolved — the board contradicting itself about the one
+    /// thing it exists to tell you.
+    #[test]
+    fn answering_clears_the_escalation_and_keeps_the_decision() {
+        let (b, id) = claimed_leaf();
+        b.record_run_failure(id, "boom", 1).expect("escalated");
+        assert!(b.get(id).unwrap().escalation.is_some());
+
+        b.answer_escalation(id, "Investigate the environment".into()).expect("answered");
+        let it = b.get(id).unwrap();
+        assert!(it.escalation.is_none(), "resolved escalation must not linger");
+
+        // The decision survives as standing context for whoever picks it up.
+        assert!(
+            it.notes.iter().any(|n| n.text.contains("Investigate the environment")),
+            "the decision must be preserved as a note: {:?}",
+            it.notes
+        );
+    }
+
+    #[test]
+    fn answering_nothing_is_refused() {
+        let (b, id) = claimed_leaf();
+        assert!(b.answer_escalation(id, "whatever".into()).is_err());
     }
 }

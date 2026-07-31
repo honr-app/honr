@@ -63,7 +63,8 @@ execution:
     memory: 4Gi
 
     # Sandboxes are heavy and OpenShell is alpha. Do not start at seven.
-    max_concurrent: 2
+    # Deliberately 1 until gates are supervisor-run rather than agent-claimed.
+    max_concurrent: 1
 
     per_card_budget_cents: 200
     daily_budget_cents: 2000

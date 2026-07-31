@@ -3,7 +3,7 @@ import { Board } from "./components/Board";
 import { DetailDrawer } from "./components/Detail";
 import { Digest } from "./components/Digest";
 import { Tree } from "./components/Tree";
-import { useBoard, useNow } from "./useBoard";
+import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
 import { money } from "./api";
 import type { WorkItem } from "./types";
 
@@ -23,6 +23,10 @@ export default function App() {
   const totalSpend = b.goals.reduce((n, g) => n + g.spend_cents, 0);
   const totalBudget = b.goals.reduce((n, g) => n + (g.budget_cents ?? 0), 0);
   const live = b.goals.reduce((n, g) => n + g.agents_live, 0);
+
+  // How long we have been showing a picture we could not refresh.
+  const age = b.lastLoadedAt === null ? null : now - b.lastLoadedAt;
+  const staleFor = age !== null && age > STALE_AFTER_MS ? age : null;
 
   return (
     <div className="app">
@@ -48,7 +52,18 @@ export default function App() {
         </div>
       </header>
 
-      {b.error && <div className="err bar">{b.error}</div>}
+      {/* The board keeps rendering its last good snapshot when a poll fails,
+          which is right — blanking it would be worse. But it has to say so.
+          Stale state that looks current is how you end up acting on a picture
+          that stopped being true fifteen minutes ago. */}
+      {staleFor !== null && (
+        <div className="err bar">
+          ⚠ NOT LIVE — showing state from {Math.round(staleFor / 1000)}s ago.
+          honr is unreachable; nothing here is current.
+          <button className="link" onClick={b.refresh}>retry now</button>
+        </div>
+      )}
+      {b.error && staleFor === null && <div className="err bar">{b.error}</div>}
 
       <main className={open ? "with-drawer" : ""}>
         {!b.loaded ? (
