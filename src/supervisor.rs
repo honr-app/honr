@@ -471,7 +471,7 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
 
     let result =
         run_inside(board, os, cfg, &agent_id, &grant, &name, &branch, f.lease_secs, &spec).await;
-    finalize(os, board, id, &name, &result).await;
+    finalize(os, id, &name, &result).await;
     result
 }
 
@@ -497,21 +497,23 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
         finish(board, os, cfg, &a.agent_id, id, &a.sandbox, &branch, &run, spent).await
     }
     .await;
-    finalize(os, board, id, &a.sandbox, &result).await;
+    finalize(os, id, &a.sandbox, &result).await;
     result
 }
 
-async fn finalize(
-    os: &OpenShell,
-    board: &SharedBoard,
-    id: ItemId,
-    name: &str,
-    result: &anyhow::Result<()>,
-) {
+/// Dispose of the sandbox. Deliberately no `Board` here: the card keeps what
+/// the run produced, including the sandbox name, and taking the board would
+/// make it easy to clear that again on the way out.
+async fn finalize(os: &OpenShell, id: ItemId, name: &str, result: &anyhow::Result<()>) {
     match result {
+        // The sandbox goes; its name stays. Review has to answer "where did
+        // this run?" from the card, and the box is gone by the time anyone
+        // asks — the name is the only evidence left. Nothing keys off the
+        // field afterwards: `adoptable` is gated on Claimed/Running, so a
+        // finished card naming a box that somehow outlived it still gets
+        // reaped rather than re-adopted.
         Ok(_) => {
             let _ = os.delete(name).await;
-            board.set_environment(id, None);
         }
         // Keep the sandbox on failure: `openshell logs` is the tool that
         // actually answers questions, and a deleted sandbox answers none. Stop

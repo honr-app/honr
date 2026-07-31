@@ -206,6 +206,33 @@ async fn cut_scope(
 mod tests {
     use super::*;
 
+    /// Where a card ran and what it produced have to survive the trip to the
+    /// browser. The card face reads them off the board snapshot and the drawer
+    /// off the detail payload, where the item is `#[serde(flatten)]`ed — so
+    /// either can stop carrying them without a single type changing.
+    #[tokio::test]
+    async fn a_finished_card_carries_its_pr_and_sandbox_to_the_ui() {
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join("honr-test-nowrite.json"),
+        ));
+        let id = b.create(None, "t", "i", None, crate::model::Origin::Human, false, None).id;
+        b.set_environment(id, Some("honr-card-8-a1".into()));
+        b.set_pr_url(id, Some("https://github.com/shanemcd/honr/pull/1".into()));
+
+        let Json(snap) = board(AxState(b.clone())).await;
+        let on_the_card = serde_json::to_value(&snap).unwrap();
+        assert_eq!(on_the_card["items"][0]["pr_url"], "https://github.com/shanemcd/honr/pull/1");
+        assert_eq!(on_the_card["items"][0]["environment"], "honr-card-8-a1");
+
+        let Ok(Json(detail)) = item_detail(AxState(b), Path(id)).await else {
+            panic!("no detail for the card we just created");
+        };
+        let in_the_drawer = serde_json::to_value(&detail).unwrap();
+        assert_eq!(in_the_drawer["pr_url"], "https://github.com/shanemcd/honr/pull/1");
+        assert_eq!(in_the_drawer["environment"], "honr-card-8-a1");
+    }
+
     #[tokio::test]
     async fn version_reports_the_crate_version() {
         let Json(v) = version().await;
