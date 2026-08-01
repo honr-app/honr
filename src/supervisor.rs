@@ -1447,7 +1447,11 @@ fn briefing(
          \nIf work is discovered to be bigger than one card, do not overrun. \
          Write `.honr/split.json` (or `/work/.honr/split.json`) with an array of `children` \
          (each having `title`, `intent`, and optional `definition_of_done`), then exit. \
-         Those become **sibling Tasks under the same Project** — never nested under this card.\n\
+         Those become **sibling Tasks under the same Project** — never nested under this card. \
+         Splits may only carve this card's definition of done into smaller slices of the same outcome. \
+         Do not invent work that belongs to another Project — escalate instead. \
+         If a PR already exists for the card, do not split — finish via report or request human guidance. \
+         Split and publish are mutually exclusive for one run.\n\
          \n`bd` (beads CLI) is available for the task graph and project memory. \
          Run `bd prime` for context, `bd show <id>` for this card's Project/deps, \
          `bd remember \"insight\"` to store learned insights, and `bd dep add` for \
@@ -1903,6 +1907,18 @@ mod tests {
     fn briefing_mentions_verdict_split_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", "shanemcd/honr", "main");
         assert!(b.contains("split.json"), "briefing must mention split.json: {b}");
+        assert!(
+            b.contains("smaller slices of the same outcome"),
+            "briefing must instruct slice-only splits: {b}"
+        );
+        assert!(
+            b.contains("Do not invent work that belongs to another Project"),
+            "briefing must prohibit inventing external work: {b}"
+        );
+        assert!(
+            b.contains("Split and publish are mutually exclusive"),
+            "briefing must state PR/split mutual exclusivity: {b}"
+        );
     }
 
     #[test]
