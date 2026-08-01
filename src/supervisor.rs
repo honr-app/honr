@@ -1409,7 +1409,13 @@ fn briefing(
         }
     }
     if !grant.notes.is_empty() {
-        b.push_str("\nNotes from the human steering this:\n");
+        // Notes are the human's live correction. When they conflict with title
+        // or definition of done (common after Request changes), notes win —
+        // otherwise agents re-satisfy a stale DoD and ignore the steer.
+        b.push_str(
+            "\nNotes from the human steering this (BINDING — if these conflict with \
+             the title or definition of done above, follow the notes):\n",
+        );
         for n in &grant.notes {
             b.push_str(&format!("  - {n}\n"));
         }
@@ -1678,6 +1684,10 @@ mod tests {
         g.notes = vec!["Changes requested: rebase onto latest, api.rs only.".into()];
         let b = briefing(&g, BranchState::Rebased, "honr/card-7", "shanemcd/honr", "main");
         assert!(b.contains("rebase onto latest, api.rs only."), "{b}");
+        assert!(
+            b.contains("BINDING"),
+            "notes must be framed as overrides of title/DoD: {b}"
+        );
     }
 
     // ---- surviving a restart ------------------------------------------

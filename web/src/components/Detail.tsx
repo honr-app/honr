@@ -929,10 +929,18 @@ export function DetailDrawer({
         </>
       )}
 
-      {d.state === "shaping" && d.level !== "Project" && (
-        <Section title="Refine">
+      {/* Title / Why / DoD are the contract the next agent is graded on. Editable
+          in Shaping, Ready, and Review — not only before first Ready — because
+          Request changes notes lose to a stale DoD if you cannot rewrite it. */}
+      {d.level !== "Project" &&
+        (d.state === "shaping" || d.state === "ready" || d.state === "review") && (
+        <Section title={d.state === "review" ? "Card contract" : "Refine"}>
           <p className="dim" style={{ marginBottom: 8 }}>
-            Tweak this Task before moving it into the Ready queue.
+            {d.state === "shaping"
+              ? "Tweak this Task before moving it into the Ready queue."
+              : d.state === "ready"
+                ? "Still editable until an agent claims it. DoD is what the next run must satisfy."
+                : "If the PR missed the point, fix DoD / Why here — Request changes saves these with your note."}
           </p>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
@@ -959,7 +967,7 @@ export function DetailDrawer({
             <div>
               <label className="section-title" style={{ display: "block", marginBottom: 2 }}>Definition of Done</label>
               <textarea
-                rows={2}
+                rows={3}
                 placeholder="How to mechanically verify success..."
                 value={editDod}
                 onChange={(e) => setEditDod(e.target.value)}
@@ -980,36 +988,40 @@ export function DetailDrawer({
             </div>
           </div>
 
-          <div className="btns">
-            <button
-              onClick={() => {
-                act(
-                  api.update(d.id, {
-                    title: editTitle,
-                    intent: editIntent,
-                    definition_of_done: editDod,
-                    engine: editEngine,
-                  })
-                );
-              }}
-            >
-              Save Changes
-            </button>
-            <button
-              className="primary"
-              onClick={() => {
-                const saveP = api.update(d.id, {
-                  title: editTitle,
-                  intent: editIntent,
-                  definition_of_done: editDod,
-                  engine: editEngine,
-                });
-                act(saveP.then(() => api.transition(d.id, "ready", "human approved")));
-              }}
-            >
-              Move to Ready
-            </button>
-          </div>
+          {d.state !== "review" && (
+            <div className="btns">
+              <button
+                onClick={() => {
+                  act(
+                    api.update(d.id, {
+                      title: editTitle,
+                      intent: editIntent,
+                      definition_of_done: editDod,
+                      engine: editEngine,
+                    })
+                  );
+                }}
+              >
+                Save Changes
+              </button>
+              {d.state === "shaping" && (
+                <button
+                  className="primary"
+                  onClick={() => {
+                    const saveP = api.update(d.id, {
+                      title: editTitle,
+                      intent: editIntent,
+                      definition_of_done: editDod,
+                      engine: editEngine,
+                    });
+                    act(saveP.then(() => api.transition(d.id, "ready", "human approved")));
+                  }}
+                >
+                  Move to Ready
+                </button>
+              )}
+            </div>
+          )}
         </Section>
       )}
 
@@ -1031,7 +1043,7 @@ export function DetailDrawer({
           <textarea
             rows={2}
             value={text}
-            placeholder="What needs to change? This reaches the next agent that picks it up."
+            placeholder="What needs to change? Prefer fixing DoD above when acceptance criteria are wrong — your note still binds over a stale DoD."
             onChange={(e) => setText(e.target.value)}
           />
           <div className="btns">
@@ -1045,7 +1057,20 @@ export function DetailDrawer({
             <button
               disabled={!text.trim()}
               title={text.trim() ? "" : "Say what needs changing first"}
-              onClick={() => { act(api.requestChanges(d.id, text)); setText(""); }}
+              onClick={() => {
+                const note = text;
+                setText("");
+                act(
+                  api
+                    .update(d.id, {
+                      title: editTitle,
+                      intent: editIntent,
+                      definition_of_done: editDod,
+                      engine: editEngine,
+                    })
+                    .then(() => api.requestChanges(d.id, note)),
+                );
+              }}
             >
               Request changes
             </button>

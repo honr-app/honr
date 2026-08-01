@@ -1096,7 +1096,9 @@ impl Board {
         }
     }
 
-    /// Tweak an item's title, intent, or definition of done in Shaping before approving it.
+    /// Tweak an item's title, intent, definition of done, or engine.
+    /// Used from Shaping (pre-Ready), Ready (pre-claim), and Review (with
+    /// Request changes) so humans can rewrite the contract the next agent sees.
     pub fn update_item(
         &self,
         id: ItemId,
