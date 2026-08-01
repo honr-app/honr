@@ -1,0 +1,19 @@
+{
+  "children": [
+    {
+      "title": "Store & Model: Pass infra bounce reasons through release and store on WorkItem",
+      "intent": "Update WorkItem model and Board::release to record explicit failure/bounce reasons in history and store on WorkItem.",
+      "definition_of_done": "cargo test --offline --locked passes; store test verifies calling release_with_reason records the bounce reason on WorkItem and transition history."
+    },
+    {
+      "title": "Supervisor: Capture and forward human-readable error messages on infrastructure failure",
+      "intent": "Update supervisor Fleet::supervise so that when is_infrastructure or sandbox creation fails, the human-readable error string is passed to release.",
+      "definition_of_done": "cargo test --offline --locked passes; supervisor tests verify that infrastructure failure messages are passed to board release."
+    },
+    {
+      "title": "API & Web UI: Expose bounce reasons in API and render in card drawer",
+      "intent": "Expose last_bounce_reason in API responses and render the human-readable bounce reason in the card detail drawer and overview.",
+      "definition_of_done": "cargo test --offline --locked and cargo clippy --offline -- -D warnings pass; card drawer renders the bounce reason when present on WorkItem."
+    }
+  ]
+}
