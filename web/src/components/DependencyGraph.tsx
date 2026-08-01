@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { WorkItem } from "../types";
 
 interface Props {
@@ -14,16 +14,41 @@ interface Edge {
   isUnresolved: boolean;
 }
 
+interface NodePort {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** Pixel coords of `el` in `ancestor`'s scrolled content space (SVG local). */
+function contentOffset(el: Element, ancestor: HTMLElement): { left: number; top: number; width: number; height: number } {
+  const er = el.getBoundingClientRect();
+  const ar = ancestor.getBoundingClientRect();
+  return {
+    left: er.left - ar.left + ancestor.scrollLeft,
+    top: er.top - ar.top + ancestor.scrollTop,
+    width: er.width,
+    height: er.height,
+  };
+}
+
 export function DependencyGraph({ items, onOpen }: Props) {
+  const uid = useId().replace(/:/g, "");
+  const markerUnresolved = `arrow-unresolved-${uid}`;
+  const markerResolved = `arrow-resolved-${uid}`;
+  const markerHover = `arrow-hover-${uid}`;
+
   const [hoveredNode, setHoveredNode] = useState<number | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<{ from: number; to: number } | null>(null);
   const [simplifyDone, setSimplifyDone] = useState<boolean>(false);
   const [search, setSearch] = useState<string>("");
 
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [nodeCoords, setNodeCoords] = useState<Map<number, { x1: number; y1: number; x2: number; y2: number }>>(
-    new Map()
-  );
+  // SVG lives inside the scrollable canvas — measure against this, not the outer shell.
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const ranksRef = useRef<HTMLDivElement>(null);
+  const [nodeCoords, setNodeCoords] = useState<Map<number, NodePort>>(new Map());
+  const [svgSize, setSvgSize] = useState({ w: 0, h: 0 });
 
   // Filter items if simplifyDone or search is active
   const filteredItems = useMemo(() => {
@@ -110,31 +135,50 @@ export function DependencyGraph({ items, onOpen }: Props) {
     return { ranks: groups, maxRank: maxR, edges: edgesList, itemMap: map };
   }, [filteredItems]);
 
-  // Compute actual screen pixel coordinates of nodes for SVG connector drawing
+  // Compute node ports in the SVG's content coordinate space.
   useLayoutEffect(() => {
-    const updateCoords = () => {
-      if (!containerRef.current) return;
-      const containerRect = containerRef.current.getBoundingClientRect();
-      const newCoords = new Map<number, { x1: number; y1: number; x2: number; y2: number }>();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
+    const updateCoords = () => {
+      const ranksEl = ranksRef.current;
+      if (!ranksEl) return;
+
+      const newCoords = new Map<number, NodePort>();
       for (const item of filteredItems) {
         const el = document.getElementById(`graph-node-${item.id}`);
-        if (el) {
-          const rect = el.getBoundingClientRect();
-          newCoords.set(item.id, {
-            x1: rect.left - containerRect.left,
-            y1: rect.top - containerRect.top + rect.height / 2,
-            x2: rect.right - containerRect.left,
-            y2: rect.top - containerRect.top + rect.height / 2,
-          });
-        }
+        if (!el) continue;
+        const box = contentOffset(el, canvas);
+        newCoords.set(item.id, {
+          x1: box.left,
+          y1: box.top + box.height / 2,
+          x2: box.left + box.width,
+          y2: box.top + box.height / 2,
+        });
       }
       setNodeCoords(newCoords);
+      setSvgSize({
+        w: Math.max(ranksEl.scrollWidth, canvas.clientWidth),
+        h: Math.max(ranksEl.scrollHeight, canvas.clientHeight),
+      });
     };
 
     updateCoords();
+    // Second pass after fonts/layout settle (card heights can shift).
+    const raf = requestAnimationFrame(updateCoords);
+
+    const ro = new ResizeObserver(updateCoords);
+    ro.observe(canvas);
+    if (ranksRef.current) ro.observe(ranksRef.current);
     window.addEventListener("resize", updateCoords);
-    return () => window.removeEventListener("resize", updateCoords);
+    canvas.addEventListener("scroll", updateCoords);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      window.removeEventListener("resize", updateCoords);
+      canvas.removeEventListener("scroll", updateCoords);
+    };
   }, [filteredItems, ranks]);
 
   // Sets for highlighting hovered connections
@@ -192,7 +236,7 @@ export function DependencyGraph({ items, onOpen }: Props) {
   }, [hoveredNode, hoveredEdge, itemMap, edges, filteredItems.length]);
 
   return (
-    <div className="graph-container" ref={containerRef} data-testid="graph-container">
+    <div className="graph-container" data-testid="graph-container">
       {/* Graph Toolbar */}
       <div className="graph-toolbar">
         <div className="graph-title">
@@ -225,39 +269,47 @@ export function DependencyGraph({ items, onOpen }: Props) {
       </div>
 
       {/* SVG Edges Canvas */}
-      <div className="graph-canvas">
-        <svg className="graph-svg" style={{ width: "100%", height: "100%", position: "absolute", top: 0, left: 0 }}>
+      <div className="graph-canvas" ref={canvasRef}>
+        <svg
+          className="graph-svg"
+          width={svgSize.w || "100%"}
+          height={svgSize.h || "100%"}
+          style={{ width: svgSize.w || "100%", height: svgSize.h || "100%", position: "absolute", top: 0, left: 0 }}
+        >
           <defs>
             <marker
-              id="arrow-unresolved"
+              id={markerUnresolved}
               viewBox="0 0 10 10"
-              refX="8"
+              refX="9"
               refY="5"
               markerWidth="6"
               markerHeight="6"
-              orient="auto-start-reverse"
+              orient="auto"
+              markerUnits="strokeWidth"
             >
               <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--warn)" />
             </marker>
             <marker
-              id="arrow-resolved"
+              id={markerResolved}
               viewBox="0 0 10 10"
-              refX="8"
+              refX="9"
               refY="5"
               markerWidth="6"
               markerHeight="6"
-              orient="auto-start-reverse"
+              orient="auto"
+              markerUnits="strokeWidth"
             >
               <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--ok)" />
             </marker>
             <marker
-              id="arrow-hover"
+              id={markerHover}
               viewBox="0 0 10 10"
-              refX="8"
+              refX="9"
               refY="5"
               markerWidth="6"
               markerHeight="6"
-              orient="auto-start-reverse"
+              orient="auto"
+              markerUnits="strokeWidth"
             >
               <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
             </marker>
@@ -280,10 +332,10 @@ export function DependencyGraph({ items, onOpen }: Props) {
 
             const pathD = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
             const markerId = isHovered
-              ? "url(#arrow-hover)"
+              ? `url(#${markerHover})`
               : e.isUnresolved
-              ? "url(#arrow-unresolved)"
-              : "url(#arrow-resolved)";
+                ? `url(#${markerUnresolved})`
+                : `url(#${markerResolved})`;
 
             return (
               <g key={`edge-${e.from}-${e.to}`}>
@@ -302,7 +354,7 @@ export function DependencyGraph({ items, onOpen }: Props) {
         </svg>
 
         {/* Nodes Grid organized by Topological Rank Columns */}
-        <div className="graph-ranks">
+        <div className="graph-ranks" ref={ranksRef}>
           {Array.from({ length: maxRank + 1 }).map((_, rankIdx) => {
             const rankItems = ranks.get(rankIdx) || [];
             if (rankItems.length === 0) return null;
