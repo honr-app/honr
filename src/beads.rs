@@ -217,6 +217,53 @@ impl BeadsClient {
         }
     }
 
+    /// Resolve GitHub token from GITHUB_TOKEN env var, falling back to `gh auth token`
+    /// via `gh` and `/opt/homebrew/bin/gh` when PATH is thin.
+    pub fn resolve_github_token() -> Option<String> {
+        Self::resolve_github_token_with(
+            || std::env::var("GITHUB_TOKEN").ok(),
+            |cmd_path| {
+                std::process::Command::new(cmd_path)
+                    .args(["auth", "token"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if stdout.is_empty() {
+                                None
+                            } else {
+                                Some(stdout)
+                            }
+                        } else {
+                            None
+                        }
+                    })
+            },
+        )
+    }
+
+    fn resolve_github_token_with<E, C>(get_env: E, run_cmd: C) -> Option<String>
+    where
+        E: Fn() -> Option<String>,
+        C: FnMut(&str) -> Option<String>,
+    {
+        if let Some(token) = get_env().filter(|t| !t.trim().is_empty()) {
+            return Some(token.trim().to_string());
+        }
+
+        let mut run_cmd = run_cmd;
+        if let Some(token) = run_cmd("gh") {
+            return Some(token);
+        }
+
+        if let Some(token) = run_cmd("/opt/homebrew/bin/gh") {
+            return Some(token);
+        }
+
+        None
+    }
+
     /// Run `bd github sync` to sync beads issues with GitHub Issues.
     pub async fn github_sync(&self) -> Result<(), String> {
         if !self.beads_dir.join("metadata.json").exists()
@@ -224,15 +271,7 @@ impl BeadsClient {
         {
             return Ok(());
         }
-        let token = std::env::var("GITHUB_TOKEN")
-            .or_else(|_| {
-                std::process::Command::new("gh")
-                    .args(["auth", "token"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .map_err(|_| ())
-            })
-            .unwrap_or_default();
+        let token = Self::resolve_github_token().unwrap_or_default();
 
         let mut cmd = self.cmd();
         cmd.arg("github").arg("sync").arg("--push-only");
@@ -429,5 +468,87 @@ mod tests {
             .close(&task.id, Some("Done"))
             .await
             .expect("close task");
+    }
+
+    #[test]
+    fn test_token_env_wins() {
+        let mut cmd_calls = Vec::new();
+        let token = BeadsClient::resolve_github_token_with(
+            || Some("env_token_secret".to_string()),
+            |cmd| {
+                cmd_calls.push(cmd.to_string());
+                Some("gh_token".to_string())
+            },
+        );
+        assert_eq!(token, Some("env_token_secret".to_string()));
+        assert!(
+            cmd_calls.is_empty(),
+            "gh command should not be executed when GITHUB_TOKEN env is set"
+        );
+    }
+
+    #[test]
+    fn test_gh_auth_token_fallback() {
+        let mut cmd_calls = Vec::new();
+        let token = BeadsClient::resolve_github_token_with(
+            || None,
+            |cmd| {
+                cmd_calls.push(cmd.to_string());
+                if cmd == "gh" {
+                    Some("gh_token_123".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(token, Some("gh_token_123".to_string()));
+        assert_eq!(cmd_calls, vec!["gh"]);
+    }
+
+    #[test]
+    fn test_homebrew_gh_path_fallback_when_bare_gh_missing() {
+        let mut cmd_calls = Vec::new();
+        let token = BeadsClient::resolve_github_token_with(
+            || None,
+            |cmd| {
+                cmd_calls.push(cmd.to_string());
+                if cmd == "/opt/homebrew/bin/gh" {
+                    Some("homebrew_token_456".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(token, Some("homebrew_token_456".to_string()));
+        assert_eq!(
+            cmd_calls,
+            vec!["gh", "/opt/homebrew/bin/gh"],
+            "/opt/homebrew/bin/gh should be tried when bare gh fails/missing"
+        );
+    }
+
+    #[test]
+    fn test_token_resolution_returns_none_when_all_fail() {
+        let mut cmd_calls = Vec::new();
+        let token = BeadsClient::resolve_github_token_with(
+            || None,
+            |cmd| {
+                cmd_calls.push(cmd.to_string());
+                None
+            },
+        );
+        assert_eq!(token, None);
+        assert_eq!(cmd_calls, vec!["gh", "/opt/homebrew/bin/gh"]);
+    }
+
+    #[tokio::test]
+    async fn test_github_sync_skips_when_no_beads_dir() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-empty-test-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let client = BeadsClient::new(&test_dir);
+        assert!(client.github_sync().await.is_ok());
     }
 }
