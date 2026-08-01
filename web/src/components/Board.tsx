@@ -1,9 +1,9 @@
 import { useState, type MouseEvent } from "react";
-import { Card } from "./Card";
-import { DependencyGraph } from "./DependencyGraph";
-import { BOARD_COLUMNS, COLUMN_OF } from "../types";
-import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types";
-import { api, money, since } from "../api";
+import { Card } from "./Card.js";
+import { DependencyGraph } from "./DependencyGraph.js";
+import { BOARD_COLUMNS, COLUMN_OF } from "../types.js";
+import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types.js";
+import { api, money, since } from "../api.js";
 
 interface Props {
   goals: GoalView[];
@@ -297,8 +297,27 @@ function Swimlane({
   );
 }
 
-/** Sort Review by regret risk, not arrival time: blast radius × novelty. */
-function sortFor(key: ColumnKey) {
+/** Check whether an item has unresolved blockers. */
+export function isBlocked(item: WorkItem): boolean {
+  if (item.blockers && item.blockers.length > 0) {
+    return item.blockers.some((b) => b.state !== "done" && b.state !== "retired");
+  }
+  return item.blocked_by ? item.blocked_by.length > 0 : false;
+}
+
+/** Sort Review by regret risk, not arrival time: blast radius × novelty.
+    Sort Ready by claimable first: unblocked cards sort above blocked cards. */
+export function sortFor(key: ColumnKey) {
+  if (key === "ready") {
+    return (a: WorkItem, b: WorkItem) => {
+      const aBlocked = isBlocked(a) ? 1 : 0;
+      const bBlocked = isBlocked(b) ? 1 : 0;
+      if (aBlocked !== bBlocked) {
+        return aBlocked - bBlocked;
+      }
+      return new Date(a.entered_state_at).getTime() - new Date(b.entered_state_at).getTime();
+    };
+  }
   if (key === "review") {
     return (a: WorkItem, b: WorkItem) => {
       const risk = (i: WorkItem) => (i.diff_added + i.diff_removed) * (i.gate_failures + 1);

@@ -356,7 +356,7 @@ impl Cockpit {
     fn list_column(&self, Parameters(a): Parameters<ColumnArg>) -> Out<ListColumnOut> {
         let snap = self.board.snapshot();
         let now = snap.server_time;
-        let rows = snap
+        let mut items: Vec<&crate::model::WorkItem> = snap
             .items
             .iter()
             .filter(|i| i.state.column() == a.column)
@@ -364,6 +364,23 @@ impl Cockpit {
                 None => true,
                 Some(g) => self.board.goal_for(i.id) == g,
             })
+            .collect();
+
+        if a.column == Column::Ready {
+            items.sort_by(|a, b| {
+                let a_blocked = a.blockers.iter().any(|blk| !blk.state.is_terminal())
+                    || (a.blockers.is_empty() && !a.blocked_by.is_empty());
+                let b_blocked = b.blockers.iter().any(|blk| !blk.state.is_terminal())
+                    || (b.blockers.is_empty() && !b.blocked_by.is_empty());
+                if a_blocked != b_blocked {
+                    return a_blocked.cmp(&b_blocked);
+                }
+                a.entered_state_at.cmp(&b.entered_state_at)
+            });
+        }
+
+        let rows = items
+            .into_iter()
             .map(|i| CardLine {
                 id: i.id,
                 title: i.title.clone(),
@@ -925,5 +942,34 @@ mod tests {
         let cut_val = serde_json::to_value(&cut_res.0).expect("serialize to value");
         assert!(cut_val.is_object(), "cut_scope response must be a JSON record object");
         assert!(cut_val.as_object().unwrap().contains_key("items"));
+    }
+
+    #[test]
+    fn list_column_sorts_unblocked_ready_first() {
+        let (board, goal_id) = test_board();
+        let cockpit = Cockpit::new(board.clone());
+
+        // Card 1: unblocked
+        let c1 = board.create(Some(goal_id), "Card 1", "Unblocked", Some("DoD".into()), Origin::Human, false, None).expect("c1");
+        let _ = board.transition(c1.id, State::Shaping, "test", None);
+        let _ = board.transition(c1.id, State::Ready, "test", None);
+
+        // Card 2: blocked by Card 1
+        let c2 = board.create(Some(goal_id), "Card 2", "Blocked", Some("DoD".into()), Origin::Human, false, None).expect("c2");
+        let _ = board.transition(c2.id, State::Shaping, "test", None);
+        let _ = board.transition(c2.id, State::Ready, "test", None);
+        let _ = board.set_blocked_by(c2.id, vec![c1.id]);
+
+        // Bounce Card 1 through claim and release so its entered_state_at is NEWER than Card 2
+        let _ = board.claim(c1.id, "agent-1", None, 60).expect("claim");
+        let _ = board.release(c1.id, "agent-1").expect("release");
+
+        let res = cockpit
+            .list_column(Parameters(ColumnArg { column: Column::Ready, goal: Some(goal_id) }))
+            .expect("list_column should succeed");
+
+        let pos_c1 = res.0.items.iter().position(|i| i.id == c1.id).expect("c1 present");
+        let pos_c2 = res.0.items.iter().position(|i| i.id == c2.id).expect("c2 present");
+        assert!(pos_c1 < pos_c2, "Unblocked card #1 must sort before blocked card #2");
     }
 }
