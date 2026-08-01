@@ -187,9 +187,14 @@ impl Board {
     }
 
     fn emit(&self, item: &WorkItem) {
+        let mut item = item.clone();
+        {
+            let s = self.state.read().unwrap();
+            Self::populate_blockers(&s, &mut item);
+        }
         let _ = self.tx.send(BoardEvent::Upsert {
             seq: self.next_seq(),
-            item: Box::new(item.clone()),
+            item: Box::new(item),
         });
         self.dirty.store(true, Ordering::Relaxed);
     }
@@ -208,10 +213,29 @@ impl Board {
         }
     }
 
+    pub fn populate_blockers(s: &BoardState, item: &mut WorkItem) {
+        item.blockers = item
+            .blocked_by
+            .iter()
+            .filter_map(|&bid| {
+                s.items.get(&bid).map(|b| BlockerSummary {
+                    id: b.id,
+                    title: b.title.clone(),
+                    state: b.state,
+                })
+            })
+            .collect();
+    }
+
     // ------------------------------------------------------------ tree reads
 
     pub fn get(&self, id: ItemId) -> Option<WorkItem> {
-        self.state.read().unwrap().items.get(&id).cloned()
+        let s = self.state.read().unwrap();
+        s.items.get(&id).map(|i| {
+            let mut item = i.clone();
+            Self::populate_blockers(&s, &mut item);
+            item
+        })
     }
 
     pub fn children_of(&self, id: ItemId) -> Vec<ItemId> {
@@ -339,7 +363,9 @@ impl Board {
         if to == State::Ready {
             item.progress = 0.0;
         }
-        Ok(item.clone())
+        let mut item_out = item.clone();
+        Self::populate_blockers(s, &mut item_out);
+        Ok(item_out)
     }
 
     pub fn transition(
@@ -382,7 +408,9 @@ impl Board {
             let depth = parent.map(|p| Self::depth(&s, p) + 1).unwrap_or(0);
             item.level = self.schema.level_for_depth(depth).map(|l| l.name.clone());
             s.items.insert(id, item.clone());
-            item
+            let mut item_out = item;
+            Self::populate_blockers(&s, &mut item_out);
+            item_out
         };
         self.emit(&item);
         item
@@ -547,7 +575,11 @@ impl Board {
                 Some(c) if c == "any" => true,
                 Some(c) => capabilities.iter().any(|have| have == c),
             })
-            .cloned()
+            .map(|i| {
+                let mut item = i.clone();
+                Self::populate_blockers(&s, &mut item);
+                item
+            })
             .collect()
     }
 
@@ -963,7 +995,15 @@ impl Board {
     pub fn snapshot(&self) -> Snapshot {
         let s = self.state.read().unwrap();
         let now = Utc::now();
-        let items: Vec<WorkItem> = s.items.values().cloned().collect();
+        let items: Vec<WorkItem> = s
+            .items
+            .values()
+            .map(|i| {
+                let mut item = i.clone();
+                Self::populate_blockers(&s, &mut item);
+                item
+            })
+            .collect();
 
         let mut goal_ids: Vec<ItemId> =
             items.iter().map(|i| Self::goal_of(&s, i.id)).collect();

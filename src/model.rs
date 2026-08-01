@@ -163,6 +163,14 @@ pub struct Transition {
     pub reason: Option<String>,
 }
 
+/// Summary of a resolved blocker item (id, title, state).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BlockerSummary {
+    pub id: ItemId,
+    pub title: String,
+    pub state: State,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItem {
     pub id: ItemId,
@@ -193,6 +201,8 @@ pub struct WorkItem {
 
     #[serde(default)]
     pub blocked_by: Vec<ItemId>,
+    #[serde(default)]
+    pub blockers: Vec<BlockerSummary>,
     #[serde(default)]
     pub capability: Option<String>,
 
@@ -267,6 +277,7 @@ impl WorkItem {
             origin: Origin::Human,
             above_line: false,
             blocked_by: Vec::new(),
+            blockers: Vec::new(),
             capability: None,
             lease: None,
             model: None,

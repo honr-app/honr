@@ -361,7 +361,16 @@ impl Cockpit {
                     ),
                     State::Review => format!("+{} −{} · gates passed", i.diff_added, i.diff_removed),
                     State::Ready if !i.blocked_by.is_empty() => {
-                        format!("blocked by {:?}", i.blocked_by)
+                        if !i.blockers.is_empty() {
+                            let summaries: Vec<String> = i
+                                .blockers
+                                .iter()
+                                .map(|b| format!("#{} \"{}\" ({:?})", b.id, b.title, b.state))
+                                .collect();
+                            format!("blocked by {}", summaries.join(", "))
+                        } else {
+                            format!("blocked by {:?}", i.blocked_by)
+                        }
                     }
                     _ => i.intent.clone(),
                 },
