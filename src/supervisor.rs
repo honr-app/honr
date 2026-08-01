@@ -297,18 +297,17 @@ struct Adoption {
     seen_cents: u64,
 }
 
-/// The card this sandbox belongs to, if the sandbox is worth adopting.
+/// The card this sandbox belongs to, if the sandbox is worth preserving or adopting.
 ///
-/// The card decides, not the sandbox. A failed sandbox is deliberately *kept*
-/// for inspection, so its existence proves nothing about whether a run is live;
-/// and a retry leaves the previous attempt's sandbox behind under the same
-/// `honr.item` label, so the label alone cannot say which one to watch.
-/// `environment` names the current attempt, and that is the only thing that
-/// can. Everything this rejects gets reaped.
+/// The card decides, not the sandbox. A failed sandbox or parked sandbox for a
+/// non-terminal card is preserved so its WORKDIR build cache survives across
+/// re-runs.
+/// Terminal cards (Done, Retired) or mismatched sandboxes (e.g. an old attempt
+/// when environment names a newer one) return None and get reaped during
+/// reconciliation.
 fn adoptable<'a>(item: Option<&'a WorkItem>, sandbox: &str) -> Option<&'a WorkItem> {
     item.filter(|i| {
-        matches!(i.state, State::Claimed | State::Running)
-            && i.environment.as_deref() == Some(sandbox)
+        !i.state.is_terminal() && i.environment.as_deref() == Some(sandbox)
     })
 }
 
@@ -383,6 +382,15 @@ async fn reconcile(os: &OpenShell, board: &SharedBoard, lease_secs: i64) -> Vec<
             continue;
         };
 
+        if !matches!(item.state, State::Claimed | State::Running) {
+            tracing::info!(
+                "#{id}: preserving parked sandbox {} in state {:?}",
+                sb.name,
+                item.state
+            );
+            continue;
+        }
+
         match adopt(os, board, item, &sb.name, lease_secs).await {
             Some(a) => {
                 tracing::info!("#{id}: re-attached to {} from line {}", sb.name, a.from_line);
@@ -395,8 +403,6 @@ async fn reconcile(os: &OpenShell, board: &SharedBoard, lease_secs: i64) -> Vec<
                 // A restart is not the card's fault, so it costs no retry
                 // budget; it just gets dispatched again from the top.
                 tracing::warn!("#{id}: {} has no live agent; requeueing", sb.name);
-                let _ = os.delete(&sb.name).await;
-                board.set_environment(id, None);
                 let _ = board.transition(
                     id,
                     State::Ready,
@@ -535,19 +541,16 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     result
 }
 
-/// Dispose of the sandbox. Deliberately no `Board` here: the card keeps what
-/// the run produced, including the sandbox name, and taking the board would
-/// make it easy to clear that again on the way out.
+/// Dispose of or stop the sandbox agent. Deliberately no `Board` here: the card
+/// keeps what the run produced, including the sandbox name, and taking the board
+/// would make it easy to clear that again on the way out.
 async fn finalize(os: &OpenShell, id: ItemId, name: &str, result: &anyhow::Result<()>) {
     match result {
-        // The sandbox goes; its name stays. Review has to answer "where did
-        // this run?" from the card, and the box is gone by the time anyone
-        // asks — the name is the only evidence left. Nothing keys off the
-        // field afterwards: `adoptable` is gated on Claimed/Running, so a
-        // finished card naming a box that somehow outlived it still gets
-        // reaped rather than re-adopted.
+        // Stop the agent process so it stops spending CPU/billing, but keep
+        // the sandbox parked for inspection or future re-use until Done.
         Ok(_) => {
-            let _ = os.delete(name).await;
+            stop_agent(os, name).await;
+            tracing::info!("#{id}: keeping parked sandbox {name} after run completed");
         }
         // Keep the sandbox on failure: `openshell logs` is the tool that
         // actually answers questions, and a deleted sandbox answers none. Stop
@@ -1766,12 +1769,137 @@ mod tests {
         // the real run went unwatched.
         assert!(adoptable(Some(&item), "honr-card-9-a1").is_none(), "reap the old attempt");
 
-        // Not running: whatever is out there is debris.
+        // Review card keeps its sandbox parked.
         item.state = State::Review;
-        assert!(adoptable(Some(&item), "honr-card-9-a2").is_none(), "reap a finished card's box");
+        assert!(adoptable(Some(&item), "honr-card-9-a2").is_some(), "keep a Review card's box");
+
+        // Terminal states reap the sandbox.
+        item.state = State::Done;
+        assert!(adoptable(Some(&item), "honr-card-9-a2").is_none(), "reap a Done card's box");
+
+        item.state = State::Retired;
+        assert!(adoptable(Some(&item), "honr-card-9-a2").is_none(), "reap a Retired card's box");
 
         // A sandbox for a card that no longer exists.
         assert!(adoptable(None, "honr-card-9-a2").is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_preserves_review_and_ready_sandboxes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "honr-test-reconcile-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let list_json = tmp_dir.join("list.json");
+        let deleted_txt = tmp_dir.join("deleted.txt");
+        let script_path = tmp_dir.join("mock_openshell.sh");
+
+        let board = Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            tmp_dir.join("board.json"),
+        ));
+
+        let proj = board
+            .create(None, "Project", "intent", None, crate::model::Origin::Human, false, None)
+            .expect("create project");
+
+        let add_task = |b: &crate::store::Board, title: &str, st: crate::model::State| {
+            let item = b
+                .create(Some(proj.id), title, "intent", Some("DoD".into()), crate::model::Origin::Human, true, None)
+                .expect("create item");
+            let _ = b.transition(item.id, crate::model::State::Shaping, "test", None);
+            let _ = b.transition(item.id, crate::model::State::Ready, "test", None);
+            if st != crate::model::State::Ready {
+                let _ = b.transition(item.id, st, "test", None);
+            }
+            item.id
+        };
+
+        // Task 1: Review
+        let id1 = add_task(&board, "Card 1", crate::model::State::Review);
+        let env1 = format!("honr-card-{id1}-a1");
+        board.set_environment(id1, Some(env1.clone()));
+
+        // Task 2: Ready with environment
+        let id2 = add_task(&board, "Card 2", crate::model::State::Ready);
+        let env2 = format!("honr-card-{id2}-a1");
+        board.set_environment(id2, Some(env2.clone()));
+
+        // Task 3: Done (terminal)
+        let id3 = add_task(&board, "Card 3", crate::model::State::Done);
+        let env3 = format!("honr-card-{id3}-a1");
+        board.set_environment(id3, Some(env3.clone()));
+
+        // Task 4: Running with environment = honr-card-{id4}-a2
+        let id4 = add_task(&board, "Card 4", crate::model::State::Running);
+        let env4_old = format!("honr-card-{id4}-a1");
+        let env4_new = format!("honr-card-{id4}-a2");
+        board.set_environment(id4, Some(env4_new.clone()));
+
+        // Task 5: Retired (terminal)
+        let id5 = add_task(&board, "Card 5", crate::model::State::Retired);
+        let env5 = format!("honr-card-{id5}-a1");
+        board.set_environment(id5, Some(env5.clone()));
+
+        let sandboxes_json = serde_json::json!([
+            {"name": env1, "labels": {"honr.item": id1.to_string()}},
+            {"name": env2, "labels": {"honr.item": id2.to_string()}},
+            {"name": env3, "labels": {"honr.item": id3.to_string()}},
+            {"name": env4_old, "labels": {"honr.item": id4.to_string()}},
+            {"name": env4_new, "labels": {"honr.item": id4.to_string()}},
+            {"name": env5, "labels": {"honr.item": id5.to_string()}},
+            {"name": "honr-card-99-a1", "labels": {"honr.item": "99"}}
+        ]).to_string();
+
+        std::fs::write(&list_json, sandboxes_json).unwrap();
+
+        let script_content = format!(
+            r#"#!/bin/sh
+if [ "$1" = "sandbox" ] && [ "$2" = "list" ]; then
+    cat "{}"
+elif [ "$1" = "sandbox" ] && [ "$2" = "delete" ]; then
+    echo "$3" >> "{}"
+    exit 0
+elif [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
+    echo "{MARK_GONE}"
+    exit 0
+fi
+"#,
+            list_json.display(),
+            deleted_txt.display()
+        );
+        std::fs::write(&script_path, script_content).unwrap();
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+
+        let os = OpenShell::new(script_path.to_str().unwrap(), Duration::from_secs(5));
+
+        reconcile(&os, &board, 600).await;
+
+        let deleted = if deleted_txt.exists() {
+            std::fs::read_to_string(&deleted_txt).unwrap()
+        } else {
+            String::new()
+        };
+        let deleted_lines: Vec<&str> = deleted.lines().collect();
+
+        // Done, Retired, old attempt, and orphaned sandboxes MUST be reaped:
+        assert!(deleted_lines.contains(&env3.as_str()), "Done card sandbox reaped");
+        assert!(deleted_lines.contains(&env4_old.as_str()), "Old attempt sandbox reaped");
+        assert!(deleted_lines.contains(&env5.as_str()), "Retired card sandbox reaped");
+        assert!(deleted_lines.contains(&"honr-card-99-a1"), "Orphaned card sandbox reaped");
+
+        // Review, Ready, and active Running sandboxes MUST be preserved:
+        assert!(!deleted_lines.contains(&env1.as_str()), "Review card sandbox kept");
+        assert!(!deleted_lines.contains(&env2.as_str()), "Ready card sandbox kept");
+        assert!(!deleted_lines.contains(&env4_new.as_str()), "Active card sandbox kept");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
     /// Where to resume, and what has already been paid for.
