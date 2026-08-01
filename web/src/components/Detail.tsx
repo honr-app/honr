@@ -6,6 +6,8 @@ interface Detail extends WorkItem {
   ancestry: { level: string; title: string; intent: string }[];
   constraints: string[];
   children: number[];
+  default_engine?: string;
+  default_model?: string;
 }
 
 type EditPlanTask = {
@@ -167,11 +169,15 @@ function parseClaudeLogLine(
 export function DetailDrawer({
   id,
   now,
+  defaultEngine,
+  defaultModel,
   onClose,
   onChanged,
 }: {
   id: number;
   now: number;
+  defaultEngine?: string;
+  defaultModel?: string;
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -181,7 +187,7 @@ export function DetailDrawer({
   const [editTitle, setEditTitle] = useState("");
   const [editIntent, setEditIntent] = useState("");
   const [editDod, setEditDod] = useState("");
-  const [editEngine, setEditEngine] = useState("agy");
+  const [editEngine, setEditEngine] = useState("");
   const [constraintText, setConstraintText] = useState("");
   const [planTasks, setPlanTasks] = useState<EditPlanTask[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -231,7 +237,7 @@ export function DetailDrawer({
         setEditTitle(item.title);
         setEditIntent(item.intent);
         setEditDod(item.definition_of_done ?? "");
-        setEditEngine(item.engine ?? "agy");
+        setEditEngine(item.engine ?? item.default_engine ?? defaultEngine ?? "");
         setPlanTasks(planTasksFromArtifact(item.plan?.tasks));
       })
       .catch((e) => setErr(String(e)));
@@ -250,6 +256,9 @@ export function DetailDrawer({
 
   if (err && !d) return <aside className="drawer"><Head onClose={onClose} title={`#${id}`} /><div className="err">{err}</div></aside>;
   if (!d) return <aside className="drawer"><Head onClose={onClose} title={`#${id}`} /><div className="dim">loading…</div></aside>;
+
+  const resolvedEngine = d.engine ?? d.default_engine ?? defaultEngine ?? "";
+  const resolvedModel = d.model ?? d.default_model ?? defaultModel ?? "";
 
   return (
     <aside className="drawer">
@@ -321,7 +330,8 @@ export function DetailDrawer({
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <span className="pill">{d.state}</span>
           {d.level && <span className="pill">{d.level}</span>}
-          <span className="pill">{d.engine || "claude"}</span>
+          <span className="pill">{resolvedEngine}</span>
+          {resolvedModel && <span className="pill">{resolvedModel}</span>}
           <span className="pill">{money(d.cost_cents)}</span>
           {d.beads_id && (
             <span
@@ -430,7 +440,7 @@ export function DetailDrawer({
               </a>
             </p>
           )}
-          {d.environment && <p className="dim">sandbox {d.environment}</p>}
+          {d.environment && <p className="dim">sandbox {d.environment} ({resolvedEngine})</p>}
         </Section>
       )}
 
@@ -438,6 +448,20 @@ export function DetailDrawer({
         const parsedClaudeLogs = logs.claude
           .map((l) => parseClaudeLogLine(l))
           .filter((p): p is { text: string; type: "text" | "tool" | "result" | "system" | "error" } => p !== null);
+
+        const agentTabLabel =
+          resolvedEngine === "agy"
+            ? "Antigravity Agent"
+            : resolvedEngine === "claude"
+              ? "Claude Agent"
+              : `${resolvedEngine} Agent`;
+
+        const engineDisplayName =
+          resolvedEngine === "agy"
+            ? "Antigravity (agy)"
+            : resolvedEngine === "claude"
+              ? "Claude"
+              : resolvedEngine;
 
         return (
           <Section title="Live Logs">
@@ -448,7 +472,7 @@ export function DetailDrawer({
                   style={{ fontSize: "11px", padding: "3px 10px" }}
                   onClick={() => setLogTab("claude")}
                 >
-                  {d.engine === "agy" ? "Antigravity Agent" : "Claude Agent"} ({parsedClaudeLogs.length})
+                  {agentTabLabel} ({parsedClaudeLogs.length})
                 </button>
                 <button
                   className={logTab === "openshell" ? "primary" : ""}
@@ -501,8 +525,7 @@ export function DetailDrawer({
                       ))}
                       {(() => {
                         const last = parsedClaudeLogs[parsedClaudeLogs.length - 1];
-                        const engineName = d.engine === "agy" ? "Antigravity (agy)" : "Claude";
-                        let statusText = `${engineName} is thinking / evaluating response...`;
+                        let statusText = `${engineDisplayName} is thinking / evaluating response...`;
                         if (last.type === "tool") statusText = `Executing ${last.text.replace("🔨 ", "")}...`;
                         if (last.type === "result") statusText = "Tool output received, processing next action...";
                         return (
@@ -534,7 +557,7 @@ export function DetailDrawer({
                     </>
                   ) : (
                     <span className="dim">
-                      Waiting for {d.engine === "agy" ? "Antigravity" : "Claude"} agent stdout stream…
+                      Waiting for {engineDisplayName} agent stdout stream…
                     </span>
                   )
                 ) : logs.openshell.length > 0 ? (

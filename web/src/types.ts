@@ -148,6 +148,8 @@ export interface Snapshot {
   heartbeat_expect_secs: number;
   seq: number;
   dispatch_paused: boolean;
+  default_engine?: string;
+  default_model?: string;
 }
 
 export type BoardEvent =

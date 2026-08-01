@@ -11,6 +11,8 @@ interface BoardState {
   loaded: boolean;
   connected: boolean;
   dispatchPaused: boolean;
+  defaultEngine: string;
+  defaultModel: string;
   /** When the last successful load happened. Drives the staleness warning. */
   lastLoadedAt: number | null;
 }
@@ -30,6 +32,8 @@ const initial: BoardState = {
   loaded: false,
   connected: false,
   dispatchPaused: false,
+  defaultEngine: "",
+  defaultModel: "",
   lastLoadedAt: null,
 };
 
@@ -46,6 +50,8 @@ function reduce(s: BoardState, a: Action): BoardState {
         serverTime: a.snap.server_time,
         heartbeatExpect: a.snap.heartbeat_expect_secs,
         dispatchPaused: a.snap.dispatch_paused ?? false,
+        defaultEngine: a.snap.default_engine ?? "",
+        defaultModel: a.snap.default_model ?? "",
         loaded: true,
         lastLoadedAt: Date.now(),
       };

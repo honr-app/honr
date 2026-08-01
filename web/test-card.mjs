@@ -81,4 +81,51 @@ const unblockedHtml = renderToString(
 assert(!unblockedHtml.includes("blocker-chips"), "Unblocked card should be empty when unblocked (no blocker chips)");
 assert(!unblockedHtml.includes("waiting on"), "Unblocked card should not render waiting on");
 
+// Test 3: Running card with engine null and defaultEngine agy shows agy badge
+const runningItem = {
+  ...unblockedItem,
+  id: 9,
+  state: "running",
+  engine: null,
+  model: "claude-opus-5",
+  progress: 0.5,
+  cost_cents: 100,
+  lease: {
+    agent_id: "agent-1",
+    granted_at: new Date().toISOString(),
+    last_heartbeat: new Date().toISOString(),
+    expires_at: new Date().toISOString(),
+  },
+};
+
+const runningAgyHtml = renderToString(
+  React.createElement(Card, {
+    item: runningItem,
+    column: "running",
+    now,
+    heartbeatExpect: 600,
+    defaultEngine: "agy",
+    onOpen: () => {},
+  })
+);
+
+console.log("\nRunning Card HTML (defaultEngine=agy):\n", runningAgyHtml);
+assert(runningAgyHtml.includes("agy"), "Running card with engine null and defaultEngine agy should render agy badge");
+assert(!runningAgyHtml.includes("◍ claude-opus-5"), "Running card should not render model name as badge when engine resolves to agy");
+
+// Test 4: Running card with engine null and defaultEngine claude shows claude badge
+const runningClaudeHtml = renderToString(
+  React.createElement(Card, {
+    item: runningItem,
+    column: "running",
+    now,
+    heartbeatExpect: 600,
+    defaultEngine: "claude",
+    onOpen: () => {},
+  })
+);
+
+console.log("\nRunning Card HTML (defaultEngine=claude):\n", runningClaudeHtml);
+assert(runningClaudeHtml.includes("claude"), "Running card with engine null and defaultEngine claude should render claude badge");
+
 console.log("\n✅ All Card component assertions passed!");

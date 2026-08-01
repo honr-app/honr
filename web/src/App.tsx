@@ -110,6 +110,8 @@ export default function App() {
             breadcrumbOf={breadcrumbOf}
             now={now}
             heartbeatExpect={b.heartbeatExpect}
+            defaultEngine={b.defaultEngine}
+            defaultModel={b.defaultModel}
             onOpen={setOpen}
             onChanged={b.refresh}
           />
@@ -125,7 +127,7 @@ export default function App() {
         )}
 
         {open != null && (
-          <DetailDrawer id={open} now={now} onClose={() => setOpen(null)} onChanged={b.refresh} />
+          <DetailDrawer id={open} now={now} defaultEngine={b.defaultEngine} defaultModel={b.defaultModel} onClose={() => setOpen(null)} onChanged={b.refresh} />
         )}
       </main>
     </div>
