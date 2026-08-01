@@ -131,6 +131,12 @@ impl BeadsClient {
             let err = String::from_utf8_lossy(&out.stderr);
             return Err(format!("bd show failed: {err}"));
         }
+        if let Ok(issues) = serde_json::from_slice::<Vec<BeadsIssue>>(&out.stdout) {
+            return issues
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("issue {id} not found"));
+        }
         serde_json::from_slice(&out.stdout)
             .map_err(|e| format!("failed to parse bd show JSON: {e}"))
     }
