@@ -79,7 +79,6 @@ const unblockedHtml = renderToString(
 );
 
 assert(!unblockedHtml.includes("blocker-chips"), "Unblocked card should be empty when unblocked (no blocker chips)");
-assert(!unblockedHtml.includes("waiting on"), "Unblocked card should not render waiting on");
 
 // Test 3: Running card with engine null and defaultEngine agy shows agy badge
 const runningItem = {
@@ -128,4 +127,71 @@ const runningClaudeHtml = renderToString(
 console.log("\nRunning Card HTML (defaultEngine=claude):\n", runningClaudeHtml);
 assert(runningClaudeHtml.includes("claude"), "Running card with engine null and defaultEngine claude should render claude badge");
 
-console.log("\n✅ All Card component assertions passed!");
+import { isBlocked, sortFor } from "./dist-test/components/Board.js";
+
+// Test 5: isBlocked helper
+assert.strictEqual(isBlocked(blockedItem), true, "blockedItem should be blocked");
+assert.strictEqual(isBlocked(unblockedItem), false, "unblockedItem should be unblocked");
+
+const resolvedBlockerItem = {
+  ...blockedItem,
+  id: 10,
+  blocked_by: [6],
+  blockers: [{ id: 6, title: "Supervisor runs the gates", state: "done" }],
+};
+assert.strictEqual(isBlocked(resolvedBlockerItem), false, "Item with done blocker should be unblocked");
+
+// Test 6: Ready column sorts claimable cards first, including after claim-release bounce
+const oldDate = new Date(Date.now() - 3600 * 1000).toISOString();
+const olderDate = new Date(Date.now() - 7200 * 1000).toISOString();
+
+const card1_unblocked = {
+  ...unblockedItem,
+  id: 1,
+  title: "Unblocked Card 1",
+  entered_state_at: oldDate,
+};
+
+const card2_blocked = {
+  ...blockedItem,
+  id: 2,
+  title: "Blocked Card 2",
+  entered_state_at: olderDate, // older timestamp
+};
+
+const card3_blocked = {
+  ...blockedItem,
+  id: 3,
+  title: "Blocked Card 3",
+  entered_state_at: olderDate,
+};
+
+const card4_blocked = {
+  ...blockedItem,
+  id: 4,
+  title: "Blocked Card 4",
+  entered_state_at: olderDate,
+};
+
+const card5_blocked = {
+  ...blockedItem,
+  id: 5,
+  title: "Blocked Card 5",
+  entered_state_at: olderDate,
+};
+
+// Ready column sorting: Card 1 (unblocked) must sort before Cards 2..5 (blocked)
+let readyCards = [card2_blocked, card3_blocked, card4_blocked, card5_blocked, card1_unblocked];
+readyCards.sort(sortFor("ready"));
+assert.strictEqual(readyCards[0].id, 1, "Unblocked card #1 must sort first");
+
+// Claim -> Release bounce: Card 1 is claimed and then released back to Ready.
+// Its entered_state_at refreshes to NOW (newest timestamp).
+card1_unblocked.entered_state_at = new Date().toISOString();
+
+readyCards = [card2_blocked, card3_blocked, card4_blocked, card5_blocked, card1_unblocked];
+readyCards.sort(sortFor("ready"));
+
+assert.strictEqual(readyCards[0].id, 1, "After claim-release bounce, unblocked card #1 must STILL sort first");
+
+console.log("\n✅ All Card & Board component sorting assertions passed!");

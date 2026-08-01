@@ -31,9 +31,10 @@ export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaul
   const stale = hbAge !== null && hbAge > heartbeatExpect;
   const decay = hbAge === null ? 0 : Math.min(1, Math.max(0, (hbAge - heartbeatExpect) / (heartbeatExpect * 4)));
 
-  const blockersList = item.blockers && item.blockers.length > 0
+  const blockersList = (item.blockers && item.blockers.length > 0
     ? item.blockers
-    : item.blocked_by.map((id) => ({ id, title: `Task #${id}`, state: "ready" as const }));
+    : item.blocked_by.map((id) => ({ id, title: `Task #${id}`, state: "ready" as const }))
+  ).filter((b) => b.state !== "done" && b.state !== "retired");
 
   return (
     <div
