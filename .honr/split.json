@@ -1,24 +1,19 @@
 {
   "children": [
     {
-      "title": "Supervisor: Preserve sandboxes on successful run completion to Review",
-      "intent": "Modify finalize in src/supervisor.rs so that successful agent runs stop the agent process to halt billing while keeping the sandbox intact for Review and subsequent iterations.",
-      "definition_of_done": "cargo test --offline --locked passes; supervisor unit tests verify that successful runs preserve the sandbox and stop the agent process."
+      "title": "Supervisor: Tighten agent briefing rules for splits and PR collisions",
+      "intent": "Update briefing(...) in src/supervisor.rs to explicitly instruct agents that splits may only carve the current card's DoD into smaller slices of the same outcome, and that splitting after opening a PR is prohibited (split and publish are mutually exclusive).",
+      "definition_of_done": "cargo test --offline --locked passes; supervisor unit tests in src/supervisor.rs verify that the generated briefing contains explicit instructions regarding slice-only splits, prohibiting inventing external work, and PR/split mutual exclusivity."
     },
     {
-      "title": "Supervisor: Preserve parked sandboxes in Review and Ready during reconcile",
-      "intent": "Update adoptable and reconcile in src/supervisor.rs so sandboxes for non-terminal cards (Review, Ready with environment) are preserved rather than reaped as orphans.",
-      "definition_of_done": "cargo test --offline --locked passes; reconciliation unit tests verify that sandboxes for Review and Ready cards are kept during reconcile."
+      "title": "Store & Supervisor: Reject split attempts on cards with existing PRs",
+      "intent": "Update Board::split in src/store.rs and process_verdict in src/supervisor.rs to check whether a PR already exists for the card (pr_url set or PR detected). If so, refuse the split and escalate the card to NeedsHuman rather than creating sibling tasks.",
+      "definition_of_done": "cargo test --offline --locked passes; unit tests in src/store.rs and src/supervisor.rs verify that calling split on a card with a PR returns an error and escalates to NeedsHuman."
     },
     {
-      "title": "Supervisor: In-place sandbox reuse and branch refresh on card reclaim",
-      "intent": "Update run_inside in src/supervisor.rs so claiming a card with a live environment sandbox reuses it in place (git fetch/rebase, new briefing) without delete/create, preserving WORKDIR build caches.",
-      "definition_of_done": "cargo test --offline --locked passes; supervisor tests verify live sandbox reuse and in-place workspace refresh on card reclaim."
-    },
-    {
-      "title": "Store & Supervisor: Delete sandboxes on Done, Retired, and item deletion",
-      "intent": "Trigger sandbox deletion and environment cleanup when a card reaches terminal states (Done, Retired/Cut) or is deleted.",
-      "definition_of_done": "cargo test --offline --locked and cargo clippy --offline -- -D warnings pass; unit tests verify sandbox deletion on Done, Retired, and item deletion."
+      "title": "Supervisor & Store: Validate split child payloads and prevent bad splits from reaching Ready",
+      "intent": "Update process_verdict in src/supervisor.rs and Board::split in src/store.rs to strictly validate split child fields (non-empty title, non-empty intent, valid DoD) and ensure that if any child fails validation or governor limits, no sibling tasks are published to Ready and the parent card is escalated.",
+      "definition_of_done": "cargo test --offline --locked and cargo clippy --offline -- -D warnings pass; unit tests verify that invalid split payloads (e.g., empty title/intent) are rejected and escalated before reaching Ready."
     }
   ]
 }
