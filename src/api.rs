@@ -242,4 +242,52 @@ mod tests {
             serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }),
         );
     }
+
+    #[tokio::test]
+    async fn item_detail_and_board_snapshot_include_resolved_blockers() {
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join("honr-test-blockers.json"),
+        ));
+        let blocker = b.create(None, "Blocker Task", "Must be done first", None, crate::model::Origin::Human, false, None);
+        let blocked = b.create(None, "Blocked Task", "Waiting on blocker", None, crate::model::Origin::Human, false, None);
+        b.set_blocked_by(blocked.id, vec![blocker.id]);
+
+        let Json(snap) = board(AxState(b.clone())).await;
+        let snap_val = serde_json::to_value(&snap).unwrap();
+        let blocked_item = snap_val["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == blocked.id)
+            .expect("blocked item in snapshot");
+
+        assert_eq!(blocked_item["blocked_by"], serde_json::json!([blocker.id]));
+        assert_eq!(
+            blocked_item["blockers"],
+            serde_json::json!([
+                {
+                    "id": blocker.id,
+                    "title": "Blocker Task",
+                    "state": "draft"
+                }
+            ])
+        );
+
+        let Ok(Json(detail)) = item_detail(AxState(b), Path(blocked.id)).await else {
+            panic!("no detail for blocked task");
+        };
+        let detail_val = serde_json::to_value(&detail).unwrap();
+        assert_eq!(detail_val["blocked_by"], serde_json::json!([blocker.id]));
+        assert_eq!(
+            detail_val["blockers"],
+            serde_json::json!([
+                {
+                    "id": blocker.id,
+                    "title": "Blocker Task",
+                    "state": "draft"
+                }
+            ])
+        );
+    }
 }
