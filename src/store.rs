@@ -1291,6 +1291,31 @@ impl Board {
         children: Vec<(String, String, String)>, // title, intent, dod
         max_children: usize,
     ) -> Result<Vec<WorkItem>, String> {
+        let card = self.get(id).ok_or("no such item")?;
+
+        if let Some(ref pr_url) = card.pr_url.filter(|s| !s.trim().is_empty()) {
+            let msg = format!(
+                "cannot split card #{id}: a PR already exists ({pr_url}); split and publish are mutually exclusive"
+            );
+            let _ = self.escalate(
+                id,
+                agent_id,
+                msg.clone(),
+                vec![
+                    EscalationOption {
+                        label: "Finish card via report".into(),
+                        detail: "Complete the card with the existing PR using report.".into(),
+                    },
+                    EscalationOption {
+                        label: "Close PR and retry split".into(),
+                        detail: "Close or abandon the existing PR before splitting the card.".into(),
+                    },
+                ],
+                0,
+            );
+            return Err(msg);
+        }
+
         if children.len() < 2 {
             return Err("a split needs at least two siblings; use report if the work is one card".into());
         }
@@ -1302,7 +1327,6 @@ impl Board {
             ));
         }
 
-        let card = self.get(id).ok_or("no such item")?;
         let project_id = card.parent.ok_or_else(|| {
             "cannot split a Project; only Tasks under a Project can split into siblings".to_string()
         })?;
@@ -2178,6 +2202,25 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.contains("cannot split a Project"), "got error: {err}");
+    }
+
+    #[test]
+    fn split_refused_when_pr_exists() {
+        let (b, id) = claimed_leaf();
+        b.set_pr_url(id, Some("https://github.com/shanemcd/honr/pull/42".to_string()));
+        let children = vec![
+            ("Part 1".into(), "Do part 1".into(), "Part 1 done".into()),
+            ("Part 2".into(), "Do part 2".into(), "Part 2 done".into()),
+        ];
+        let err = b.split(id, "agent", children, 5).unwrap_err();
+        assert!(err.contains("a PR already exists"), "got error: {err}");
+
+        let item = b.get(id).expect("item exists");
+        assert_eq!(item.state, State::NeedsHuman);
+        assert!(item.escalation.is_some(), "escalation must be populated");
+        let esc = item.escalation.unwrap();
+        assert!(esc.question.contains("a PR already exists"));
+        assert_eq!(esc.options.len(), 2);
     }
 
     #[test]
