@@ -33,7 +33,7 @@
 | **Storage Engine** | Single `honr.json` file on host with `RwLock` | No multi-process or multi-branch concurrency. External tools cannot query or update tasks safely. |
 | **Hierarchy & Graph** | Fixed ladder (`Vision → Project → Epic → Story → Task`) + `blocked_by` array | Strict tree height rules create confusion (e.g. Epics appearing on execution boards). Lack of flexible graph edges (`relates-to`, `supersedes`). |
 | **Sandbox Context** | Static `$HONR_BRIEFING` string passed via CLI flag at container start | Agents inside OpenShell sandboxes cannot query task context dynamically or update progress during long execution turns. |
-| **Agent Memory** | Stateslint logs and verdict files (`.honr/*.json`) | No persistent memory across card attempts or agent turns. Learned insights are lost when a sandbox is destroyed. |
+| **Agent Memory** | Stateslint logs and verdict files (`/work/.honr/*.json`) | No persistent memory across card attempts or agent turns. Learned insights are lost when a sandbox is destroyed. |
 | **Concurrency & IDs** | Integer sequential IDs (`#12`, `#13`) | Susceptible to ID collision when multiple sandboxed agents attempt to split cards concurrently on divergent git branches. |
 
 ---
