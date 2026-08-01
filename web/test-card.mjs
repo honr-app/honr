@@ -4,6 +4,7 @@ import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
 import { Home } from "./dist-test/components/Home.js";
 import { isBlocked, sortFor } from "./dist-test/components/Board.js";
+import { Head } from "./dist-test/components/Detail.js";
 
 const now = Math.floor(Date.now() / 1000);
 
@@ -280,4 +281,18 @@ const cleanHomeHtml = renderToString(
 assert(!cleanHomeHtml.includes("owaiting"), "Home with unblocked items should stay clean");
 assert(!cleanHomeHtml.includes("waiting on"), "Home with unblocked items should not show waiting on");
 
-console.log("\n✅ All Card, Board, and Home component assertions passed!");
+// Test 9: Detail Head renders Archive and Delete actions
+const headHtml = renderToString(
+  React.createElement(Head, {
+    title: "#100 Test Project",
+    onClose: () => {},
+    onArchive: () => {},
+    onDelete: () => {},
+  })
+);
+
+console.log("\nDetail Head HTML:\n", headHtml);
+assert(headHtml.includes("📦 Archive"), "Detail Head should offer Archive action button");
+assert(headHtml.includes("🗑 Delete"), "Detail Head should offer Delete action button");
+
+console.log("\n✅ All Card, Board, Home, and Detail component assertions passed!");
