@@ -94,6 +94,7 @@ export interface WorkItem {
   diff_removed: number;
   notes: Note[];
   pinned: string[];
+  last_bounce_reason?: string | null;
   release_target: string | null;
   environment: string | null;
   engine?: string | null;

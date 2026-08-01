@@ -321,6 +321,10 @@ pub struct WorkItem {
     #[serde(default)]
     pub pinned: Vec<String>,
 
+    /// The bounce reason if this card was returned to Ready due to an infra or execution bounce.
+    #[serde(default)]
+    pub last_bounce_reason: Option<String>,
+
     /// The tree says *why*; the release target says *which shipped artifact*.
     /// These vary independently.
     #[serde(default)]
@@ -387,6 +391,7 @@ impl WorkItem {
             diff_removed: 0,
             notes: Vec::new(),
             pinned: Vec::new(),
+            last_bounce_reason: None,
             release_target: None,
             environment: None,
             beads_id: None,

@@ -515,6 +515,7 @@ impl Board {
             if by == "human" {
                 item.run_failures = 0;
                 item.escalation = None;
+                item.last_bounce_reason = None;
             }
         }
         let mut item_out = item.clone();
@@ -1419,7 +1420,34 @@ impl Board {
 
     /// `release` — graceful surrender.
     pub fn release(&self, id: ItemId, agent_id: &str) -> Result<WorkItem, TransitionError> {
-        self.transition(id, State::Ready, agent_id, Some("released by agent".into()))
+        self.release_with_reason(id, agent_id, None)
+    }
+
+    /// `release_with_reason` — graceful surrender with an explicit bounce reason recorded on WorkItem and transition history.
+    pub fn release_with_reason(
+        &self,
+        id: ItemId,
+        agent_id: &str,
+        reason: Option<&str>,
+    ) -> Result<WorkItem, TransitionError> {
+        let reason_str = reason
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "released by agent".to_string());
+
+        let item = {
+            let mut s = self.state.write().unwrap();
+            if let Some(r) = reason {
+                if let Some(it) = s.items.get_mut(&id) {
+                    it.last_bounce_reason = Some(r.to_string());
+                }
+            }
+            Self::transition_locked(&mut s, id, State::Ready, agent_id, Some(reason_str))?
+        };
+        self.emit(&item);
+        if let Some(r) = reason {
+            self.story(id, format!("{}: released ({r})", item.title));
+        }
+        Ok(item)
     }
 
     // --------------------------------------------------------- the verifier
@@ -2454,5 +2482,49 @@ mod tests {
         let restored = Board::load_or_new(Schema::default(), path.clone());
         assert!(restored.get(project.id).unwrap().dispatch_paused);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn release_with_reason_records_bounce_reason_and_history() {
+        let (b, _project, task_id) = project_with_ready_task();
+        let agent_id = "agent-infra-test";
+
+        // Claim task
+        let _grant = b.claim(task_id, agent_id, None, 300).expect("claim task");
+        let claimed = b.get(task_id).expect("claimed item");
+        assert_eq!(claimed.state, State::Claimed);
+        assert_eq!(claimed.last_bounce_reason, None);
+
+        // Release with reason
+        let bounce_msg = "infra failure: podman socket connection refused";
+        let released = b
+            .release_with_reason(task_id, agent_id, Some(bounce_msg))
+            .expect("release with reason");
+
+        assert_eq!(released.state, State::Ready);
+        assert_eq!(
+            released.last_bounce_reason.as_deref(),
+            Some(bounce_msg)
+        );
+
+        // Verify transition history
+        let last_transition = released
+            .history
+            .last()
+            .expect("has transition history");
+        assert_eq!(last_transition.from, State::Claimed);
+        assert_eq!(last_transition.to, State::Ready);
+        assert_eq!(last_transition.by, agent_id);
+        assert_eq!(
+            last_transition.reason.as_deref(),
+            Some(bounce_msg)
+        );
+
+        // Verify state store persistence/get
+        let fetched = b.get(task_id).expect("fetched item");
+        assert_eq!(
+            fetched.last_bounce_reason.as_deref(),
+            Some(bounce_msg)
+        );
     }
 }
