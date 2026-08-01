@@ -1,4 +1,4 @@
-import { money, secsSince, since } from "../api";
+import { money, secsSince, since } from "../api.js";
 import type { ColumnKey, WorkItem } from "../types";
 
 interface Props {
@@ -23,6 +23,10 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }:
   const stale = hbAge !== null && hbAge > heartbeatExpect;
   const decay = hbAge === null ? 0 : Math.min(1, Math.max(0, (hbAge - heartbeatExpect) / (heartbeatExpect * 4)));
 
+  const blockersList = item.blockers && item.blockers.length > 0
+    ? item.blockers
+    : item.blocked_by.map((id) => ({ id, title: `Task #${id}`, state: "ready" as const }));
+
   return (
     <div
       className={`card col-${column} ${machine ? "machine" : ""} ${stale ? "stale" : ""}`}
@@ -40,22 +44,29 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }:
         <span className="id">#{item.id}</span> {item.title}
       </div>
 
+      {blockersList.length > 0 && (
+        <div className="blocker-chips" data-testid="blocker-chips">
+          <span className="blocker-label">⊘ waiting on</span>
+          {blockersList.map((b) => (
+            <span
+              key={b.id}
+              className={`blocker-chip state-${b.state}`}
+              title={`#${b.id}: ${b.title} (${b.state.replace("_", " ")})`}
+            >
+              <span className="blocker-id">#{b.id}</span>
+              <span className="blocker-title">{b.title}</span>
+              <span className="state-cue">{b.state.replace("_", " ")}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
       {column === "ready" && (
         <>
           <div className="row">
             <span className="tag">⊙ {item.capability ?? "any"}</span>
             <span className="dim">{since(item.entered_state_at, now)}</span>
           </div>
-          {((item.blockers && item.blockers.length > 0) || item.blocked_by.length > 0) && (
-            <div className="row blocked">
-              ⊘ blocked by{" "}
-              {item.blockers && item.blockers.length > 0
-                ? item.blockers
-                    .map((b) => `#${b.id} "${b.title}" (${b.state.replace("_", " ")})`)
-                    .join(", ")
-                : item.blocked_by.map((b) => `#${b}`).join(", ")}
-            </div>
-          )}
           {breadcrumb && <div className="crumb">↑ {breadcrumb}</div>}
         </>
       )}
