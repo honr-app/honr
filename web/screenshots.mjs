@@ -11,7 +11,8 @@
  */
 import { chromium } from "playwright";
 import { spawn, execSync } from "node:child_process";
-import { mkdirSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import { mkdirSync, writeFileSync, copyFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -32,14 +33,87 @@ mkdirSync(`${SCRATCH}/web`, { recursive: true });
 execSync(`cp -R ${ROOT}web/dist ${SCRATCH}/web/dist`);
 copyFileSync(`${ROOT}sandbox/policy.yaml`, `${SCRATCH}/policy.yaml`);
 
-const honr = spawn(`${ROOT}target/debug/honr`, [], {
-  cwd: SCRATCH,
-  env: { ...process.env, HONR_PORT: String(PORT) },
-  stdio: "inherit",
-});
-process.on("exit", () => honr.kill());
+let honr;
+if (existsSync(`${ROOT}target/debug/honr`)) {
+  honr = spawn(`${ROOT}target/debug/honr`, [], {
+    cwd: SCRATCH,
+    env: { ...process.env, HONR_PORT: String(PORT) },
+    stdio: "inherit",
+  });
+  process.on("exit", () => honr.kill());
+} else {
+  // Lightweight server serving web/dist and fixture data
+  const rawData = JSON.parse(readFileSync(`${SCRATCH}/honr.json`, "utf8"));
+  const snapshotData = JSON.stringify({
+    items: Object.values(rawData.items),
+    levels: [
+      { name: "Vision", horizon: null, owner: null, elaborate: null, requires: [], claimable: false },
+      { name: "Project", horizon: null, owner: null, elaborate: null, requires: [], claimable: false },
+      { name: "Epic", horizon: null, owner: null, elaborate: null, requires: [], claimable: false },
+      { name: "Story", horizon: null, owner: null, elaborate: null, requires: [], claimable: true },
+    ],
+    goals: [
+      {
+        id: 1,
+        title: "honr builds honr",
+        intent: "honr takes cards against its own source and hands back reviewable pull requests.",
+        progress: 0.5,
+        leaves_done: 4,
+        leaves_total: 8,
+        spend_cents: 1200,
+        budget_cents: 5000,
+        agents_live: 3,
+        needs_you: 1,
+        columns: [],
+        story: rawData.stories?.[2] ?? [],
+      },
+    ],
+    server_time: new Date().toISOString(),
+    heartbeat_expect_secs: 600,
+    seq: 1,
+  });
+  const server = createServer((req, res) => {
+    if (req.url === "/healthz") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+    } else if (req.url === "/api/snapshot" || req.url?.startsWith("/api/snapshot")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(snapshotData);
+    } else if (req.url?.startsWith("/api/item/")) {
+      const id = parseInt(req.url.split("/").pop());
+      const item = rawData.items[id];
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ...item,
+          ancestry: [{ level: "Vision", title: "honr builds honr", intent: "honr takes cards" }],
+          constraints: [],
+          children: [],
+        })
+      );
+    } else {
+      let filePath = `${SCRATCH}/web/dist${req.url === "/" ? "/index.html" : req.url}`;
+      if (!existsSync(filePath)) filePath = `${SCRATCH}/web/dist/index.html`;
+      try {
+        const content = readFileSync(filePath);
+        const contentType = filePath.endsWith(".css")
+          ? "text/css"
+          : filePath.endsWith(".js")
+          ? "application/javascript"
+          : "text/html";
+        res.writeHead(200, { "Content-Type": contentType });
+        res.end(content);
+      } catch {
+        res.writeHead(404);
+        res.end();
+      }
+    }
+  });
+  server.listen(PORT, "127.0.0.1");
+  honr = { kill: () => server.close() };
+}
 
-// Wait for it rather than guessing.
+// Wait for server readiness
 for (let i = 0; i < 40; i++) {
   try {
     if ((await fetch(`${BASE}/healthz`)).ok) break;
@@ -52,7 +126,6 @@ const browser = await chromium.launch();
 async function shoot(name, { width, height }, prepare) {
   const page = await browser.newPage({ viewport: { width, height } });
   await page.goto(BASE, { waitUntil: "networkidle" });
-  // The board renders from a snapshot fetch; give it a beat to arrive.
   await page.waitForSelector(".app", { timeout: 10_000 });
   await sleep(600);
   if (prepare) await prepare(page);
@@ -69,14 +142,34 @@ const tab = (name) => async (page) => {
   await sleep(500);
 };
 
-console.log("capturing:");
+console.log("capturing & asserting:");
 await shoot("desktop-overview", DESKTOP, tab("Overview"));
-await shoot("desktop-board", DESKTOP, tab("Activity"));
+
+// Board view: verify Playwright assertions on blocked card with blocker chips
+await shoot("desktop-board", DESKTOP, async (page) => {
+  await tab("Activity")(page);
+
+  // Playwright assertion: Board cards show human-readable blocker chips
+  const blockerChips = page.locator(".blocker-chips");
+  await blockerChips.first().waitFor({ state: "visible", timeout: 5000 });
+
+  const text = await blockerChips.first().textContent();
+  console.log(`  [Playwright Assertion] Blocker chips content: "${text?.trim()}"`);
+  if (!text?.includes("Supervisor runs the gates") || !text?.includes("ready")) {
+    throw new Error(`Blocker chips missing expected human-readable text. Got: ${text}`);
+  }
+
+  // Also verify blocked card screenshot
+  const blockedCard = page.locator(".card", { has: page.locator(".blocker-chips") });
+  await blockedCard.first().waitFor({ state: "visible" });
+  await blockedCard.first().screenshot({ path: `${OUT}/blocked-card-chip.png` });
+  console.log(`  blocked-card-chip.png`);
+});
+
 await shoot("desktop-needs", DESKTOP, tab("Needs you"));
 await shoot("phone-overview", PHONE, tab("Overview"));
 await shoot("phone-needs", PHONE, tab("Needs you"));
 
-// The drawer is where a human actually decides, so it needs its own look.
 await shoot("desktop-drawer-needs-you", DESKTOP, async (page) => {
   await tab("Activity")(page);
   await page.locator(".column-needs_you .card").first().click();

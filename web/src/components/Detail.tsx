@@ -84,19 +84,23 @@ export function DetailDrawer({
 
       {((d.blockers && d.blockers.length > 0) || d.blocked_by.length > 0) && (
         <Section title="Blockers">
-          <ul className="plain">
+          <div className="blocker-chips">
             {d.blockers && d.blockers.length > 0 ? (
               d.blockers.map((b) => (
-                <li key={b.id}>
-                  ⊘ <b>#{b.id}</b> {b.title} <span className="pill">{b.state}</span>
-                </li>
+                <span key={b.id} className={`blocker-chip state-${b.state}`}>
+                  <span className="blocker-id">#{b.id}</span>
+                  <span className="blocker-title">{b.title}</span>
+                  <span className="state-cue">{b.state.replace("_", " ")}</span>
+                </span>
               ))
             ) : (
               d.blocked_by.map((bid) => (
-                <li key={bid}>⊘ <b>#{bid}</b></li>
+                <span key={bid} className="blocker-chip">
+                  <span className="blocker-id">#{bid}</span>
+                </span>
               ))
             )}
-          </ul>
+          </div>
         </Section>
       )}
 
