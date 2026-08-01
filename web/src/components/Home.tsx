@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { api, money, since } from "../api";
+import { api, money, since } from "../api.js";
 import type { GoalView, State, StoryLine, WorkItem } from "../types";
 
 const PAGE_SIZE = 10;
@@ -345,6 +345,19 @@ export function Home({
           <ul className="home-tasks home-issues">
             {pageItems.map((t) => {
               const project = t.parent != null ? items.get(t.parent) : undefined;
+              const blockersList = (
+                t.blockers && t.blockers.length > 0
+                  ? t.blockers
+                  : t.blocked_by.map((id) => {
+                      const found = items.get(id);
+                      return {
+                        id,
+                        title: found?.title ?? `Task #${id}`,
+                        state: found?.state ?? ("ready" as const),
+                      };
+                    })
+              ).filter((b) => b.state !== "done" && b.state !== "retired");
+
               return (
                 <li key={t.id}>
                   <button type="button" onClick={() => onOpen(t.id)}>
@@ -362,6 +375,26 @@ export function Home({
                       <span className="dim">{money(t.cost_cents)}</span>
                     )}
                   </button>
+                  {blockersList.length > 0 && (
+                    <div
+                      className="owaiting blocker-chips"
+                      data-testid="blocker-chips"
+                      style={{ paddingLeft: 16 }}
+                    >
+                      <span className="blocker-label">⊘ waiting on</span>
+                      {blockersList.map((b) => (
+                        <span
+                          key={b.id}
+                          className={`blocker-chip state-${b.state}`}
+                          title={`#${b.id}: ${b.title} (${b.state.replace("_", " ")})`}
+                        >
+                          <span className="blocker-id">#{b.id}</span>
+                          <span className="blocker-title">{b.title}</span>
+                          <span className="state-cue">{b.state.replace("_", " ")}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </li>
               );
             })}
