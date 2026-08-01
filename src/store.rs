@@ -557,7 +557,10 @@ impl Board {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     if let (Some(b), Some(bid)) = (beads, beads_id) {
-                        let _ = b.close(&bid, Some(&reason_str)).await;
+                        if crate::beads::BeadsClient::is_real_id(&bid) {
+                            let _ = b.close(&bid, Some(&reason_str)).await;
+                            let _ = b.github_sync().await;
+                        }
                     }
                 });
             }
@@ -1852,7 +1855,10 @@ fn check_split_relatedness(
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
                         if let (Some(b), Some(bid)) = (beads, beads_id) {
-                            let _ = b.close(&bid, Some("Deleted from honr board")).await;
+                            if crate::beads::BeadsClient::is_real_id(&bid) {
+                                let _ = b.close(&bid, Some("Deleted from honr board")).await;
+                                let _ = b.github_sync().await;
+                            }
                         }
                     });
                 }
@@ -3087,5 +3093,100 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[tokio::test]
+    async fn done_and_retired_transitions_call_beads_close_and_sync_for_real_ids() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-test-beads-done-retired-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let board_path = test_dir.join("board.json");
+
+        let b = Board::new(Schema::default(), board_path);
+        let beads = b.beads.as_ref().expect("beads client");
+        beads.init_stealth().await.expect("init stealth");
+
+        let project = beads
+            .create_linked("Test Project", 0, "epic", None, None, &[])
+            .await
+            .expect("create project");
+        let task_done = beads
+            .create_linked("Task Done", 1, "task", None, Some(&project.id), &[])
+            .await
+            .expect("create task done");
+        let task_retired = beads
+            .create_linked("Task Retired", 1, "task", None, Some(&project.id), &[])
+            .await
+            .expect("create task retired");
+
+        let item1 = b
+            .create(None, "Item Done", "why", None, Origin::Human, true, None)
+            .expect("create item1");
+        let item2 = b
+            .create(None, "Item Retired", "why", None, Origin::Human, true, None)
+            .expect("create item2");
+
+        b.set_beads_id(item1.id, &task_done.id);
+        b.set_beads_id(item2.id, &task_retired.id);
+
+        let _ = b.transition(item1.id, State::Shaping, "t", None);
+        let _ = b.transition(item1.id, State::Ready, "t", None);
+        let _ = b.transition(item1.id, State::Done, "human", Some("done".into()));
+
+        let _ = b.transition(item2.id, State::Shaping, "t", None);
+        let _ = b.transition(item2.id, State::Ready, "t", None);
+        let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        let shown_done = beads.show(&task_done.id).await.expect("show task done");
+        assert_eq!(shown_done.status, "closed");
+
+        let shown_retired = beads.show(&task_retired.id).await.expect("show task retired");
+        assert_eq!(shown_retired.status, "closed");
+    }
+
+    #[tokio::test]
+    async fn done_and_retired_transitions_noop_for_placeholders() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-test-beads-placeholder-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let board_path = test_dir.join("board.json");
+
+        let b = Board::new(Schema::default(), board_path);
+        let beads = b.beads.as_ref().expect("beads client");
+        beads.init_stealth().await.expect("init stealth");
+
+        let real_issue = beads
+            .create_linked("Real Task", 1, "task", None, None, &[])
+            .await
+            .expect("create real task");
+
+        let item1 = b
+            .create(None, "Placeholder Item 1", "why", None, Origin::Human, true, None)
+            .expect("create item1");
+        let item2 = b
+            .create(None, "Placeholder Item 2", "why", None, Origin::Human, true, None)
+            .expect("create item2");
+
+        assert!(item1.beads_id.as_ref().unwrap().starts_with("bd-honr-"));
+        assert!(item2.beads_id.as_ref().unwrap().starts_with("bd-honr-"));
+
+        let _ = b.transition(item1.id, State::Shaping, "t", None);
+        let _ = b.transition(item1.id, State::Ready, "t", None);
+        let _ = b.transition(item1.id, State::Done, "human", Some("done".into()));
+
+        let _ = b.transition(item2.id, State::Shaping, "t", None);
+        let _ = b.transition(item2.id, State::Ready, "t", None);
+        let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let shown_real = beads.show(&real_issue.id).await.expect("show real task");
+        assert_eq!(shown_real.status, "open");
     }
 }
