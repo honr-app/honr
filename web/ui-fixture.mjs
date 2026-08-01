@@ -293,4 +293,15 @@ const stories = {
   ],
 };
 
+// Populate blockers array for items with blocked_by
+for (const item of Object.values(items)) {
+  if (item.blocked_by && item.blocked_by.length > 0 && (!item.blockers || item.blockers.length === 0)) {
+    item.blockers = item.blocked_by.map((bid) => ({
+      id: bid,
+      title: items[bid]?.title ?? `Task #${bid}`,
+      state: items[bid]?.state ?? "ready",
+    }));
+  }
+}
+
 process.stdout.write(JSON.stringify({ next_id: next, items, stories }, null, 1));
