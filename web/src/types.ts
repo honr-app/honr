@@ -47,6 +47,28 @@ export interface BlockerSummary {
   state: State;
 }
 
+export type PlanStatus = "empty" | "awaiting_approval" | "approved";
+
+export interface PlanTaskSpec {
+  key: string;
+  title: string;
+  intent: string;
+  definition_of_done: string;
+  blocked_by_keys: string[];
+  capability: string | null;
+  item_id: number | null;
+}
+
+export interface PlanArtifact {
+  revision: number;
+  summary: string;
+  status: PlanStatus;
+  tasks: PlanTaskSpec[];
+  cancel_keys: string[];
+  cancel_item_ids: number[];
+  approved_revision: number | null;
+}
+
 export interface WorkItem {
   id: number;
   parent: number | null;
@@ -75,7 +97,12 @@ export interface WorkItem {
   release_target: string | null;
   environment: string | null;
   engine?: string | null;
+  beads_id?: string | null;
+  github_issue_url?: string | null;
   pr_url: string | null;
+  plan?: PlanArtifact | null;
+  /** Projects only: pause claiming under this project. */
+  dispatch_paused?: boolean;
   created_at: string;
   entered_state_at: string;
   history: Transition[];
@@ -96,6 +123,10 @@ export interface GoalView {
   budget_cents: number | null;
   agents_live: number;
   needs_you: number;
+  /** `no_plan` | `awaiting_approval` | `approved_vN` */
+  plan_status: string;
+  /** Project-level dispatch pause (independent of global). */
+  dispatch_paused?: boolean;
   columns: ColumnView[];
   story: StoryLine[];
 }
@@ -116,11 +147,14 @@ export interface Snapshot {
   server_time: string;
   heartbeat_expect_secs: number;
   seq: number;
+  dispatch_paused: boolean;
 }
 
 export type BoardEvent =
   | { type: "upsert"; seq: number; item: WorkItem }
-  | { type: "story"; seq: number; goal: number; at: string; text: string };
+  | { type: "story"; seq: number; goal: number; at: string; text: string }
+  | { type: "delete"; seq: number; id: number }
+  | { type: "dispatch_paused"; seq: number; paused: boolean };
 
 /** Which board column a state renders in. Mirrors `State::column` on the server. */
 export const COLUMN_OF: Record<State, ColumnKey> = {

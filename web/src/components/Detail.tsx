@@ -1,11 +1,40 @@
 import { useEffect, useRef, useState } from "react";
 import { api, money, since } from "../api";
-import type { WorkItem } from "../types";
+import type { PlanTaskSpec, WorkItem } from "../types";
 
 interface Detail extends WorkItem {
   ancestry: { level: string; title: string; intent: string }[];
   constraints: string[];
   children: number[];
+}
+
+type EditPlanTask = {
+  key: string;
+  title: string;
+  intent: string;
+  definition_of_done: string;
+  blocked_by: string; // comma-separated keys for simple editing
+};
+
+function planTasksFromArtifact(tasks: PlanTaskSpec[] | undefined): EditPlanTask[] {
+  if (!tasks?.length) return [];
+  return tasks.map((t) => ({
+    key: t.key,
+    title: t.title,
+    intent: t.intent,
+    definition_of_done: t.definition_of_done,
+    blocked_by: t.blocked_by_keys.join(", "),
+  }));
+}
+
+function emptyPlanTask(n: number): EditPlanTask {
+  return {
+    key: `t${n}`,
+    title: "",
+    intent: "",
+    definition_of_done: "",
+    blocked_by: "",
+  };
 }
 
 function formatToolTarget(name: string, input: any): string {
@@ -44,6 +73,23 @@ function parseClaudeLogLine(
 
   try {
     const obj = JSON.parse(trimmed);
+
+    if (obj.event === "step_update" && obj.step_update) {
+      const su = obj.step_update;
+      if (su.step_type === "tool" && su.tool_info) {
+        const name = su.tool_name || su.tool_info.name || "tool";
+        const params = su.tool_info.parameters;
+        if (su.state === "ACTIVE") {
+          return { text: `🔨 [${name}] ${formatToolTarget(name, params)}`, type: "tool" };
+        }
+        if (su.state === "DONE" && su.tool_info.output) {
+          const out = typeof su.tool_info.output === "string" ? su.tool_info.output : JSON.stringify(su.tool_info.output ?? "");
+          return { text: `⚙️ [${name}] ${out.slice(0, 180)}`, type: "result" };
+        }
+        return null;
+      }
+      return null;
+    }
 
     if (["message_start", "message_delta", "message_stop", "content_block_stop", "ping"].includes(obj.type)) {
       return null;
@@ -135,8 +181,10 @@ export function DetailDrawer({
   const [editTitle, setEditTitle] = useState("");
   const [editIntent, setEditIntent] = useState("");
   const [editDod, setEditDod] = useState("");
-  const [editEngine, setEditEngine] = useState("claude");
+  const [editEngine, setEditEngine] = useState("agy");
   const [constraintText, setConstraintText] = useState("");
+  const [planTasks, setPlanTasks] = useState<EditPlanTask[]>([]);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [logs, setLogs] = useState<{ claude: string[]; openshell: string[] }>({
     claude: [],
     openshell: [],
@@ -146,36 +194,33 @@ export function DetailDrawer({
   const logContainerRef = useRef<HTMLDivElement | null>(null);
 
   const handleScroll = () => {
-    const el = logContainerRef.current;
-    if (!el) return;
-    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (!logContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = logContainerRef.current;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 20;
     setUserScrolledUp(!isAtBottom);
   };
 
-  useEffect(() => {
-    if (!d || (!d.environment && !["running", "verifying", "claimed"].includes(d.state))) return;
-    const fetchLogs = () => {
-      const el = logContainerRef.current;
-      const isAtBottom = el ? el.scrollHeight - el.scrollTop - el.clientHeight < 40 : true;
+  const loadLogs = () => {
+    if (!id) return;
+    api
+      .logs(id)
+      .then((res) => {
+        setLogs(res);
+      })
+      .catch(() => {});
+  };
 
-      api
-        .logs(d.id)
-        .then((res) => {
-          setLogs(res);
-          if (isAtBottom && logContainerRef.current) {
-            requestAnimationFrame(() => {
-              if (logContainerRef.current) {
-                logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-              }
-            });
-          }
-        })
-        .catch(() => {});
-    };
-    fetchLogs();
-    const interval = setInterval(fetchLogs, 2500);
+  useEffect(() => {
+    loadLogs();
+    const interval = setInterval(loadLogs, 2000);
     return () => clearInterval(interval);
-  }, [d?.id, d?.environment, d?.state]);
+  }, [id]);
+
+  useEffect(() => {
+    if (!userScrolledUp && logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [logs, userScrolledUp, logTab]);
 
   const load = () =>
     api
@@ -186,13 +231,16 @@ export function DetailDrawer({
         setEditTitle(item.title);
         setEditIntent(item.intent);
         setEditDod(item.definition_of_done ?? "");
-        setEditEngine(item.engine ?? "claude");
+        setEditEngine(item.engine ?? "agy");
+        setPlanTasks(planTasksFromArtifact(item.plan?.tasks));
       })
       .catch((e) => setErr(String(e)));
 
   useEffect(() => {
     setD(null);
     setErr(null);
+    setConfirmDelete(false);
+    setPlanTasks([]);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -205,15 +253,97 @@ export function DetailDrawer({
 
   return (
     <aside className="drawer">
-      <Head onClose={onClose} title={`#${d.id} ${d.title}`} />
+      <Head onClose={onClose} onDelete={() => setConfirmDelete(!confirmDelete)} title={`#${d.id} ${d.title}`} />
       {err && <div className="err">{err}</div>}
 
+      {confirmDelete && (
+        <div
+          style={{
+            background: "#450a0a",
+            border: "1px solid #991b1b",
+            borderRadius: "6px",
+            padding: "10px 12px",
+            marginBottom: "12px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+          }}
+        >
+          <div style={{ color: "#fca5a5", fontSize: "12px", fontWeight: 600 }}>
+            ⚠️ Permanently delete #{d.id} "{d.title}"?
+          </div>
+          <div style={{ color: "#f87171", fontSize: "11px" }}>
+            This will remove the item and any child tasks permanently. This action cannot be undone.
+          </div>
+          <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+            <button
+              style={{
+                fontSize: "11px",
+                padding: "4px 12px",
+                background: "#dc2626",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+              onClick={() => {
+                api
+                  .deleteItem(d.id)
+                  .then(() => {
+                    onChanged();
+                    onClose();
+                  })
+                  .catch((e) => setErr(String(e)));
+              }}
+            >
+              Confirm Delete
+            </button>
+            <button
+              style={{
+                fontSize: "11px",
+                padding: "4px 12px",
+                background: "#334155",
+                color: "#cbd5e1",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+              }}
+              onClick={() => setConfirmDelete(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="pill-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <span className="pill">{d.state}</span>
           {d.level && <span className="pill">{d.level}</span>}
           <span className="pill">{d.engine || "claude"}</span>
           <span className="pill">{money(d.cost_cents)}</span>
+          {d.beads_id && (
+            <span
+              className="pill beads"
+              style={{ color: "#38bdf8", background: "#0c4a6e", border: "1px solid #0284c7" }}
+              title={`Beads Task ID: ${d.beads_id} (Dolt version-controlled issue store on refs/dolt/data)`}
+            >
+              🔗 {d.beads_id}
+            </span>
+          )}
+          {d.github_issue_url && (
+            <a
+              className="pill beads"
+              href={d.github_issue_url}
+              target="_blank"
+              rel="noreferrer"
+              style={{ textDecoration: "none", color: "#38bdf8", background: "#0c4a6e", border: "1px solid #0284c7" }}
+              title={`View on GitHub Issues: ${d.github_issue_url}`}
+            >
+              🐙 GitHub Issue
+            </a>
+          )}
           {d.origin.kind !== "human" && <span className="pill machine">{d.origin.kind}-born</span>}
         </div>
 
@@ -236,29 +366,35 @@ export function DetailDrawer({
         )}
       </div>
 
-      {/* The highest-leverage payload in the system: sixty words that tell an
-          agent why it is writing this code. */}
-      <Section title="Intent chain">
-        <div className="chain">
-          {d.ancestry.map((a, n) => (
-            <div key={n} className="chain-line">
-              <span className="chain-level">{a.level.toUpperCase()}</span>
-              <span>{a.intent}</span>
-            </div>
-          ))}
-          {d.definition_of_done && (
-            <div className="chain-line dod">
-              <span className="chain-level">DoD</span>
-              <span>{d.definition_of_done}</span>
-            </div>
-          )}
-        </div>
-      </Section>
+      {/* Task ancestry chain — Projects edit Why below instead. */}
+      {d.level !== "Project" && (
+        <Section title="Why this exists">
+          <div className="chain">
+            {d.ancestry.map((a, n) => (
+              <div key={n} className="chain-line">
+                <span className="chain-level">{a.level.toUpperCase()}</span>
+                <span>{a.intent}</span>
+              </div>
+            ))}
+            {d.definition_of_done && (
+              <div className="chain-line dod">
+                <span className="chain-level">DoD</span>
+                <span>{d.definition_of_done}</span>
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
 
-      {d.constraints.length > 0 && (
+      {d.level !== "Project" && d.constraints.length > 0 && (
         <Section title="Inherited constraints">
+          <p className="dim" style={{ marginBottom: 6 }}>
+            From the Project (and ancestors). Edit them on the Project.
+          </p>
           <ul className="plain">
-            {d.constraints.map((c, n) => <li key={n}>📌 {c}</li>)}
+            {d.constraints.map((c, n) => (
+              <li key={n}>📌 {c}</li>
+            ))}
           </ul>
         </Section>
       )}
@@ -312,7 +448,7 @@ export function DetailDrawer({
                   style={{ fontSize: "11px", padding: "3px 10px" }}
                   onClick={() => setLogTab("claude")}
                 >
-                  Claude Agent ({parsedClaudeLogs.length})
+                  {d.engine === "agy" ? "Antigravity Agent" : "Claude Agent"} ({parsedClaudeLogs.length})
                 </button>
                 <button
                   className={logTab === "openshell" ? "primary" : ""}
@@ -365,7 +501,8 @@ export function DetailDrawer({
                       ))}
                       {(() => {
                         const last = parsedClaudeLogs[parsedClaudeLogs.length - 1];
-                        let statusText = "Claude is thinking / evaluating model response...";
+                        const engineName = d.engine === "agy" ? "Antigravity (agy)" : "Claude";
+                        let statusText = `${engineName} is thinking / evaluating response...`;
                         if (last.type === "tool") statusText = `Executing ${last.text.replace("🔨 ", "")}...`;
                         if (last.type === "result") statusText = "Tool output received, processing next action...";
                         return (
@@ -396,7 +533,9 @@ export function DetailDrawer({
                       })()}
                     </>
                   ) : (
-                    <span className="dim">Waiting for Claude agent stdout stream…</span>
+                    <span className="dim">
+                      Waiting for {d.engine === "agy" ? "Antigravity" : "Claude"} agent stdout stream…
+                    </span>
                   )
                 ) : logs.openshell.length > 0 ? (
                   logs.openshell.map((l, i) => (
@@ -470,10 +609,307 @@ export function DetailDrawer({
         </Section>
       )}
 
-      {d.state === "shaping" && (
-        <Section title="Refine & Approve Plan">
+      {d.level === "Project" && (
+        <>
+          <Section title="Project">
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="btns" style={{ alignItems: "center", gap: 8 }}>
+                <button
+                  type="button"
+                  className={d.dispatch_paused ? "dispatch-toggle paused" : "dispatch-toggle"}
+                  onClick={() =>
+                    act(
+                      d.dispatch_paused
+                        ? api.resumeProjectDispatch(d.id)
+                        : api.pauseProjectDispatch(d.id),
+                    )
+                  }
+                  title={
+                    d.dispatch_paused
+                      ? "Resume claiming under this Project (allowed even while Pause all is on)"
+                      : "Pause claiming under this Project — running cards keep going"
+                  }
+                >
+                  {d.dispatch_paused ? "Resume dispatch" : "Pause dispatch"}
+                </button>
+                {d.dispatch_paused && (
+                  <span className="dim">
+                    New claims under this Project are stopped. While Pause all is
+                    on, Resume here makes this Project an exception.
+                  </span>
+                )}
+              </div>
+              <div>
+                <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
+                  Title
+                </label>
+                <input
+                  type="text"
+                  className="search-input"
+                  style={{ width: "100%" }}
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
+                  Why
+                </label>
+                <p className="dim" style={{ marginBottom: 4, fontSize: 12 }}>
+                  One sentence — the outcome contract. Not the Task breakdown.
+                </p>
+                <textarea
+                  rows={2}
+                  value={editIntent}
+                  onChange={(e) => setEditIntent(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
+                  Agent Engine
+                </label>
+                <select
+                  className="search-input"
+                  style={{ width: "100%", background: "#0f172a", color: "#f8fafc", padding: "6px" }}
+                  value={editEngine}
+                  onChange={(e) => setEditEngine(e.target.value)}
+                >
+                  <option value="claude">Claude Code (Anthropic)</option>
+                  <option value="agy">Antigravity CLI (agy)</option>
+                </select>
+              </div>
+              <div className="btns">
+                <button
+                  onClick={() =>
+                    act(
+                      api.update(d.id, {
+                        title: editTitle,
+                        intent: editIntent,
+                        engine: editEngine,
+                      }),
+                    )
+                  }
+                >
+                  Save Project
+                </button>
+              </div>
+            </div>
+          </Section>
+
+          <Section title="Constraints">
+            <p className="dim" style={{ marginBottom: 8 }}>
+              Standing rules inherited by every Task under this Project.
+            </p>
+            <ul className="plain" style={{ marginBottom: 8 }}>
+              {(d.pinned ?? []).map((c, n) => (
+                <li
+                  key={`${n}-${c.slice(0, 24)}`}
+                  style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}
+                >
+                  <span style={{ flex: 1 }}>📌 {c}</span>
+                  <button
+                    type="button"
+                    className="dim"
+                    style={{ fontSize: 11, padding: "2px 8px" }}
+                    onClick={() => act(api.unpin(d.id, n))}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+              {(d.pinned ?? []).length === 0 && (
+                <li className="dim">No constraints yet.</li>
+              )}
+            </ul>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                type="text"
+                className="search-input"
+                style={{ flex: 1 }}
+                placeholder="e.g. Gates run with --offline"
+                value={constraintText}
+                onChange={(e) => setConstraintText(e.target.value)}
+              />
+              <button
+                disabled={!constraintText.trim()}
+                onClick={() => {
+                  act(api.pin(d.id, constraintText.trim()));
+                  setConstraintText("");
+                }}
+              >
+                Add
+              </button>
+            </div>
+          </Section>
+
+          <Section title="Plan">
+            <p className="dim" style={{ marginBottom: 8 }}>
+              Task breakdown (keys, deps, DoDs). Save Plan, then Approve Plan to
+              materialize Ready Tasks — this Project never becomes a Board card.
+            </p>
+            {d.plan && (
+              <p style={{ marginBottom: 8 }}>
+                <span className="badge">{d.plan.status}</span>{" "}
+                <span className="dim">v{d.plan.revision}</span>
+              </p>
+            )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+              {planTasks.map((t, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    border: "1px solid #1e293b",
+                    borderRadius: 6,
+                    padding: 8,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <input
+                      className="search-input"
+                      style={{ width: 72 }}
+                      placeholder="key"
+                      value={t.key}
+                      onChange={(e) => {
+                        const next = [...planTasks];
+                        next[idx] = { ...t, key: e.target.value };
+                        setPlanTasks(next);
+                      }}
+                    />
+                    <input
+                      className="search-input"
+                      style={{ flex: 1 }}
+                      placeholder="Title"
+                      value={t.title}
+                      onChange={(e) => {
+                        const next = [...planTasks];
+                        next[idx] = { ...t, title: e.target.value };
+                        setPlanTasks(next);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="dim"
+                      style={{ fontSize: 11, padding: "2px 8px" }}
+                      onClick={() => setPlanTasks(planTasks.filter((_, i) => i !== idx))}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <textarea
+                    rows={2}
+                    placeholder="Why this task exists"
+                    value={t.intent}
+                    onChange={(e) => {
+                      const next = [...planTasks];
+                      next[idx] = { ...t, intent: e.target.value };
+                      setPlanTasks(next);
+                    }}
+                  />
+                  <textarea
+                    rows={2}
+                    placeholder="Definition of done (mechanically checkable)"
+                    value={t.definition_of_done}
+                    onChange={(e) => {
+                      const next = [...planTasks];
+                      next[idx] = { ...t, definition_of_done: e.target.value };
+                      setPlanTasks(next);
+                    }}
+                  />
+                  <input
+                    className="search-input"
+                    style={{ width: "100%" }}
+                    placeholder="Blocked by keys (comma-separated), e.g. t1, t2"
+                    value={t.blocked_by}
+                    onChange={(e) => {
+                      const next = [...planTasks];
+                      next[idx] = { ...t, blocked_by: e.target.value };
+                      setPlanTasks(next);
+                    }}
+                  />
+                </div>
+              ))}
+              {planTasks.length === 0 && (
+                <p className="dim">No tasks in the Plan yet. Add one, or wait for Initial plan.</p>
+              )}
+            </div>
+
+            <div className="btns" style={{ marginBottom: 8 }}>
+              <button
+                type="button"
+                onClick={() => setPlanTasks([...planTasks, emptyPlanTask(planTasks.length + 1)])}
+              >
+                Add Task
+              </button>
+              <button
+                type="button"
+                disabled={
+                  planTasks.length === 0 ||
+                  planTasks.some(
+                    (t) =>
+                      !t.key.trim() ||
+                      !t.title.trim() ||
+                      !t.definition_of_done.trim(),
+                  )
+                }
+                onClick={() => {
+                  const body = {
+                    summary: editIntent.trim() || undefined,
+                    tasks: planTasks.map((t) => ({
+                      key: t.key.trim(),
+                      title: t.title.trim(),
+                      intent: t.intent.trim() || t.title.trim(),
+                      definition_of_done: t.definition_of_done.trim(),
+                      blocked_by_keys: t.blocked_by
+                        .split(",")
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    })),
+                  };
+                  act(
+                    api
+                      .update(d.id, {
+                        title: editTitle,
+                        intent: editIntent,
+                        engine: editEngine,
+                      })
+                      .then(() => api.savePlan(d.id, body)),
+                  );
+                }}
+              >
+                Save Plan
+              </button>
+              <button
+                className="primary"
+                disabled={(() => {
+                  const hasArtifact = !!(d.plan && d.plan.tasks.length > 0);
+                  if (d.plan?.status === "approved") return true;
+                  if (hasArtifact) return d.plan!.status !== "awaiting_approval";
+                  return d.children.length <= 1;
+                })()}
+                title={
+                  d.plan?.status === "approved"
+                    ? "Already approved — edit & Save Plan to propose a new revision"
+                    : d.plan?.status === "awaiting_approval"
+                      ? "Materialize Tasks to Ready"
+                      : "Save Plan first (status must be awaiting approval)"
+                }
+                onClick={() => act(api.approvePlan(d.id))}
+              >
+                Approve Plan
+              </button>
+            </div>
+          </Section>
+        </>
+      )}
+
+      {d.state === "shaping" && d.level !== "Project" && (
+        <Section title="Refine">
           <p className="dim" style={{ marginBottom: 8 }}>
-            Tweak card details before approving into the Ready queue.
+            Tweak this Task before moving it into the Ready queue.
           </p>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
@@ -489,7 +925,7 @@ export function DetailDrawer({
             </div>
 
             <div>
-              <label className="section-title" style={{ display: "block", marginBottom: 2 }}>Intent (Why this exists)</label>
+              <label className="section-title" style={{ display: "block", marginBottom: 2 }}>Why</label>
               <textarea
                 rows={2}
                 value={editIntent}
@@ -519,29 +955,6 @@ export function DetailDrawer({
                 <option value="agy">Antigravity CLI (agy)</option>
               </select>
             </div>
-
-            <div>
-              <label className="section-title" style={{ display: "block", marginBottom: 2 }}>Add Inherited Constraint</label>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input
-                  type="text"
-                  className="search-input"
-                  style={{ flex: 1 }}
-                  placeholder="e.g. Must run --offline"
-                  value={constraintText}
-                  onChange={(e) => setConstraintText(e.target.value)}
-                />
-                <button
-                  disabled={!constraintText.trim()}
-                  onClick={() => {
-                    act(api.pin(d.id, constraintText.trim()));
-                    setConstraintText("");
-                  }}
-                >
-                  Pin
-                </button>
-              </div>
-            </div>
           </div>
 
           <div className="btns">
@@ -568,19 +981,10 @@ export function DetailDrawer({
                   definition_of_done: editDod,
                   engine: editEngine,
                 });
-                const publishP = saveP.then(() => {
-                  if (d.children.length > 0) {
-                    return Promise.all(
-                      d.children.map((cid) => api.transition(cid, "ready", "plan approved"))
-                    ).then(() => api.transition(d.id, "ready", "plan approved"));
-                  } else {
-                    return api.transition(d.id, "ready", "plan approved");
-                  }
-                });
-                act(publishP);
+                act(saveP.then(() => api.transition(d.id, "ready", "human approved")));
               }}
             >
-              Approve & Publish to Ready
+              Move to Ready
             </button>
           </div>
         </Section>
@@ -696,10 +1100,30 @@ export function DetailDrawer({
   );
 }
 
-const Head = ({ title, onClose }: { title: string; onClose: () => void }) => (
-  <div className="drawer-head">
-    <h3>{title}</h3>
-    <button className="close" onClick={onClose}>✕</button>
+const Head = ({ title, onClose, onDelete }: { title: string; onClose: () => void; onDelete?: () => void }) => (
+  <div className="drawer-head" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+    <h3 style={{ margin: 0, flex: 1 }}>{title}</h3>
+    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+      {onDelete && (
+        <button
+          style={{
+            fontSize: "11px",
+            padding: "3px 8px",
+            background: "#450a0a",
+            color: "#f87171",
+            border: "1px solid #7f1d1d",
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontWeight: 600,
+          }}
+          onClick={onDelete}
+          title="Delete item permanently"
+        >
+          🗑 Delete
+        </button>
+      )}
+      <button className="close" onClick={onClose}>✕</button>
+    </div>
   </div>
 );
 

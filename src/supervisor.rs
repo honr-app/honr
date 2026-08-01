@@ -66,8 +66,9 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     tokio::spawn(dispatch_loop(board, cfg));
 }
 
-/// What makes pull-based dispatch survivable: a dead agent simply stops
-/// renewing and the card returns to Ready. No orphan-cleanup job needed.
+/// Requeue cards whose leases lapsed. The matching supervise task notices on
+/// its next liveness tick (see `watch_agent`) and frees the concurrency slot —
+/// the sweeper alone must not leave `in_flight` stuck on a zombie watch.
 async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig) {
     let mut t = tokio::time::interval(Duration::from_millis(cfg.sweep_interval_ms));
     loop {
@@ -76,6 +77,28 @@ async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig) {
             tracing::info!("lease expired on #{id}; requeued");
         }
     }
+}
+
+/// How often a live watch renews the lease even when the agent log is silent.
+///
+/// Must be well under `lease_secs` (default 600). Line-driven heartbeats alone
+/// let a long quiet tool call expire the lease while the supervisor is still
+/// following — then the card shows Ready, `in_flight` stays 1, and nothing else
+/// claims.
+const WATCH_HEARTBEAT_SECS: u64 = 30;
+/// How often to notice Halt / lease-sweep while following. Keeps cancel latency
+/// short without hammering the board lock.
+const WATCH_BOARD_POLL_SECS: u64 = 2;
+
+/// Board states in which this process may keep watching a sandbox.
+fn board_still_owns_run(state: State) -> bool {
+    matches!(state, State::Claimed | State::Running)
+}
+
+/// Supervise ended because the board (lease sweeper / Halt) already released
+/// the card — not because the work failed.
+fn is_supervisor_cancel(err: &str) -> bool {
+    err.contains("run cancelled:")
 }
 
 /// Spend since process start, in cents. Coarse on purpose — a daily ceiling
@@ -116,15 +139,15 @@ struct Fleet {
     os: Arc<OpenShell>,
     agents: Arc<AgentConfig>,
     in_flight: Arc<AtomicU64>,
-    /// Which cards this process is actively running.
+    /// Which cards this process is actively supervising.
     ///
-    /// The lease is time-based and cannot see in-process state: a long silent
-    /// tool call lets the sweeper requeue a card whose supervisor task is still
-    /// alive, and dispatch would then claim it again and race itself on one
-    /// branch. A sandbox label is *not* the right evidence here — failed
-    /// sandboxes are deliberately kept for inspection, so the label outlives
-    /// the run and would deadlock every retry. `reconcile` is the one place
-    /// that reads labels, and it cross-checks them against the card.
+    /// Prevents dispatch from double-claiming a card whose watch is still
+    /// alive. Paired with timer heartbeats in `watch_agent` (so a silent tool
+    /// call cannot expire the lease) and cancel-when-board-releases (so a Halt
+    /// or residual lease sweep frees `in_flight`). A sandbox label is *not*
+    /// the right evidence here — failed sandboxes are kept for inspection, so
+    /// the label outlives the run. `reconcile` is the one place that reads
+    /// labels, and it cross-checks them against the card.
     active: Active,
     cooldown: Cooldown,
     lease_secs: i64,
@@ -147,7 +170,12 @@ impl Fleet {
                 Ok(()) => f.board.clear_run_failures(id),
                 Err(e) => {
                     let msg = e.to_string();
-                    if is_infrastructure(&msg) {
+                    if is_supervisor_cancel(&msg) {
+                        // Lease sweeper or Halt already moved the card. Do not
+                        // burn retry budget or release again — just let
+                        // finalize stop the agent and free the slot below.
+                        tracing::info!("#{id}: {msg}");
+                    } else if is_infrastructure(&msg) {
                         // Not the card's fault. Give it back untouched and stop
                         // dispatching for a while rather than spending the
                         // card's retry budget on a broken machine.
@@ -199,6 +227,11 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     loop {
         tick.tick().await;
 
+        // Pause stops new claims only. Adoption and in-flight runs keep going.
+        // Global pause stamps every Project paused; Resume on a Project is an
+        // exception checked via `may_claim` — do not early-continue on the
+        // global flag alone.
+
         if fleet.in_flight.load(Ordering::Relaxed) as usize >= fleet.agents.max_concurrent {
             continue;
         }
@@ -218,10 +251,9 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         }
 
         let ready = board.list_ready(&["any".to_string()]);
-        let Some(item) = ready
-            .into_iter()
-            .find(|i| !fleet.active.lock().unwrap().contains(&i.id))
-        else {
+        let Some(item) = ready.into_iter().find(|i| {
+            !fleet.active.lock().unwrap().contains(&i.id) && board.may_claim(i.id)
+        }) else {
             continue;
         };
 
@@ -581,6 +613,12 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
     anyhow::ensure!(up.ok(), "metadata shim never came up: {}", outerr(&up));
     beat(0.02);
 
+    if let Err(e) = sync_beads_into_sandbox(board, os, name).await {
+        tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
+    } else {
+        beat(0.025);
+    }
+
     // Clone the fork. GIT_TERMINAL_PROMPT=0 is not optional: without it a
     // missing credential blocks forever on an interactive username prompt,
     // which looks exactly like a slow clone.
@@ -614,6 +652,10 @@ echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
 /// They make watching *resumable*: a supervisor that starts halfway through a
 /// run skips the lines a previous one already streamed, and starts its cost
 /// arithmetic from what that one already charged.
+///
+/// Liveness is also on a wall-clock timer: silent tool calls must not expire
+/// the lease. If the board leaves Claimed/Running (lease sweep or Halt), the
+/// watch ends immediately so `in_flight` frees and the agent is stopped.
 #[allow(clippy::too_many_arguments)]
 async fn watch_agent(
     board: &SharedBoard,
@@ -638,35 +680,77 @@ async fn watch_agent(
     let (board2, spent2) = (board.clone(), spent.clone());
     let agent_owned = agent_id.to_string();
 
-    let run = os
-        .exec_streaming(name, &follow_script(from_line), timeout, move |line| {
-            // Progress is not knowable from the stream, so it is reported as
-            // elapsed-against-deadline and capped below 1.0 — honest about
-            // being an estimate, and monotonic, which is what the card face
-            // needs. Only `report` sets 1.0.
-            let frac = started.elapsed().as_secs_f32() / timeout.as_secs_f32();
-            let progress = frac.max(floor).clamp(0.0, 0.95);
+    let follow = follow_script(from_line);
+    let stream = os.exec_streaming(name, &follow, timeout, move |line| {
+        // Progress is not knowable from the stream, so it is reported as
+        // elapsed-against-deadline and capped below 1.0 — honest about
+        // being an estimate, and monotonic, which is what the card face
+        // needs. Only `report` sets 1.0.
+        let frac = started.elapsed().as_secs_f32() / timeout.as_secs_f32();
+        let progress = frac.max(floor).clamp(0.0, 0.95);
 
-            let cents = parse_cost_cents(line);
-            let delta = cents
-                .map(|c| {
-                    let prev = spent2.swap(c, Ordering::Relaxed);
-                    c.saturating_sub(prev)
-                })
-                .unwrap_or(0);
-            if delta > 0 {
-                SPENT_TODAY.fetch_add(delta, Ordering::Relaxed);
-            }
+        let cents = parse_cost_cents(line);
+        let delta = cents
+            .map(|c| {
+                let prev = spent2.swap(c, Ordering::Relaxed);
+                c.saturating_sub(prev)
+            })
+            .unwrap_or(0);
+        if delta > 0 {
+            SPENT_TODAY.fetch_add(delta, Ordering::Relaxed);
+        }
 
-            // Buffer live agent output lines for UI stream view.
-            board2.append_agent_log(id, line.to_string());
+        // Buffer live agent output lines for UI stream view.
+        board2.append_agent_log(id, line.to_string());
 
-            // Every line is an activity ping. A stream-format change therefore
-            // degrades to "still alive" rather than crashing the supervisor.
+        // Do not renew a lease the board has already ended (Halt / sweep).
+        if board2
+            .get(id)
+            .is_some_and(|i| board_still_owns_run(i.state))
+        {
             let _ = board2.heartbeat(id, &agent_owned, progress, delta, lease_secs);
-        })
-        .await?;
-    Ok((run, spent.load(Ordering::Relaxed)))
+        }
+    });
+    tokio::pin!(stream);
+
+    let mut hb = tokio::time::interval(Duration::from_secs(WATCH_HEARTBEAT_SECS));
+    hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // First tick completes immediately; skip it so we don't double-beat the
+    // claim/setup heartbeats that just ran.
+    hb.tick().await;
+
+    let mut poll = tokio::time::interval(Duration::from_secs(WATCH_BOARD_POLL_SECS));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    poll.tick().await;
+
+    loop {
+        tokio::select! {
+            res = &mut stream => {
+                let run = res?;
+                return Ok((run, spent.load(Ordering::Relaxed)));
+            }
+            _ = hb.tick() => {
+                if !board.get(id).is_some_and(|i| board_still_owns_run(i.state)) {
+                    // Dropping `stream` kills the follow exec (kill_on_drop).
+                    anyhow::bail!("run cancelled: card left Claimed/Running");
+                }
+                let frac = started.elapsed().as_secs_f32() / timeout.as_secs_f32();
+                let progress = frac.max(floor).clamp(0.0, 0.95);
+                let _ = board.heartbeat(id, agent_id, progress, 0, lease_secs);
+            }
+            _ = poll.tick() => {
+                let Some(item) = board.get(id) else {
+                    anyhow::bail!("run cancelled: card #{id} gone from the board");
+                };
+                if !board_still_owns_run(item.state) {
+                    anyhow::bail!(
+                        "run cancelled: card left {:?} (lease expired or halted)",
+                        item.state
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------- verdict file protocol
@@ -820,9 +904,12 @@ async fn process_verdict(
                     (c.title, c.intent, dod)
                 })
                 .collect();
-            match board.split(id, agent_id, children, 7, 5) {
-                Ok(_) => {
-                    tracing::info!("#{id}: agent split via verdict file");
+            match board.split(id, agent_id, children, 5) {
+                Ok(made) => {
+                    for m in &made {
+                        board.schedule_beads_mirror(m.id);
+                    }
+                    tracing::info!("#{id}: agent split into {} sibling tasks", made.len());
                     Ok(true)
                 }
                 Err(e) => {
@@ -835,7 +922,7 @@ async fn process_verdict(
                             vec![
                                 crate::model::EscalationOption {
                                     label: "Decompose manually".into(),
-                                    detail: "Break down the card into smaller children manually.".into(),
+                                    detail: "Add sibling Tasks under the Project with the right deps.".into(),
                                 },
                                 crate::model::EscalationOption {
                                     label: "Revise scope".into(),
@@ -1109,7 +1196,51 @@ fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
         ("CARGO_HOME".into(), "/opt/cargo".into()),
         ("NPM_CONFIG_CACHE".into(), "/opt/npm-cache".into()),
         ("PATH".into(), "/opt/cargo/bin:/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin".into()),
+        // Shared task graph with the host control plane (uploaded at sandbox start).
+        ("BEADS_DIR".into(), "/work/.beads".into()),
     ]
+}
+
+/// Snapshot the host beads DB into the sandbox so `bd show` / `bd remember` see
+/// the same Project + Task graph the supervisor dispatched from.
+async fn sync_beads_into_sandbox(
+    board: &SharedBoard,
+    os: &OpenShell,
+    name: &str,
+) -> anyhow::Result<()> {
+    let Some(client) = board.beads.as_ref() else {
+        return Ok(());
+    };
+    let dir = &client.beads_dir;
+    if !dir.exists() {
+        return Ok(());
+    }
+    let tar = std::env::temp_dir().join(format!("{name}-beads.tgz"));
+    let parent = dir.parent().unwrap_or(std::path::Path::new("."));
+    let folder = dir.file_name().and_then(|s| s.to_str()).unwrap_or(".beads");
+    let status = tokio::process::Command::new("tar")
+        .args(["-czf"])
+        .arg(&tar)
+        .arg("-C")
+        .arg(parent)
+        .arg(folder)
+        .status()
+        .await?;
+    anyhow::ensure!(status.success(), "failed to tar host beads dir {:?}", dir);
+    os.upload(name, tar.to_str().unwrap_or_default(), "/tmp").await?;
+    let archive = format!("/tmp/{}", tar.file_name().and_then(|s| s.to_str()).unwrap_or("beads.tgz"));
+    let unpack = os
+        .exec(
+            name,
+            &format!(
+                "mkdir -p /work && tar -xzf {archive} -C /work && test -d /work/.beads && echo beads-up"
+            ),
+            Duration::from_secs(60),
+        )
+        .await?;
+    anyhow::ensure!(unpack.ok(), "beads unpack failed: {}", outerr(&unpack));
+    let _ = std::fs::remove_file(&tar);
+    Ok(())
 }
 
 /// A credential helper that echoes the injected token. The value is OpenShell's
@@ -1262,6 +1393,11 @@ fn briefing(
     }
 
     b.push_str(&format!("Your card: {}\n", grant.title));
+    if let Some(bid) = &grant.beads_id {
+        if crate::beads::BeadsClient::is_real_id(bid) {
+            b.push_str(&format!("Beads id: {bid} (use `bd show {bid}`)\n"));
+        }
+    }
     if let Some(dod) = &grant.definition_of_done {
         b.push_str(&format!("Definition of done: {dod}\n"));
     }
@@ -1304,7 +1440,12 @@ fn briefing(
          and recommended choice index, then exit. Options must supply at least two concrete choices.\n\
          \nIf work is discovered to be bigger than one card, do not overrun. \
          Write `.honr/split.json` (or `/work/.honr/split.json`) with an array of `children` \
-         (each having `title`, `intent`, and optional `definition_of_done`), then exit.\n",
+         (each having `title`, `intent`, and optional `definition_of_done`), then exit. \
+         Those become **sibling Tasks under the same Project** — never nested under this card.\n\
+         \n`bd` (beads CLI) is available for the task graph and project memory. \
+         Run `bd prime` for context, `bd show <id>` for this card's Project/deps, \
+         `bd remember \"insight\"` to store learned insights, and `bd dep add` for \
+         blocks/relates-to edges between sibling tasks. Do not nest tasks under tasks.\n",
     );
 
     b.push_str(&format!(
@@ -1381,6 +1522,33 @@ fn tail(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_liveness_outpaces_the_default_lease() {
+        // Timer heartbeats must renew well before the sweeper can requeue.
+        assert!(WATCH_HEARTBEAT_SECS < 600 / 4);
+        assert!(WATCH_BOARD_POLL_SECS < WATCH_HEARTBEAT_SECS);
+    }
+
+    #[test]
+    fn only_claimed_or_running_keeps_the_watch() {
+        assert!(board_still_owns_run(State::Claimed));
+        assert!(board_still_owns_run(State::Running));
+        assert!(!board_still_owns_run(State::Ready));
+        assert!(!board_still_owns_run(State::NeedsHuman));
+        assert!(!board_still_owns_run(State::Done));
+    }
+
+    #[test]
+    fn board_release_is_not_a_card_failure() {
+        assert!(is_supervisor_cancel(
+            "run cancelled: card left Ready (lease expired or halted)"
+        ));
+        assert!(!is_supervisor_cancel("clone failed: CONNECT tunnel 403"));
+        assert!(!is_infrastructure(
+            "run cancelled: card left Ready (lease expired or halted)"
+        ));
+    }
 
     #[test]
     fn cost_is_parsed_from_the_stream() {
@@ -1670,6 +1838,7 @@ mod tests {
             item_id: 7,
             title: "t".into(),
             definition_of_done: None,
+            beads_id: Some("honr-test7".into()),
             ancestry: vec![],
             constraints: vec![],
             notes: vec![],

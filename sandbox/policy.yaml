@@ -7,8 +7,8 @@ filesystem_policy:
   # pre-warmed registries baked by sandbox/Containerfile. Cargo and npm both
   # write to their caches during a build, so those two must be read_write —
   # without them a build fails on permissions, which surfaces as a hang.
-  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log, /opt/rust]
-  read_write: [/sandbox, /tmp, /dev/null, /opt/cargo, /opt/npm-cache]
+  read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust]
+  read_write: [/sandbox, /tmp, /dev, /opt/cargo, /opt/npm-cache]
 
 landlock:
   compatibility: best_effort
@@ -19,10 +19,19 @@ network_policies:
     endpoints:
       - { host: aiplatform.googleapis.com, port: 443, protocol: rest, enforcement: enforce, access: full }
       - { host: '*-aiplatform.googleapis.com', port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: cloudcode-pa.googleapis.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: daily-cloudcode-pa.googleapis.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: oauth2.googleapis.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: www.googleapis.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: play.googleapis.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: lh3.googleusercontent.com, port: 443, protocol: rest, enforcement: enforce, access: full }
     binaries:
       - { path: /usr/local/bin/claude }
+      - { path: /usr/local/bin/agy }
+      - { path: /usr/bin/agy }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
+      - { path: /usr/local/bin/bd }
 
   github:
     name: github
@@ -38,4 +47,23 @@ network_policies:
       - { path: /usr/lib/git-core/git-remote-https }
       - { path: /usr/bin/curl }
       - { path: /usr/local/bin/claude }
+      - { path: /usr/local/bin/agy }
+      - { path: /usr/bin/agy }
       - { path: /usr/bin/node }
+      - { path: /usr/local/bin/bd }
+
+  package_registries:
+    name: package-registries
+    endpoints:
+      - { host: index.crates.io, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: static.crates.io, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: crates.io, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: registry.npmjs.org, port: 443, protocol: rest, enforcement: enforce, access: full }
+    binaries:
+      - { path: /usr/local/bin/cargo }
+      - { path: /opt/cargo/bin/cargo }
+      - { path: /usr/bin/npm }
+      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/claude }
+      - { path: /usr/local/bin/agy }
+      - { path: /usr/bin/agy }

@@ -1,20 +1,12 @@
 /**
- * A board dense enough to judge the UI against.
+ * A board dense enough to judge the UI against — Project + flat Tasks.
  *
  * Writes a `honr.json` directly rather than driving the API, because the
- * states worth looking at are exactly the ones no public verb can produce:
- * lease timestamps at chosen ages (so the heartbeat decay gradient is
- * visible), `pr_url` on Review cards, gate history, escalations mid-flight.
- *
- * This is a *fixture*, not a seed. It never runs in the product — point a
- * scratch honr at it (see screenshots.mjs) and throw it away afterwards.
+ * states worth looking at are exactly the ones no public verb can produce.
  *
  *   node ui-fixture.mjs > /tmp/honr-ui/honr.json
  */
 
-// Relative to *now*, not a fixed instant: leases have to still be live when
-// honr boots, or the sweeper requeues every Running card before the first
-// screenshot and the board you capture is not the board you described.
 const NOW = Date.now();
 const iso = (secsAgo) => new Date(NOW - secsAgo * 1000).toISOString();
 
@@ -48,6 +40,7 @@ function item(o) {
     release_target: null,
     environment: null,
     pr_url: null,
+    beads_id: null,
     created_at: iso(o.age ?? 3600),
     entered_state_at: iso(o.since ?? 600),
     history: [],
@@ -65,124 +58,136 @@ const lease = (agent, hbAgo) => ({
   expires_at: iso(hbAgo - 600),
 });
 
-// ---- above the line -------------------------------------------------------
-
-const vision = item({
-  title: "honr builds honr",
-  intent: "honr takes cards against its own source and hands back reviewable pull requests.",
-  state: "shaping",
-  level: "Vision",
-  above_line: true,
-  pinned: [
-    "Merging is a human action. Approving in honr surfaces the PR; it never merges it.",
-    "Everything in the sandbox stack fails as a hang, not an error.",
-  ],
-});
+// ---- Project root ---------------------------------------------------------
 
 const project = item({
-  parent: vision,
   title: "Phase 2 — real agents",
   intent: "Replace the simulated fleet with agents in OpenShell sandboxes that open real PRs.",
   state: "shaping",
   level: "Project",
   above_line: true,
   budget_cents: 5000,
+  beads_id: "honr-proj1",
+  pinned: [
+    "Merging is a human action. Approving in honr surfaces the PR; it never merges it.",
+    "Everything in the sandbox stack fails as a hang, not an error.",
+  ],
 });
 
-const mk = (title, intent) =>
-  item({ parent: project, title, intent, state: "shaping", level: "Epic", above_line: true });
-
-const loop = mk("Prove the loop", "One real card goes from Ready to an open PR with no hand-holding.");
-const verify = mk("Verification the agent cannot influence", "Gates run by the supervisor from a clean checkout.");
-const decide = mk("Agent-initiated decisions", "An agent that hits a real ambiguity stops and asks.");
-
-// ---- Ready: deep enough that the column has to chunk ----------------------
-
-const leaf = (parent, title, intent, extra = {}) =>
+const task = (title, intent, extra = {}) =>
   item({
-    parent,
+    parent: project,
     title,
     intent,
     definition_of_done: `${title} is done and covered by a test.`,
     state: "ready",
-    level: "Story",
+    level: "Task",
     capability: "any",
     ...extra,
   });
 
-const first = leaf(verify, "Supervisor runs the gates", "The agent's own claim of success is what reaches the board.", { since: 2400 });
-leaf(verify, "Verify from a clean checkout", "Gates in the agent's sandbox can be influenced by the agent.", { blocked_by: [first], since: 2100 });
-leaf(verify, "Report the real diffstat", "Review sorts by a blast radius it does not actually know.", { since: 1500 });
-leaf(verify, "Observe cost during the run", "Spend only arrives in the final message, so no cap can interrupt.", { since: 900 });
-leaf(loop, "Re-adopt live sandboxes on restart", "A rebuilt honr should resume watching a run, not kill it.", { since: 600 });
-leaf(decide, "Split from inside the sandbox", "Work bigger than its card should decompose, not overrun.", { since: 300 });
-leaf(project, "Receipt copy for the digest", "Plain-language wording for the phone view.", { capability: "writer", since: 120 });
+// ---- Ready ----------------------------------------------------------------
 
-// ---- Running: three heartbeat ages, to show the decay gradient ------------
+const first = task("Supervisor runs the gates", "The agent's own claim of success is what reaches the board.", {
+  since: 2400,
+  beads_id: "honr-t10",
+});
+task("Verify from a clean checkout", "Gates in the agent's sandbox can be influenced by the agent.", {
+  blocked_by: [first],
+  since: 2100,
+  beads_id: "honr-t11",
+});
+task("Report the real diffstat", "Review sorts by a blast radius it does not actually know.", {
+  since: 1500,
+  beads_id: "honr-t17",
+});
+task("Observe cost during the run", "Spend only arrives in the final message, so no cap can interrupt.", {
+  since: 900,
+  beads_id: "honr-t18",
+});
+task("Re-adopt live sandboxes on restart", "A rebuilt honr should resume watching a run, not kill it.", {
+  since: 600,
+  beads_id: "honr-t9",
+});
+task("Split from inside the sandbox", "Work bigger than its card should become sibling tasks, not nest.", {
+  since: 300,
+  beads_id: "honr-t13",
+});
+task("Receipt copy for the digest", "Plain-language wording for the phone view.", {
+  capability: "writer",
+  since: 120,
+  beads_id: "honr-t15",
+});
+
+// ---- Running --------------------------------------------------------------
 
 item({
-  parent: decide,
+  parent: project,
   title: "Verdict file protocol",
   intent: "An agent needs a way to hand a decision back without a network path to honr.",
   definition_of_done: "escalate.json with two options lands the card in Needs You.",
   state: "running",
-  level: "Story",
+  level: "Task",
   capability: "any",
   lease: lease("sandbox-12", 2),
   model: "claude-opus-5",
   progress: 0.62,
   cost_cents: 210,
   environment: "honr-card-12-a1",
+  beads_id: "honr-t12",
   since: 840,
 });
 
 item({
-  parent: loop,
+  parent: project,
   title: "Sandbox name on the card",
   intent: "environment is stored but nothing renders it.",
   definition_of_done: "A Running card shows its sandbox name.",
   state: "running",
-  level: "Story",
+  level: "Task",
   capability: "any",
-  lease: lease("sandbox-13", 14), // past heartbeat_expect: visibly decaying
+  lease: lease("sandbox-13", 14),
   model: "claude-opus-5",
   progress: 0.18,
   cost_cents: 80,
   environment: "honr-card-13-a1",
+  beads_id: "honr-t14",
   since: 200,
 });
 
 item({
-  parent: verify,
+  parent: project,
   title: "Clean-checkout verifier",
   intent: "Gates should run where the agent cannot reach them.",
   definition_of_done: "Gates run in a sandbox created from the pushed branch.",
   state: "running",
-  level: "Story",
+  level: "Task",
   capability: "any",
-  lease: lease("sandbox-14", 47), // deep decay — is this one hung?
+  lease: lease("sandbox-14", 47),
   model: "claude-opus-5",
   progress: 0.91,
   cost_cents: 340,
   environment: "honr-card-14-a2",
   run_failures: 1,
+  beads_id: "honr-t11b",
   since: 1500,
 });
 
 // ---- Needs You ------------------------------------------------------------
 
 item({
-  parent: decide,
+  parent: project,
   title: "Force-push policy on shared branches",
   intent: "Two cards touching one branch need a rule before either lands.",
   definition_of_done: "The rule is documented and enforced in the supervisor.",
   state: "needs_human",
-  level: "Story",
+  level: "Task",
   capability: "any",
   lease: lease("sandbox-15", 30),
   model: "claude-opus-5",
   progress: 0.4,
   cost_cents: 155,
+  beads_id: "honr-t19",
   since: 1080,
   escalation: {
     question:
@@ -206,30 +211,31 @@ item({
 // ---- Verify ---------------------------------------------------------------
 
 item({
-  parent: loop,
+  parent: project,
   title: "Attempt-scoped sandbox names",
   intent: "A retry must not collide with the sandbox kept for inspection.",
   definition_of_done: "A second attempt creates honr-card-N-a2.",
   state: "verifying",
-  level: "Story",
+  level: "Task",
   capability: "any",
   progress: 1,
   cost_cents: 96,
   diff_added: 34,
   diff_removed: 8,
   gates: [{ name: "cargo test", status: "running", detail: null }],
+  beads_id: "honr-t20",
   since: 45,
 });
 
-// ---- Review: the column whose whole point is the PR -----------------------
+// ---- Review ---------------------------------------------------------------
 
 item({
-  parent: loop,
+  parent: project,
   title: "First self-hosted card: GET /api/version",
   intent: "A deliberately small change to prove the loop end to end.",
   definition_of_done: "GET /api/version returns the crate version; a test asserts it.",
   state: "review",
-  level: "Story",
+  level: "Task",
   capability: "any",
   progress: 1,
   cost_cents: 122,
@@ -238,16 +244,17 @@ item({
   pr_url: "https://github.com/shanemcd/honr/pull/1",
   environment: "honr-card-8-a1",
   gates: [{ name: "agent-reported", status: "passed", detail: "3 gates passed" }],
+  beads_id: "honr-t8",
   since: 300,
 });
 
 item({
-  parent: verify,
+  parent: project,
   title: "Rebase onto upstream, not the fork's frozen base",
   intent: "Nothing syncs a fork, so its base freezes while upstream moves.",
   definition_of_done: "A re-run rebases onto upstream/main.",
   state: "review",
-  level: "Story",
+  level: "Task",
   capability: "any",
   progress: 1,
   cost_cents: 402,
@@ -257,30 +264,32 @@ item({
   pr_url: "https://github.com/shanemcd/honr/pull/4",
   environment: "honr-card-17-a3",
   gates: [{ name: "agent-reported", status: "passed", detail: "3 gates passed" }],
+  beads_id: "honr-t21",
   since: 5400,
 });
 
 // ---- Done -----------------------------------------------------------------
 
-for (const [title, added, removed] of [
-  ["Open the sandbox policy for the toolchain", 6, 2],
-  ["Cap run retries so a failing card stops looping", 148, 12],
-  ["Let the agent publish; the supervisor verifies", 97, 113],
-  ["Add openshell.rs: typed CLI wrapper", 402, 0],
+for (const [title, added, removed, bid] of [
+  ["Open the sandbox policy for the toolchain", 6, 2, "honr-t7"],
+  ["Cap run retries so a failing card stops looping", 148, 12, "honr-t22"],
+  ["Let the agent publish; the supervisor verifies", 97, 113, "honr-t23"],
+  ["Add openshell.rs: typed CLI wrapper", 402, 0, "honr-t24"],
 ]) {
   item({
-    parent: loop,
+    parent: project,
     title,
     intent: `${title}.`,
     definition_of_done: `${title} verified.`,
     state: "done",
-    level: "Story",
+    level: "Task",
     capability: "any",
     progress: 1,
     cost_cents: 90 + added,
     diff_added: added,
     diff_removed: removed,
     gates: [{ name: "agent-reported", status: "passed", detail: "gates passed" }],
+    beads_id: bid,
     since: 7200,
   });
 }

@@ -39,10 +39,12 @@ pub fn allowed(from: State, to: State) -> bool {
         (Running, NeedsHuman) => true,
         (Running, Verifying) => true,
 
-        // Children created.
+        // Sibling tasks created under the Project; original may requeue or finish.
         (Splitting, Ready) => true,
-        // The parent becomes a container and stops being claimable.
         (Splitting, Shaping) => true,
+        // Flat model: the split card is replaced by siblings, not nested under.
+        (Splitting, Done) => true,
+        (Splitting, Retired) => true,
 
         (NeedsHuman, Running) => true,
         // Human reassigns.
@@ -100,8 +102,7 @@ pub fn check(
         return Err(TransitionError::Illegal { id: item.id, from: item.state, to });
     }
 
-    // "Epic" is not a type — it's a work item that has been decomposed. A node
-    // with children is a container, and containers are not picked up.
+    // A node with children is a Project (container); containers are not picked up.
     if has_children && requires_claimable(to) {
         return Err(TransitionError::ContainerNotClaimable { id: item.id });
     }

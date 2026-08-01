@@ -29,6 +29,10 @@ pub struct BoardState {
     /// they will be right to.
     #[serde(default)]
     pub stories: BTreeMap<ItemId, Vec<StoryLine>>,
+    /// When true, the supervisor skips claiming new Ready cards. In-flight
+    /// Claimed/Running work continues. Persists across restarts.
+    #[serde(default)]
+    pub dispatch_paused: bool,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
 }
@@ -68,6 +72,10 @@ pub struct GoalView {
     pub budget_cents: Option<u64>,
     pub agents_live: usize,
     pub needs_you: usize,
+    /// `no_plan` | `awaiting_approval` | `approved_vN`
+    pub plan_status: String,
+    /// Project-level dispatch pause (independent of global `dispatch_paused`).
+    pub dispatch_paused: bool,
     pub columns: Vec<ColumnView>,
     pub story: Vec<StoryLine>,
 }
@@ -80,6 +88,8 @@ pub struct Snapshot {
     pub server_time: DateTime<Utc>,
     pub heartbeat_expect_secs: i64,
     pub seq: u64,
+    /// Supervisor will not claim new Ready cards while true.
+    pub dispatch_paused: bool,
 }
 
 /// What `claim` hands back. The card alone would be a title; the chain is why
@@ -96,8 +106,9 @@ pub struct ClaimGrant {
     pub item_id: ItemId,
     pub title: String,
     pub definition_of_done: Option<String>,
-    /// Vision -> ... -> this card. Sixty words that stop an agent getting a
-    /// decision wrong that nobody would catch until an install failed.
+    /// Canonical beads hash id when mirrored (e.g. `honr-a1b2`).
+    pub beads_id: Option<String>,
+    /// Project → this Task. Short why-chain for the agent.
     pub ancestry: Vec<AncestryLine>,
     /// Standing constraints inherited from every ancestor.
     pub constraints: Vec<String>,
@@ -148,6 +159,7 @@ pub struct Board {
     pub schema: Schema,
     path: PathBuf,
     started_at: DateTime<Utc>,
+    pub beads: Option<crate::beads::BeadsClient>,
 }
 
 pub type SharedBoard = Arc<Board>;
@@ -155,6 +167,12 @@ pub type SharedBoard = Arc<Board>;
 impl Board {
     pub fn new(schema: Schema, path: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(1024);
+        // Co-locate beads with the board file when possible.
+        let beads_dir = path
+            .parent()
+            .map(|p| p.join(".beads"))
+            .unwrap_or_else(|| PathBuf::from(".beads"));
+        let beads = Some(crate::beads::BeadsClient::new(beads_dir));
         Self {
             state: RwLock::new(BoardState { next_id: 1, ..Default::default() }),
             tx,
@@ -163,6 +181,7 @@ impl Board {
             schema,
             path,
             started_at: Utc::now(),
+            beads,
         }
     }
 
@@ -171,7 +190,12 @@ impl Board {
         let board = Self::new(schema, path.clone());
         if let Ok(raw) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<BoardState>(&raw) {
-                Ok(state) => {
+                Ok(mut state) => {
+                    for (id, item) in state.items.iter_mut() {
+                        if item.beads_id.is_none() {
+                            item.beads_id = Some(format!("bd-honr-{id}"));
+                        }
+                    }
                     tracing::info!(items = state.items.len(), "restored board from {path:?}");
                     *board.state.write().unwrap() = state;
                 }
@@ -183,6 +207,109 @@ impl Board {
 
     pub fn subscribe(&self) -> broadcast::Receiver<BoardEvent> {
         self.tx.subscribe()
+    }
+
+    pub fn dispatch_paused(&self) -> bool {
+        self.state.read().unwrap().dispatch_paused
+    }
+
+    /// Pause or resume supervisor dispatch globally. Does not touch in-flight runs.
+    ///
+    /// Pause stamps every Project as paused. Resume clears the global flag and
+    /// every Project pause. While globally paused, Resume on an individual
+    /// Project is an exception — that subtree may claim again.
+    pub fn set_dispatch_paused(&self, paused: bool) {
+        let stamped: Vec<WorkItem> = {
+            let mut s = self.state.write().unwrap();
+            let global_changed = s.dispatch_paused != paused;
+            s.dispatch_paused = paused;
+            let mut changed = Vec::new();
+            for it in s.items.values_mut() {
+                if !it.is_project() {
+                    continue;
+                }
+                if it.dispatch_paused == paused {
+                    continue;
+                }
+                it.dispatch_paused = paused;
+                changed.push(it.clone());
+            }
+            if !global_changed && changed.is_empty() {
+                return;
+            }
+            changed
+        };
+        self.dirty.store(true, Ordering::Relaxed);
+        let _ = self.tx.send(BoardEvent::DispatchPaused {
+            seq: self.next_seq(),
+            paused,
+        });
+        for item in stamped {
+            self.emit(&item);
+        }
+        tracing::info!(
+            paused,
+            "dispatch {}",
+            if paused {
+                "paused (all projects stamped)"
+            } else {
+                "resumed (all project pauses cleared)"
+            }
+        );
+    }
+
+    /// Pause or resume claiming under one Project. Does not touch in-flight runs.
+    ///
+    /// While the board is globally paused, `paused: false` is an allowlist
+    /// exception — that Project may claim even though the header still says
+    /// Resume (global).
+    pub fn set_project_dispatch_paused(
+        &self,
+        id: ItemId,
+        paused: bool,
+    ) -> Result<WorkItem, String> {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
+            if !it.is_project() {
+                return Err(format!("#{id} is not a Project"));
+            }
+            if it.dispatch_paused == paused {
+                return Ok(it.clone());
+            }
+            it.dispatch_paused = paused;
+            it.clone()
+        };
+        self.emit(&item);
+        tracing::info!(
+            id,
+            paused,
+            "project dispatch {}",
+            if paused { "paused" } else { "resumed" }
+        );
+        Ok(item)
+    }
+
+    /// Whether the supervisor may claim this Ready card right now.
+    ///
+    /// A card is claimable when its Project is not paused. Global pause does
+    /// not block by itself — it stamps every Project paused; Resume on a
+    /// Project clears that stamp and becomes an exception. Orphan tasks (no
+    /// Project) are blocked only while the global flag is set.
+    pub fn may_claim(&self, id: ItemId) -> bool {
+        let s = self.state.read().unwrap();
+        let mut cur = Some(id);
+        while let Some(cid) = cur {
+            let Some(it) = s.items.get(&cid) else {
+                break;
+            };
+            if it.is_project() {
+                return !it.dispatch_paused;
+            }
+            cur = it.parent;
+        }
+        // No Project ancestor.
+        !s.dispatch_paused
     }
 
     fn next_seq(&self) -> u64 {
@@ -277,12 +404,11 @@ impl Board {
         out
     }
 
-    /// The goal a card belongs to. Swimlanes go by goal, never by agent — you
-    /// care about "is billing v2 moving", not "what is agent-7 up to".
+    /// The Project a card belongs to. Swimlanes go by Project, never by agent.
     fn goal_of(s: &BoardState, id: ItemId) -> ItemId {
         let chain = Self::chain(s, id);
-        // Depth 1 is the Project rung; fall back to the root for shallow trees.
-        chain.get(1).copied().unwrap_or_else(|| chain.first().copied().unwrap_or(id))
+        // Roots are Projects; every Task's swimlane is its Project root.
+        chain.first().copied().unwrap_or(id)
     }
 
     fn level_name(&self, s: &BoardState, id: ItemId) -> String {
@@ -338,6 +464,11 @@ impl Board {
     pub fn get_agent_logs(&self, id: ItemId) -> Vec<String> {
         let s = self.state.read().unwrap();
         s.agent_logs.get(&id).map(|l| l.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    pub fn clear_agent_logs(&self, id: ItemId) {
+        let mut s = self.state.write().unwrap();
+        s.agent_logs.remove(&id);
     }
 
     fn unresolved_blockers(s: &BoardState, item: &WorkItem) -> Vec<ItemId> {
@@ -401,9 +532,29 @@ impl Board {
             Self::transition_locked(&mut s, id, to, by, reason)?
         };
         self.emit(&item);
+
+        if to == State::Done || to == State::Retired {
+            let beads = self.beads.clone();
+            let beads_id = item.beads_id.clone();
+            let reason_str = item
+                .history
+                .last()
+                .and_then(|h| h.reason.clone())
+                .unwrap_or_else(|| format!("Marked {to:?}"));
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    if let (Some(b), Some(bid)) = (beads, beads_id) {
+                        let _ = b.close(&bid, Some(&reason_str)).await;
+                    }
+                });
+            }
+        }
+
         Ok(item)
     }
 
+    /// Create a Project (root) or a Task under a Project. Tasks are flat —
+    /// nesting under another Task is refused.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -414,7 +565,22 @@ impl Board {
         origin: Origin,
         above_line: bool,
         capability: Option<String>,
-    ) -> WorkItem {
+    ) -> Result<WorkItem, String> {
+        if let Some(pid) = parent {
+            let s = self.state.read().unwrap();
+            let Some(p) = s.items.get(&pid) else {
+                return Err(format!("no parent #{pid}"));
+            };
+            if p.parent.is_some() {
+                return Err(
+                    "tasks are flat under a Project; cannot nest under another task".into(),
+                );
+            }
+            if p.level.as_deref() == Some("Task") {
+                return Err("cannot add children to a Task; parent must be a Project".into());
+            }
+        }
+
         let item = {
             let mut s = self.state.write().unwrap();
             let id = s.next_id;
@@ -426,15 +592,359 @@ impl Board {
             item.origin = origin;
             item.above_line = above_line;
             item.capability = capability;
-            let depth = parent.map(|p| Self::depth(&s, p) + 1).unwrap_or(0);
-            item.level = self.schema.level_for_depth(depth).map(|l| l.name.clone());
+            item.beads_id = Some(format!("bd-honr-{id}"));
+            item.level = if parent.is_none() {
+                self.schema
+                    .project_level()
+                    .map(|l| l.name.clone())
+                    .or_else(|| Some("Project".into()))
+            } else {
+                self.schema
+                    .task_level()
+                    .map(|l| l.name.clone())
+                    .or_else(|| Some("Task".into()))
+            };
+            if parent.is_none() {
+                item.plan = Some(PlanArtifact::empty());
+                // Global pause stamps existing projects; new ones must start
+                // paused too or they'd slip through as accidental exceptions.
+                if s.dispatch_paused {
+                    item.dispatch_paused = true;
+                }
+            }
             s.items.insert(id, item.clone());
             let mut item_out = item;
             Self::populate_blockers(&s, &mut item_out);
             item_out
         };
         self.emit(&item);
-        item
+
+        // Every Project gets a claimable Initial Plan Task so the Board is never
+        // empty for an active Project — Projects themselves never go Ready.
+        if parent.is_none() {
+            self.seed_initial_plan_task(item.id, &item.title)?;
+        }
+        Ok(item)
+    }
+
+    fn seed_initial_plan_task(&self, project_id: ItemId, project_title: &str) -> Result<WorkItem, String> {
+        let seed = self.create(
+            Some(project_id),
+            INITIAL_PLAN_TITLE,
+            format!(
+                "Produce a Plan artifact for «{project_title}» — flat Tasks with deps and \
+                 mechanically checkable DoDs — then wait for human Approve Plan."
+            ),
+            Some("Plan artifact approved; Tasks materialized.".into()),
+            Origin::Planner,
+            false,
+            None,
+        )?;
+        let _ = self.transition(seed.id, State::Shaping, "cockpit", Some("seed plan task".into()));
+        let seed = self
+            .transition(seed.id, State::Ready, "cockpit", Some("seed plan task".into()))
+            .map_err(|e| e.to_string())?;
+        self.story(
+            project_id,
+            format!("Seeded {INITIAL_PLAN_TITLE} Task #{}.", seed.id),
+        );
+        Ok(seed)
+    }
+
+    /// Write / revise the Plan artifact on a Project. Does not create board Tasks
+    /// — Approve Plan materializes them.
+    pub fn propose_plan(
+        &self,
+        project_id: ItemId,
+        summary: impl Into<String>,
+        tasks: Vec<PlanTaskSpec>,
+        cancel_keys: Vec<String>,
+    ) -> Result<PlanArtifact, String> {
+        if tasks.is_empty() {
+            return Err("a plan needs at least one task".into());
+        }
+        for t in &tasks {
+            if t.definition_of_done.trim().is_empty() {
+                return Err(format!(
+                    "task '{}' has no definition of done; without one the board is a wish list",
+                    t.title
+                ));
+            }
+            if t.key.trim().is_empty() {
+                return Err(format!("task '{}' needs a stable plan key", t.title));
+            }
+        }
+        let plan = {
+            let mut s = self.state.write().unwrap();
+            let project = s
+                .items
+                .get_mut(&project_id)
+                .ok_or_else(|| format!("no work item #{project_id}"))?;
+            if !project.is_project() {
+                return Err("plan parent must be a Project".into());
+            }
+            let mut next = project.plan.clone().unwrap_or_else(PlanArtifact::empty);
+            // Preserve item_id links for keys that already materialized.
+            let prev_ids: BTreeMap<String, ItemId> = next
+                .tasks
+                .iter()
+                .filter_map(|t| t.item_id.map(|id| (t.key.clone(), id)))
+                .collect();
+            let cancel_item_ids: Vec<ItemId> = cancel_keys
+                .iter()
+                .filter_map(|k| prev_ids.get(k).copied())
+                .collect();
+            next.revision = next.revision.saturating_add(1);
+            next.summary = summary.into();
+            next.status = PlanStatus::AwaitingApproval;
+            next.cancel_keys = cancel_keys;
+            next.cancel_item_ids = cancel_item_ids;
+            next.tasks = tasks
+                .into_iter()
+                .map(|mut t| {
+                    if t.item_id.is_none() {
+                        t.item_id = prev_ids.get(&t.key).copied();
+                    }
+                    t
+                })
+                .collect();
+            project.plan = Some(next.clone());
+            let snap = project.clone();
+            drop(s);
+            self.emit(&snap);
+            next
+        };
+        self.story(
+            project_id,
+            format!(
+                "Plan v{} proposed ({} tasks) — awaiting Approve Plan.",
+                plan.revision,
+                plan.tasks.len()
+            ),
+        );
+        Ok(plan)
+    }
+
+    /// Materialize the Project's Plan artifact into flat Tasks + deps, publish
+    /// them to Ready, and close open Initial Plan Tasks. Never moves the Project
+    /// to Ready.
+    pub fn approve_plan(&self, project_id: ItemId) -> Result<Vec<ItemId>, String> {
+        let project = self
+            .get(project_id)
+            .ok_or_else(|| format!("no work item #{project_id}"))?;
+        if !project.is_project() {
+            return Err("approve_plan requires a Project".into());
+        }
+
+        if let Some(plan) = project.plan.clone().filter(|p| !p.tasks.is_empty()) {
+            return self.materialize_and_publish_plan(project_id, plan);
+        }
+
+        // Legacy: shaping children with no artifact (pre-plan boards).
+        let mut published = Vec::new();
+        for cid in self.children_of(project_id) {
+            let Some(child) = self.get(cid) else { continue };
+            if child.is_initial_plan_task() {
+                continue;
+            }
+            if child.state == State::Shaping
+                && self
+                    .transition(cid, State::Ready, "human", Some("plan approved".into()))
+                    .is_ok()
+            {
+                published.push(cid);
+            }
+        }
+        if published.is_empty() {
+            return Err(
+                "no Plan artifact to approve — run propose_breakdown (or wait for the Initial plan Task)"
+                    .into(),
+            );
+        }
+        self.close_plan_tasks(project_id);
+        self.story(
+            project_id,
+            format!("Plan approved: {} tasks published to Ready (legacy path).", published.len()),
+        );
+        Ok(published)
+    }
+
+    fn materialize_and_publish_plan(
+        &self,
+        project_id: ItemId,
+        mut plan: PlanArtifact,
+    ) -> Result<Vec<ItemId>, String> {
+        for id in &plan.cancel_item_ids {
+            let _ = self.transition(*id, State::Retired, "human", Some("cancelled by replan".into()));
+        }
+
+        // Create / update Tasks for each plan spec.
+        for spec in plan.tasks.iter_mut() {
+            if let Some(existing_id) = spec.item_id {
+                if self.get(existing_id).is_some() {
+                    let _ = self.update_item(
+                        existing_id,
+                        Some(spec.title.clone()),
+                        Some(spec.intent.clone()),
+                        Some(spec.definition_of_done.clone()),
+                        None,
+                    );
+                    continue;
+                }
+            }
+            let child = self.create(
+                Some(project_id),
+                spec.title.clone(),
+                spec.intent.clone(),
+                Some(spec.definition_of_done.clone()),
+                Origin::Planner,
+                false,
+                spec.capability.clone(),
+            )?;
+            let _ = self.transition(child.id, State::Shaping, "planner", Some("from plan".into()));
+            spec.item_id = Some(child.id);
+        }
+
+        // Resolve key → id, then wire blocked_by.
+        let key_to_id: BTreeMap<String, ItemId> = plan
+            .tasks
+            .iter()
+            .filter_map(|t| t.item_id.map(|id| (t.key.clone(), id)))
+            .collect();
+        for spec in &plan.tasks {
+            let Some(id) = spec.item_id else { continue };
+            let blockers: Vec<ItemId> = spec
+                .blocked_by_keys
+                .iter()
+                .filter_map(|k| key_to_id.get(k).copied())
+                .collect();
+            self.set_blocked_by(id, blockers);
+        }
+
+        // Publish to Ready.
+        let mut published = Vec::new();
+        for spec in &plan.tasks {
+            let Some(id) = spec.item_id else { continue };
+            if let Some(child) = self.get(id) {
+                if child.state == State::Shaping
+                    && self
+                        .transition(id, State::Ready, "human", Some("plan approved".into()))
+                        .is_ok()
+                {
+                    published.push(id);
+                } else if child.state == State::Ready {
+                    published.push(id);
+                }
+            }
+        }
+
+        plan.status = PlanStatus::Approved;
+        plan.approved_revision = Some(plan.revision);
+        {
+            let mut s = self.state.write().unwrap();
+            if let Some(p) = s.items.get_mut(&project_id) {
+                p.plan = Some(plan.clone());
+                let snap = p.clone();
+                drop(s);
+                self.emit(&snap);
+            }
+        }
+
+        self.close_plan_tasks(project_id);
+        self.story(
+            project_id,
+            format!(
+                "Plan v{} approved: {} tasks published to Ready.",
+                plan.revision,
+                published.len()
+            ),
+        );
+        Ok(published)
+    }
+
+    fn close_plan_tasks(&self, project_id: ItemId) {
+        for cid in self.children_of(project_id) {
+            let Some(child) = self.get(cid) else { continue };
+            if !child.is_initial_plan_task() || child.state.is_terminal() {
+                continue;
+            }
+            // Prefer Done from shaping/ready/running paths the machine allows.
+            if child.state == State::Ready
+                || child.state == State::Shaping
+                || child.state == State::NeedsHuman
+            {
+                let _ = self.transition(
+                    cid,
+                    State::Done,
+                    "human",
+                    Some("plan approved; tasks materialized".into()),
+                );
+            } else if matches!(child.state, State::Claimed | State::Running) {
+                // Halt-ish: Ready then Done if needed.
+                let _ = self.transition(cid, State::Ready, "human", Some("plan approved".into()));
+                let _ = self.transition(
+                    cid,
+                    State::Done,
+                    "human",
+                    Some("plan approved; tasks materialized".into()),
+                );
+            }
+        }
+    }
+
+    /// Dual-write a board item into beads (Project→epic, Task→task with `--parent`).
+    /// Call after `create` when you hold a `SharedBoard` so the real hash id can be stored.
+    pub fn schedule_beads_mirror(self: &Arc<Self>, id: ItemId) {
+        let Some(item) = self.get(id) else { return };
+        let Some(beads) = self.beads.clone() else { return };
+        let title = item.title.clone();
+        let intent = item.intent.clone();
+        let is_project = item.parent.is_none();
+        let parent_beads = item.parent.and_then(|pid| self.get(pid).and_then(|p| p.beads_id));
+        // Skip placeholders that aren't real beads ids (still sync — create gets a new id).
+        let blockers: Vec<String> = item
+            .blocked_by
+            .iter()
+            .filter_map(|bid| self.get(*bid).and_then(|b| b.beads_id))
+            .filter(|bid| !bid.starts_with("bd-honr-"))
+            .collect();
+        let board = Arc::clone(self);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let issue_type = if is_project { "epic" } else { "task" };
+                let parent = parent_beads
+                    .as_deref()
+                    .filter(|p| !p.starts_with("bd-honr-"));
+                match beads
+                    .create_linked(&title, 2, issue_type, Some(&intent), parent, &blockers)
+                    .await
+                {
+                    Ok(issue) => board.set_beads_id(id, &issue.id),
+                    Err(e) => tracing::warn!(id, error = %e, "beads mirror create failed"),
+                }
+            });
+        }
+    }
+
+    pub fn set_beads_id(&self, id: ItemId, beads_id: &str) {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let Some(it) = s.items.get_mut(&id) else { return };
+            it.beads_id = Some(beads_id.to_string());
+            it.clone()
+        };
+        self.emit(&item);
+    }
+
+    #[allow(dead_code)]
+    pub fn set_github_issue_url(&self, id: ItemId, url: &str) {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let Some(it) = s.items.get_mut(&id) else { return };
+            it.github_issue_url = Some(url.to_string());
+            it.clone()
+        };
+        self.emit(&item);
     }
 
     /// Unused until the supervisor enforces a per-card cents cap.
@@ -554,8 +1064,6 @@ impl Board {
         self.emit(&item);
     }
 
-    /// Unused until real dependencies are declared through the cockpit.
-    #[allow(dead_code)]
     pub fn set_blocked_by(&self, id: ItemId, blockers: Vec<ItemId>) {
         let item = {
             let mut s = self.state.write().unwrap();
@@ -564,6 +1072,27 @@ impl Board {
             it.clone()
         };
         self.emit(&item);
+
+        // Mirror blocks edges into beads when both sides have real hash ids.
+        if let (Some(beads), Some(bid)) = (self.beads.clone(), item.beads_id.clone()) {
+            let deps: Vec<String> = item
+                .blocked_by
+                .iter()
+                .filter_map(|b| self.get(*b).and_then(|w| w.beads_id))
+                .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+                .collect();
+            if crate::beads::BeadsClient::is_real_id(&bid) && !deps.is_empty() {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        for dep in deps {
+                            if let Err(e) = beads.dep_add(&bid, &dep, "blocks").await {
+                                tracing::warn!(%bid, %dep, error = %e, "beads dep sync failed");
+                            }
+                        }
+                    });
+                }
+            }
+        }
     }
 
     /// Tweak an item's title, intent, or definition of done in Shaping before approving it.
@@ -585,6 +1114,12 @@ impl Board {
             }
             if let Some(i) = intent {
                 if !i.trim().is_empty() {
+                    // Keep Plan summary aligned with Project Why.
+                    if it.is_project() {
+                        if let Some(plan) = it.plan.as_mut() {
+                            plan.summary = i.trim().to_string();
+                        }
+                    }
                     it.intent = i;
                 }
             }
@@ -617,12 +1152,13 @@ impl Board {
             .map(|i| i.id)
     }
 
-    /// `list_ready` — the pull queue made visible.
+    /// `list_ready` — the pull queue made visible. Projects are never claimable.
     pub fn list_ready(&self, capabilities: &[String]) -> Vec<WorkItem> {
         let s = self.state.read().unwrap();
         s.items
             .values()
             .filter(|i| i.state == State::Ready)
+            .filter(|i| i.level.as_deref() != Some("Project"))
             .filter(|i| !Self::has_children(&s, i.id))
             .filter(|i| Self::unresolved_blockers(&s, i).is_empty())
             .filter(|i| match &i.capability {
@@ -636,6 +1172,27 @@ impl Board {
                 item
             })
             .collect()
+    }
+
+    /// Ready tasks from beads (`issue_type=task` only), mapped back to board items when present.
+    #[allow(dead_code)]
+    pub async fn list_ready_beads(&self) -> Result<Vec<crate::beads::BeadsIssue>, String> {
+        if let Some(b) = &self.beads {
+            let ready = b.list_ready().await?;
+            Ok(ready.into_iter().filter(|i| i.issue_type == "task").collect())
+        } else {
+            Err("beads client not initialized".into())
+        }
+    }
+
+    /// `sync_beads_remote` — pushes beads database state to GitHub remote (refs/dolt/data).
+    #[allow(dead_code)]
+    pub async fn sync_beads_remote(&self) -> Result<(), String> {
+        if let Some(b) = &self.beads {
+            b.sync_remote(Some("origin")).await
+        } else {
+            Err("beads client not initialized".into())
+        }
     }
 
     /// `claim` — takes a lease and returns the full goal ancestry, not just the
@@ -667,10 +1224,21 @@ impl Board {
         };
         self.emit(&item);
 
+        if let (Some(beads), Some(bid)) = (self.beads.clone(), item.beads_id.clone()) {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    if let Err(e) = beads.claim(&bid).await {
+                        tracing::warn!(%bid, error = %e, "beads claim sync failed");
+                    }
+                });
+            }
+        }
+
         Ok(ClaimGrant {
             item_id: id,
             title: item.title.clone(),
             definition_of_done: item.definition_of_done.clone(),
+            beads_id: item.beads_id.clone(),
             ancestry: self.ancestry(id),
             constraints: self.inherited_pins(id),
             notes: item.notes.iter().map(|n| n.text.clone()).collect(),
@@ -710,67 +1278,72 @@ impl Board {
         Ok(item)
     }
 
-    /// `split` — self-orchestration. The parent visibly hatches: it becomes a
-    /// container and its children fan into Ready.
+    /// `split` — self-orchestration. Creates **sibling** Tasks under the same
+    /// Project (flat model); the original card is Done, not nested into.
     pub fn split(
         &self,
         id: ItemId,
         agent_id: &str,
         children: Vec<(String, String, String)>, // title, intent, dod
-        max_depth: usize,
         max_children: usize,
     ) -> Result<Vec<WorkItem>, String> {
         if children.len() < 2 {
-            return Err("a split needs at least two children; use report if the work is one card".into());
+            return Err("a split needs at least two siblings; use report if the work is one card".into());
         }
         if children.len() > max_children {
             return Err(format!(
-                "split of {} children exceeds max_children_per_split={max_children}; escalating \
+                "split of {} siblings exceeds max_children_per_split={max_children}; escalating \
                  rather than fanning out",
                 children.len()
             ));
         }
+
+        let card = self.get(id).ok_or("no such item")?;
+        let project_id = card.parent.ok_or_else(|| {
+            "cannot split a Project; only Tasks under a Project can split into siblings".to_string()
+        })?;
         {
             let s = self.state.read().unwrap();
-            if Self::depth(&s, id) + 1 > max_depth {
-                return Err(format!(
-                    "split would exceed max_depth={max_depth}; escalating rather than failing silently"
-                ));
+            if s.items.get(&project_id).and_then(|p| p.parent).is_some() {
+                return Err("split target is not under a Project root".into());
             }
         }
 
         self.transition(id, State::Splitting, agent_id, Some("agent requested split".into()))
             .map_err(|e| e.to_string())?;
 
-        let parent = self.get(id).ok_or("no such item")?;
         let mut made = Vec::new();
         for (title, intent, dod) in children {
-            let child = self.create(
-                Some(id),
+            let sibling = self.create(
+                Some(project_id),
                 title,
                 intent,
                 Some(dod),
                 Origin::Split { from: id },
                 false,
-                parent.capability.clone(),
-            );
-            self.transition(child.id, State::Shaping, agent_id, None).map_err(|e| e.to_string())?;
-            let child = self
-                .transition(child.id, State::Ready, agent_id, None)
+                card.capability.clone(),
+            )?;
+            self.transition(sibling.id, State::Shaping, agent_id, None)
                 .map_err(|e| e.to_string())?;
-            made.push(child);
+            let sibling = self
+                .transition(sibling.id, State::Ready, agent_id, None)
+                .map_err(|e| e.to_string())?;
+            made.push(sibling);
         }
 
-        // The parent is now a container: it shrinks to a rollup and stops being
-        // claimable.
-        self.transition(id, State::Shaping, agent_id, Some("hatched into children".into()))
-            .map_err(|e| e.to_string())?;
+        self.transition(
+            id,
+            State::Done,
+            agent_id,
+            Some("split into sibling tasks under the Project".into()),
+        )
+        .map_err(|e| e.to_string())?;
 
         self.story(
-            id,
+            project_id,
             format!(
-                "{} turned out bigger than one card — split into {} ({}).",
-                parent.title,
+                "{} turned out bigger than one card — replaced by {} siblings ({}).",
+                card.title,
                 made.len(),
                 made.iter().map(|c| c.title.as_str()).collect::<Vec<_>>().join(", ")
             ),
@@ -936,6 +1509,10 @@ impl Board {
 
     /// Pin — becomes standing context for this item *and all descendants*.
     pub fn pin(&self, id: ItemId, text: String) -> Result<WorkItem, String> {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Err("constraint text is empty".into());
+        }
         let item = {
             let mut s = self.state.write().unwrap();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
@@ -944,6 +1521,22 @@ impl Board {
         };
         self.emit(&item);
         self.story(id, format!("Constraint pinned on {}: {text}", item.title));
+        Ok(item)
+    }
+
+    /// Remove a pin by index on this item (does not touch ancestor pins).
+    pub fn unpin(&self, id: ItemId, index: usize) -> Result<WorkItem, String> {
+        let (item, removed) = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or("no such item")?;
+            if index >= it.pinned.len() {
+                return Err(format!("no constraint at index {index}"));
+            }
+            let removed = it.pinned.remove(index);
+            (it.clone(), removed)
+        };
+        self.emit(&item);
+        self.story(id, format!("Constraint removed on {}: {removed}", item.title));
         Ok(item)
     }
 
@@ -1004,6 +1597,53 @@ impl Board {
             self.story(id, format!("Scope cut: {} retired ({} items).", t.title, touched.len()));
         }
         Ok(touched)
+    }
+
+    /// Delete item — removes the item (and its subtree) permanently from the board.
+    pub fn delete_item(&self, id: ItemId) -> Result<(), String> {
+        let mut s = self.state.write().unwrap();
+        if !s.items.contains_key(&id) {
+            return Err(format!("item #{id} not found"));
+        }
+
+        let mut to_delete = Vec::new();
+        let mut stack = vec![id];
+        while let Some(cur) = stack.pop() {
+            to_delete.push(cur);
+            for (cid, item) in &s.items {
+                if item.parent == Some(cur) && !to_delete.contains(cid) && !stack.contains(cid) {
+                    stack.push(*cid);
+                }
+            }
+        }
+
+        for del_id in &to_delete {
+            if let Some(it) = s.items.remove(del_id) {
+                let beads = self.beads.clone();
+                let beads_id = it.beads_id.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let (Some(b), Some(bid)) = (beads, beads_id) {
+                            let _ = b.close(&bid, Some("Deleted from honr board")).await;
+                        }
+                    });
+                }
+            }
+        }
+
+        for item in s.items.values_mut() {
+            item.blocked_by.retain(|b| !to_delete.contains(b));
+        }
+
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        self.flush();
+
+        let _ = self.tx.send(BoardEvent::Delete {
+            seq: self.next_seq(),
+            id,
+        });
+        Ok(())
     }
 
     pub fn approve_review(&self, id: ItemId) -> Result<WorkItem, String> {
@@ -1080,20 +1720,20 @@ impl Board {
             server_time: now,
             heartbeat_expect_secs: self.schema.execution.heartbeat_expect_secs,
             seq: self.seq.load(Ordering::Relaxed),
+            dispatch_paused: s.dispatch_paused,
         }
     }
 
     fn goal_view(&self, s: &BoardState, gid: ItemId, now: DateTime<Utc>) -> Option<GoalView> {
         let goal = s.items.get(&gid)?;
 
-        // The vision is the thing goals ladder up to, not a swimlane of its
-        // own. A root with no children below it, though, *is* the goal.
-        if Self::depth(s, gid) == 0 && Self::has_children(s, gid) {
+        // Only Project roots are swimlanes. Nested nodes never get their own.
+        if Self::depth(s, gid) != 0 {
             return None;
         }
 
-        let members: Vec<&WorkItem> =
-            s.items.values().filter(|i| Self::goal_of(s, i.id) == gid).collect();
+        // Tasks under this Project only — the Project itself is never a Board card.
+        let members: Vec<&WorkItem> = s.items.values().filter(|i| i.parent == Some(gid)).collect();
 
         let leaves: Vec<&&WorkItem> =
             members.iter().filter(|i| !Self::has_children(s, i.id)).collect();
@@ -1124,6 +1764,12 @@ impl Board {
             });
         }
 
+        let plan_status = goal
+            .plan
+            .as_ref()
+            .map(|p| p.status_label())
+            .unwrap_or_else(|| "no_plan".into());
+
         Some(GoalView {
             id: gid,
             title: goal.title.clone(),
@@ -1135,6 +1781,8 @@ impl Board {
             budget_cents: goal.budget_cents,
             agents_live,
             needs_you,
+            plan_status,
+            dispatch_paused: goal.dispatch_paused,
             columns,
             story: s.stories.get(&gid).cloned().unwrap_or_default(),
         })
@@ -1244,9 +1892,8 @@ impl Board {
             .into_iter()
             .filter_map(|gid| {
                 let goal = s.items.get(&gid)?;
-                // Same rule as the board: the vision is what goals ladder up
-                // to, not a lane of its own.
-                if Self::depth(&s, gid) == 0 && Self::has_children(&s, gid) {
+                // Only Project roots are digest lanes.
+                if Self::depth(&s, gid) != 0 {
                     return None;
                 }
                 let members: Vec<&WorkItem> =
@@ -1309,17 +1956,21 @@ mod tests {
     /// A board with one leaf sitting in Ready, claimed by `agent`.
     fn claimed_leaf() -> (Board, ItemId) {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nowrite.json"));
-        let parent = b.create(None, "goal", "why", None, Origin::Human, true, None);
+        let parent = b
+            .create(None, "goal", "why", None, Origin::Human, true, None)
+            .expect("project");
         let _ = b.transition(parent.id, State::Shaping, "t", None);
-        let leaf = b.create(
-            Some(parent.id),
-            "leaf",
-            "do a thing",
-            Some("it is done".into()),
-            Origin::Human,
-            false,
-            None,
-        );
+        let leaf = b
+            .create(
+                Some(parent.id),
+                "leaf",
+                "do a thing",
+                Some("it is done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
         let _ = b.transition(leaf.id, State::Shaping, "t", None);
         let _ = b.transition(leaf.id, State::Ready, "t", None);
         b.claim(leaf.id, "agent", None, 45).expect("claim");
@@ -1414,31 +2065,52 @@ mod tests {
     }
 
     #[test]
-    fn split_creates_children_and_hatches_parent() {
+    fn delete_item_removes_item_and_descendants() {
+        let b = std::sync::Arc::new(Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join("honr-test-del.json"),
+        ));
+        let p = b
+            .create(None, "Parent", "intent", None, Origin::Human, false, None)
+            .expect("project");
+        let c = b
+            .create(Some(p.id), "Child", "intent", None, Origin::Human, false, None)
+            .expect("task");
+        assert!(b.get(p.id).is_some());
+        assert!(b.get(c.id).is_some());
+
+        b.delete_item(p.id).expect("delete parent");
+        assert!(b.get(p.id).is_none());
+        assert!(b.get(c.id).is_none());
+    }
+
+    #[test]
+    fn split_creates_siblings_under_project() {
         let (b, id) = claimed_leaf();
+        let project_id = b.get(id).unwrap().parent.expect("task under project");
         let _ = b.transition(id, State::Running, "agent", None);
         let children = vec![
             ("Part 1".into(), "Do part 1".into(), "Part 1 done".into()),
             ("Part 2".into(), "Do part 2".into(), "Part 2 done".into()),
         ];
-        let made = b.split(id, "agent", children, 7, 5).expect("split should succeed");
+        let made = b.split(id, "agent", children, 5).expect("split should succeed");
         assert_eq!(made.len(), 2);
-        assert_eq!(made[0].parent, Some(id));
+        assert_eq!(made[0].parent, Some(project_id));
         assert_eq!(made[0].state, State::Ready);
-        assert_eq!(made[1].parent, Some(id));
+        assert_eq!(made[1].parent, Some(project_id));
         assert_eq!(made[1].state, State::Ready);
 
-        let parent = b.get(id).expect("parent exists");
-        assert_eq!(parent.state, State::Shaping);
+        let original = b.get(id).expect("original exists");
+        assert_eq!(original.state, State::Done);
     }
 
     #[test]
-    fn split_refused_below_minimum_children() {
+    fn split_refused_below_minimum_siblings() {
         let (b, id) = claimed_leaf();
         let _ = b.transition(id, State::Running, "agent", None);
         let children = vec![("Single".into(), "Only one".into(), "Done".into())];
-        let err = b.split(id, "agent", children, 7, 5).unwrap_err();
-        assert!(err.contains("at least two children"), "got error: {err}");
+        let err = b.split(id, "agent", children, 5).unwrap_err();
+        assert!(err.contains("at least two siblings"), "got error: {err}");
     }
 
     #[test]
@@ -1448,20 +2120,334 @@ mod tests {
         let children: Vec<_> = (1..=6)
             .map(|i| (format!("Child {i}"), format!("Intent {i}"), format!("DoD {i}")))
             .collect();
-        let err = b.split(id, "agent", children, 7, 5).unwrap_err();
+        let err = b.split(id, "agent", children, 5).unwrap_err();
         assert!(err.contains("exceeds max_children_per_split=5"), "got error: {err}");
     }
 
     #[test]
-    fn split_refused_exceeding_depth_governor() {
-        let (b, id) = claimed_leaf();
-        let _ = b.transition(id, State::Running, "agent", None);
-        // id is a child of goal, so depth(id) is 1. If max_depth is 1, depth + 1 = 2 > 1.
-        let children = vec![
-            ("Child 1".into(), "Intent 1".into(), "DoD 1".into()),
-            ("Child 2".into(), "Intent 2".into(), "DoD 2".into()),
-        ];
-        let err = b.split(id, "agent", children, 1, 5).unwrap_err();
-        assert!(err.contains("max_depth=1"), "got error: {err}");
+    fn split_refused_on_project_root() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-root.json"));
+        let project = b
+            .create(None, "proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        // Put project in a claimable path only to exercise the guard — claim a fake run.
+        // Projects aren't Ready-claimable; call split directly after forcing Splitting-capable state.
+        let err = b
+            .split(
+                project.id,
+                "agent",
+                vec![
+                    ("A".into(), "a".into(), "done".into()),
+                    ("B".into(), "b".into(), "done".into()),
+                ],
+                5,
+            )
+            .unwrap_err();
+        assert!(err.contains("cannot split a Project"), "got error: {err}");
+    }
+
+    #[test]
+    fn nest_under_task_is_refused() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nest.json"));
+        let project = b
+            .create(None, "proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let task = b
+            .create(Some(project.id), "task", "do", Some("done".into()), Origin::Human, false, None)
+            .expect("task");
+        let err = b
+            .create(Some(task.id), "nested", "no", None, Origin::Human, false, None)
+            .unwrap_err();
+        assert!(err.contains("flat under a Project"), "got error: {err}");
+    }
+
+    #[test]
+    fn pin_and_unpin_round_trip() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-unpin.json"));
+        let project = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .expect("project");
+        b.pin(project.id, "gates offline".into()).expect("pin");
+        b.pin(project.id, "human merges".into()).expect("pin");
+        assert_eq!(b.get(project.id).unwrap().pinned.len(), 2);
+        b.unpin(project.id, 0).expect("unpin");
+        let pins = b.get(project.id).unwrap().pinned;
+        assert_eq!(pins, vec!["human merges".to_string()]);
+    }
+
+    #[test]
+    fn project_create_seeds_initial_plan_task() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-seed-plan.json"));
+        let project = b
+            .create(None, "Phase X", "why", None, Origin::Human, true, None)
+            .expect("project");
+        assert!(project.plan.is_some());
+        assert_eq!(project.plan.as_ref().unwrap().status, PlanStatus::Empty);
+
+        let kids = b.children_of(project.id);
+        assert_eq!(kids.len(), 1, "exactly one seed Task");
+        let seed = b.get(kids[0]).unwrap();
+        assert_eq!(seed.title, INITIAL_PLAN_TITLE);
+        assert_eq!(seed.state, State::Ready);
+        assert!(seed.is_initial_plan_task());
+        // Project itself must not be Ready / claimable.
+        assert_ne!(b.get(project.id).unwrap().state, State::Ready);
+    }
+
+    #[test]
+    fn approve_plan_materializes_from_artifact_not_project() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-approve-plan.json"));
+        let project = b
+            .create(None, "Phase Y", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+
+        b.propose_plan(
+            project.id,
+            "first cut",
+            vec![
+                PlanTaskSpec {
+                    key: "a".into(),
+                    title: "Task A".into(),
+                    intent: "do a".into(),
+                    definition_of_done: "a done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    item_id: None,
+                },
+                PlanTaskSpec {
+                    key: "b".into(),
+                    title: "Task B".into(),
+                    intent: "do b".into(),
+                    definition_of_done: "b done".into(),
+                    blocked_by_keys: vec!["a".into()],
+                    capability: None,
+                    item_id: None,
+                },
+            ],
+            vec![],
+        )
+        .expect("propose");
+
+        let published = b.approve_plan(project.id).expect("approve");
+        assert_eq!(published.len(), 2);
+        assert_ne!(b.get(project.id).unwrap().state, State::Ready);
+        assert_eq!(
+            b.get(project.id).unwrap().plan.as_ref().unwrap().status,
+            PlanStatus::Approved
+        );
+
+        let a = b.get(published[0]).unwrap();
+        let b_item = b.get(published[1]).unwrap();
+        assert_eq!(a.state, State::Ready);
+        assert_eq!(b_item.state, State::Ready);
+        assert_eq!(b_item.blocked_by, vec![published[0]]);
+
+        // Initial plan Task closed.
+        let seed = b
+            .children_of(project.id)
+            .into_iter()
+            .find_map(|id| b.get(id).filter(|i| i.is_initial_plan_task()));
+        assert!(seed.unwrap().state.is_terminal());
+    }
+
+    #[test]
+    fn dispatch_paused_defaults_false_and_toggles() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-pause-toggle.json"));
+        assert!(!b.dispatch_paused());
+        assert!(!b.snapshot().dispatch_paused);
+
+        b.set_dispatch_paused(true);
+        assert!(b.dispatch_paused());
+        assert!(b.snapshot().dispatch_paused);
+
+        b.set_dispatch_paused(false);
+        assert!(!b.dispatch_paused());
+        assert!(!b.snapshot().dispatch_paused);
+    }
+
+    #[test]
+    fn dispatch_paused_persists_across_load() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-pause-persist-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let b = Board::new(Schema::default(), path.clone());
+        b.set_dispatch_paused(true);
+        b.flush();
+
+        let restored = Board::load_or_new(Schema::default(), path.clone());
+        assert!(restored.dispatch_paused());
+        assert!(restored.snapshot().dispatch_paused);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn old_board_json_without_pause_field_loads_unpaused() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-pause-legacy-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"next_id":1,"items":{},"stories":{}}"#,
+        )
+        .expect("write");
+        let b = Board::load_or_new(Schema::default(), path.clone());
+        assert!(!b.dispatch_paused());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Project + Ready task under it. Returns (board, project_id, task_id).
+    fn project_with_ready_task() -> (Board, ItemId, ItemId) {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-proj-pause-{}.json", std::process::id())),
+        );
+        let project = b
+            .create(None, "proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        let task = b
+            .create(
+                Some(project.id),
+                "task",
+                "do it",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        let _ = b.transition(task.id, State::Shaping, "t", None);
+        let _ = b.transition(task.id, State::Ready, "t", None);
+        (b, project.id, task.id)
+    }
+
+    #[test]
+    fn project_pause_blocks_only_that_subtree() {
+        let (b, project_a, task_a) = project_with_ready_task();
+        let project_b = b
+            .create(None, "other", "why", None, Origin::Human, true, None)
+            .expect("project b");
+        let _ = b.transition(project_b.id, State::Shaping, "t", None);
+        let task_b = b
+            .create(
+                Some(project_b.id),
+                "task b",
+                "do it",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task b");
+        let task_b = task_b.id;
+        let _ = b.transition(task_b, State::Shaping, "t", None);
+        let _ = b.transition(task_b, State::Ready, "t", None);
+
+        assert!(b.may_claim(task_a));
+        assert!(b.may_claim(task_b));
+
+        b.set_project_dispatch_paused(project_a, true).expect("pause a");
+        assert!(!b.may_claim(task_a));
+        assert!(b.may_claim(task_b), "sibling project still claimable");
+        assert!(
+            b.snapshot()
+                .goals
+                .iter()
+                .find(|g| g.id == project_a)
+                .expect("goal a")
+                .dispatch_paused
+        );
+
+        b.set_project_dispatch_paused(project_a, false).expect("resume a");
+        assert!(b.may_claim(task_a));
+    }
+
+    #[test]
+    fn global_pause_stamps_projects_and_allows_exceptions() {
+        let (b, project_a, task_a) = project_with_ready_task();
+        let project_b = b
+            .create(None, "other", "why", None, Origin::Human, true, None)
+            .expect("project b");
+        let _ = b.transition(project_b.id, State::Shaping, "t", None);
+        let task_b = b
+            .create(
+                Some(project_b.id),
+                "task b",
+                "do it",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task b");
+        let task_b = task_b.id;
+        let _ = b.transition(task_b, State::Shaping, "t", None);
+        let _ = b.transition(task_b, State::Ready, "t", None);
+
+        b.set_dispatch_paused(true);
+        assert!(b.get(project_a).unwrap().dispatch_paused);
+        assert!(b.get(project_b.id).unwrap().dispatch_paused);
+        assert!(!b.may_claim(task_a));
+        assert!(!b.may_claim(task_b));
+
+        // Exception: resume one project while global stays paused.
+        b.set_project_dispatch_paused(project_a, false).expect("resume a");
+        assert!(b.dispatch_paused());
+        assert!(b.may_claim(task_a), "resumed project is an exception");
+        assert!(!b.may_claim(task_b), "other projects stay stamped");
+
+        // Global resume clears every project pause.
+        b.set_dispatch_paused(false);
+        assert!(!b.get(project_a).unwrap().dispatch_paused);
+        assert!(!b.get(project_b.id).unwrap().dispatch_paused);
+        assert!(b.may_claim(task_a));
+        assert!(b.may_claim(task_b));
+    }
+
+    #[test]
+    fn new_project_while_globally_paused_starts_paused() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-pause-new-{}.json", std::process::id())),
+        );
+        b.set_dispatch_paused(true);
+        let project = b
+            .create(None, "late", "why", None, Origin::Human, true, None)
+            .expect("project");
+        assert!(project.dispatch_paused);
+    }
+
+    #[test]
+    fn cannot_project_pause_a_task() {
+        let (b, _project, task) = project_with_ready_task();
+        assert!(b.set_project_dispatch_paused(task, true).is_err());
+    }
+
+    #[test]
+    fn project_pause_persists_across_load() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-proj-pause-persist-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let b = Board::new(Schema::default(), path.clone());
+        let project = b
+            .create(None, "proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        b.set_project_dispatch_paused(project.id, true).expect("pause");
+        b.flush();
+
+        let restored = Board::load_or_new(Schema::default(), path.clone());
+        assert!(restored.get(project.id).unwrap().dispatch_paused);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -35,26 +35,37 @@ cargo run                 # :8080 — API, SSE, MCP, and the built UI
 Serves `web/dist` if it exists. For hot reload: `cd web && npm install && npm run dev`
 (:5173, proxies to :8080). `HONR_PORT` overrides the port.
 
-Connect the cockpit:
+Connect the cockpit (honr must already be listening on :8080):
+
+**Cursor** — project config is [`.cursor/mcp.json`](.cursor/mcp.json):
+
+```json
+{ "mcpServers": { "honr": { "type": "http", "url": "http://127.0.0.1:8080/mcp" } } }
+```
+
+Then **Cursor Settings → Tools & MCP** (or Customize → MCPs), enable **honr**, and reload if needed.
+With the cockpit rule in [`.cursor/rules/honr-cockpit.mdc`](.cursor/rules/honr-cockpit.mdc), the agent
+drives Projects/Plans via MCP; sandboxed workers claim Ready Tasks and open PRs.
+
+**Claude Code:**
 
 ```bash
 claude mcp add --transport http honr http://localhost:8080/mcp
 ```
 
-Then describe a goal, approve the breakdown it proposes, and the cards appear.
+Then describe a goal, approve the Plan, and the cards appear.
 State lives in `honr.json` (gitignored); delete it to start over.
 
 **The board starts empty and nothing claims cards until you enable agents** —
 see [`docs/operating.md`](docs/operating.md). That's deliberate: honr must run
 on a machine with no podman, no gateway and no credentials.
 
-## The three views
+## The two views
 
 | View | The question it answers |
 |---|---|
-| **Overview** | What is this system doing? The why-chain top-down, with each branch reporting how much of it is real. |
-| **Activity** | What is happening right now? Six columns, heartbeat age on the card face, cards visibly decaying as it grows. |
-| **Needs you** | What is blocked on me? One-tap answers to agent escalations. |
+| **Home** | What should I know right now? Status, one-tap answers to escalations, and Project progress. |
+| **Board** | What is happening in the columns? Ready → Done, with heartbeat decay on running cards. |
 
 The UI is for **understanding**; the agent is for **driving**. Steer, pin, halt
 and cut scope live in the cockpit, because they all want a reason. What stays
@@ -65,14 +76,15 @@ review.
 
 | Path | What |
 |---|---|
-| `src/model.rs` | One node type. Project/epic/story/task are labels for altitude. |
+| `src/model.rs` | One node type. Project (container) + Task (claimable leaf). |
 | `src/machine.rs` | Legal transitions + the two invariants. |
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
+| `src/beads.rs` | `bd` CLI wrapper — identity, Project→Task parent, deps. |
 | `src/api.rs` `src/sse.rs` | The human face. |
 | `src/mcp.rs` | The cockpit and worker face. |
 | `src/openshell.rs` | Typed async wrapper over the `openshell` CLI. |
 | `src/supervisor.rs` | Dispatch, the per-card sandbox lifecycle, lease sweeping. |
-| `honr.yaml` | Level schema and execution config. |
+| `honr.yaml` | Level schema (Project + Task) and execution config. |
 | `sandbox/` | Container image, network policy, metadata shim. |
 | `web/` | React UI, plus a Playwright screenshot harness. |
 
@@ -90,15 +102,14 @@ review.
 ## What's implemented
 
 Columns and card anatomy (§1–2), the lifecycle enforced server-side (§3), one
-node type with a level schema and the commitment line (§4), human verbs and the
-plan-approval gate (§5), seven worker verbs with `escalate` refusing fewer than
-two options (§6), and chunking rather than compression (§8) — overflow reads
-`7 ready · 2 blocked on #41 · oldest 40m`, computed server-side so it can't
-drift.
+node type with a **Project + flat Tasks** level schema (§4) — Vision/Epic/Story
+are retired; task↔task links are dependency edges (via beads). Human verbs and
+the plan-approval gate (§5), seven worker verbs with `escalate` refusing fewer
+than two options (§6), and chunking rather than compression (§8).
 
-Plus the execution path: sandbox per card, briefing built from the intent
-chain, liveness and cost observed from the agent's output stream, budget caps,
-retry limits, and cross-fork PRs.
+Plus the execution path: sandbox per card, briefing built from the Project→Task
+chain, beads mirrored into the sandbox (`BEADS_DIR`), liveness and cost from the
+agent's output stream, budget caps, retry limits, and cross-fork PRs.
 
 ## Not implemented
 

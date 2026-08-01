@@ -71,14 +71,16 @@ blockers, and its capability matches — which today is hardcoded to `["any"]`,
 so a card tagged anything else is silently never claimed.
 
 Nothing pushes work. A card becoming Ready is the entire trigger, which means
-the real human decision point is `approve_plan`, not dispatch.
+the real human decision point is **Approve Plan** (`approve_plan` — materialize
+the Project's Plan artifact into Ready Tasks; the Project itself never goes
+Ready), not dispatch.
 
 ## Steering a card
 
 | You want to | Do this |
 |---|---|
 | Send a reviewed card back with instructions | **Request changes** in the drawer. The note reaches the next run's briefing. |
-| Answer a blocked agent | **Needs you** tab, pick an option. Resets the card's retry budget. |
+| Answer a blocked agent | **Home** — Needs you section, pick an option. Resets the card's retry budget. |
 | Anything requiring a reason | Tell the cockpit. Steer, pin, halt and cut live there. |
 
 `steer` on a *running* card does nothing today: the briefing is built once at

@@ -10,3 +10,15 @@ web/tsconfig.tsbuildinfo
 web/shots
 .honr
 
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+
+# Local sandbox vendor blobs (install via Containerfile / CLI)
+sandbox/agy.tar.gz
+sandbox/antigravity
+
+# Local board backups
+honr.json.pre-flat-backup
