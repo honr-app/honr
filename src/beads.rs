@@ -315,14 +315,22 @@ impl BeadsClient {
         {
             return Ok(());
         }
-        let token = Self::resolve_github_token().unwrap_or_default();
 
-        let mut cmd = self.cmd();
-        cmd.arg("github").arg("sync").arg("--push-only");
+        let repo_full = std::env::var("GITHUB_REPOSITORY")
+            .unwrap_or_else(|_| "shanemcd/honr".to_string());
 
-        if !token.is_empty() {
-            cmd.env("GITHUB_TOKEN", token);
+        let mut cmd = Command::new("sh");
+        cmd.env("BEADS_DIR", &self.beads_dir);
+        if let Some(parent) = self.beads_dir.parent() {
+            cmd.current_dir(parent);
         }
+
+        if let Some((owner, repo)) = repo_full.split_once('/') {
+            cmd.env("GITHUB_OWNER", std::env::var("GITHUB_OWNER").unwrap_or_else(|_| owner.to_string()));
+            cmd.env("GITHUB_REPO", std::env::var("GITHUB_REPO").unwrap_or_else(|_| repo.to_string()));
+        }
+
+        cmd.args(["-c", "bd github sync --push-only"]);
 
         let out = cmd.output().await.map_err(|e| e.to_string())?;
         if out.status.success() {
