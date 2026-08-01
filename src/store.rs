@@ -932,7 +932,14 @@ impl Board {
                     .create_linked(&title, 2, issue_type, Some(&intent), parent, &blockers)
                     .await
                 {
-                    Ok(issue) => board.set_beads_id(id, &issue.id),
+                    Ok(issue) => {
+                        board.set_beads_id(id, &issue.id);
+                        if crate::beads::BeadsClient::is_real_id(&issue.id) {
+                            if let Err(e) = beads.github_sync().await {
+                                tracing::warn!(id, error = %e, "beads github sync after mirror create failed");
+                            }
+                        }
+                    }
                     Err(e) => tracing::warn!(id, error = %e, "beads mirror create failed"),
                 }
             });
@@ -2967,5 +2974,118 @@ mod tests {
             b.snapshot().goals.iter().any(|g| g.id == keep.id),
             "active Project still listed"
         );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_beads_mirror_invokes_github_sync_on_create_and_split() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-store-beads-mirror-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client);
+        let board = Arc::new(board_raw);
+
+        // 1. Create a project and verify placeholder before mirror
+        let project = board
+            .create(None, "Test Mirror Project", "intent", None, Origin::Human, true, None)
+            .expect("create project");
+        assert_eq!(project.beads_id, Some("bd-honr-1".to_string()));
+        assert!(
+            !crate::beads::BeadsClient::is_real_id(
+                project.beads_id.as_deref().unwrap_or("")
+            ),
+            "placeholder bd-honr-* ids must skip create/sync"
+        );
+
+        // Schedule beads mirror on create
+        board.schedule_beads_mirror(project.id);
+
+        // Wait for spawned async task in schedule_beads_mirror to assign real beads_id and run github_sync
+        let mut real_project_id = None;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if let Some(p) = board.get(project.id) {
+                if let Some(ref bid) = p.beads_id {
+                    if crate::beads::BeadsClient::is_real_id(bid) {
+                        real_project_id = Some(bid.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        let project_beads_id = real_project_id.expect("expected real beads_id after schedule_beads_mirror on create");
+        assert!(crate::beads::BeadsClient::is_real_id(&project_beads_id));
+
+        // 2. Create a task under project
+        let task = board
+            .create(
+                Some(project.id),
+                "Task to split",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("create task");
+
+        // Mirror task
+        board.schedule_beads_mirror(task.id);
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if let Some(t) = board.get(task.id) {
+                if let Some(ref bid) = t.beads_id {
+                    if crate::beads::BeadsClient::is_real_id(bid) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Transition task to Claimed and split into siblings
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.claim(task.id, "agent", None, 45);
+
+        let children = vec![
+            ("Sibling One".to_string(), "intent 1".to_string(), "dod 1".to_string()),
+            ("Sibling Two".to_string(), "intent 2".to_string(), "dod 2".to_string()),
+        ];
+        let made = board.split(task.id, "agent", children, 5).expect("split");
+        assert_eq!(made.len(), 2);
+
+        // Mirror each split sibling
+        for m in &made {
+            board.schedule_beads_mirror(m.id);
+        }
+
+        // Wait for spawned async tasks on split siblings to assign real beads_ids and invoke github_sync
+        for m in &made {
+            let mut sibling_real_id = None;
+            for _ in 0..50 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if let Some(item) = board.get(m.id) {
+                    if let Some(ref bid) = item.beads_id {
+                        if crate::beads::BeadsClient::is_real_id(bid) {
+                            sibling_real_id = Some(bid.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            let sib_id = sibling_real_id.expect("expected real beads_id after schedule_beads_mirror on split");
+            assert!(crate::beads::BeadsClient::is_real_id(&sib_id));
+        }
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }
