@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, money, since } from "../api";
-import type { PlanTaskSpec, WorkItem } from "../types";
+import { api, money, since } from "../api.js";
+import type { PlanTaskSpec, WorkItem } from "../types.js";
 
 interface Detail extends WorkItem {
   ancestry: { level: string; title: string; intent: string }[];
@@ -191,6 +191,7 @@ export function DetailDrawer({
   const [constraintText, setConstraintText] = useState("");
   const [planTasks, setPlanTasks] = useState<EditPlanTask[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
   const [logs, setLogs] = useState<{ claude: string[]; openshell: string[] }>({
     claude: [],
     openshell: [],
@@ -246,6 +247,7 @@ export function DetailDrawer({
     setD(null);
     setErr(null);
     setConfirmDelete(false);
+    setConfirmArchive(false);
     setPlanTasks([]);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -262,8 +264,84 @@ export function DetailDrawer({
 
   return (
     <aside className="drawer">
-      <Head onClose={onClose} onDelete={() => setConfirmDelete(!confirmDelete)} title={`#${d.id} ${d.title}`} />
+      <Head
+        onClose={onClose}
+        onArchive={
+          d.state !== "retired"
+            ? () => {
+                setConfirmArchive(!confirmArchive);
+                setConfirmDelete(false);
+              }
+            : undefined
+        }
+        onDelete={() => {
+          setConfirmDelete(!confirmDelete);
+          setConfirmArchive(false);
+        }}
+        title={`#${d.id} ${d.title}`}
+      />
       {err && <div className="err">{err}</div>}
+
+      {confirmArchive && (
+        <div
+          style={{
+            background: "#1e1b4b",
+            border: "1px solid #4338ca",
+            borderRadius: "6px",
+            padding: "10px 12px",
+            marginBottom: "12px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+          }}
+        >
+          <div style={{ color: "#c7d2fe", fontSize: "12px", fontWeight: 600 }}>
+            📦 Archive #{d.id} "{d.title}"?
+          </div>
+          <div style={{ color: "#a5b4fc", fontSize: "11px" }}>
+            This item and its subtree will be retired, not deleted. It appears greyed on the board and hidden from Home.
+          </div>
+          <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+            <button
+              style={{
+                fontSize: "11px",
+                padding: "4px 12px",
+                background: "#4f46e5",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+              onClick={() => {
+                api
+                  .cut(d.id, "archived from drawer")
+                  .then(() => {
+                    onChanged();
+                    onClose();
+                  })
+                  .catch((e) => setErr(String(e)));
+              }}
+            >
+              Confirm Archive
+            </button>
+            <button
+              style={{
+                fontSize: "11px",
+                padding: "4px 12px",
+                background: "#334155",
+                color: "#cbd5e1",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+              }}
+              onClick={() => setConfirmArchive(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {confirmDelete && (
         <div
@@ -1148,10 +1226,38 @@ export function DetailDrawer({
   );
 }
 
-const Head = ({ title, onClose, onDelete }: { title: string; onClose: () => void; onDelete?: () => void }) => (
+export const Head = ({
+  title,
+  onClose,
+  onArchive,
+  onDelete,
+}: {
+  title: string;
+  onClose: () => void;
+  onArchive?: () => void;
+  onDelete?: () => void;
+}) => (
   <div className="drawer-head" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
     <h3 style={{ margin: 0, flex: 1 }}>{title}</h3>
     <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+      {onArchive && (
+        <button
+          style={{
+            fontSize: "11px",
+            padding: "3px 8px",
+            background: "#1e1b4b",
+            color: "#818cf8",
+            border: "1px solid #3730a3",
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontWeight: 600,
+          }}
+          onClick={onArchive}
+          title="Archive (soft retire) item and its subtree"
+        >
+          📦 Archive
+        </button>
+      )}
       {onDelete && (
         <button
           style={{
