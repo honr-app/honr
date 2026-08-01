@@ -47,7 +47,8 @@ export function Home({
   const done = tasks.filter((t) => t.state === "done").length;
   const spend = tasks.reduce((s, t) => s + t.cost_cents, 0);
 
-  const recent = goals
+  const activeGoals = goals.filter((g) => items.get(g.id)?.state !== "retired");
+  const recent = activeGoals
     .flatMap((g) =>
       (g.story ?? []).map((s) => ({
         ...s,
@@ -181,7 +182,7 @@ export function Home({
                   {storyMark(s)}
                 </span>
                 <div className="home-recent-body">
-                  {goals.length > 1 && (
+                  {activeGoals.length > 1 && (
                     <button
                       type="button"
                       className="home-recent-project"

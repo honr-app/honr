@@ -437,8 +437,8 @@ impl Cockpit {
     #[tool(
         name = "create_goal",
         description = "Create a Project (top-level container). Seeds an Initial plan Task in \
-                       Ready. The Project itself is never claimable — write a Plan artifact \
-                       via propose_breakdown, then the human Approves Plan to materialize Tasks."
+                       Ready. An agent may open one plan/docs PR then split into sibling Tasks; \
+                       cockpit may also propose_breakdown + Approve Plan."
     )]
     fn create_goal(&self, Parameters(a): Parameters<CreateGoalArg>) -> Out<Ack> {
         if a.parent.is_some() {
@@ -463,7 +463,7 @@ impl Cockpit {
         }
         self.ack(
             item.id,
-            "Project created in shaping with Initial plan Task Ready; propose_breakdown next",
+            "Project created in shaping with Initial plan Task Ready (agent may plan-PR + split)",
         )
     }
 

@@ -17,10 +17,11 @@ export default function App() {
 
   const { goalOf, breadcrumbOf } = useMemo(() => buildLookups(b.items), [b.items]);
 
-  const totalNeedsYou = b.goals.reduce((n, g) => n + g.needs_you, 0);
-  const totalSpend = b.goals.reduce((n, g) => n + g.spend_cents, 0);
-  const totalBudget = b.goals.reduce((n, g) => n + (g.budget_cents ?? 0), 0);
-  const live = b.goals.reduce((n, g) => n + g.agents_live, 0);
+  const activeGoals = b.goals.filter((g) => b.items.get(g.id)?.state !== "retired");
+  const totalNeedsYou = activeGoals.reduce((n, g) => n + g.needs_you, 0);
+  const totalSpend = activeGoals.reduce((n, g) => n + g.spend_cents, 0);
+  const totalBudget = activeGoals.reduce((n, g) => n + (g.budget_cents ?? 0), 0);
+  const live = activeGoals.reduce((n, g) => n + g.agents_live, 0);
 
   const age = b.lastLoadedAt === null ? null : now - b.lastLoadedAt;
   const staleFor = age !== null && age > STALE_AFTER_MS ? age : null;

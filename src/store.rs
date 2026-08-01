@@ -12,7 +12,7 @@ use crate::schema::{Level, Schema};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -193,12 +193,22 @@ impl Board {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<BoardState>(&raw) {
                 Ok(mut state) => {
+                    let mut healed = 0usize;
                     for (id, item) in state.items.iter_mut() {
                         if item.beads_id.is_none() {
                             item.beads_id = Some(format!("bd-honr-{id}"));
                         }
+                        // A brief experiment left Initial plan in Shaping; restore
+                        // them to Ready so dedicated planning agents can claim.
+                        if item.is_initial_plan_task() && item.state == State::Shaping {
+                            item.state = State::Ready;
+                            healed += 1;
+                        }
                     }
                     tracing::info!(items = state.items.len(), "restored board from {path:?}");
+                    if healed > 0 {
+                        tracing::info!("healed {healed} Initial plan Task(s) Shaping → Ready");
+                    }
                     *board.state.write().unwrap() = state;
                 }
                 Err(e) => tracing::warn!("ignoring unreadable {path:?}: {e}"),
@@ -622,8 +632,8 @@ impl Board {
         };
         self.emit(&item);
 
-        // Every Project gets a claimable Initial Plan Task so the Board is never
-        // empty for an active Project — Projects themselves never go Ready.
+        // Every Project gets a claimable Initial Plan Task so planning can run
+        // as a dedicated sandbox job (optional plan PR + split into siblings).
         if parent.is_none() {
             self.seed_initial_plan_task(item.id, &item.title)?;
         }
@@ -635,10 +645,11 @@ impl Board {
             Some(project_id),
             INITIAL_PLAN_TITLE,
             format!(
-                "Produce a Plan artifact for «{project_title}» — flat Tasks with deps and \
-                 mechanically checkable DoDs — then wait for human Approve Plan."
+                "Produce a Plan for «{project_title}» — flat sibling Tasks with deps and \
+                 mechanically checkable DoDs. You may open one plan/docs PR, then finish by \
+                 writing split.json (PR + split is allowed on this card only)."
             ),
-            Some("Plan artifact approved; Tasks materialized.".into()),
+            Some("Sibling Tasks materialized via split (or Approve Plan).".into()),
             Origin::Planner,
             false,
             None,
@@ -1282,6 +1293,10 @@ impl Board {
         Ok(item)
     }
 
+fn normalize_title(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
 fn tokenize_text(text: &str) -> HashSet<String> {
     let stop_words: HashSet<&'static str> = [
         "a", "an", "the", "and", "or", "but", "if", "because", "as", "until", "while", "of", "at",
@@ -1381,6 +1396,11 @@ fn check_split_relatedness(
 
     /// `split` — self-orchestration. Creates **sibling** Tasks under the same
     /// Project (flat model); the original card is Done, not nested into.
+    ///
+    /// Implementation cards: PR and split are mutually exclusive.
+    /// Initial plan cards: a plan/docs PR is allowed, then split materializes
+    /// the Tasks. Sibling titles already present under the Project are reused
+    /// (idempotent) so a second split or a cockpit plan cannot duplicate work.
     pub fn split(
         &self,
         id: ItemId,
@@ -1389,28 +1409,31 @@ fn check_split_relatedness(
         max_children: usize,
     ) -> Result<Vec<WorkItem>, String> {
         let card = self.get(id).ok_or("no such item")?;
+        let allow_pr = card.is_initial_plan_task();
 
         if let Some(ref pr_url) = card.pr_url.as_ref().filter(|s| !s.trim().is_empty()) {
-            let msg = format!(
-                "cannot split card #{id}: a PR already exists ({pr_url}); split and publish are mutually exclusive"
-            );
-            let _ = self.escalate(
-                id,
-                agent_id,
-                msg.clone(),
-                vec![
-                    EscalationOption {
-                        label: "Finish card via report".into(),
-                        detail: "Complete the card with the existing PR using report.".into(),
-                    },
-                    EscalationOption {
-                        label: "Close PR and retry split".into(),
-                        detail: "Close or abandon the existing PR before splitting the card.".into(),
-                    },
-                ],
-                0,
-            );
-            return Err(msg);
+            if !allow_pr {
+                let msg = format!(
+                    "cannot split card #{id}: a PR already exists ({pr_url}); split and publish are mutually exclusive"
+                );
+                let _ = self.escalate(
+                    id,
+                    agent_id,
+                    msg.clone(),
+                    vec![
+                        EscalationOption {
+                            label: "Finish card via report".into(),
+                            detail: "Complete the card with the existing PR using report.".into(),
+                        },
+                        EscalationOption {
+                            label: "Close PR and retry split".into(),
+                            detail: "Close or abandon the existing PR before splitting the card.".into(),
+                        },
+                    ],
+                    0,
+                );
+                return Err(msg);
+            }
         }
 
         if children.len() < 2 {
@@ -1438,11 +1461,49 @@ fn check_split_relatedness(
 
         Self::check_split_relatedness(&card, &project, &children)?;
 
+        // Dedupe titles within the request (first wins).
+        let mut seen_req = HashSet::new();
+        let mut unique_children = Vec::new();
+        for child in children {
+            let key = Self::normalize_title(&child.0);
+            if key.is_empty() || !seen_req.insert(key) {
+                continue;
+            }
+            unique_children.push(child);
+        }
+        if unique_children.len() < 2 {
+            return Err(
+                "a split needs at least two distinct sibling titles; use report if the work is one card"
+                    .into(),
+            );
+        }
+
         self.transition(id, State::Splitting, agent_id, Some("agent requested split".into()))
             .map_err(|e| e.to_string())?;
 
+        // Existing non-retired siblings under the Project, keyed by normalized title.
+        let existing_by_title: HashMap<String, WorkItem> = {
+            let s = self.state.read().unwrap();
+            s.items
+                .values()
+                .filter(|i| i.parent == Some(project_id))
+                .filter(|i| i.id != id)
+                .filter(|i| i.state != State::Retired)
+                .map(|i| (Self::normalize_title(&i.title), i.clone()))
+                .filter(|(k, _)| !k.is_empty())
+                .collect()
+        };
+
         let mut made = Vec::new();
-        for (title, intent, dod) in children {
+        let mut created = 0usize;
+        let mut reused = 0usize;
+        for (title, intent, dod) in unique_children {
+            let key = Self::normalize_title(&title);
+            if let Some(existing) = existing_by_title.get(&key) {
+                reused += 1;
+                made.push(existing.clone());
+                continue;
+            }
             let sibling = self.create(
                 Some(project_id),
                 title,
@@ -1457,6 +1518,7 @@ fn check_split_relatedness(
             let sibling = self
                 .transition(sibling.id, State::Ready, agent_id, None)
                 .map_err(|e| e.to_string())?;
+            created += 1;
             made.push(sibling);
         }
 
@@ -1471,9 +1533,11 @@ fn check_split_relatedness(
         self.story(
             project_id,
             format!(
-                "{} turned out bigger than one card — replaced by {} siblings ({}).",
+                "{} turned out bigger than one card — {} siblings ({} created, {} reused): {}.",
                 card.title,
                 made.len(),
+                created,
+                reused,
                 made.iter().map(|c| c.title.as_str()).collect::<Vec<_>>().join(", ")
             ),
         );
@@ -1735,8 +1799,9 @@ fn check_split_relatedness(
             .map_err(|e| e.to_string())
     }
 
-    /// Cut scope — the subtree is retired, not deleted. It stays visible and
-    /// greyed, because "we chose not to" is a fact you will need later.
+    /// Cut scope — the subtree is retired, not deleted. Archived Projects drop
+    /// off the board/digest; items remain in state because "we chose not to"
+    /// is a fact you will need later.
     pub fn cut_scope(&self, id: ItemId, reason: Option<String>) -> Result<Vec<ItemId>, String> {
         let mut stack = vec![id];
         let mut touched = Vec::new();
@@ -1887,6 +1952,10 @@ fn check_split_relatedness(
 
         // Only Project roots are swimlanes. Nested nodes never get their own.
         if Self::depth(s, gid) != 0 {
+            return None;
+        }
+        // Archived / cut Projects stay in state for history but leave the board.
+        if goal.state == State::Retired {
             return None;
         }
 
@@ -2052,6 +2121,9 @@ fn check_split_relatedness(
                 let goal = s.items.get(&gid)?;
                 // Only Project roots are digest lanes.
                 if Self::depth(&s, gid) != 0 {
+                    return None;
+                }
+                if goal.state == State::Retired {
                     return None;
                 }
                 let members: Vec<&WorkItem> =
@@ -2391,6 +2463,125 @@ mod tests {
     }
 
     #[test]
+    fn initial_plan_may_split_after_pr() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-initial-plan-pr-split.json"),
+        );
+        let project = b
+            .create(
+                None,
+                "Archive UI",
+                "Archive completed work from the board",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .expect("project");
+        let seed_id = b
+            .children_of(project.id)
+            .into_iter()
+            .find(|&id| b.get(id).unwrap().is_initial_plan_task())
+            .expect("initial plan");
+        b.set_pr_url(seed_id, Some("https://github.com/shanemcd/honr/pull/41".into()));
+        let _ = b.claim(seed_id, "agent", None, 60).expect("claim initial plan");
+        let _ = b.transition(seed_id, State::Running, "agent", None);
+
+        let made = b
+            .split(
+                seed_id,
+                "agent",
+                vec![
+                    (
+                        "API archive endpoint".into(),
+                        "Expose archive for board cards".into(),
+                        "Archive API works".into(),
+                    ),
+                    (
+                        "UI archive controls".into(),
+                        "Add archive actions in the board UI".into(),
+                        "Archive UI works".into(),
+                    ),
+                ],
+                5,
+            )
+            .expect("Initial plan must split even with a PR");
+        assert_eq!(made.len(), 2);
+        assert_eq!(b.get(seed_id).unwrap().state, State::Done);
+    }
+
+    #[test]
+    fn split_reuses_existing_siblings_by_title() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-split-idempotent.json"),
+        );
+        let project = b
+            .create(
+                None,
+                "Archive UI",
+                "Archive completed work from the board",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .expect("project");
+        let seed_id = b
+            .children_of(project.id)
+            .into_iter()
+            .find(|&id| b.get(id).unwrap().is_initial_plan_task())
+            .expect("initial plan");
+
+        let preexisting = b
+            .create(
+                Some(project.id),
+                "API archive endpoint",
+                "already shaped",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("preexisting");
+        let _ = b.transition(preexisting.id, State::Shaping, "t", None);
+        let preexisting = b
+            .transition(preexisting.id, State::Ready, "t", None)
+            .expect("ready");
+
+        let before = b.children_of(project.id).len();
+        let _ = b.claim(seed_id, "agent", None, 60).expect("claim");
+        let _ = b.transition(seed_id, State::Running, "agent", None);
+        let made = b
+            .split(
+                seed_id,
+                "agent",
+                vec![
+                    (
+                        "API archive endpoint".into(),
+                        "Expose archive for board cards".into(),
+                        "Archive API works".into(),
+                    ),
+                    (
+                        "UI archive controls".into(),
+                        "Add archive actions in the board UI".into(),
+                        "Archive UI works".into(),
+                    ),
+                ],
+                5,
+            )
+            .expect("split");
+        assert_eq!(made.len(), 2);
+        assert_eq!(made[0].id, preexisting.id, "matching title must be reused");
+        assert_eq!(
+            b.children_of(project.id).len(),
+            before + 1,
+            "only the missing sibling should be created"
+        );
+    }
+
+    #[test]
     fn nest_under_task_is_refused() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nest.json"));
         let project = b
@@ -2432,8 +2623,13 @@ mod tests {
         assert_eq!(kids.len(), 1, "exactly one seed Task");
         let seed = b.get(kids[0]).unwrap();
         assert_eq!(seed.title, INITIAL_PLAN_TITLE);
-        assert_eq!(seed.state, State::Ready);
+        assert_eq!(seed.state, State::Ready, "Initial plan is dispatchable planning work");
         assert!(seed.is_initial_plan_task());
+        assert!(b.may_claim(seed.id));
+        assert!(
+            b.list_ready(&["any".into()]).iter().any(|i| i.id == seed.id),
+            "Initial plan must appear in list_ready"
+        );
         // Project itself must not be Ready / claimable.
         assert_ne!(b.get(project.id).unwrap().state, State::Ready);
     }
@@ -2735,6 +2931,41 @@ mod tests {
         assert_eq!(
             fetched.last_bounce_reason.as_deref(),
             Some(bounce_msg)
+        );
+    }
+
+    #[test]
+    fn archived_project_omitted_from_snapshot_and_digest() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-archive-hide.json"),
+        );
+        let keep = b
+            .create(None, "Keep me", "why", None, Origin::Human, true, None)
+            .expect("keep");
+        let archive = b
+            .create(None, "Archive me", "why", None, Origin::Human, true, None)
+            .expect("archive");
+        let _ = b.transition(keep.id, State::Shaping, "t", None);
+        let _ = b.transition(archive.id, State::Shaping, "t", None);
+
+        assert!(b.snapshot().goals.iter().any(|g| g.id == archive.id));
+        assert!(b.digest().goals.iter().any(|g| g.goal_id == archive.id));
+
+        b.cut_scope(archive.id, Some("archived".into()))
+            .expect("cut");
+        assert_eq!(b.get(archive.id).unwrap().state, State::Retired);
+        assert!(
+            b.snapshot().goals.iter().all(|g| g.id != archive.id),
+            "retired Project must not appear in snapshot goals"
+        );
+        assert!(
+            b.digest().goals.iter().all(|g| g.goal_id != archive.id),
+            "retired Project must not appear in digest"
+        );
+        assert!(
+            b.snapshot().goals.iter().any(|g| g.id == keep.id),
+            "active Project still listed"
         );
     }
 }

@@ -68,9 +68,11 @@ export function Board(props: Props) {
         </button>
       </div>
 
-      {props.goals.map((goal) => (
-        <Swimlane key={goal.id} goal={goal} filterQuery={filterQuery} filterState={filterState} {...props} />
-      ))}
+      {props.goals
+        .filter((goal) => props.items.get(goal.id)?.state !== "retired")
+        .map((goal) => (
+          <Swimlane key={goal.id} goal={goal} filterQuery={filterQuery} filterState={filterState} {...props} />
+        ))}
     </div>
   );
 }

@@ -1,9 +1,11 @@
 ---
 description: Act as honr cockpit — drive work via MCP, do not edit honr product code directly
-alwaysApply: true
+alwaysApply: false
 ---
 
-# Cockpit mode (honr builds honr)
+# Cockpit mode (honr builds honr) — PAUSED
+
+**Status: paused** (human asked to edit the tree directly). Re-enable with `alwaysApply: true` when cockpit resumes.
 
 You are the **cockpit** agent: lead developer and scrum master. Worker agents in sandboxes implement cards and open PRs.
 
