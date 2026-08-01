@@ -816,8 +816,7 @@ struct ReportFile {
 }
 
 fn probe_verdict_script() -> String {
-    format!(
-        r#"for dir in {WORKDIR}/.honr /work/.honr /sandbox/.honr /tmp/.honr; do
+    r#"for dir in /work/.honr /sandbox/.honr /tmp/.honr; do
   if [ -f "$dir/escalate.json" ]; then
     echo "escalate:$dir/escalate.json"
     exit 0
@@ -829,7 +828,7 @@ fn probe_verdict_script() -> String {
     exit 0
   fi
 done"#
-    )
+        .to_string()
 }
 
 async fn process_verdict(
@@ -1442,10 +1441,10 @@ fn briefing(
 
     b.push_str(
         "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
-         Write `.honr/escalate.json` (or `/work/.honr/escalate.json`) with your question, options, \
+         Write `/work/.honr/escalate.json` with your question, options, \
          and recommended choice index, then exit. Options must supply at least two concrete choices.\n\
          \nIf work is discovered to be bigger than one card, do not overrun. \
-         Write `.honr/split.json` (or `/work/.honr/split.json`) with an array of `children` \
+         Write `/work/.honr/split.json` with an array of `children` \
          (each having `title`, `intent`, and optional `definition_of_done`), then exit. \
          Those become **sibling Tasks under the same Project** — never nested under this card. \
          Splits may only carve this card's definition of done into smaller slices of the same outcome. \
@@ -1459,7 +1458,7 @@ fn briefing(
     );
 
     b.push_str(&format!(
-        "\nWhen the work is done, write `.honr/report.json` (or `/work/.honr/report.json`) \
+        "\nWhen the work is done, write `/work/.honr/report.json` \
          with your diffstat (`added` and `removed` line counts matching `git diff --numstat` against `{base}`), \
          optional `gates` passed, and `pr_url`.\n",
         base = base,
@@ -1865,6 +1864,8 @@ mod tests {
     #[test]
     fn probe_verdict_script_checks_locations() {
         let s = probe_verdict_script();
+        assert!(!s.contains("{WORKDIR}/.honr"), "probe script must not search {WORKDIR}/.honr: {s}");
+        assert!(!s.contains("WORKDIR"), "probe script must not reference WORKDIR: {s}");
         assert!(s.contains("escalate.json"), "{s}");
         assert!(s.contains(".honr"), "{s}");
         assert!(s.contains("/work/.honr"), "{s}");
@@ -1898,15 +1899,48 @@ mod tests {
     }
 
     #[test]
+    fn committed_split_json_inside_workdir_cannot_trigger_split() {
+        let script = probe_verdict_script();
+        assert!(!script.contains("{WORKDIR}"), "probe_verdict_script must not reference WORKDIR: {script}");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "honr-test-workdir-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let honr_dir = temp_dir.join(".honr");
+        std::fs::create_dir_all(&honr_dir).expect("create .honr in temp workdir");
+        let split_file = honr_dir.join("split.json");
+        std::fs::write(&split_file, r#"{"children":[{"title":"Fake Child","intent":"Fake Intent"}]}"#)
+            .expect("write fake split.json in workdir");
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(&temp_dir)
+            .output()
+            .expect("execute probe_verdict_script in bash");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert!(
+            !stdout.contains("split.json") || !stdout.contains(temp_dir.to_string_lossy().as_ref()),
+            "a split.json inside WORKDIR/.honr must NOT be detected by probe_verdict_script: stdout={stdout}"
+        );
+    }
+
+    #[test]
     fn briefing_mentions_verdict_escalate_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", "shanemcd/honr", "main");
-        assert!(b.contains("escalate.json"), "briefing must mention escalate.json: {b}");
+        assert!(b.contains("/work/.honr/escalate.json"), "briefing must mention /work/.honr/escalate.json: {b}");
+        assert!(!b.contains("`.honr/escalate.json`"), "briefing must omit WORKDIR .honr/escalate.json: {b}");
     }
 
     #[test]
     fn briefing_mentions_verdict_split_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", "shanemcd/honr", "main");
-        assert!(b.contains("split.json"), "briefing must mention split.json: {b}");
+        assert!(b.contains("/work/.honr/split.json"), "briefing must mention /work/.honr/split.json: {b}");
+        assert!(!b.contains("`.honr/split.json`"), "briefing must omit WORKDIR .honr/split.json: {b}");
         assert!(
             b.contains("smaller slices of the same outcome"),
             "briefing must instruct slice-only splits: {b}"
@@ -1924,7 +1958,8 @@ mod tests {
     #[test]
     fn briefing_mentions_verdict_report_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", "shanemcd/honr", "main");
-        assert!(b.contains("report.json"), "briefing must mention report.json: {b}");
+        assert!(b.contains("/work/.honr/report.json"), "briefing must mention /work/.honr/report.json: {b}");
+        assert!(!b.contains("`.honr/report.json`"), "briefing must omit WORKDIR .honr/report.json: {b}");
         assert!(b.contains("diffstat"), "briefing must mention diffstat: {b}");
     }
 

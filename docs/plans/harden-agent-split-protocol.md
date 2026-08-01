@@ -2,7 +2,7 @@
 
 ## Context & Objectives
 
-Currently in `honr`, agents self-orchestrate card decomposition by writing `.honr/split.json`. The supervisor processes this file in `process_verdict` and calls `Board::split` to materialize sibling tasks under the parent Project.
+Currently in `honr`, agents self-orchestrate card decomposition by writing `/work/.honr/split.json`. The supervisor processes this file in `process_verdict` and calls `Board::split` to materialize sibling tasks under the parent Project.
 
 However, two major failure modes have been observed in practice:
 1. **Unrelated/External Work Invention**: Agents split cards into unrelated sibling tasks or invent scope belonging to other projects, rather than carving the card's DoD into smaller slices of the same outcome.
