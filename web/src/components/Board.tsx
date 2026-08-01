@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Card } from "./Card";
+import { DependencyGraph } from "./DependencyGraph";
 import { BOARD_COLUMNS, COLUMN_OF } from "../types";
 import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types";
 import { money, since } from "../api";
@@ -34,6 +35,7 @@ export function Board(props: Props) {
  */
 function Swimlane({ goal, ...p }: Props & { goal: GoalView }) {
   const [open, setOpen] = useState(true);
+  const [viewMode, setViewMode] = useState<"columns" | "graph">("columns");
   const story = p.stories.get(goal.id) ?? goal.story;
   const mine = [...p.items.values()].filter((i) => p.goalOf(i.id) === goal.id);
 
@@ -56,6 +58,24 @@ function Swimlane({ goal, ...p }: Props & { goal: GoalView }) {
         </span>
         <span className="live">● {goal.agents_live} live</span>
         {goal.needs_you > 0 && <span className="alarm">⚠ {goal.needs_you} need you</span>}
+
+        <div className="lane-view-switcher" onClick={(e) => e.stopPropagation()}>
+          <button
+            className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
+            onClick={() => setViewMode("columns")}
+            title="Kanban Columns View"
+          >
+            ▤ Columns
+          </button>
+          <button
+            className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
+            onClick={() => setViewMode("graph")}
+            title="Visual Dependency Graph View"
+            data-testid="toggle-graph-view"
+          >
+            ☩ Dependency Graph
+          </button>
+        </div>
       </header>
 
       {open && (
@@ -79,26 +99,29 @@ function Swimlane({ goal, ...p }: Props & { goal: GoalView }) {
             </div>
           )}
 
-          <div className="columns">
-            {BOARD_COLUMNS.map((col) => {
-              const cards = mine
-                .filter((i) => COLUMN_OF[i.state] === col.key)
-                .sort(sortFor(col.key));
-              const summary = goal.columns.find((c) => c.column === col.key)?.summary;
-              return (
-                <ColumnEl
-                  key={col.key}
-                  label={col.label}
-                  question={col.question}
-                  colKey={col.key}
-                  cards={cards}
-                  summary={summary?.text ?? ""}
-                  {...p}
-                />
-              );
-            })}
-          </div>
-
+          {viewMode === "graph" ? (
+            <DependencyGraph items={mine} onOpen={p.onOpen} />
+          ) : (
+            <div className="columns">
+              {BOARD_COLUMNS.map((col) => {
+                const cards = mine
+                  .filter((i) => COLUMN_OF[i.state] === col.key)
+                  .sort(sortFor(col.key));
+                const summary = goal.columns.find((c) => c.column === col.key)?.summary;
+                return (
+                  <ColumnEl
+                    key={col.key}
+                    label={col.label}
+                    question={col.question}
+                    colKey={col.key}
+                    cards={cards}
+                    summary={summary?.text ?? ""}
+                    {...p}
+                  />
+                );
+              })}
+            </div>
+          )}
         </>
       )}
     </section>
