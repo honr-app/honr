@@ -30,6 +30,12 @@ use std::time::Duration;
 /// Where the agent works inside the sandbox. `/sandbox` is $HOME and writable;
 /// the policy's `read_write` list has to agree with this.
 const WORKDIR: &str = "/sandbox/repo";
+/// Control-plane verdict dir — must be under `/sandbox` (writable HOME). `/work`
+/// does not exist in the OpenShell image and the sandbox user cannot `mkdir` it
+/// at `/` (Permission denied). Never put verdicts under `{WORKDIR}/.honr`.
+const VERDICT_DIR: &str = "/sandbox/.honr";
+/// Host beads snapshot unpack target (`BEADS_DIR`). Same constraint as VERDICT_DIR.
+const BEADS_SANDBOX_DIR: &str = "/sandbox/.beads";
 const SHIM_LOCAL: &str = "sandbox/metadata-shim.py";
 /// `sandbox upload` takes a destination **directory**, not a destination file:
 /// uploading to `/tmp/metadata-shim.py` creates a *directory* of that name with
@@ -1079,7 +1085,9 @@ struct ReportFile {
 }
 
 fn probe_verdict_script() -> String {
-    r#"for dir in /work/.honr /sandbox/.honr /tmp/.honr; do
+    // Prefer /sandbox/.honr (writable HOME). Keep /work and /tmp as legacy
+    // fallbacks; /tmp often cannot be downloaded by OpenShell.
+    r#"for dir in /sandbox/.honr /work/.honr /tmp/.honr; do
   if [ -f "$dir/escalate.json" ]; then
     echo "escalate:$dir/escalate.json"
     exit 0
@@ -1233,9 +1241,10 @@ async fn process_verdict(
                     .escalate(
                         id,
                         agent_id,
-                        "Initial plan must finish by writing /work/.honr/split.json \
-                         (optional one plan/docs PR first). report.json is for implementation cards."
-                            .into(),
+                        format!(
+                            "Initial plan must finish by writing {VERDICT_DIR}/split.json \
+                             (optional one plan/docs PR first). report.json is for implementation cards."
+                        ),
                         vec![
                             crate::model::EscalationOption {
                                 label: "Resume and split".into(),
@@ -1406,6 +1415,8 @@ fn start_script(cfg: &AgentConfig, briefing: &str, engine: &str) -> String {
 rm -f {AGENT_PID} {AGENT_STATUS}
 : > {AGENT_LOG}
 export HONR_BRIEFING={brief}
+# Reused sandboxes keep create-time env; force the writable beads path every run.
+export BEADS_DIR={BEADS_SANDBOX_DIR}
 setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} {cmd} >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
 for i in $(seq 1 40); do
   if [ -s {AGENT_PID} ]; then exit 0; fi
@@ -1513,7 +1524,7 @@ fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
         ("NPM_CONFIG_CACHE".into(), "/opt/npm-cache".into()),
         ("PATH".into(), "/opt/cargo/bin:/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin".into()),
         // Shared task graph with the host control plane (uploaded at sandbox start).
-        ("BEADS_DIR".into(), "/work/.beads".into()),
+        ("BEADS_DIR".into(), BEADS_SANDBOX_DIR.into()),
     ]
 }
 
@@ -1549,7 +1560,7 @@ async fn sync_beads_into_sandbox(
         .exec(
             name,
             &format!(
-                "mkdir -p /work && tar -xzf {archive} -C /work && test -d /work/.beads && echo beads-up"
+                "mkdir -p /sandbox && tar -xzf {archive} -C /sandbox && test -d {BEADS_SANDBOX_DIR} && echo beads-up"
             ),
             Duration::from_secs(60),
         )
@@ -1800,14 +1811,14 @@ fn briefing(
         b.push_str(
             "\nThis is the Project's **Initial plan** card. Your job is to materialize sibling Tasks.\n\
              You MAY open **one** plan/docs PR (publish the plan artifact), then you MUST finish by \
-             writing `/work/.honr/split.json` with an array of `children` \
+             writing `/sandbox/.honr/split.json` with an array of `children` \
              (each having `title`, `intent`, and optional `definition_of_done`). \
              On this card only, a PR and a split are allowed together — do **not** open a second PR. \
              If sibling Tasks with the same titles already exist under the Project, still write \
              split.json; the board will reuse them instead of duplicating. \
              Do **not** finish with `report.json` — split is the finish for Initial plan.\n\
              Children must stay on-theme for this Project. Do not invent work for another Project — escalate instead.\n\
-             If you hit a real decision that needs a human, write `/work/.honr/escalate.json` with \
+             If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` with \
              options (at least two) and a recommended index, then exit.\n\
              \n`bd` (beads CLI) is available for the task graph and project memory. \
              Run `bd prime` for context, `bd show <id>` for this card's Project/deps, \
@@ -1817,10 +1828,10 @@ fn briefing(
     } else {
         b.push_str(
             "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
-             Write `/work/.honr/escalate.json` with your question, options, \
+             Write `/sandbox/.honr/escalate.json` with your question, options, \
              and recommended choice index, then exit. Options must supply at least two concrete choices.\n\
              \nIf work is discovered to be bigger than one card, do not overrun. \
-             Write `/work/.honr/split.json` with an array of `children` \
+             Write `/sandbox/.honr/split.json` with an array of `children` \
              (each having `title`, `intent`, and optional `definition_of_done`), then exit. \
              Those become **sibling Tasks under the same Project** — never nested under this card. \
              Splits may only carve this card's definition of done into smaller slices of the same outcome. \
@@ -1834,7 +1845,7 @@ fn briefing(
         );
 
         b.push_str(&format!(
-            "\nWhen the work is done, write `/work/.honr/report.json` \
+            "\nWhen the work is done, write `/sandbox/.honr/report.json` \
              with your diffstat (`added` and `removed` line counts matching `git diff --numstat` against `{base}`), \
              optional `gates` passed, and `pr_url`.\n",
             base = base,
@@ -1845,7 +1856,7 @@ fn briefing(
         b.push_str(&format!(
             "\nOptional plan artifact: commit on `{branch}`, push to `origin`, and open **at most one** \
              PR against `{upstream}` base `{base}` (or update that existing PR — never a second one). \
-             Then write `/work/.honr/split.json` and exit. Leave `{base}` alone.\n",
+             Then write `/sandbox/.honr/split.json` and exit. Leave `{base}` alone.\n",
             branch = branch_name,
             upstream = upstream,
             base = base,
@@ -2471,14 +2482,14 @@ mod tests {
     #[test]
     fn briefing_mentions_verdict_escalate_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", "shanemcd/honr", "main");
-        assert!(b.contains("/work/.honr/escalate.json"), "briefing must mention /work/.honr/escalate.json: {b}");
+        assert!(b.contains("/sandbox/.honr/escalate.json"), "briefing must mention /sandbox/.honr/escalate.json: {b}");
         assert!(!b.contains("`.honr/escalate.json`"), "briefing must omit WORKDIR .honr/escalate.json: {b}");
     }
 
     #[test]
     fn briefing_mentions_verdict_split_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", "shanemcd/honr", "main");
-        assert!(b.contains("/work/.honr/split.json"), "briefing must mention /work/.honr/split.json: {b}");
+        assert!(b.contains("/sandbox/.honr/split.json"), "briefing must mention /sandbox/.honr/split.json: {b}");
         assert!(!b.contains("`.honr/split.json`"), "briefing must omit WORKDIR .honr/split.json: {b}");
         assert!(
             b.contains("smaller slices of the same outcome"),
@@ -2521,7 +2532,7 @@ mod tests {
     #[test]
     fn briefing_mentions_verdict_report_protocol() {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", "shanemcd/honr", "main");
-        assert!(b.contains("/work/.honr/report.json"), "briefing must mention /work/.honr/report.json: {b}");
+        assert!(b.contains("/sandbox/.honr/report.json"), "briefing must mention /sandbox/.honr/report.json: {b}");
         assert!(!b.contains("`.honr/report.json`"), "briefing must omit WORKDIR .honr/report.json: {b}");
         assert!(b.contains("diffstat"), "briefing must mention diffstat: {b}");
     }
