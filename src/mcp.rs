@@ -199,12 +199,42 @@ pub struct SnapshotOut {
     pub hint: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
 pub struct CardLine {
     pub id: ItemId,
     pub title: String,
     pub state: String,
     pub detail: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct ListColumnOut {
+    pub items: Vec<CardLine>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct BreakdownOut {
+    pub items: Vec<ItemId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct ApprovePlanOut {
+    pub items: Vec<ItemId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct CutScopeOut {
+    pub items: Vec<ItemId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct ListReadyOut {
+    pub items: Vec<CardLine>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct SplitOut {
+    pub items: Vec<ItemId>,
 }
 
 // ---------------------------------------------------------------- the server
@@ -302,7 +332,7 @@ impl Cockpit {
                        column matters. Call this before acting on individual items — never guess \
                        an item id."
     )]
-    fn list_column(&self, Parameters(a): Parameters<ColumnArg>) -> Out<Vec<CardLine>> {
+    fn list_column(&self, Parameters(a): Parameters<ColumnArg>) -> Out<ListColumnOut> {
         let snap = self.board.snapshot();
         let now = snap.server_time;
         let rows = snap
@@ -337,7 +367,7 @@ impl Cockpit {
                 },
             })
             .collect();
-        Ok(ToolJson(rows))
+        Ok(ToolJson(ListColumnOut { items: rows }))
     }
 
     #[tool(
@@ -383,7 +413,7 @@ impl Cockpit {
                        misunderstanding costs pennies instead of forty agent-hours. Every child \
                        needs a definition of done a verifier can mechanically check."
     )]
-    fn propose_breakdown(&self, Parameters(a): Parameters<BreakdownArg>) -> Out<Vec<ItemId>> {
+    fn propose_breakdown(&self, Parameters(a): Parameters<BreakdownArg>) -> Out<BreakdownOut> {
         if self.board.get(a.parent).is_none() {
             return Err(bad(format!("no work item #{}", a.parent)));
         }
@@ -410,7 +440,7 @@ impl Cockpit {
             let _ = self.board.transition(child.id, State::Shaping, "planner", None);
             ids.push(child.id);
         }
-        Ok(ToolJson(ids))
+        Ok(ToolJson(BreakdownOut { items: ids }))
     }
 
     #[tool(
@@ -419,7 +449,7 @@ impl Cockpit {
                        human has actually seen and approved the shape — this is the gate that \
                        lets them walk away afterwards."
     )]
-    fn approve_plan(&self, Parameters(a): Parameters<IdArg>) -> Out<Vec<ItemId>> {
+    fn approve_plan(&self, Parameters(a): Parameters<IdArg>) -> Out<ApprovePlanOut> {
         let mut published = Vec::new();
         for cid in self.board.children_of(a.id) {
             if self.board.get(cid).map(|i| i.state) == Some(State::Shaping)
@@ -429,7 +459,7 @@ impl Cockpit {
             }
         }
         self.board.story(a.id, format!("Plan approved: {} items published to Ready.", published.len()));
-        Ok(ToolJson(published))
+        Ok(ToolJson(ApprovePlanOut { items: published }))
     }
 
     #[tool(
@@ -483,9 +513,9 @@ impl Cockpit {
                        visible and greyed, because 'we chose not to' is a fact you will need \
                        later. Confirm with the human before calling this."
     )]
-    fn cut_scope(&self, Parameters(a): Parameters<ReasonArg>) -> Out<Vec<ItemId>> {
+    fn cut_scope(&self, Parameters(a): Parameters<ReasonArg>) -> Out<CutScopeOut> {
         let ids = self.board.cut_scope(a.id, a.reason).map_err(bad)?;
-        Ok(ToolJson(ids))
+        Ok(ToolJson(CutScopeOut { items: ids }))
     }
 
     #[tool(
@@ -516,7 +546,7 @@ impl Cockpit {
         description = "WORKER VERB. The claimable pool, filtered to your capabilities. Poll this \
                        when you are not holding a card."
     )]
-    fn list_ready(&self, Parameters(a): Parameters<ListReadyArg>) -> Out<Vec<CardLine>> {
+    fn list_ready(&self, Parameters(a): Parameters<ListReadyArg>) -> Out<ListReadyOut> {
         let rows = self
             .board
             .list_ready(&a.capabilities)
@@ -528,7 +558,7 @@ impl Cockpit {
                 detail: i.intent.clone(),
             })
             .collect();
-        Ok(ToolJson(rows))
+        Ok(ToolJson(ListReadyOut { items: rows }))
     }
 
     #[tool(
@@ -566,14 +596,16 @@ impl Cockpit {
                        children fan into Ready. Needs two or more children; if it is really one \
                        card, just report."
     )]
-    fn split(&self, Parameters(a): Parameters<SplitArg>) -> Out<Vec<ItemId>> {
+    fn split(&self, Parameters(a): Parameters<SplitArg>) -> Out<SplitOut> {
         let children = a
             .children
             .into_iter()
             .map(|c| (c.title, c.intent, c.definition_of_done))
             .collect();
         let made = self.board.split(a.item_id, &a.agent_id, children, 7, 5).map_err(bad)?;
-        Ok(ToolJson(made.into_iter().map(|i| i.id).collect()))
+        Ok(ToolJson(SplitOut {
+            items: made.into_iter().map(|i| i.id).collect(),
+        }))
     }
 
     #[tool(
@@ -669,4 +701,135 @@ pub fn service(board: SharedBoard) -> StreamableHttpService<Cockpit, LocalSessio
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Column, Origin};
+    use crate::schema::Schema;
+    use crate::store::Board;
+
+    fn test_board() -> (SharedBoard, ItemId) {
+        let path = std::env::temp_dir().join("honr-mcp-test.json");
+        let b = Arc::new(Board::new(Schema::default(), path));
+        let goal = b.create(None, "Test Goal", "Test Intent", None, Origin::Human, true, None);
+        let _ = b.transition(goal.id, State::Shaping, "test", None);
+        (b, goal.id)
+    }
+
+    #[test]
+    fn list_column_returns_record_with_items_for_triage_columns() {
+        let (board, goal_id) = test_board();
+        let cockpit = Cockpit::new(board.clone());
+
+        // Ready card
+        let card_ready = board.create(
+            Some(goal_id),
+            "Ready Card",
+            "Ready Intent",
+            Some("DoD".into()),
+            Origin::Human,
+            false,
+            None,
+        );
+        let _ = board.transition(card_ready.id, State::Shaping, "test", None);
+        let _ = board.transition(card_ready.id, State::Ready, "test", None);
+
+        // NeedsYou card (escalated)
+        let card_needs = board.create(
+            Some(goal_id),
+            "NeedsYou Card",
+            "NeedsYou Intent",
+            Some("DoD".into()),
+            Origin::Human,
+            false,
+            None,
+        );
+        let _ = board.transition(card_needs.id, State::Shaping, "test", None);
+        let _ = board.transition(card_needs.id, State::Ready, "test", None);
+        let _ = board.claim(card_needs.id, "agent-1", None, 60);
+        let options = vec![
+            crate::model::EscalationOption { label: "Opt A".into(), detail: "Detail A".into() },
+            crate::model::EscalationOption { label: "Opt B".into(), detail: "Detail B".into() },
+        ];
+        let _ = board.escalate(card_needs.id, "agent-1", "Which option?".into(), options, 0);
+
+        // Shaping card
+        let card_shaping = board.create(
+            Some(goal_id),
+            "Shaping Card",
+            "Shaping Intent",
+            None,
+            Origin::Human,
+            false,
+            None,
+        );
+        let _ = board.transition(card_shaping.id, State::Shaping, "test", None);
+
+        // Verify list_column for needs_you, ready, shaping returns a record object with "items"
+        for col in [Column::NeedsYou, Column::Ready, Column::Shaping] {
+            let res = cockpit
+                .list_column(Parameters(ColumnArg { column: col, goal: None }))
+                .expect("list_column should succeed");
+            let value = serde_json::to_value(&res.0).expect("serialize to value");
+
+            assert!(value.is_object(), "structuredContent must be a JSON record/object, got: {:?}", value);
+            let obj = value.as_object().unwrap();
+            assert!(obj.contains_key("items"), "record must contain 'items' key");
+            assert!(obj["items"].is_array(), "'items' value must be a JSON array");
+        }
+    }
+
+    #[test]
+    fn propose_breakdown_and_approve_plan_return_record_with_items() {
+        let (board, goal_id) = test_board();
+        let cockpit = Cockpit::new(board.clone());
+
+        let breakdown_arg = BreakdownArg {
+            parent: goal_id,
+            children: vec![ChildSpec {
+                title: "Subtask 1".into(),
+                intent: "Intent 1".into(),
+                definition_of_done: "DoD 1".into(),
+                capability: None,
+            }],
+        };
+
+        let bd_res = cockpit
+            .propose_breakdown(Parameters(breakdown_arg))
+            .expect("propose_breakdown should succeed");
+        let bd_val = serde_json::to_value(&bd_res.0).expect("serialize to value");
+        assert!(bd_val.is_object(), "propose_breakdown response must be a JSON record object");
+        assert!(bd_val.as_object().unwrap().contains_key("items"));
+
+        let approve_res = cockpit
+            .approve_plan(Parameters(IdArg { id: goal_id }))
+            .expect("approve_plan should succeed");
+        let app_val = serde_json::to_value(&approve_res.0).expect("serialize to value");
+        assert!(app_val.is_object(), "approve_plan response must be a JSON record object");
+        assert!(app_val.as_object().unwrap().contains_key("items"));
+    }
+
+    #[test]
+    fn cut_scope_list_ready_and_split_return_record_with_items() {
+        let (board, goal_id) = test_board();
+        let cockpit = Cockpit::new(board.clone());
+
+        // list_ready
+        let ready_res = cockpit
+            .list_ready(Parameters(ListReadyArg { capabilities: vec!["any".into()] }))
+            .expect("list_ready should succeed");
+        let ready_val = serde_json::to_value(&ready_res.0).expect("serialize to value");
+        assert!(ready_val.is_object(), "list_ready response must be a JSON record object");
+        assert!(ready_val.as_object().unwrap().contains_key("items"));
+
+        // cut_scope
+        let cut_res = cockpit
+            .cut_scope(Parameters(ReasonArg { id: goal_id, reason: Some("retired".into()) }))
+            .expect("cut_scope should succeed");
+        let cut_val = serde_json::to_value(&cut_res.0).expect("serialize to value");
+        assert!(cut_val.is_object(), "cut_scope response must be a JSON record object");
+        assert!(cut_val.as_object().unwrap().contains_key("items"));
+    }
 }
