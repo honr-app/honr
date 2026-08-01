@@ -932,6 +932,31 @@ async fn process_verdict(
         "split" => {
             let split: SplitFile = serde_json::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("invalid split.json: {e}"))?;
+
+            // Check whether a PR already exists for the card (pr_url set or PR detected)
+            let existing_pr = if let Some(url) = board
+                .get(id)
+                .and_then(|i| i.pr_url)
+                .filter(|s| !s.trim().is_empty())
+            {
+                Some(url)
+            } else if let Ok(out) = os.exec(name, &pr_lookup_script(cfg, branch), short).await {
+                if out.ok() {
+                    out.stdout
+                        .lines()
+                        .find_map(|l| l.strip_prefix(PR_URL_MARK))
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(pr_url) = existing_pr {
+                board.set_pr_url(id, Some(pr_url.clone()));
+            }
+
             let children = split
                 .children
                 .into_iter()
@@ -950,24 +975,27 @@ async fn process_verdict(
                 }
                 Err(e) => {
                     tracing::warn!("#{id}: split refused: {e}");
-                    board
-                        .escalate(
-                            id,
-                            agent_id,
-                            format!("Agent requested a split, but it was refused by governor: {e}"),
-                            vec![
-                                crate::model::EscalationOption {
-                                    label: "Decompose manually".into(),
-                                    detail: "Add sibling Tasks under the Project with the right deps.".into(),
-                                },
-                                crate::model::EscalationOption {
-                                    label: "Revise scope".into(),
-                                    detail: "Narrow the definition of done so the work fits in one card.".into(),
-                                },
-                            ],
-                            0,
-                        )
-                        .map_err(|esc_err| anyhow::anyhow!("split refused ({e}) and failed to escalate: {esc_err}"))?;
+                    let state = board.get(id).map(|i| i.state);
+                    if state != Some(State::NeedsHuman) {
+                        board
+                            .escalate(
+                                id,
+                                agent_id,
+                                format!("Agent requested a split, but it was refused by governor: {e}"),
+                                vec![
+                                    crate::model::EscalationOption {
+                                        label: "Decompose manually".into(),
+                                        detail: "Add sibling Tasks under the Project with the right deps.".into(),
+                                    },
+                                    crate::model::EscalationOption {
+                                        label: "Revise scope".into(),
+                                        detail: "Narrow the definition of done so the work fits in one card.".into(),
+                                    },
+                                ],
+                                0,
+                            )
+                            .map_err(|esc_err| anyhow::anyhow!("split refused ({e}) and failed to escalate: {esc_err}"))?;
+                    }
                     Ok(true)
                 }
             }
@@ -1606,6 +1634,7 @@ fn tail(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Origin;
 
     #[test]
     fn watch_liveness_outpaces_the_default_lease() {
@@ -2103,5 +2132,176 @@ mod tests {
         }"#;
         let rep_empty: ReportFile = serde_json::from_str(json_empty_url).unwrap();
         assert_eq!(rep_empty.pr_url.filter(|s| !s.trim().is_empty()), None);
+    }
+
+    #[tokio::test]
+    async fn process_verdict_refuses_split_when_board_has_pr_url() {
+        let board = test_board();
+        let project = board
+            .create(None, "project", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
+        let _ = board.transition(task.id, State::Running, "agent-1", None);
+
+        let pr_url = "https://github.com/shanemcd/honr/pull/50";
+        board.set_pr_url(task.id, Some(pr_url.to_string()));
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-split-pr-1-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let mock_bin = dir.join("fake_openshell.sh");
+        let split_json_path = dir.join("split.json");
+        std::fs::write(
+            &split_json_path,
+            r#"{
+                "children": [
+                    {"title": "Child A", "intent": "A", "definition_of_done": "A done"},
+                    {"title": "Child B", "intent": "B", "definition_of_done": "B done"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let script_content = format!(
+            r#"#!/usr/bin/env bash
+if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
+    echo "split:{}"
+    exit 0
+elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
+    cp "{}" "$5"
+    exit 0
+fi
+exit 1
+"#,
+            split_json_path.display(),
+            split_json_path.display()
+        );
+        std::fs::write(&mock_bin, script_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let cfg = repo_cfg();
+
+        let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
+            .await
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(handled);
+        let item = board.get(task.id).unwrap();
+        assert_eq!(item.state, State::NeedsHuman);
+        assert_eq!(item.pr_url.as_deref(), Some(pr_url));
+        let esc = item.escalation.expect("escalation set");
+        assert!(esc.question.contains("a PR already exists"));
+    }
+
+    #[tokio::test]
+    async fn process_verdict_refuses_split_when_pr_detected_by_lookup() {
+        let board = test_board();
+        let project = board
+            .create(None, "project", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
+        let _ = board.transition(task.id, State::Running, "agent-1", None);
+
+        // No PR set on board initially
+        assert!(board.get(task.id).unwrap().pr_url.is_none());
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-split-pr-2-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let mock_bin = dir.join("fake_openshell_detected.sh");
+        let split_json_path = dir.join("split.json");
+        std::fs::write(
+            &split_json_path,
+            r#"{
+                "children": [
+                    {"title": "Child A", "intent": "A", "definition_of_done": "A done"},
+                    {"title": "Child B", "intent": "B", "definition_of_done": "B done"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let script_content = format!(
+            r#"#!/usr/bin/env bash
+if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
+    cmd="$*"
+    if echo "$cmd" | grep -q "gh pr list"; then
+        echo "HONR-PR-URL=https://github.com/shanemcd/honr/pull/99"
+        exit 0
+    else
+        echo "split:{}"
+        exit 0
+    fi
+elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
+    cp "{}" "$5"
+    exit 0
+fi
+exit 1
+"#,
+            split_json_path.display(),
+            split_json_path.display()
+        );
+        std::fs::write(&mock_bin, script_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let cfg = repo_cfg();
+
+        let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
+            .await
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(handled);
+        let item = board.get(task.id).unwrap();
+        assert_eq!(item.state, State::NeedsHuman);
+        assert_eq!(
+            item.pr_url.as_deref(),
+            Some("https://github.com/shanemcd/honr/pull/99")
+        );
+        let esc = item.escalation.expect("escalation set");
+        assert!(esc.question.contains("a PR already exists"));
     }
 }
