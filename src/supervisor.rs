@@ -22,6 +22,7 @@ use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_ITEM};
 use crate::schema::{AgentConfig, ExecutionConfig};
 use crate::store::{ClaimGrant, SharedBoard};
 
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,12 +53,12 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     let os = Arc::new(OpenShell::default());
     if !cfg.agents.enabled {
         tracing::info!("execution.agents.enabled = false; board runs with no executor");
-        tokio::spawn(sweeper_loop(board, cfg, os));
+        tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
         return;
     }
     if let Err(e) = cfg.agents.validate() {
         tracing::error!("agents enabled but misconfigured: {e}");
-        tokio::spawn(sweeper_loop(board, cfg, os));
+        tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
         return;
     }
     // The sweeper starts *inside* `dispatch_loop`, once reconciliation has
@@ -70,14 +71,23 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
 /// Requeue cards whose leases lapsed. The matching supervise task notices on
 /// its next liveness tick (see `watch_agent`) and frees the concurrency slot —
 /// the sweeper alone must not leave `in_flight` stuck on a zombie watch.
-async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig, os: Arc<OpenShell>) {
+///
+/// Also periodically reconciles sandbox inventory (reap terminal / keep parked).
+/// `active` must be the same set dispatch uses so we never treat an in-flight
+/// setup as "no live agent" and bounce the card back to Ready.
+async fn sweeper_loop(
+    board: SharedBoard,
+    cfg: ExecutionConfig,
+    os: Arc<OpenShell>,
+    active: Active,
+) {
     let mut t = tokio::time::interval(Duration::from_millis(cfg.sweep_interval_ms));
     loop {
         t.tick().await;
         for id in board.sweep_leases() {
             tracing::info!("lease expired on #{id}; requeued");
         }
-        let _ = reconcile(&os, &board, cfg.lease_secs).await;
+        let _ = reconcile(&os, &board, cfg.lease_secs, &active).await;
     }
 }
 
@@ -88,8 +98,9 @@ async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig, os: Arc<OpenShel
 /// following — then the card shows Ready, `in_flight` stays 1, and nothing else
 /// claims.
 const WATCH_HEARTBEAT_SECS: u64 = 30;
-/// How often to notice Halt / lease-sweep while following. Keeps cancel latency
-/// short without hammering the board lock.
+/// How often to notice Halt / lease-sweep while following *or* setting up.
+/// Keeps cancel latency short without hammering the board lock. Setup used to
+/// ignore this — a Halt mid-clone left `in_flight` stuck at `max_concurrent`.
 const WATCH_BOARD_POLL_SECS: u64 = 2;
 
 /// Board states in which this process may keep watching a sandbox.
@@ -101,6 +112,40 @@ fn board_still_owns_run(state: State) -> bool {
 /// the card — not because the work failed.
 fn is_supervisor_cancel(err: &str) -> bool {
     err.contains("run cancelled:")
+}
+
+/// Bail if Halt / lease sweep / cut already moved the card off Claimed|Running.
+fn ensure_board_owns_run(board: &SharedBoard, id: ItemId) -> anyhow::Result<()> {
+    let Some(item) = board.get(id) else {
+        anyhow::bail!("run cancelled: card #{id} gone from the board");
+    };
+    if !board_still_owns_run(item.state) {
+        anyhow::bail!(
+            "run cancelled: card left {:?} (lease expired or halted)",
+            item.state
+        );
+    }
+    Ok(())
+}
+
+/// Run `fut`, aborting within about `WATCH_BOARD_POLL_SECS` if the board
+/// releases the card. Dropping `fut` cancels the underlying openshell exec
+/// (`kill_on_drop`), which is what frees `in_flight` after Halt during setup.
+async fn with_board_cancel<F, T>(board: &SharedBoard, id: ItemId, fut: F) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    tokio::pin!(fut);
+    let mut poll = tokio::time::interval(Duration::from_secs(WATCH_BOARD_POLL_SECS));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // First tick completes immediately; skip so we don't race the caller.
+    poll.tick().await;
+    loop {
+        tokio::select! {
+            res = &mut fut => return res,
+            _ = poll.tick() => ensure_board_owns_run(board, id)?,
+        }
+    }
 }
 
 /// Spend since process start, in cents. Coarse on purpose — a daily ceiling
@@ -120,12 +165,19 @@ const INFRA_COOLDOWN: Duration = Duration::from_secs(60);
 /// run 3 times without producing any work" about a card that never got the
 /// chance to run at all, which is exactly what it did report.
 fn is_infrastructure(err: &str) -> bool {
-    const SIGNS: [&str; 5] = [
+    const SIGNS: [&str; 11] = [
         "podman.sock",
         "connection error",
         "connection closed before message completed",
         "create sandbox failed",
         "gateway",
+        // OpenShell relay flakes during create→exec; not the card's fault.
+        "exec relay closed",
+        "sandbox is not ready",
+        "The service is currently unavailable",
+        "ssh tar extract exited",
+        "ssh exited with status",
+        "phase: Deleting",
     ];
     SIGNS.iter().any(|s| err.contains(s))
 }
@@ -145,11 +197,11 @@ struct Fleet {
     ///
     /// Prevents dispatch from double-claiming a card whose watch is still
     /// alive. Paired with timer heartbeats in `watch_agent` (so a silent tool
-    /// call cannot expire the lease) and cancel-when-board-releases (so a Halt
-    /// or residual lease sweep frees `in_flight`). A sandbox label is *not*
-    /// the right evidence here — failed sandboxes are kept for inspection, so
-    /// the label outlives the run. `reconcile` is the one place that reads
-    /// labels, and it cross-checks them against the card.
+    /// call cannot expire the lease) and `with_board_cancel` during setup +
+    /// watch (so a Halt / cut / lease sweep frees `in_flight` even mid-clone).
+    /// A sandbox label is *not* the right evidence here — failed sandboxes are
+    /// kept for inspection, so the label outlives the run. `reconcile` is the
+    /// one place that reads labels, and it cross-checks them against the card.
     active: Active,
     cooldown: Cooldown,
     lease_secs: i64,
@@ -223,7 +275,12 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         fleet.supervise(id, agent_id, adopt_card(fleet.clone(), a));
     }
 
-    tokio::spawn(sweeper_loop(board.clone(), cfg.clone(), fleet.os.clone()));
+    tokio::spawn(sweeper_loop(
+        board.clone(),
+        cfg.clone(),
+        fleet.os.clone(),
+        fleet.active.clone(),
+    ));
 
     let mut tick = tokio::time::interval(Duration::from_secs(3));
     loop {
@@ -316,15 +373,17 @@ fn adoptable<'a>(item: Option<&'a WorkItem>, sandbox: &str) -> Option<&'a WorkIt
 
 /// Should reconcile keep this sandbox?
 ///
-/// A sandbox is kept if its card still exists on the board, is not in a
-/// terminal state (`Done` / `Retired`), and explicitly names this sandbox in
-/// `card.environment`.
+/// Keep every non-terminal card's `honr-card-{id}-*` sandboxes. Matching only
+/// `card.environment` raced create: the sweeper reaped a sandbox mid-setup
+/// (and deleted Needs You inspection sandboxes) within a single sweep.
+/// Previous attempts are removed explicitly when a new attempt name is chosen.
 fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str) -> bool {
     let Some(i) = item else { return false };
     if i.state.is_terminal() {
         return false;
     }
     i.environment.as_deref() == Some(sandbox)
+        || sandbox.starts_with(&format!("honr-card-{}-", i.id))
 }
 
 /// How long startup waits for the gateway before giving up on reconciling.
@@ -378,11 +437,23 @@ async fn reconcile_once_reachable(
         // wait rounded up to the poll interval.
         tokio::time::sleep(GATEWAY_POLL.min(left)).await;
     }
-    reconcile(os, board, lease_secs).await
+    // Startup: nothing is supervised yet, so empty `active` is correct — a
+    // Claimed/Running card with a dead agent process should be requeued.
+    reconcile(os, board, lease_secs, &Active::default()).await
 }
 
 /// Match live sandboxes back to the board, before anything else touches them.
-async fn reconcile(os: &OpenShell, board: &SharedBoard, lease_secs: i64) -> Vec<Adoption> {
+///
+/// When `active` already contains the card id, this process is mid-run (often
+/// still creating the sandbox / starting the agent). Do **not** requeue those —
+/// the periodic sweeper used to race dispatch and bounce cards every few
+/// seconds with a misleading "honr restarted" reason.
+async fn reconcile(
+    os: &OpenShell,
+    board: &SharedBoard,
+    lease_secs: i64,
+    active: &Active,
+) -> Vec<Adoption> {
     let Ok(ours) = os.list_ours().await else {
         tracing::warn!("could not list sandboxes; skipping reconciliation");
         return Vec::new();
@@ -393,12 +464,23 @@ async fn reconcile(os: &OpenShell, board: &SharedBoard, lease_secs: i64) -> Vec<
         let Some(id) = sb.item_id() else { continue };
         let card = board.get(id);
         if !should_keep_sandbox(card.as_ref(), &sb.name) {
-            tracing::info!("reaping unneeded sandbox {}", sb.name);
+            tracing::info!(
+                "reaping unneeded sandbox {} (card={:?} state={:?} env={:?})",
+                sb.name,
+                card.as_ref().map(|c| c.id),
+                card.as_ref().map(|c| c.state),
+                card.as_ref().and_then(|c| c.environment.as_deref()),
+            );
             let _ = os.delete(&sb.name).await;
             continue;
         }
 
         if let Some(item) = adoptable(card.as_ref(), &sb.name) {
+            // This process is already watching (or still setting up) the card —
+            // do not adopt again or requeue; that raced dispatch every sweep.
+            if active.lock().unwrap().contains(&id) {
+                continue;
+            }
             match adopt(os, board, item, &sb.name, lease_secs).await {
                 Some(a) => {
                     tracing::info!("#{id}: re-attached to {} from line {}", sb.name, a.from_line);
@@ -505,12 +587,42 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     let id = grant.item_id;
     let branch = format!("honr/card-{id}");
 
+    ensure_board_owns_run(board, id)?;
+
     let existing_env = board.get(id).and_then(|i| i.environment);
     let (name, is_reused) = match existing_env {
-        Some(ref env_name) if is_sandbox_live(os, env_name).await => (env_name.clone(), true),
+        Some(ref env_name)
+            if with_board_cancel(board, id, async {
+                Ok(is_sandbox_live(os, env_name).await)
+            })
+            .await? =>
+        {
+            (env_name.clone(), true)
+        }
         _ => {
-            let attempt = board.get(id).map(|i| i.run_failures).unwrap_or(0) + 1;
+            let (attempt, prev_env) = board
+                .get(id)
+                .map(|i| (i.run_failures + 1, i.environment.clone()))
+                .unwrap_or((1, None));
             let new_name = format!("honr-card-{id}-a{attempt}");
+            // Drop the previous attempt before renaming — reconcile used to
+            // reap by exact environment match and raced the new create.
+            if let Some(prev) = prev_env {
+                if prev != new_name {
+                    // Best-effort delete, but Halt must still free the slot.
+                    if let Err(e) = with_board_cancel(board, id, async {
+                        let _ = os.delete(&prev).await;
+                        Ok(())
+                    })
+                    .await
+                    {
+                        if is_supervisor_cancel(&e.to_string()) {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            ensure_board_owns_run(board, id)?;
             board.set_environment(id, Some(new_name.clone()));
             (new_name, false)
         }
@@ -576,13 +688,92 @@ async fn finalize(os: &OpenShell, id: ItemId, name: &str, result: &anyhow::Resul
     }
 }
 
+async fn exec_with_infra_retry(
+    os: &OpenShell,
+    name: &str,
+    script: &str,
+    timeout: Duration,
+    what: &str,
+) -> anyhow::Result<Output> {
+    let mut last = String::new();
+    for attempt in 1..=5 {
+        match os.exec(name, script, timeout).await {
+            Ok(out) if out.ok() => return Ok(out),
+            Ok(out) => {
+                last = format!("{what} failed: {}", outerr(&out));
+                if !is_infrastructure(&last) {
+                    anyhow::bail!("{last}");
+                }
+            }
+            Err(e) => {
+                last = format!("{what} failed: {e}");
+                if !is_infrastructure(&last) {
+                    anyhow::bail!("{last}");
+                }
+            }
+        }
+        tracing::warn!("{what} on {name} attempt {attempt}/5 failed (retrying): {last}");
+        tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+        let _ = wait_until_sandbox_ready(os, name).await;
+    }
+    anyhow::bail!("{last}")
+}
+
+/// Create returns as soon as the bootstrap command exits; the supervisor relay
+/// can still be bouncing. Poll until `list` reports Ready before upload/exec.
+async fn wait_until_sandbox_ready(os: &OpenShell, name: &str) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match os.list().await {
+            Ok(list) => {
+                if let Some(sb) = list.iter().find(|s| s.name == name) {
+                    let phase = sb.phase.as_deref().unwrap_or("");
+                    if phase.eq_ignore_ascii_case("Ready") {
+                        // Brief settle — immediate upload right after Ready still
+                        // flakes with "sandbox is not ready" / relay closed.
+                        tokio::time::sleep(Duration::from_millis(750)).await;
+                        return Ok(());
+                    }
+                    if phase.eq_ignore_ascii_case("Deleting") || phase.eq_ignore_ascii_case("Failed")
+                    {
+                        anyhow::bail!("sandbox {name} entered phase {phase} before setup finished");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("waiting for {name} ready: list failed: {e}"),
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("sandbox {name} not Ready within 60s");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 async fn ensure_shim_up(os: &OpenShell, name: &str, short: Duration) -> anyhow::Result<()> {
-    os.upload(name, SHIM_LOCAL, SHIM_DEST_DIR).await?;
-    let up = os
-        .exec(
-            name,
-            &format!(
-                r#"set -e
+    // Upload/exec right after create occasionally hits a dead relay; retry.
+    let mut last = String::new();
+    for attempt in 1..=5 {
+        match os.upload(name, SHIM_LOCAL, SHIM_DEST_DIR).await {
+            Ok(()) => {
+                last.clear();
+                break;
+            }
+            Err(e) => {
+                last = e.to_string();
+                if !is_infrastructure(&last) || attempt == 5 {
+                    return Err(e.into());
+                }
+                tracing::warn!("#{attempt}/5 upload shim to {name} failed (retrying): {last}");
+                tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+            }
+        }
+    }
+    if !last.is_empty() {
+        anyhow::bail!("upload shim to {name}: {last}");
+    }
+
+    let script = format!(
+        r#"set -e
 if curl -sf -H 'Metadata-Flavor: Google' http://127.0.0.1:8127/ >/dev/null 2>&1; then
   exit 0
 fi
@@ -594,12 +785,28 @@ for i in $(seq 1 40); do
   sleep 0.25
 done
 echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
-            ),
-            short,
-        )
-        .await?;
-    anyhow::ensure!(up.ok(), "metadata shim never came up: {}", outerr(&up));
-    Ok(())
+    );
+    let mut last_exec = String::new();
+    for attempt in 1..=5 {
+        match os.exec(name, &script, short).await {
+            Ok(up) if up.ok() => return Ok(()),
+            Ok(up) => {
+                last_exec = outerr(&up);
+                if !is_infrastructure(&last_exec) {
+                    anyhow::bail!("metadata shim never came up: {last_exec}");
+                }
+            }
+            Err(e) => {
+                last_exec = e.to_string();
+                if !is_infrastructure(&last_exec) {
+                    return Err(e.into());
+                }
+            }
+        }
+        tracing::warn!("#{attempt}/5 start shim on {name} failed (retrying): {last_exec}");
+        tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+    }
+    anyhow::bail!("metadata shim never came up: {last_exec}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -623,43 +830,68 @@ async fn run_inside(
     // the moment it is claimed until `claude` produces its first line — long
     // enough for the sweeper to requeue a healthy run. Each call marks a step
     // that actually completed, so this stays evidence of progress rather than
-    // an assertion of liveness.
-    let beat = |p: f32| {
+    // an assertion of liveness. Also refuses to heartbeat a Halted card —
+    // setup must not outlive the board's claim.
+    let beat = |p: f32| -> anyhow::Result<()> {
+        ensure_board_owns_run(board, id)?;
         let _ = board.heartbeat(id, agent_id, p, 0, lease_secs);
+        Ok(())
     };
 
     let branch_state = if !is_reused {
-        let _ = os.delete(&spec.name).await;
-        os.create(spec).await?;
-        beat(0.01);
+        if let Err(e) = with_board_cancel(board, id, async {
+            let _ = os.delete(&spec.name).await;
+            Ok(())
+        })
+        .await
+        {
+            if is_supervisor_cancel(&e.to_string()) {
+                return Err(e);
+            }
+        }
+        with_board_cancel(board, id, async { os.create(spec).await.map_err(Into::into) }).await?;
+        with_board_cancel(board, id, wait_until_sandbox_ready(os, name)).await?;
+        beat(0.01)?;
 
-        ensure_shim_up(os, name, short).await?;
-        beat(0.02);
+        with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
+        beat(0.02)?;
 
-        if let Err(e) = sync_beads_into_sandbox(board, os, name).await {
-            tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
-        } else {
-            beat(0.025);
+        match with_board_cancel(board, id, sync_beads_into_sandbox(board, os, name)).await {
+            Ok(()) => beat(0.025)?,
+            Err(e) if is_supervisor_cancel(&e.to_string()) => return Err(e),
+            Err(e) => {
+                tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
+            }
         }
 
-        let clone = os.exec(name, &clone_script(cfg, branch), short).await?;
-        anyhow::ensure!(clone.ok(), "clone failed: {}", outerr(&clone));
-        beat(0.03);
+        let clone = with_board_cancel(
+            board,
+            id,
+            exec_with_infra_retry(os, name, &clone_script(cfg, branch), short, "clone"),
+        )
+        .await?;
+        beat(0.03)?;
         branch_state_of(&clone.stdout)
     } else {
-        beat(0.01);
-        ensure_shim_up(os, name, short).await?;
-        beat(0.02);
+        beat(0.01)?;
+        with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
+        beat(0.02)?;
 
-        if let Err(e) = sync_beads_into_sandbox(board, os, name).await {
-            tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
-        } else {
-            beat(0.025);
+        match with_board_cancel(board, id, sync_beads_into_sandbox(board, os, name)).await {
+            Ok(()) => beat(0.025)?,
+            Err(e) if is_supervisor_cancel(&e.to_string()) => return Err(e),
+            Err(e) => {
+                tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
+            }
         }
 
-        let refresh = os.exec(name, &refresh_script(cfg, branch), short).await?;
-        anyhow::ensure!(refresh.ok(), "in-place refresh failed: {}", outerr(&refresh));
-        beat(0.03);
+        let refresh = with_board_cancel(
+            board,
+            id,
+            exec_with_infra_retry(os, name, &refresh_script(cfg, branch), short, "refresh"),
+        )
+        .await?;
+        beat(0.03)?;
         branch_state_of(&refresh.stdout)
     };
 
@@ -668,11 +900,16 @@ async fn run_inside(
     let briefing_text = briefing(grant, branch_state, branch, &cfg.repo.upstream, &cfg.repo.base);
     let engine = grant.engine.as_deref().unwrap_or(&cfg.engine);
     if engine == "agy" {
-        setup_agy_auth(os, name, &cfg.vertex.project).await?;
+        with_board_cancel(board, id, setup_agy_auth(os, name, &cfg.vertex.project)).await?;
     }
-    let start = os.exec(name, &start_script(cfg, &briefing_text, engine), short).await?;
+    let start = with_board_cancel(board, id, async {
+        os.exec(name, &start_script(cfg, &briefing_text, engine), short)
+            .await
+            .map_err(Into::into)
+    })
+    .await?;
     anyhow::ensure!(start.ok(), "agent did not start: {}", outerr(&start));
-    beat(0.04);
+    beat(0.04)?;
 
     // From the top of the log with nothing spent: this run is ours from its
     // first line. An adopted run joins here instead, further in.
@@ -766,24 +1003,14 @@ async fn watch_agent(
                 return Ok((run, spent.load(Ordering::Relaxed)));
             }
             _ = hb.tick() => {
-                if !board.get(id).is_some_and(|i| board_still_owns_run(i.state)) {
-                    // Dropping `stream` kills the follow exec (kill_on_drop).
-                    anyhow::bail!("run cancelled: card left Claimed/Running");
-                }
+                // Dropping `stream` kills the follow exec (kill_on_drop).
+                ensure_board_owns_run(board, id)?;
                 let frac = started.elapsed().as_secs_f32() / timeout.as_secs_f32();
                 let progress = frac.max(floor).clamp(0.0, 0.95);
                 let _ = board.heartbeat(id, agent_id, progress, 0, lease_secs);
             }
             _ = poll.tick() => {
-                let Some(item) = board.get(id) else {
-                    anyhow::bail!("run cancelled: card #{id} gone from the board");
-                };
-                if !board_still_owns_run(item.state) {
-                    anyhow::bail!(
-                        "run cancelled: card left {:?} (lease expired or halted)",
-                        item.state
-                    );
-                }
+                ensure_board_owns_run(board, id)?;
             }
         }
     }
@@ -1000,6 +1227,32 @@ async fn process_verdict(
             }
         }
         "report" => {
+            if board.get(id).is_some_and(|i| i.is_initial_plan_task()) {
+                tracing::warn!("#{id}: Initial plan tried to finish via report; refusing");
+                board
+                    .escalate(
+                        id,
+                        agent_id,
+                        "Initial plan must finish by writing /work/.honr/split.json \
+                         (optional one plan/docs PR first). report.json is for implementation cards."
+                            .into(),
+                        vec![
+                            crate::model::EscalationOption {
+                                label: "Resume and split".into(),
+                                detail: "Re-dispatch so the agent writes split.json with sibling Tasks."
+                                    .into(),
+                            },
+                            crate::model::EscalationOption {
+                                label: "Approve Plan in cockpit".into(),
+                                detail: "Use propose_breakdown + Approve Plan instead of the sandbox split."
+                                    .into(),
+                            },
+                        ],
+                        0,
+                    )
+                    .map_err(|e| anyhow::anyhow!("initial-plan report refuse: {e}"))?;
+                return Ok(true);
+            }
             let rep: ReportFile = serde_json::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("invalid report.json: {e}"))?;
             let pr_url = if let Some(url) = rep.pr_url.filter(|s| !s.trim().is_empty()) {
@@ -1541,46 +1794,79 @@ fn briefing(
         }
     });
 
-    b.push_str(
-        "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
-         Write `/work/.honr/escalate.json` with your question, options, \
-         and recommended choice index, then exit. Options must supply at least two concrete choices.\n\
-         \nIf work is discovered to be bigger than one card, do not overrun. \
-         Write `/work/.honr/split.json` with an array of `children` \
-         (each having `title`, `intent`, and optional `definition_of_done`), then exit. \
-         Those become **sibling Tasks under the same Project** — never nested under this card. \
-         Splits may only carve this card's definition of done into smaller slices of the same outcome. \
-         Do not invent work that belongs to another Project — escalate instead. \
-         If a PR already exists for the card, do not split — finish via report or request human guidance. \
-         Split and publish are mutually exclusive for one run.\n\
-         \n`bd` (beads CLI) is available for the task graph and project memory. \
-         Run `bd prime` for context, `bd show <id>` for this card's Project/deps, \
-         `bd remember \"insight\"` to store learned insights, and `bd dep add` for \
-         blocks/relates-to edges between sibling tasks. Do not nest tasks under tasks.\n",
-    );
+    let is_initial_plan = grant.title == crate::model::INITIAL_PLAN_TITLE;
 
-    b.push_str(&format!(
-        "\nWhen the work is done, write `/work/.honr/report.json` \
-         with your diffstat (`added` and `removed` line counts matching `git diff --numstat` against `{base}`), \
-         optional `gates` passed, and `pr_url`.\n",
-        base = base,
-    ));
+    if is_initial_plan {
+        b.push_str(
+            "\nThis is the Project's **Initial plan** card. Your job is to materialize sibling Tasks.\n\
+             You MAY open **one** plan/docs PR (publish the plan artifact), then you MUST finish by \
+             writing `/work/.honr/split.json` with an array of `children` \
+             (each having `title`, `intent`, and optional `definition_of_done`). \
+             On this card only, a PR and a split are allowed together — do **not** open a second PR. \
+             If sibling Tasks with the same titles already exist under the Project, still write \
+             split.json; the board will reuse them instead of duplicating. \
+             Do **not** finish with `report.json` — split is the finish for Initial plan.\n\
+             Children must stay on-theme for this Project. Do not invent work for another Project — escalate instead.\n\
+             If you hit a real decision that needs a human, write `/work/.honr/escalate.json` with \
+             options (at least two) and a recommended index, then exit.\n\
+             \n`bd` (beads CLI) is available for the task graph and project memory. \
+             Run `bd prime` for context, `bd show <id>` for this card's Project/deps, \
+             `bd remember \"insight\"` to store learned insights, and `bd dep add` for \
+             blocks/relates-to edges between sibling tasks. Do not nest tasks under tasks.\n",
+        );
+    } else {
+        b.push_str(
+            "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
+             Write `/work/.honr/escalate.json` with your question, options, \
+             and recommended choice index, then exit. Options must supply at least two concrete choices.\n\
+             \nIf work is discovered to be bigger than one card, do not overrun. \
+             Write `/work/.honr/split.json` with an array of `children` \
+             (each having `title`, `intent`, and optional `definition_of_done`), then exit. \
+             Those become **sibling Tasks under the same Project** — never nested under this card. \
+             Splits may only carve this card's definition of done into smaller slices of the same outcome. \
+             Do not invent work that belongs to another Project — escalate instead. \
+             If a PR already exists for the card, do not split — finish via report or request human guidance. \
+             Split and publish are mutually exclusive for one run.\n\
+             \n`bd` (beads CLI) is available for the task graph and project memory. \
+             Run `bd prime` for context, `bd show <id>` for this card's Project/deps, \
+             `bd remember \"insight\"` to store learned insights, and `bd dep add` for \
+             blocks/relates-to edges between sibling tasks. Do not nest tasks under tasks.\n",
+        );
 
-    b.push_str(&format!(
-        "\nRun the project's own checks before you finish — `cargo test --offline --locked` and \
-         `cargo clippy --offline -- -D warnings`. Both work with no network; if either needs to \
-         reach the network, something is wrong and you should say so rather than work around it.\n\
-         \nWhen the work is done, publish it yourself:\n\
-         \n  1. Commit on `{branch}`. Do not commit to any other branch.\n\
-           2. Push to `origin` (the fork). Force-push is fine on your own branch.\n\
-           3. Open a pull request against `{upstream}` base `{base}`, or update the existing \
-              one if a PR for this branch is already open.\n\
-         \nThe PR is how a human reviews this, so it is part of the work, not an afterthought. \
-         Leave `{base}` alone.\n",
-        branch = branch_name,
-        upstream = upstream,
-        base = base,
-    ));
+        b.push_str(&format!(
+            "\nWhen the work is done, write `/work/.honr/report.json` \
+             with your diffstat (`added` and `removed` line counts matching `git diff --numstat` against `{base}`), \
+             optional `gates` passed, and `pr_url`.\n",
+            base = base,
+        ));
+    }
+
+    if is_initial_plan {
+        b.push_str(&format!(
+            "\nOptional plan artifact: commit on `{branch}`, push to `origin`, and open **at most one** \
+             PR against `{upstream}` base `{base}` (or update that existing PR — never a second one). \
+             Then write `/work/.honr/split.json` and exit. Leave `{base}` alone.\n",
+            branch = branch_name,
+            upstream = upstream,
+            base = base,
+        ));
+    } else {
+        b.push_str(&format!(
+            "\nRun the project's own checks before you finish — `cargo test --offline --locked` and \
+             `cargo clippy --offline -- -D warnings`. Both work with no network; if either needs to \
+             reach the network, something is wrong and you should say so rather than work around it.\n\
+             \nWhen the work is done, publish it yourself:\n\
+             \n  1. Commit on `{branch}`. Do not commit to any other branch.\n\
+               2. Push to `origin` (the fork). Force-push is fine on your own branch.\n\
+               3. Open a pull request against `{upstream}` base `{base}`, or update the existing \
+                  one if a PR for this branch is already open.\n\
+             \nThe PR is how a human reviews this, so it is part of the work, not an afterthought. \
+             Leave `{base}` alone.\n",
+            branch = branch_name,
+            upstream = upstream,
+            base = base,
+        ));
+    }
     b
 }
 
@@ -1660,6 +1946,96 @@ mod tests {
         assert!(!is_infrastructure(
             "run cancelled: card left Ready (lease expired or halted)"
         ));
+    }
+
+    /// Halt mid-setup used to leave `in_flight` stuck: clone/create ignored the
+    /// board, so `max_concurrent` never freed and Ready cards sat forever.
+    #[tokio::test]
+    async fn setup_await_cancels_when_card_is_halted() {
+        let board = test_board();
+        let project = board
+            .create(None, "project", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
+
+        let board_halt = board.clone();
+        let id = task.id;
+        let halt = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            board_halt
+                .halt(id, Some("test halt".into()))
+                .expect("halt");
+        });
+
+        let began = std::time::Instant::now();
+        let err = with_board_cancel(&board, id, async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .expect_err("must cancel when halted");
+        halt.await.expect("halt task");
+
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "cancel must not wait out the setup future"
+        );
+        assert!(
+            is_supervisor_cancel(&err.to_string()),
+            "expected supervisor cancel, got {err}"
+        );
+        assert_eq!(board.get(id).unwrap().state, State::Ready);
+    }
+
+    #[tokio::test]
+    async fn setup_await_cancels_when_card_is_retired() {
+        let board = test_board();
+        let project = board
+            .create(None, "project", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
+
+        let board_cut = board.clone();
+        let id = task.id;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let _ = board_cut.cut_scope(id, Some("reshape".into()));
+        });
+
+        let err = with_board_cancel(&board, id, async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .expect_err("must cancel when retired");
+        assert!(is_supervisor_cancel(&err.to_string()), "{err}");
+        assert_eq!(board.get(id).unwrap().state, State::Retired);
     }
 
     #[test]
@@ -1892,8 +2268,13 @@ mod tests {
         item.state = State::Ready;
         assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
 
-        // Old attempt sandbox is not kept
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1"));
+        // Prior attempt for the same card is kept (prefix match) so create
+        // cannot race reconcile; run_card deletes the previous name explicitly.
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a1"));
+
+        item.state = State::NeedsHuman;
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a3"));
 
         // Terminal card sandbox is not kept (reaped)
         item.state = State::Done;
@@ -1904,6 +2285,22 @@ mod tests {
 
         // Deleted item sandbox is not kept
         assert!(!should_keep_sandbox(None, "honr-card-9-a2"));
+
+        // Other cards' sandboxes are not kept
+        item.state = State::Ready;
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-8-a1"));
+    }
+
+    #[test]
+    fn relay_and_not_ready_are_infrastructure() {
+        assert!(is_infrastructure(
+            "clone failed: Error: exec relay closed before the command reported an exit status"
+        ));
+        assert!(is_infrastructure("sandbox is not ready"));
+        assert!(is_infrastructure(
+            "code: 'The service is currently unavailable', message: \"exec relay closed\""
+        ));
+        assert!(!is_infrastructure("agent panicked in user code"));
     }
 
     #[test]
@@ -2094,6 +2491,30 @@ mod tests {
         assert!(
             b.contains("Split and publish are mutually exclusive"),
             "briefing must state PR/split mutual exclusivity: {b}"
+        );
+    }
+
+    #[test]
+    fn briefing_initial_plan_allows_pr_then_split() {
+        let mut g = grant();
+        g.title = crate::model::INITIAL_PLAN_TITLE.into();
+        let b = briefing(&g, BranchState::Fresh, "honr/card-92", "shanemcd/honr", "main");
+        assert!(b.contains("Initial plan"), "briefing must identify Initial plan: {b}");
+        assert!(
+            b.contains("PR and a split are allowed together")
+                || b.contains("a PR and a split are allowed together"),
+            "briefing must allow PR+split on Initial plan: {b}"
+        );
+        assert!(
+            !b.contains("Split and publish are mutually exclusive"),
+            "Initial plan briefing must not use the implementation exclusivity rule: {b}"
+        );
+        assert!(
+            b.contains("Do **not** finish with `report.json`")
+                || b.contains("Do not finish with `report.json`")
+                || b.contains("do **not** finish with `report.json`")
+                || b.contains("split is the finish"),
+            "briefing must forbid report finish for Initial plan: {b}"
         );
     }
 
