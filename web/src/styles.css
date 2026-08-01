@@ -859,6 +859,12 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   line-height: 1.5;
 }
 
+.owaiting {
+  padding-right: 16px;
+  margin-top: 2px;
+  margin-bottom: 6px;
+}
+
 /* Tab badge, so "Needs you" carries its own count. */
 .pip {
   display: inline-block;

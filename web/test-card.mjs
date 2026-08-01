@@ -2,6 +2,8 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
+import { Home } from "./dist-test/components/Home.js";
+import { isBlocked, sortFor } from "./dist-test/components/Board.js";
 
 const now = Math.floor(Date.now() / 1000);
 
@@ -127,8 +129,6 @@ const runningClaudeHtml = renderToString(
 console.log("\nRunning Card HTML (defaultEngine=claude):\n", runningClaudeHtml);
 assert(runningClaudeHtml.includes("claude"), "Running card with engine null and defaultEngine claude should render claude badge");
 
-import { isBlocked, sortFor } from "./dist-test/components/Board.js";
-
 // Test 5: isBlocked helper
 assert.strictEqual(isBlocked(blockedItem), true, "blockedItem should be blocked");
 assert.strictEqual(isBlocked(unblockedItem), false, "unblockedItem should be unblocked");
@@ -194,4 +194,90 @@ readyCards.sort(sortFor("ready"));
 
 assert.strictEqual(readyCards[0].id, 1, "After claim-release bounce, unblocked card #1 must STILL sort first");
 
-console.log("\n✅ All Card & Board component sorting assertions passed!");
+// Test 7: Home Issues rows show a friendly waiting-on line when blocked_by is non-empty
+const projectItem = {
+  id: 100,
+  parent: null,
+  level: "Project",
+  title: "Test Project",
+  intent: "Test project intent",
+  definition_of_done: "Done",
+  state: "ready",
+  origin: { kind: "human" },
+  above_line: true,
+  blocked_by: [],
+  blockers: [],
+  capability: null,
+  lease: null,
+  model: null,
+  progress: 0,
+  cost_cents: 0,
+  budget_cents: null,
+  escalation: null,
+  gates: [],
+  gate_failures: 0,
+  diff_added: 0,
+  diff_removed: 0,
+  notes: [],
+  pinned: [],
+  release_target: null,
+  environment: null,
+  pr_url: null,
+  created_at: new Date().toISOString(),
+  entered_state_at: new Date().toISOString(),
+  history: [],
+};
+
+const blockedHomeItem = {
+  ...blockedItem,
+  parent: 100,
+};
+
+const unblockedHomeItem = {
+  ...unblockedItem,
+  parent: 100,
+};
+
+const homeItemsMap = new Map([
+  [100, projectItem],
+  [7, blockedHomeItem],
+  [8, unblockedHomeItem],
+]);
+
+const homeHtml = renderToString(
+  React.createElement(Home, {
+    items: homeItemsMap,
+    goals: [],
+    now,
+    onOpen: () => {},
+    onOpenBoard: () => {},
+    onChanged: () => {},
+  })
+);
+
+console.log("\nHome HTML:\n", homeHtml);
+
+assert(homeHtml.includes('class="owaiting blocker-chips"') || homeHtml.includes('blocker-chips'), "Home should contain blocker-chips line");
+assert(homeHtml.includes('⊘ waiting on'), "Home should contain waiting on label");
+assert(homeHtml.includes('Supervisor runs the gates'), "Home row should display human-readable blocker title");
+
+// Test 8: Home with only unblocked items renders no waiting-on line
+const unblockedHomeItemsMap = new Map([
+  [100, projectItem],
+  [8, unblockedHomeItem],
+]);
+const cleanHomeHtml = renderToString(
+  React.createElement(Home, {
+    items: unblockedHomeItemsMap,
+    goals: [],
+    now,
+    onOpen: () => {},
+    onOpenBoard: () => {},
+    onChanged: () => {},
+  })
+);
+
+assert(!cleanHomeHtml.includes("owaiting"), "Home with unblocked items should stay clean");
+assert(!cleanHomeHtml.includes("waiting on"), "Home with unblocked items should not show waiting on");
+
+console.log("\n✅ All Card, Board, and Home component assertions passed!");
