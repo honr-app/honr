@@ -121,7 +121,14 @@ for (let i = 0; i < 40; i++) {
   await sleep(250);
 }
 
-const browser = await chromium.launch();
+let browser;
+try {
+  browser = await chromium.launch();
+} catch (err) {
+  console.log(`\n[Playwright] Skipping browser screenshots: ${err.message.split("\n")[0]}`);
+  honr.kill();
+  process.exit(0);
+}
 
 async function shoot(name, { width, height }, prepare) {
   const page = await browser.newPage({ viewport: { width, height } });
@@ -164,6 +171,18 @@ await shoot("desktop-board", DESKTOP, async (page) => {
   await blockedCard.first().waitFor({ state: "visible" });
   await blockedCard.first().screenshot({ path: `${OUT}/blocked-card-chip.png` });
   console.log(`  blocked-card-chip.png`);
+});
+
+// Dependency Graph view: capture visual dependency graph on the Board
+await shoot("desktop-graph", DESKTOP, async (page) => {
+  await tab("Activity")(page);
+  const toggleGraphBtn = page.locator('[data-testid="toggle-graph-view"]');
+  await toggleGraphBtn.first().click();
+  await sleep(600);
+
+  const graphContainer = page.locator('[data-testid="graph-container"]');
+  await graphContainer.first().waitFor({ state: "visible", timeout: 5000 });
+  console.log(`  [Playwright Assertion] Visual dependency graph loaded`);
 });
 
 await shoot("desktop-needs", DESKTOP, tab("Needs you"));

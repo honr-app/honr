@@ -8,3 +8,5 @@ web/tsconfig.tsbuildinfo
 
 # UI screenshots, regenerated on demand
 web/shots
+.honr
+
