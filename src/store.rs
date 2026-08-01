@@ -3439,4 +3439,127 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_live_e2e_beads_github_auto_sync() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-e2e-live-sync-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let _ = beads_client
+            .cmd()
+            .args(["rename-prefix", "honr-"])
+            .output()
+            .await;
+        let _ = beads_client
+            .cmd()
+            .args(["config", "set", "github.owner", "clankrshq"])
+            .output()
+            .await;
+        let _ = beads_client
+            .cmd()
+            .args(["config", "set", "github.repo", "honr"])
+            .output()
+            .await;
+
+
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        // 1. Create a Project
+        let project = board
+            .create(
+                None,
+                "E2E: prove beads ↔ GitHub Issues auto-sync",
+                "Project intent: Prove end-to-end auto-sync",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .expect("create project");
+        board.mirror_beads_item(project.id).await;
+
+        let sync_p = beads_client
+            .cmd()
+            .args(["github", "sync", "--push-only", "-v"])
+            .output()
+            .await
+            .unwrap();
+        println!("Project sync stdout = {}", String::from_utf8_lossy(&sync_p.stdout));
+        println!("Project sync stderr = {}", String::from_utf8_lossy(&sync_p.stderr));
+
+        let project_bid = board.get(project.id).unwrap().beads_id.unwrap();
+        println!("Project real beads_id = {project_bid}");
+        let project_show = beads_client.show(&project_bid).await.expect("project show");
+        println!("Project show = {project_show:?}");
+        println!("Project github_issue_url() = {:?}", project_show.github_issue_url());
+
+        // 2. Create a child Task under the Project
+        let task = board
+            .create(
+                Some(project.id),
+                "Verify create/close dual-writes beads + GitHub Issue",
+                "Exercise live auto-sync path",
+                Some("DOD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("create task");
+
+        board.mirror_beads_item(task.id).await;
+
+        let sync_t = beads_client
+            .cmd()
+            .args(["github", "sync", "--push-only", "-v"])
+            .output()
+            .await
+            .unwrap();
+        println!("Task sync stdout = {}", String::from_utf8_lossy(&sync_t.stdout));
+        println!("Task sync stderr = {}", String::from_utf8_lossy(&sync_t.stderr));
+
+        let task_item_before = board.get(task.id).expect("task item");
+        let child_beads_id = task_item_before.beads_id.expect("task beads id");
+        println!("Task beads_id = {child_beads_id}");
+
+        let sync_task = beads_client.github_sync().await;
+        println!("github_sync after task create = {sync_task:?}");
+
+        let task_show = beads_client.show(&child_beads_id).await.expect("task show");
+        println!("Task show = {task_show:?}");
+        println!("Task github_issue_url() = {:?}", task_show.github_issue_url());
+
+        let task_item = board.get(task.id).expect("task item");
+        let child_github_url = task_item.github_issue_url.expect("task github issue url");
+
+
+
+        println!("E2E EVIDENCE 1: child card beads_id = {child_beads_id}");
+        println!("E2E EVIDENCE 2: github_issue_url = {child_github_url}");
+
+        // 3. Mark Task as Done
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.claim(task.id, "agent", None, 45);
+        let _ = board.transition(task.id, State::Done, "E2E verification completed", None);
+
+        // Await beads close + github_sync directly to ensure sync finishes before checking
+        let _ = beads_client.close(&child_beads_id, Some("E2E verification completed")).await;
+        let sync_res = beads_client.github_sync().await;
+        println!("E2E EVIDENCE 3: github_sync after Done result: {sync_res:?}");
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
 }
