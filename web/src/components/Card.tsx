@@ -6,6 +6,8 @@ interface Props {
   column: ColumnKey;
   now: number;
   heartbeatExpect: number;
+  defaultEngine?: string;
+  defaultModel?: string;
   breadcrumb?: string;
   /** Prefer beads hash ids for blocker chips when available. */
   labelOf?: (id: number) => string;
@@ -16,9 +18,12 @@ interface Props {
  * Card anatomy differs by column, because the question you're asking differs.
  * Everything on the face is here to answer that column's one question.
  */
-export function Card({ item, column, now, heartbeatExpect, breadcrumb, labelOf, onOpen }: Props) {
+export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaultModel, breadcrumb, labelOf, onOpen }: Props) {
   const machine = item.origin.kind !== "human";
   const idLabel = (id: number) => (labelOf ? labelOf(id) : `#${id}`);
+
+  const engine = item.engine ?? defaultEngine;
+  const model = item.model ?? defaultModel;
 
   // The one number that tells you an agent is thinking versus hung. It belongs
   // on the card face, not behind a click — and the card decays as it ages.
@@ -83,11 +88,11 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, labelOf, 
         <>
           <div className="row">
             <span className="tag">
-              {(item.engine || "agy") === "agy"
+              {engine === "agy"
                 ? "⚡ agy"
-                : item.engine === "claude"
+                : engine === "claude"
                   ? "🤖 claude"
-                  : `◍ ${item.model ?? "?"}`}
+                  : `◍ ${engine || model || "?"}`}
             </span>
             <span className={stale ? "hb stale" : "hb"}>♥ {hbAge ?? "—"}s</span>
             <span className="dim">{money(item.cost_cents)}</span>

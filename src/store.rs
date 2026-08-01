@@ -90,6 +90,8 @@ pub struct Snapshot {
     pub seq: u64,
     /// Supervisor will not claim new Ready cards while true.
     pub dispatch_paused: bool,
+    pub default_engine: String,
+    pub default_model: String,
 }
 
 /// What `claim` hands back. The card alone would be a title; the chain is why
@@ -826,13 +828,12 @@ impl Board {
         for spec in &plan.tasks {
             let Some(id) = spec.item_id else { continue };
             if let Some(child) = self.get(id) {
-                if child.state == State::Shaping
+                if (child.state == State::Shaping
                     && self
                         .transition(id, State::Ready, "human", Some("plan approved".into()))
-                        .is_ok()
+                        .is_ok())
+                    || child.state == State::Ready
                 {
-                    published.push(id);
-                } else if child.state == State::Ready {
                     published.push(id);
                 }
             }
@@ -1721,6 +1722,8 @@ impl Board {
             heartbeat_expect_secs: self.schema.execution.heartbeat_expect_secs,
             seq: self.seq.load(Ordering::Relaxed),
             dispatch_paused: s.dispatch_paused,
+            default_engine: self.schema.execution.agents.engine.clone(),
+            default_model: self.schema.execution.agents.vertex.model.clone(),
         }
     }
 

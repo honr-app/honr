@@ -330,9 +330,6 @@ pub struct WorkItem {
     /// again instead of orphaning them.
     #[serde(default)]
     pub environment: Option<String>,
-    /// Selected agent engine (`claude` vs `agy`).
-    #[serde(default)]
-    pub engine: Option<String>,
     /// Beads issue hash ID (e.g. `bd-a1b2`).
     #[serde(default)]
     pub beads_id: Option<String>,
@@ -392,7 +389,6 @@ impl WorkItem {
             pinned: Vec::new(),
             release_target: None,
             environment: None,
-            engine: None,
             beads_id: None,
             github_issue_url: None,
             pr_url: None,

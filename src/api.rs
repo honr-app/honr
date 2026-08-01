@@ -113,6 +113,8 @@ pub struct ItemDetail {
     ancestry: Vec<AncestryLine>,
     constraints: Vec<String>,
     children: Vec<ItemId>,
+    default_engine: String,
+    default_model: String,
 }
 
 async fn item_detail(
@@ -120,11 +122,15 @@ async fn item_detail(
     Path(id): Path<ItemId>,
 ) -> ApiResult<ItemDetail> {
     let item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
+    let default_engine = b.schema.execution.agents.engine.clone();
+    let default_model = b.schema.execution.agents.vertex.model.clone();
     Ok(Json(ItemDetail {
         ancestry: b.ancestry(id),
         constraints: b.inherited_pins(id),
         children: b.children_of(id),
         item,
+        default_engine,
+        default_model,
     }))
 }
 
