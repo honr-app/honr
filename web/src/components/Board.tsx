@@ -13,6 +13,8 @@ interface Props {
   breadcrumbOf: (id: number) => string;
   now: number;
   heartbeatExpect: number;
+  defaultEngine?: string;
+  defaultModel?: string;
   onOpen: (id: number) => void;
   onChanged?: () => void;
 }
@@ -321,6 +323,8 @@ function ColumnEl({
   summary,
   now,
   heartbeatExpect,
+  defaultEngine,
+  defaultModel,
   breadcrumbOf,
   items,
   onOpen,
@@ -348,6 +352,8 @@ function ColumnEl({
           column={colKey}
           now={now}
           heartbeatExpect={heartbeatExpect}
+          defaultEngine={defaultEngine}
+          defaultModel={defaultModel}
           breadcrumb={breadcrumbOf(item.id)}
           labelOf={(id) => labelOfItem(items, id)}
           onOpen={onOpen}
