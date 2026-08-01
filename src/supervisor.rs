@@ -49,14 +49,15 @@ type Active = Arc<std::sync::Mutex<std::collections::HashSet<ItemId>>>;
 type Cooldown = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
 
 pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
+    let os = Arc::new(OpenShell::default());
     if !cfg.agents.enabled {
         tracing::info!("execution.agents.enabled = false; board runs with no executor");
-        tokio::spawn(sweeper_loop(board, cfg));
+        tokio::spawn(sweeper_loop(board, cfg, os));
         return;
     }
     if let Err(e) = cfg.agents.validate() {
         tracing::error!("agents enabled but misconfigured: {e}");
-        tokio::spawn(sweeper_loop(board, cfg));
+        tokio::spawn(sweeper_loop(board, cfg, os));
         return;
     }
     // The sweeper starts *inside* `dispatch_loop`, once reconciliation has
@@ -69,13 +70,14 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
 /// Requeue cards whose leases lapsed. The matching supervise task notices on
 /// its next liveness tick (see `watch_agent`) and frees the concurrency slot —
 /// the sweeper alone must not leave `in_flight` stuck on a zombie watch.
-async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig) {
+async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig, os: Arc<OpenShell>) {
     let mut t = tokio::time::interval(Duration::from_millis(cfg.sweep_interval_ms));
     loop {
         t.tick().await;
         for id in board.sweep_leases() {
             tracing::info!("lease expired on #{id}; requeued");
         }
+        let _ = reconcile(&os, &board, cfg.lease_secs).await;
     }
 }
 
@@ -221,7 +223,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         fleet.supervise(id, agent_id, adopt_card(fleet.clone(), a));
     }
 
-    tokio::spawn(sweeper_loop(board.clone(), cfg.clone()));
+    tokio::spawn(sweeper_loop(board.clone(), cfg.clone(), fleet.os.clone()));
 
     let mut tick = tokio::time::interval(Duration::from_secs(3));
     loop {
@@ -312,6 +314,19 @@ fn adoptable<'a>(item: Option<&'a WorkItem>, sandbox: &str) -> Option<&'a WorkIt
     })
 }
 
+/// Should reconcile keep this sandbox?
+///
+/// A sandbox is kept if its card still exists on the board, is not in a
+/// terminal state (`Done` / `Retired`), and explicitly names this sandbox in
+/// `card.environment`.
+fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str) -> bool {
+    let Some(i) = item else { return false };
+    if i.state.is_terminal() {
+        return false;
+    }
+    i.environment.as_deref() == Some(sandbox)
+}
+
 /// How long startup waits for the gateway before giving up on reconciling.
 ///
 /// Generous, because the podman machine takes tens of seconds to come up and
@@ -377,32 +392,32 @@ async fn reconcile(os: &OpenShell, board: &SharedBoard, lease_secs: i64) -> Vec<
     for sb in ours {
         let Some(id) = sb.item_id() else { continue };
         let card = board.get(id);
-        let Some(item) = adoptable(card.as_ref(), &sb.name) else {
-            tracing::info!("reaping orphaned sandbox {}", sb.name);
+        if !should_keep_sandbox(card.as_ref(), &sb.name) {
+            tracing::info!("reaping unneeded sandbox {}", sb.name);
             let _ = os.delete(&sb.name).await;
             continue;
-        };
+        }
 
-        match adopt(os, board, item, &sb.name, lease_secs).await {
-            Some(a) => {
-                tracing::info!("#{id}: re-attached to {} from line {}", sb.name, a.from_line);
-                adopted.push(a);
-            }
-            None => {
-                // The sandbox is up but nothing is running in it — honr died
-                // during setup, or the agent exited and nothing cleaned up
-                // after it. There is no run to watch, so give the card back.
-                // A restart is not the card's fault, so it costs no retry
-                // budget; it just gets dispatched again from the top.
-                tracing::warn!("#{id}: {} has no live agent; requeueing", sb.name);
-                let _ = os.delete(&sb.name).await;
-                board.set_environment(id, None);
-                let _ = board.transition(
-                    id,
-                    State::Ready,
-                    "supervisor",
-                    Some("honr restarted and found no live agent in the sandbox".into()),
-                );
+        if let Some(item) = adoptable(card.as_ref(), &sb.name) {
+            match adopt(os, board, item, &sb.name, lease_secs).await {
+                Some(a) => {
+                    tracing::info!("#{id}: re-attached to {} from line {}", sb.name, a.from_line);
+                    adopted.push(a);
+                }
+                None => {
+                    // The sandbox is up but nothing is running in it — honr died
+                    // during setup, or the agent exited and nothing cleaned up
+                    // after it. There is no run to watch, so give the card back.
+                    // A restart is not the card's fault, so it costs no retry
+                    // budget; it just gets dispatched again from the top.
+                    tracing::warn!("#{id}: {} has no live agent; requeueing", sb.name);
+                    let _ = board.transition(
+                        id,
+                        State::Ready,
+                        "supervisor",
+                        Some("honr restarted and found no live agent in the sandbox".into()),
+                    );
+                }
             }
         }
     }
@@ -478,19 +493,28 @@ fn probe_of(stdout: &str) -> Option<(u64, u64)> {
 
 // ----------------------------------------------------------- the lifecycle
 
+async fn is_sandbox_live(os: &OpenShell, name: &str) -> bool {
+    match os.exec(name, "true", Duration::from_secs(10)).await {
+        Ok(out) => out.ok(),
+        Err(_) => false,
+    }
+}
+
 async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Result<()> {
     let (board, os, cfg) = (&f.board, &f.os, &f.agents);
     let id = grant.item_id;
-    // Attempt-scoped, because a failed sandbox is *kept* for inspection and a
-    // retry would otherwise collide with its name. The `honr.item` label is
-    // what reconciliation matches on, so it stays stable across attempts.
-    let attempt = board.get(id).map(|i| i.run_failures).unwrap_or(0) + 1;
-    let name = format!("honr-card-{id}-a{attempt}");
     let branch = format!("honr/card-{id}");
 
-    // Recorded before creation so a crash between here and `create` still
-    // leaves a name to reconcile against — and, now, a name to re-adopt.
-    board.set_environment(id, Some(name.clone()));
+    let existing_env = board.get(id).and_then(|i| i.environment);
+    let (name, is_reused) = match existing_env {
+        Some(ref env_name) if is_sandbox_live(os, env_name).await => (env_name.clone(), true),
+        _ => {
+            let attempt = board.get(id).map(|i| i.run_failures).unwrap_or(0) + 1;
+            let new_name = format!("honr-card-{id}-a{attempt}");
+            board.set_environment(id, Some(new_name.clone()));
+            (new_name, false)
+        }
+    };
 
     let spec = SandboxSpec {
         name: name.clone(),
@@ -503,8 +527,10 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
         memory: cfg.memory.clone(),
     };
 
-    let result =
-        run_inside(board, os, cfg, &agent_id, &grant, &name, &branch, f.lease_secs, &spec).await;
+    let result = run_inside(
+        board, os, cfg, &agent_id, &grant, &name, &branch, f.lease_secs, &spec, is_reused,
+    )
+    .await;
     finalize(os, id, &name, &result).await;
     result
 }
@@ -535,29 +561,45 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     result
 }
 
-/// Dispose of the sandbox. Deliberately no `Board` here: the card keeps what
+/// Dispose of the agent in the sandbox. Deliberately no `Board` here: the card keeps what
 /// the run produced, including the sandbox name, and taking the board would
 /// make it easy to clear that again on the way out.
 async fn finalize(os: &OpenShell, id: ItemId, name: &str, result: &anyhow::Result<()>) {
+    stop_agent(os, name).await;
     match result {
-        // The sandbox goes; its name stays. Review has to answer "where did
-        // this run?" from the card, and the box is gone by the time anyone
-        // asks — the name is the only evidence left. Nothing keys off the
-        // field afterwards: `adoptable` is gated on Claimed/Running, so a
-        // finished card naming a box that somehow outlived it still gets
-        // reaped rather than re-adopted.
         Ok(_) => {
-            let _ = os.delete(name).await;
+            tracing::info!("#{id}: keeping sandbox {name} for review/reclaim");
         }
-        // Keep the sandbox on failure: `openshell logs` is the tool that
-        // actually answers questions, and a deleted sandbox answers none. Stop
-        // the agent first, though — it is detached now, so dropping the exec
-        // that was watching it no longer stops it spending.
         Err(e) => {
-            stop_agent(os, name).await;
             tracing::error!("#{id}: keeping sandbox {name} for inspection: {e}");
         }
     }
+}
+
+async fn ensure_shim_up(os: &OpenShell, name: &str, short: Duration) -> anyhow::Result<()> {
+    os.upload(name, SHIM_LOCAL, SHIM_DEST_DIR).await?;
+    let up = os
+        .exec(
+            name,
+            &format!(
+                r#"set -e
+if curl -sf -H 'Metadata-Flavor: Google' http://127.0.0.1:8127/ >/dev/null 2>&1; then
+  exit 0
+fi
+nohup python3 {SHIM_REMOTE} >/tmp/shim.log 2>&1 &
+for i in $(seq 1 40); do
+  if curl -sf -H 'Metadata-Flavor: Google' http://127.0.0.1:8127/ >/dev/null; then
+    echo shim-up; exit 0
+  fi
+  sleep 0.25
+done
+echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
+            ),
+            short,
+        )
+        .await?;
+    anyhow::ensure!(up.ok(), "metadata shim never came up: {}", outerr(&up));
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -571,6 +613,7 @@ async fn run_inside(
     branch: &str,
     lease_secs: i64,
     spec: &SandboxSpec,
+    is_reused: bool,
 ) -> anyhow::Result<()> {
     let id = grant.item_id;
     let short = Duration::from_secs(180);
@@ -585,47 +628,40 @@ async fn run_inside(
         let _ = board.heartbeat(id, agent_id, p, 0, lease_secs);
     };
 
-    let _ = os.delete(&spec.name).await;
-    os.create(spec).await?;
-    beat(0.01);
+    let branch_state = if !is_reused {
+        let _ = os.delete(&spec.name).await;
+        os.create(spec).await?;
+        beat(0.01);
 
-    // Preamble. Without the shim there is no Vertex auth at all: google-auth
-    // walks its ADC chain to the GCE metadata server, which OpenShell blocks
-    // permanently as SSRF hardening. The shim must outlive the agent.
-    os.upload(name, SHIM_LOCAL, SHIM_DEST_DIR).await?;
-    let up = os
-        .exec(
-            name,
-            &format!(
-                r#"set -e
-nohup python3 {SHIM_REMOTE} >/tmp/shim.log 2>&1 &
-for i in $(seq 1 40); do
-  if curl -sf -H 'Metadata-Flavor: Google' http://127.0.0.1:8127/ >/dev/null; then
-    echo shim-up; exit 0
-  fi
-  sleep 0.25
-done
-echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
-            ),
-            short,
-        )
-        .await?;
-    anyhow::ensure!(up.ok(), "metadata shim never came up: {}", outerr(&up));
-    beat(0.02);
+        ensure_shim_up(os, name, short).await?;
+        beat(0.02);
 
-    if let Err(e) = sync_beads_into_sandbox(board, os, name).await {
-        tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
+        if let Err(e) = sync_beads_into_sandbox(board, os, name).await {
+            tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
+        } else {
+            beat(0.025);
+        }
+
+        let clone = os.exec(name, &clone_script(cfg, branch), short).await?;
+        anyhow::ensure!(clone.ok(), "clone failed: {}", outerr(&clone));
+        beat(0.03);
+        branch_state_of(&clone.stdout)
     } else {
-        beat(0.025);
-    }
+        beat(0.01);
+        ensure_shim_up(os, name, short).await?;
+        beat(0.02);
 
-    // Clone the fork. GIT_TERMINAL_PROMPT=0 is not optional: without it a
-    // missing credential blocks forever on an interactive username prompt,
-    // which looks exactly like a slow clone.
-    let clone = os.exec(name, &clone_script(cfg, branch), short).await?;
-    anyhow::ensure!(clone.ok(), "clone failed: {}", outerr(&clone));
-    let branch_state = branch_state_of(&clone.stdout);
-    beat(0.03);
+        if let Err(e) = sync_beads_into_sandbox(board, os, name).await {
+            tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
+        } else {
+            beat(0.025);
+        }
+
+        let refresh = os.exec(name, &refresh_script(cfg, branch), short).await?;
+        anyhow::ensure!(refresh.ok(), "in-place refresh failed: {}", outerr(&refresh));
+        beat(0.03);
+        branch_state_of(&refresh.stdout)
+    };
 
     // ---- the agent -------------------------------------------------------
 
@@ -1298,6 +1334,44 @@ fi"#
     )
 }
 
+/// Refresh an existing sandbox repository in-place (git fetch & rebase)
+/// without wiping the workdir or build caches.
+fn refresh_script(cfg: &AgentConfig, branch: &str) -> String {
+    let upstream = &cfg.repo.upstream;
+    let base = &cfg.repo.base;
+    format!(
+        r#"set -e
+export GIT_TERMINAL_PROMPT=0
+if [ ! -d {WORKDIR}/.git ]; then
+  echo "repository missing in workdir" >&2
+  exit 1
+fi
+cd {WORKDIR}
+git config user.email "agent@honr.local"
+git config user.name "honr agent"
+git remote add upstream https://github.com/{upstream}.git 2>/dev/null || true
+git reset --hard >/dev/null 2>&1 || true
+git clean -fd >/dev/null 2>&1 || true
+git -c '{GIT_CRED}' fetch -q upstream {base}
+if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
+  git -c '{GIT_CRED}' fetch -q origin {branch}
+  git checkout -q -B {branch} origin/{branch}
+elif git rev-parse --verify {branch} >/dev/null 2>&1; then
+  git checkout -q {branch}
+else
+  git checkout -q -B {branch} upstream/{base}
+  echo {MARK_FRESH}
+  exit 0
+fi
+if git rebase -q upstream/{base} >/dev/null 2>&1; then
+  echo {MARK_REBASED}
+else
+  git rebase --abort >/dev/null 2>&1 || true
+  echo {MARK_CONFLICT}
+fi"#
+    )
+}
+
 /// Ask GitHub whether the agent actually opened a PR.
 ///
 /// Not "create a PR" — the agent does that. This is the supervisor checking a
@@ -1770,12 +1844,51 @@ mod tests {
         // the real run went unwatched.
         assert!(adoptable(Some(&item), "honr-card-9-a1").is_none(), "reap the old attempt");
 
-        // Not running: whatever is out there is debris.
+        // Not running: cannot adopt, but sandbox is kept by reconcile for review/reclaim
         item.state = State::Review;
-        assert!(adoptable(Some(&item), "honr-card-9-a2").is_none(), "reap a finished card's box");
+        assert!(adoptable(Some(&item), "honr-card-9-a2").is_none());
 
         // A sandbox for a card that no longer exists.
         assert!(adoptable(None, "honr-card-9-a2").is_none());
+    }
+
+    #[test]
+    fn reconcile_keeps_sandboxes_for_cards_short_of_done() {
+        let mut item = WorkItem::new(9, "t", "i");
+        item.state = State::Review;
+        item.environment = Some("honr-card-9-a2".into());
+
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+
+        // Ready with environment set (e.g. Request changes)
+        item.state = State::Ready;
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+
+        // Old attempt sandbox is not kept
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1"));
+
+        // Terminal card sandbox is not kept (reaped)
+        item.state = State::Done;
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+
+        item.state = State::Retired;
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+
+        // Deleted item sandbox is not kept
+        assert!(!should_keep_sandbox(None, "honr-card-9-a2"));
+    }
+
+    #[test]
+    fn refresh_script_fetches_and_rebases_in_place() {
+        let cfg = repo_cfg();
+        let s = refresh_script(&cfg, "honr/card-8");
+        assert!(s.contains("cd /sandbox/repo"), "{s}");
+        assert!(s.contains("git reset --hard"), "must reset tracked files: {s}");
+        assert!(s.contains("git clean -fd"), "must clean untracked files: {s}");
+        assert!(s.contains("fetch -q upstream main"), "{s}");
+        assert!(s.contains("fetch -q origin honr/card-8"), "{s}");
+        assert!(s.contains("rebase -q upstream/main"), "{s}");
+        assert!(!s.contains("rm -rf"), "must not wipe workdir: {s}");
     }
 
     /// Where to resume, and what has already been paid for.
