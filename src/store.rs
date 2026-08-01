@@ -941,6 +941,13 @@ impl Board {
                             if let Err(e) = beads.github_sync().await {
                                 tracing::warn!(id, error = %e, "beads github sync after mirror create failed");
                             }
+                            if let Ok(show_issue) = beads.show(&issue.id).await {
+                                if let Some(url) = show_issue.github_issue_url() {
+                                    board.set_github_issue_url(id, &url);
+                                }
+                            } else if let Some(url) = issue.github_issue_url() {
+                                board.set_github_issue_url(id, &url);
+                            }
                         }
                     }
                     Err(e) => tracing::warn!(id, error = %e, "beads mirror create failed"),
@@ -959,7 +966,6 @@ impl Board {
         self.emit(&item);
     }
 
-    #[allow(dead_code)]
     pub fn set_github_issue_url(&self, id: ItemId, url: &str) {
         let item = {
             let mut s = self.state.write().unwrap();
@@ -3188,5 +3194,78 @@ mod tests {
 
         let shown_real = beads.show(&real_issue.id).await.expect("show real task");
         assert_eq!(shown_real.status, "open");
+    }
+
+    #[tokio::test]
+    async fn test_schedule_beads_mirror_persists_github_issue_url() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-store-github-url-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        let project = board
+            .create(None, "Test URL Project", "intent", None, Origin::Human, true, None)
+            .expect("create project");
+
+        board.schedule_beads_mirror(project.id);
+
+        let mut real_project_id = None;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if let Some(p) = board.get(project.id) {
+                if let Some(ref bid) = p.beads_id {
+                    if crate::beads::BeadsClient::is_real_id(bid) {
+                        real_project_id = Some(bid.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        let project_beads_id = real_project_id.expect("expected real beads_id");
+
+        // Update issue in beads with an external_ref / issue URL
+        let expected_url = "https://github.com/shanemcd/honr/issues/777";
+        beads_client
+            .cmd()
+            .args(["update", &project_beads_id, "--external-ref", expected_url])
+            .output()
+            .await
+            .expect("update external ref");
+
+        // Re-run schedule_beads_mirror to pick up external_ref from beads
+        board.schedule_beads_mirror(project.id);
+
+        let mut found_url = None;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if let Some(p) = board.get(project.id) {
+                if let Some(ref url) = p.github_issue_url {
+                    found_url = Some(url.clone());
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(
+            found_url,
+            Some(expected_url.to_string()),
+            "github_issue_url should be persisted after sync/reading linked issue"
+        );
+
+        // Verify exposed on snapshot item
+        let snap = board.snapshot();
+        let item = snap.items.iter().find(|i| i.id == project.id).expect("item in snapshot");
+        assert_eq!(item.github_issue_url.as_deref(), Some(expected_url));
     }
 }

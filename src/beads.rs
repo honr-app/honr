@@ -26,6 +26,44 @@ pub struct BeadsIssue {
     pub created_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub external_ref: Option<String>,
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub issue_url: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+impl BeadsIssue {
+    pub fn github_issue_url(&self) -> Option<String> {
+        let candidates = [
+            self.issue_url.as_deref(),
+            self.url.as_deref(),
+            self.external_ref.as_deref(),
+            self.external_id.as_deref(),
+        ];
+        for candidate in candidates.into_iter().flatten() {
+            let trimmed = candidate.trim();
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                return Some(trimmed.to_string());
+            }
+            if let Some(num) = trimmed.strip_prefix("gh-") {
+                if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                    let repo = std::env::var("GITHUB_REPOSITORY")
+                        .unwrap_or_else(|_| "shanemcd/honr".to_string());
+                    return Some(format!("https://github.com/{repo}/issues/{num}"));
+                }
+            }
+            if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                let repo = std::env::var("GITHUB_REPOSITORY")
+                    .unwrap_or_else(|_| "shanemcd/honr".to_string());
+                return Some(format!("https://github.com/{repo}/issues/{trimmed}"));
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +79,7 @@ impl BeadsClient {
         }
     }
 
-    fn cmd(&self) -> Command {
+    pub fn cmd(&self) -> Command {
         let mut c = Command::new("bd");
         c.env("BEADS_DIR", &self.beads_dir);
         // Prevent `bd` from walking up into a parent workspace's `.beads`.
@@ -556,5 +594,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&test_dir);
         let client = BeadsClient::new(&test_dir);
         assert!(client.github_sync().await.is_ok());
+    }
+
+    #[test]
+    fn test_beads_issue_github_issue_url_parsing() {
+        let mut issue = BeadsIssue {
+            id: "bd-1".into(),
+            title: "Title".into(),
+            description: None,
+            status: "open".into(),
+            priority: 2,
+            issue_type: "task".into(),
+            owner: None,
+            created_at: None,
+            updated_at: None,
+            external_ref: None,
+            external_id: None,
+            issue_url: None,
+            url: None,
+        };
+
+        assert_eq!(issue.github_issue_url(), None);
+
+        issue.external_ref = Some("https://github.com/shanemcd/honr/issues/100".into());
+        assert_eq!(
+            issue.github_issue_url(),
+            Some("https://github.com/shanemcd/honr/issues/100".into())
+        );
+
+        issue.external_ref = Some("gh-101".into());
+        assert_eq!(
+            issue.github_issue_url(),
+            Some("https://github.com/shanemcd/honr/issues/101".into())
+        );
+
+        issue.external_ref = Some("102".into());
+        assert_eq!(
+            issue.github_issue_url(),
+            Some("https://github.com/shanemcd/honr/issues/102".into())
+        );
+
+        issue.issue_url = Some("https://github.com/shanemcd/honr/issues/103".into());
+        assert_eq!(
+            issue.github_issue_url(),
+            Some("https://github.com/shanemcd/honr/issues/103".into())
+        );
     }
 }
