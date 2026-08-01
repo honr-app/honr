@@ -41,6 +41,12 @@ export type Origin =
   | { kind: "split"; from: number }
   | { kind: "reflection" };
 
+export interface BlockerSummary {
+  id: number;
+  title: string;
+  state: State;
+}
+
 export interface WorkItem {
   id: number;
   parent: number | null;
@@ -52,6 +58,7 @@ export interface WorkItem {
   origin: Origin;
   above_line: boolean;
   blocked_by: number[];
+  blockers?: BlockerSummary[];
   capability: string | null;
   lease: Lease | null;
   model: string | null;

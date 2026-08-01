@@ -46,9 +46,14 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }:
             <span className="tag">⊙ {item.capability ?? "any"}</span>
             <span className="dim">{since(item.entered_state_at, now)}</span>
           </div>
-          {item.blocked_by.length > 0 && (
+          {((item.blockers && item.blockers.length > 0) || item.blocked_by.length > 0) && (
             <div className="row blocked">
-              ⊘ blocked by {item.blocked_by.map((b) => `#${b}`).join(", ")}
+              ⊘ blocked by{" "}
+              {item.blockers && item.blockers.length > 0
+                ? item.blockers
+                    .map((b) => `#${b.id} "${b.title}" (${b.state.replace("_", " ")})`)
+                    .join(", ")
+                : item.blocked_by.map((b) => `#${b}`).join(", ")}
             </div>
           )}
           {breadcrumb && <div className="crumb">↑ {breadcrumb}</div>}
