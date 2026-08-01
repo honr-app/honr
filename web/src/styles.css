@@ -170,6 +170,69 @@ main > :first-child { flex: 1; min-width: 0; }
 .question { font-size: 12px; margin: 2px 0 5px; }
 .blocked-for { color: var(--needs-human); }
 
+/* Blocker chips: friendly, human-readable chips on cards */
+.blocker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0 6px;
+  font-size: 11px;
+}
+.blocker-label {
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 500;
+  margin-right: 2px;
+}
+.blocker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 169, 77, 0.12);
+  border: 1px solid rgba(255, 169, 77, 0.35);
+  border-radius: 12px;
+  padding: 1px 7px;
+  color: var(--ink);
+  font-size: 11px;
+  max-width: 100%;
+}
+.blocker-chip .blocker-id {
+  font-weight: 600;
+  color: var(--warn);
+}
+.blocker-chip .blocker-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 130px;
+  color: var(--ink);
+}
+.blocker-chip .state-cue {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: var(--line);
+  color: var(--dim);
+  text-transform: lowercase;
+}
+.blocker-chip.state-ready .state-cue {
+  background: rgba(232, 244, 248, 0.15);
+  color: var(--ready);
+}
+.blocker-chip.state-running .state-cue {
+  background: rgba(111, 168, 255, 0.15);
+  color: var(--accent);
+}
+.blocker-chip.state-done .state-cue {
+  background: rgba(95, 211, 155, 0.15);
+  color: var(--ok);
+}
+.blocker-chip.state-needs_human .state-cue {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--needs-human);
+}
+
 .hb { color: var(--ok); }
 .hb.stale { color: var(--needs-human); }
 .card.stale { border-left-style: dotted; }
