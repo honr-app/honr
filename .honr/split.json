@@ -1,19 +1,24 @@
 {
   "children": [
     {
-      "title": "Store & Model: Pass infra bounce reasons through release and store on WorkItem",
-      "intent": "Update WorkItem model and Board::release to record explicit failure/bounce reasons in history and store on WorkItem.",
-      "definition_of_done": "cargo test --offline --locked passes; store test verifies calling release_with_reason records the bounce reason on WorkItem and transition history."
+      "title": "Supervisor: Preserve sandboxes on successful run completion to Review",
+      "intent": "Modify finalize in src/supervisor.rs so that successful agent runs stop the agent process to halt billing while keeping the sandbox intact for Review and subsequent iterations.",
+      "definition_of_done": "cargo test --offline --locked passes; supervisor unit tests verify that successful runs preserve the sandbox and stop the agent process."
     },
     {
-      "title": "Supervisor: Capture and forward human-readable error messages on infrastructure failure",
-      "intent": "Update supervisor Fleet::supervise so that when is_infrastructure or sandbox creation fails, the human-readable error string is passed to release.",
-      "definition_of_done": "cargo test --offline --locked passes; supervisor tests verify that infrastructure failure messages are passed to board release."
+      "title": "Supervisor: Preserve parked sandboxes in Review and Ready during reconcile",
+      "intent": "Update adoptable and reconcile in src/supervisor.rs so sandboxes for non-terminal cards (Review, Ready with environment) are preserved rather than reaped as orphans.",
+      "definition_of_done": "cargo test --offline --locked passes; reconciliation unit tests verify that sandboxes for Review and Ready cards are kept during reconcile."
     },
     {
-      "title": "API & Web UI: Expose bounce reasons in API and render in card drawer",
-      "intent": "Expose last_bounce_reason in API responses and render the human-readable bounce reason in the card detail drawer and overview.",
-      "definition_of_done": "cargo test --offline --locked and cargo clippy --offline -- -D warnings pass; card drawer renders the bounce reason when present on WorkItem."
+      "title": "Supervisor: In-place sandbox reuse and branch refresh on card reclaim",
+      "intent": "Update run_inside in src/supervisor.rs so claiming a card with a live environment sandbox reuses it in place (git fetch/rebase, new briefing) without delete/create, preserving WORKDIR build caches.",
+      "definition_of_done": "cargo test --offline --locked passes; supervisor tests verify live sandbox reuse and in-place workspace refresh on card reclaim."
+    },
+    {
+      "title": "Store & Supervisor: Delete sandboxes on Done, Retired, and item deletion",
+      "intent": "Trigger sandbox deletion and environment cleanup when a card reaches terminal states (Done, Retired/Cut) or is deleted.",
+      "definition_of_done": "cargo test --offline --locked and cargo clippy --offline -- -D warnings pass; unit tests verify sandbox deletion on Done, Retired, and item deletion."
     }
   ]
 }
