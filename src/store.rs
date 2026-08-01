@@ -908,52 +908,122 @@ impl Board {
         }
     }
 
-    /// Dual-write a board item into beads (Project→epic, Task→task with `--parent`).
-    /// Call after `create` when you hold a `SharedBoard` so the real hash id can be stored.
-    pub fn schedule_beads_mirror(self: &Arc<Self>, id: ItemId) {
+    /// Dual-write a single board item into beads (Project→epic, Task→task with `--parent`).
+    /// If successful, stores the real hash id, triggers `beads.github_sync()`, and sets `github_issue_url`.
+    pub async fn mirror_beads_item(self: &Arc<Self>, id: ItemId) {
         let Some(item) = self.get(id) else { return };
+        if item.state == State::Retired {
+            return;
+        }
         let Some(beads) = self.beads.clone() else { return };
         let title = item.title.clone();
         let intent = item.intent.clone();
         let is_project = item.parent.is_none();
-        let parent_beads = item.parent.and_then(|pid| self.get(pid).and_then(|p| p.beads_id));
-        // Skip placeholders that aren't real beads ids (still sync — create gets a new id).
+        let parent_beads = item
+            .parent
+            .and_then(|pid| self.get(pid).and_then(|p| p.beads_id))
+            .filter(|bid| crate::beads::BeadsClient::is_real_id(bid));
         let blockers: Vec<String> = item
             .blocked_by
             .iter()
             .filter_map(|bid| self.get(*bid).and_then(|b| b.beads_id))
-            .filter(|bid| !bid.starts_with("bd-honr-"))
+            .filter(|bid| crate::beads::BeadsClient::is_real_id(bid))
             .collect();
+
+        let issue_type = if is_project { "epic" } else { "task" };
+        let parent = parent_beads.as_deref();
+
+        match beads
+            .create_linked(&title, 2, issue_type, Some(&intent), parent, &blockers)
+            .await
+        {
+            Ok(issue) => {
+                self.set_beads_id(id, &issue.id);
+                if crate::beads::BeadsClient::is_real_id(&issue.id) {
+                    if let Err(e) = beads.github_sync().await {
+                        tracing::warn!(id, error = %e, "beads github sync after mirror create failed");
+                    }
+                    if let Ok(show_issue) = beads.show(&issue.id).await {
+                        if let Some(url) = show_issue.github_issue_url() {
+                            self.set_github_issue_url(id, &url);
+                        }
+                    } else if let Some(url) = issue.github_issue_url() {
+                        self.set_github_issue_url(id, &url);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(id, error = %e, "beads mirror create failed"),
+        }
+    }
+
+    /// Dual-write a board item into beads (Project→epic, Task→task with `--parent`).
+    /// Call after `create` when you hold a `SharedBoard` so the real hash id can be stored.
+    pub fn schedule_beads_mirror(self: &Arc<Self>, id: ItemId) {
         let board = Arc::clone(self);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let issue_type = if is_project { "epic" } else { "task" };
-                let parent = parent_beads
-                    .as_deref()
-                    .filter(|p| !p.starts_with("bd-honr-"));
-                match beads
-                    .create_linked(&title, 2, issue_type, Some(&intent), parent, &blockers)
-                    .await
-                {
-                    Ok(issue) => {
-                        board.set_beads_id(id, &issue.id);
-                        if crate::beads::BeadsClient::is_real_id(&issue.id) {
-                            if let Err(e) = beads.github_sync().await {
-                                tracing::warn!(id, error = %e, "beads github sync after mirror create failed");
-                            }
-                            if let Ok(show_issue) = beads.show(&issue.id).await {
-                                if let Some(url) = show_issue.github_issue_url() {
-                                    board.set_github_issue_url(id, &url);
-                                }
-                            } else if let Some(url) = issue.github_issue_url() {
-                                board.set_github_issue_url(id, &url);
-                            }
-                        }
-                    }
-                    Err(e) => tracing::warn!(id, error = %e, "beads mirror create failed"),
-                }
+                board.mirror_beads_item(id).await;
             });
         }
+    }
+
+    /// Re-run the create+sync mirror for open (non-retired) cards carrying placeholder beads_ids.
+    /// Projects are mirrored before Tasks so children receive real parent beads_ids.
+    pub async fn heal_placeholder_beads_ids(self: &Arc<Self>) -> usize {
+        let (projects, tasks) = {
+            let s = self.state.read().unwrap();
+            let mut projects = Vec::new();
+            let mut tasks = Vec::new();
+            for (id, item) in s.items.iter() {
+                if item.state == State::Retired {
+                    continue;
+                }
+                let is_placeholder = item
+                    .beads_id
+                    .as_deref()
+                    .is_none_or(|bid| !crate::beads::BeadsClient::is_real_id(bid));
+                if is_placeholder {
+                    if item.parent.is_none() {
+                        projects.push(*id);
+                    } else {
+                        tasks.push(*id);
+                    }
+                }
+            }
+            projects.sort();
+            tasks.sort();
+            (projects, tasks)
+        };
+
+        let mut healed = 0usize;
+        for id in projects {
+            self.mirror_beads_item(id).await;
+            if let Some(item) = self.get(id) {
+                if item
+                    .beads_id
+                    .as_deref()
+                    .is_some_and(crate::beads::BeadsClient::is_real_id)
+                {
+                    healed += 1;
+                }
+            }
+        }
+        for id in tasks {
+            self.mirror_beads_item(id).await;
+            if let Some(item) = self.get(id) {
+                if item
+                    .beads_id
+                    .as_deref()
+                    .is_some_and(crate::beads::BeadsClient::is_real_id)
+                {
+                    healed += 1;
+                }
+            }
+        }
+        if healed > 0 {
+            tracing::info!("healed {healed} placeholder beads_id(s) with real beads IDs");
+        }
+        healed
     }
 
     pub fn set_beads_id(&self, id: ItemId, beads_id: &str) {
@@ -3145,13 +3215,30 @@ mod tests {
         let _ = b.transition(item2.id, State::Ready, "t", None);
         let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
 
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        let shown_done = beads.show(&task_done.id).await.expect("show task done");
-        assert_eq!(shown_done.status, "closed");
-
-        let shown_retired = beads.show(&task_retired.id).await.expect("show task retired");
-        assert_eq!(shown_retired.status, "closed");
+        let mut done_closed = false;
+        let mut retired_closed = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !done_closed {
+                if let Ok(s) = beads.show(&task_done.id).await {
+                    if s.status == "closed" {
+                        done_closed = true;
+                    }
+                }
+            }
+            if !retired_closed {
+                if let Ok(s) = beads.show(&task_retired.id).await {
+                    if s.status == "closed" {
+                        retired_closed = true;
+                    }
+                }
+            }
+            if done_closed && retired_closed {
+                break;
+            }
+        }
+        assert!(done_closed, "task_done status should be closed in beads");
+        assert!(retired_closed, "task_retired status should be closed in beads");
     }
 
     #[tokio::test]
@@ -3267,5 +3354,89 @@ mod tests {
         let snap = board.snapshot();
         let item = snap.items.iter().find(|i| i.id == project.id).expect("item in snapshot");
         assert_eq!(item.github_issue_url.as_deref(), Some(expected_url));
+    }
+
+    #[tokio::test]
+    async fn test_heal_placeholder_beads_ids_replaces_placeholders_and_syncs() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-store-heal-placeholders-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        // 1. Create open project and task, plus a retired item
+        let project = board
+            .create(None, "Project to Heal", "intent", None, Origin::Human, true, None)
+            .expect("create project");
+        let task = board
+            .create(
+                Some(project.id),
+                "Task to Heal",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("create task");
+        let retired = board
+            .create(
+                Some(project.id),
+                "Retired Card",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("create retired");
+        let _ = board.transition(retired.id, State::Retired, "test", None);
+
+        // Verify all 3 start with bd-honr-* placeholder IDs
+        assert!(project.beads_id.as_deref().unwrap().starts_with("bd-honr-"));
+        assert!(task.beads_id.as_deref().unwrap().starts_with("bd-honr-"));
+        assert!(retired.beads_id.as_deref().unwrap().starts_with("bd-honr-"));
+
+        // 2. Execute heal
+        let healed_count = board.heal_placeholder_beads_ids().await;
+        assert_eq!(healed_count, 3, "should heal all 3 open items (project, initial plan task, task)");
+
+        // 3. Assert open cards have real beads IDs
+        let project_after = board.get(project.id).unwrap();
+        let task_after = board.get(task.id).unwrap();
+        let retired_after = board.get(retired.id).unwrap();
+
+        assert!(
+            crate::beads::BeadsClient::is_real_id(project_after.beads_id.as_deref().unwrap_or("")),
+            "project should have real beads ID"
+        );
+        assert!(
+            crate::beads::BeadsClient::is_real_id(task_after.beads_id.as_deref().unwrap_or("")),
+            "task should have real beads ID"
+        );
+        assert!(
+            retired_after.beads_id.as_deref().unwrap().starts_with("bd-honr-"),
+            "retired card should remain unhealed with placeholder ID"
+        );
+
+        // 4. Verify task exists in beads with open status
+        let task_beads_issue = beads_client
+            .show(task_after.beads_id.as_deref().unwrap())
+            .await
+            .expect("task in beads");
+        assert_eq!(task_beads_issue.id, task_after.beads_id.unwrap());
+        assert_eq!(task_beads_issue.status, "open");
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }

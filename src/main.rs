@@ -40,12 +40,14 @@ async fn main() -> anyhow::Result<()> {
 
     let board: SharedBoard = Arc::new(Board::load_or_new(schema, PathBuf::from("honr.json")));
 
-    // Ensure the beads graph DB exists beside the board (identity + deps).
+    // Ensure the beads graph DB exists beside the board (identity + deps) and heal placeholders.
     if let Some(beads) = board.beads.clone() {
+        let b = board.clone();
         tokio::spawn(async move {
             if let Err(e) = beads.init_stealth().await {
                 tracing::warn!("beads init: {e}");
             }
+            b.heal_placeholder_beads_ids().await;
         });
     }
 
