@@ -535,26 +535,17 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     result
 }
 
-/// Dispose of the sandbox. Deliberately no `Board` here: the card keeps what
-/// the run produced, including the sandbox name, and taking the board would
-/// make it easy to clear that again on the way out.
+/// Finalize a run by stopping the agent process to halt billing while
+/// keeping the sandbox intact for Review/inspection and subsequent iterations.
+/// Deliberately no `Board` here: the card keeps what the run produced,
+/// including the sandbox name.
 async fn finalize(os: &OpenShell, id: ItemId, name: &str, result: &anyhow::Result<()>) {
+    stop_agent(os, name).await;
     match result {
-        // The sandbox goes; its name stays. Review has to answer "where did
-        // this run?" from the card, and the box is gone by the time anyone
-        // asks — the name is the only evidence left. Nothing keys off the
-        // field afterwards: `adoptable` is gated on Claimed/Running, so a
-        // finished card naming a box that somehow outlived it still gets
-        // reaped rather than re-adopted.
         Ok(_) => {
-            let _ = os.delete(name).await;
+            tracing::info!("#{id}: preserving sandbox {name} for review");
         }
-        // Keep the sandbox on failure: `openshell logs` is the tool that
-        // actually answers questions, and a deleted sandbox answers none. Stop
-        // the agent first, though — it is detached now, so dropping the exec
-        // that was watching it no longer stops it spending.
         Err(e) => {
-            stop_agent(os, name).await;
             tracing::error!("#{id}: keeping sandbox {name} for inspection: {e}");
         }
     }
@@ -1975,4 +1966,97 @@ mod tests {
         let rep_empty: ReportFile = serde_json::from_str(json_empty_url).unwrap();
         assert_eq!(rep_empty.pr_url.filter(|s| !s.trim().is_empty()), None);
     }
+
+    #[tokio::test]
+    async fn successful_run_preserves_sandbox_and_stops_agent() {
+        let tag = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir();
+        let log_path = dir.join(format!("honr-test-finalize-success-{tag}.log"));
+        let script_path = dir.join(format!("honr-test-finalize-mock-s-{tag}.sh"));
+
+        use std::io::Write;
+        let mut f = std::fs::File::create(&script_path).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho \"$@\" >> \"{}\"\nexit 0",
+            log_path.display()
+        )
+        .unwrap();
+        drop(f);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let os = OpenShell::new(script_path.to_str().unwrap(), Duration::from_secs(5));
+
+        finalize(&os, 42, "honr-card-42-a1", &Ok(())).await;
+
+        let calls = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_file(&script_path);
+
+        assert!(
+            calls.contains("sandbox exec -n honr-card-42-a1"),
+            "successful run must stop agent process via exec: {calls}"
+        );
+        assert!(
+            !calls.contains("sandbox delete"),
+            "successful run must preserve sandbox and not delete it: {calls}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_run_preserves_sandbox_and_stops_agent() {
+        let tag = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir();
+        let log_path = dir.join(format!("honr-test-finalize-failed-{tag}.log"));
+        let script_path = dir.join(format!("honr-test-finalize-mock-f-{tag}.sh"));
+
+        use std::io::Write;
+        let mut f = std::fs::File::create(&script_path).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho \"$@\" >> \"{}\"\nexit 0",
+            log_path.display()
+        )
+        .unwrap();
+        drop(f);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let os = OpenShell::new(script_path.to_str().unwrap(), Duration::from_secs(5));
+
+        finalize(&os, 42, "honr-card-42-a1", &Err(anyhow::anyhow!("agent error"))).await;
+
+        let calls = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_file(&script_path);
+
+        assert!(
+            calls.contains("sandbox exec -n honr-card-42-a1"),
+            "failed run must stop agent process via exec: {calls}"
+        );
+        assert!(
+            !calls.contains("sandbox delete"),
+            "failed run must preserve sandbox and not delete it: {calls}"
+        );
+    }
 }
+
