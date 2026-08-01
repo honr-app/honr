@@ -150,11 +150,11 @@ const tab = (name) => async (page) => {
 };
 
 console.log("capturing & asserting:");
-await shoot("desktop-overview", DESKTOP, tab("Overview"));
+await shoot("desktop-home", DESKTOP, tab("Home"));
 
 // Board view: verify Playwright assertions on blocked card with blocker chips
 await shoot("desktop-board", DESKTOP, async (page) => {
-  await tab("Activity")(page);
+  await tab("Board")(page);
 
   // Playwright assertion: Board cards show human-readable blocker chips
   const blockerChips = page.locator(".blocker-chips");
@@ -175,7 +175,7 @@ await shoot("desktop-board", DESKTOP, async (page) => {
 
 // Dependency Graph view: capture visual dependency graph on the Board
 await shoot("desktop-graph", DESKTOP, async (page) => {
-  await tab("Activity")(page);
+  await tab("Board")(page);
   const toggleGraphBtn = page.locator('[data-testid="toggle-graph-view"]');
   await toggleGraphBtn.first().click();
   await sleep(600);
@@ -185,17 +185,15 @@ await shoot("desktop-graph", DESKTOP, async (page) => {
   console.log(`  [Playwright Assertion] Visual dependency graph loaded`);
 });
 
-await shoot("desktop-needs", DESKTOP, tab("Needs you"));
-await shoot("phone-overview", PHONE, tab("Overview"));
-await shoot("phone-needs", PHONE, tab("Needs you"));
+await shoot("phone-home", PHONE, tab("Home"));
 
 await shoot("desktop-drawer-needs-you", DESKTOP, async (page) => {
-  await tab("Activity")(page);
+  await tab("Board")(page);
   await page.locator(".column-needs_you .card").first().click();
   await sleep(600);
 });
 await shoot("desktop-drawer-review", DESKTOP, async (page) => {
-  await tab("Activity")(page);
+  await tab("Board")(page);
   await page.locator(".column-review .card").first().click();
   await sleep(600);
 });

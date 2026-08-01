@@ -1,10 +1,10 @@
 //! One node type.
 //!
-//! Project, epic, story, task are labels for altitude in a tree of identical
-//! things. Only two facts about a node are structural: whether it has children
-//! (container vs claimable leaf) and where it sits relative to the commitment
-//! line. Everything else — the badge, the colour, which gates apply — comes
-//! from the level schema.
+//! Project and Task are the only levels: Project is a container; Tasks are
+//! flat siblings under it, linked by dependency edges. Only two facts about a
+//! node are structural: whether it has children (container vs claimable leaf)
+//! and where it sits relative to the commitment line. Everything else — the
+//! badge, the colour, which gates apply — comes from the level schema.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -171,6 +171,82 @@ pub struct BlockerSummary {
     pub state: State,
 }
 
+/// Lifecycle of a Plan artifact attached to a Project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    /// Empty shell — waiting for a Plan Task (or propose_breakdown) to fill it.
+    Empty,
+    /// Proposed revision awaiting human Approve Plan.
+    AwaitingApproval,
+    /// Last revision has been materialized; Tasks are on the Board.
+    Approved,
+}
+
+/// One proposed Task inside a Plan artifact. Keys are stable within the plan
+/// so deps and replans can refer to work before board ids exist.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PlanTaskSpec {
+    pub key: String,
+    pub title: String,
+    pub intent: String,
+    pub definition_of_done: String,
+    #[serde(default)]
+    pub blocked_by_keys: Vec<String>,
+    #[serde(default)]
+    pub capability: Option<String>,
+    /// Set when Approve Plan materializes (or updates) a board Task.
+    #[serde(default)]
+    pub item_id: Option<ItemId>,
+}
+
+/// Source of truth for a Project's breakdown. Approve Plan applies this DAG.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PlanArtifact {
+    pub revision: u32,
+    #[serde(default)]
+    pub summary: String,
+    pub status: PlanStatus,
+    #[serde(default)]
+    pub tasks: Vec<PlanTaskSpec>,
+    /// Keys to retire on the next approve (replan cancels).
+    #[serde(default)]
+    pub cancel_keys: Vec<String>,
+    /// Board ids resolved from `cancel_keys` at propose time (keys drop out of `tasks`).
+    #[serde(default)]
+    pub cancel_item_ids: Vec<ItemId>,
+    #[serde(default)]
+    pub approved_revision: Option<u32>,
+}
+
+impl PlanArtifact {
+    pub fn empty() -> Self {
+        Self {
+            revision: 0,
+            summary: String::new(),
+            status: PlanStatus::Empty,
+            tasks: Vec::new(),
+            cancel_keys: Vec::new(),
+            cancel_item_ids: Vec::new(),
+            approved_revision: None,
+        }
+    }
+
+    /// Compact status for Home / GoalView: `no_plan`, `awaiting_approval`, `approved_vN`.
+    pub fn status_label(&self) -> String {
+        match self.status {
+            PlanStatus::Empty => "no_plan".into(),
+            PlanStatus::AwaitingApproval => "awaiting_approval".into(),
+            PlanStatus::Approved => {
+                format!("approved_v{}", self.approved_revision.unwrap_or(self.revision))
+            }
+        }
+    }
+}
+
+/// Title of the seed Task created with every Project.
+pub const INITIAL_PLAN_TITLE: &str = "Initial plan";
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItem {
     pub id: ItemId,
@@ -255,10 +331,26 @@ pub struct WorkItem {
     /// Selected agent engine (`claude` vs `agy`).
     #[serde(default)]
     pub engine: Option<String>,
+    /// Beads issue hash ID (e.g. `bd-a1b2`).
+    #[serde(default)]
+    pub beads_id: Option<String>,
+    /// Associated GitHub Issue URL (e.g. `https://github.com/shanemcd/honr/issues/8`).
+    #[serde(default)]
+    pub github_issue_url: Option<String>,
     /// The pull request the agent opened. Review is a real PR: approving here
     /// surfaces it, merging stays a human action.
     #[serde(default)]
     pub pr_url: Option<String>,
+
+    /// Plan artifact — Projects only (Phase 1). Source of truth for Approve Plan.
+    #[serde(default)]
+    pub plan: Option<PlanArtifact>,
+
+    /// Projects only: supervisor will not claim Ready Tasks under this Project
+    /// while true. Independent of the global board `dispatch_paused` flag —
+    /// both must be clear for a card to be claimable. Ignored on Tasks.
+    #[serde(default)]
+    pub dispatch_paused: bool,
 
     pub created_at: DateTime<Utc>,
     pub entered_state_at: DateTime<Utc>,
@@ -298,11 +390,27 @@ impl WorkItem {
             release_target: None,
             environment: None,
             engine: None,
+            beads_id: None,
+            github_issue_url: None,
             pr_url: None,
+            plan: None,
+            dispatch_paused: false,
             created_at: now,
             entered_state_at: now,
             history: Vec::new(),
         }
+    }
+
+    pub fn is_project(&self) -> bool {
+        self.parent.is_none() && self.level.as_deref() != Some("Task")
+    }
+
+    pub fn is_initial_plan_task(&self) -> bool {
+        self.title == INITIAL_PLAN_TITLE
+            || self
+                .definition_of_done
+                .as_deref()
+                .is_some_and(|d| d.contains("Plan artifact approved"))
     }
 
 

@@ -7,6 +7,8 @@ interface Props {
   now: number;
   heartbeatExpect: number;
   breadcrumb?: string;
+  /** Prefer beads hash ids for blocker chips when available. */
+  labelOf?: (id: number) => string;
   onOpen: (id: number) => void;
 }
 
@@ -14,8 +16,9 @@ interface Props {
  * Card anatomy differs by column, because the question you're asking differs.
  * Everything on the face is here to answer that column's one question.
  */
-export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }: Props) {
+export function Card({ item, column, now, heartbeatExpect, breadcrumb, labelOf, onOpen }: Props) {
   const machine = item.origin.kind !== "human";
+  const idLabel = (id: number) => (labelOf ? labelOf(id) : `#${id}`);
 
   // The one number that tells you an agent is thinking versus hung. It belongs
   // on the card face, not behind a click — and the card decays as it ages.
@@ -35,13 +38,18 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }:
       title={
         machine
           ? item.origin.kind === "split"
-            ? `Created by a splitting sibling (#${item.origin.from})`
+            ? `Created by a splitting sibling (${idLabel(item.origin.from)})`
             : `Created by the ${item.origin.kind}`
           : "Created by a human"
       }
     >
       <div className="card-title">
-        <span className="id">#{item.id}</span> {item.title}
+        <span className="id">
+          {item.beads_id && !item.beads_id.startsWith("bd-honr-")
+            ? item.beads_id
+            : `#${item.id}`}
+        </span>{" "}
+        {item.title}
       </div>
 
       {blockersList.length > 0 && (
@@ -74,7 +82,13 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, onOpen }:
       {column === "running" && (
         <>
           <div className="row">
-            <span className="tag">◍ {item.model ?? "?"}</span>
+            <span className="tag">
+              {item.engine === "agy"
+                ? "⚡ agy"
+                : item.engine === "claude"
+                  ? "🤖 claude"
+                  : `◍ ${item.model ?? "?"}`}
+            </span>
             <span className={stale ? "hb stale" : "hb"}>♥ {hbAge ?? "—"}s</span>
             <span className="dim">{money(item.cost_cents)}</span>
           </div>

@@ -18,17 +18,43 @@ export const api = {
   digest: () => fetch("/api/digest").then(jsonOrThrow),
   detail: (id: number) => fetch(`/api/items/${id}`).then(jsonOrThrow),
   logs: (id: number): Promise<{ claude: string[]; openshell: string[] }> => fetch(`/api/items/${id}/logs`).then(jsonOrThrow),
+  pauseDispatch: (): Promise<{ dispatch_paused: boolean }> => post("/dispatch/pause"),
+  resumeDispatch: (): Promise<{ dispatch_paused: boolean }> => post("/dispatch/resume"),
+  pauseProjectDispatch: (id: number): Promise<WorkItem> =>
+    post(`/items/${id}/dispatch/pause`),
+  resumeProjectDispatch: (id: number): Promise<WorkItem> =>
+    post(`/items/${id}/dispatch/resume`),
 
   // The human verbs. Each costs the system something different.
   steer: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/steer`, { text }),
   pin: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/pin`, { text }),
+  unpin: (id: number, index: number): Promise<WorkItem> =>
+    post(`/items/${id}/unpin`, { index }),
+  /** Write / revise Plan artifact (does not materialize Tasks). */
+  savePlan: (
+    id: number,
+    body: {
+      summary?: string;
+      tasks: {
+        key: string;
+        title: string;
+        intent: string;
+        definition_of_done: string;
+        blocked_by_keys: string[];
+        capability?: string | null;
+      }[];
+      cancel_keys?: string[];
+    },
+  ): Promise<import("./types").PlanArtifact> => post(`/items/${id}/plan`, body),
   halt: (id: number, reason?: string): Promise<WorkItem> =>
     post(`/items/${id}/halt`, { reason }),
   answer: (id: number, choice: string): Promise<WorkItem> =>
     post(`/items/${id}/answer`, { choice }),
   approve: (id: number): Promise<WorkItem> => post(`/items/${id}/approve`),
+  /** Materialize Project Plan → Ready Tasks. Never Ready's the Project. */
+  approvePlan: (id: number): Promise<number[]> => post(`/items/${id}/approve-plan`),
   requestChanges: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/request-changes`, { text }),
   transition: (id: number, to: string, reason?: string): Promise<WorkItem> =>
@@ -37,6 +63,8 @@ export const api = {
     post(`/items/${id}/update`, fields),
   cut: (id: number, reason?: string): Promise<number[]> =>
     post(`/items/${id}/cut`, { reason }),
+  deleteItem: (id: number): Promise<void> =>
+    fetch(`/api/items/${id}`, { method: "DELETE" }).then(jsonOrThrow),
 };
 
 export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;

@@ -10,6 +10,7 @@ interface BoardState {
   heartbeatExpect: number;
   loaded: boolean;
   connected: boolean;
+  dispatchPaused: boolean;
   /** When the last successful load happened. Drives the staleness warning. */
   lastLoadedAt: number | null;
 }
@@ -17,7 +18,8 @@ interface BoardState {
 type Action =
   | { type: "snapshot"; snap: Snapshot }
   | { type: "event"; ev: BoardEvent }
-  | { type: "connected"; ok: boolean };
+  | { type: "connected"; ok: boolean }
+  | { type: "dispatch_paused"; paused: boolean };
 
 const initial: BoardState = {
   items: new Map(),
@@ -27,6 +29,7 @@ const initial: BoardState = {
   heartbeatExpect: 6,
   loaded: false,
   connected: false,
+  dispatchPaused: false,
   lastLoadedAt: null,
 };
 
@@ -42,21 +45,44 @@ function reduce(s: BoardState, a: Action): BoardState {
         goals: a.snap.goals,
         serverTime: a.snap.server_time,
         heartbeatExpect: a.snap.heartbeat_expect_secs,
+        dispatchPaused: a.snap.dispatch_paused ?? false,
         loaded: true,
         lastLoadedAt: Date.now(),
       };
     }
     case "event": {
       if (a.ev.type === "upsert") {
+        const item = a.ev.item;
         const items = new Map(s.items);
-        items.set(a.ev.item.id, a.ev.item);
+        items.set(item.id, item);
+        // Project pause lives on the item; keep GoalView chip in sync without
+        // waiting for the next snapshot poll.
+        const gi = s.goals.findIndex((g) => g.id === item.id);
+        if (gi >= 0 && item.dispatch_paused !== undefined) {
+          const goals = s.goals.slice();
+          goals[gi] = { ...goals[gi], dispatch_paused: !!item.dispatch_paused };
+          return { ...s, items, goals };
+        }
         return { ...s, items };
       }
-      const stories = new Map(s.stories);
-      const prev = stories.get(a.ev.goal) ?? [];
-      stories.set(a.ev.goal, [...prev, { at: a.ev.at, text: a.ev.text }]);
-      return { ...s, stories };
+      if (a.ev.type === "delete") {
+        const items = new Map(s.items);
+        items.delete(a.ev.id);
+        return { ...s, items };
+      }
+      if (a.ev.type === "dispatch_paused") {
+        return { ...s, dispatchPaused: a.ev.paused };
+      }
+      if (a.ev.type === "story") {
+        const stories = new Map(s.stories);
+        const prev = stories.get(a.ev.goal) ?? [];
+        stories.set(a.ev.goal, [...prev, { at: a.ev.at, text: a.ev.text }]);
+        return { ...s, stories };
+      }
+      return s;
     }
+    case "dispatch_paused":
+      return { ...s, dispatchPaused: a.paused };
     case "connected":
       return { ...s, connected: a.ok };
   }

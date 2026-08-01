@@ -61,27 +61,48 @@ pub struct CreateGoalArg {
     pub title: String,
     /// One sentence of intent. This is the contract everything below inherits.
     pub intent: String,
+    /// Projects are roots. Nesting a Project under another is refused.
     #[serde(default)]
     pub parent: Option<ItemId>,
-    #[serde(default)]
+    #[serde(default = "default_above_line")]
     pub above_line: bool,
+}
+
+fn default_above_line() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ChildSpec {
     pub title: String,
-    /// One sentence. Not a restatement of the parent.
+    /// One sentence. Not a restatement of the Project.
     pub intent: String,
     /// Must be mechanically checkable by a verifier.
     pub definition_of_done: String,
     #[serde(default)]
     pub capability: Option<String>,
+    /// Stable key within the Plan (defaults to t1, t2, …).
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Plan keys this task is blocked by (sibling Tasks in the same Plan).
+    #[serde(default)]
+    pub blocked_by_keys: Vec<String>,
+    /// Legacy: board item ids. Prefer `blocked_by_keys` for new Plans.
+    #[serde(default)]
+    pub blocked_by: Vec<ItemId>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct BreakdownArg {
+    /// Must be a Project.
     pub parent: ItemId,
     pub children: Vec<ChildSpec>,
+    /// One-line summary of this Plan revision.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Plan keys to retire when this revision is approved.
+    #[serde(default)]
+    pub cancel_keys: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -398,76 +419,121 @@ impl Cockpit {
 
     #[tool(
         name = "create_goal",
-        description = "Drop a goal in plain language. It lands in shaping, not ready — nothing \
-                       is dispatched until a breakdown is proposed and approved."
+        description = "Create a Project (top-level container). Seeds an Initial plan Task in \
+                       Ready. The Project itself is never claimable — write a Plan artifact \
+                       via propose_breakdown, then the human Approves Plan to materialize Tasks."
     )]
     fn create_goal(&self, Parameters(a): Parameters<CreateGoalArg>) -> Out<Ack> {
-        let item = self.board.create(
-            a.parent,
-            a.title,
-            a.intent,
-            None,
-            crate::model::Origin::Human,
-            a.above_line,
-            None,
-        );
+        if a.parent.is_some() {
+            return Err(bad("Projects are roots; omit parent"));
+        }
+        let item = self
+            .board
+            .create(
+                None,
+                a.title,
+                a.intent,
+                None,
+                crate::model::Origin::Human,
+                a.above_line,
+                None,
+            )
+            .map_err(bad)?;
         let _ = self.board.transition(item.id, State::Shaping, "cockpit", None);
-        self.ack(item.id, "created in shaping; propose a breakdown next")
+        self.board.schedule_beads_mirror(item.id);
+        for cid in self.board.children_of(item.id) {
+            self.board.schedule_beads_mirror(cid);
+        }
+        self.ack(
+            item.id,
+            "Project created in shaping with Initial plan Task Ready; propose_breakdown next",
+        )
     }
 
     #[tool(
         name = "propose_breakdown",
-        description = "Decompose a goal into leaves and hold them for approval. This is the one \
-                       interruption worth defending: it is cheap now and the last moment a \
-                       misunderstanding costs pennies instead of forty agent-hours. Every child \
-                       needs a definition of done a verifier can mechanically check."
+        description = "Write a Plan artifact on a Project (flat Tasks + deps by plan key). Does \
+                       not create board cards — Approve Plan materializes them. Every task needs \
+                       a definition of done a verifier can mechanically check."
     )]
     fn propose_breakdown(&self, Parameters(a): Parameters<BreakdownArg>) -> Out<BreakdownOut> {
-        if self.board.get(a.parent).is_none() {
-            return Err(bad(format!("no work item #{}", a.parent)));
+        use crate::model::PlanTaskSpec;
+
+        let parent = self
+            .board
+            .get(a.parent)
+            .ok_or_else(|| bad(format!("no work item #{}", a.parent)))?;
+        if parent.parent.is_some() || parent.level.as_deref() == Some("Task") {
+            return Err(bad("breakdown parent must be a Project"));
         }
         if a.children.is_empty() {
-            return Err(bad("a breakdown needs at least one child"));
+            return Err(bad("a breakdown needs at least one task"));
         }
-        let mut ids = Vec::new();
-        for c in a.children {
-            if c.definition_of_done.trim().is_empty() {
-                return Err(bad(format!(
-                    "child '{}' has no definition of done; without one the tree is a wish list",
-                    c.title
-                )));
+
+        // Map legacy blocked_by ItemIds → keys of already-materialized plan tasks.
+        let id_to_key: std::collections::BTreeMap<ItemId, String> = parent
+            .plan
+            .as_ref()
+            .map(|p| {
+                p.tasks
+                    .iter()
+                    .filter_map(|t| t.item_id.map(|id| (id, t.key.clone())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut specs = Vec::new();
+        for (idx, c) in a.children.into_iter().enumerate() {
+            let key = c
+                .key
+                .filter(|k| !k.trim().is_empty())
+                .unwrap_or_else(|| format!("t{}", idx + 1));
+            let mut blocked_by_keys = c.blocked_by_keys;
+            for bid in c.blocked_by {
+                if let Some(k) = id_to_key.get(&bid) {
+                    if !blocked_by_keys.contains(k) {
+                        blocked_by_keys.push(k.clone());
+                    }
+                } else {
+                    // Sibling not yet in plan — use synthetic key from board id.
+                    let k = format!("id-{bid}");
+                    if !blocked_by_keys.contains(&k) {
+                        blocked_by_keys.push(k);
+                    }
+                }
             }
-            let child = self.board.create(
-                Some(a.parent),
-                c.title,
-                c.intent,
-                Some(c.definition_of_done),
-                crate::model::Origin::Planner,
-                false,
-                c.capability,
-            );
-            let _ = self.board.transition(child.id, State::Shaping, "planner", None);
-            ids.push(child.id);
+            specs.push(PlanTaskSpec {
+                key,
+                title: c.title,
+                intent: c.intent,
+                definition_of_done: c.definition_of_done,
+                blocked_by_keys,
+                capability: c.capability,
+                item_id: None,
+            });
         }
-        Ok(ToolJson(BreakdownOut { items: ids }))
+        let summary = a.summary.unwrap_or_else(|| {
+            format!("{} tasks proposed", specs.len())
+        });
+        let plan = self
+            .board
+            .propose_plan(a.parent, summary, specs, a.cancel_keys)
+            .map_err(bad)?;
+        let linked: Vec<ItemId> = plan.tasks.iter().filter_map(|t| t.item_id).collect();
+        Ok(ToolJson(BreakdownOut { items: linked }))
     }
 
     #[tool(
         name = "approve_plan",
-        description = "Publish a proposed breakdown to the ready queue. Only call this once the \
-                       human has actually seen and approved the shape — this is the gate that \
-                       lets them walk away afterwards."
+        description = "Approve a Project's Plan artifact: materialize flat Tasks + deps and \
+                       publish them to Ready. Never moves the Project itself to Ready. Only \
+                       call this once the human has actually seen and approved the shape."
     )]
     fn approve_plan(&self, Parameters(a): Parameters<IdArg>) -> Out<ApprovePlanOut> {
-        let mut published = Vec::new();
-        for cid in self.board.children_of(a.id) {
-            if self.board.get(cid).map(|i| i.state) == Some(State::Shaping)
-                && self.board.transition(cid, State::Ready, "human", Some("plan approved".into())).is_ok()
-            {
-                published.push(cid);
-            }
+        let published = self.board.approve_plan(a.id).map_err(bad)?;
+        for cid in &published {
+            self.board.schedule_beads_mirror(*cid);
         }
-        self.board.story(a.id, format!("Plan approved: {} items published to Ready.", published.len()));
         Ok(ToolJson(ApprovePlanOut { items: published }))
     }
 
@@ -611,7 +677,10 @@ impl Cockpit {
             .into_iter()
             .map(|c| (c.title, c.intent, c.definition_of_done))
             .collect();
-        let made = self.board.split(a.item_id, &a.agent_id, children, 7, 5).map_err(bad)?;
+        let made = self.board.split(a.item_id, &a.agent_id, children, 5).map_err(bad)?;
+        for m in &made {
+            self.board.schedule_beads_mirror(m.id);
+        }
         Ok(ToolJson(SplitOut {
             items: made.into_iter().map(|i| i.id).collect(),
         }))
@@ -720,9 +789,14 @@ mod tests {
     use crate::store::Board;
 
     fn test_board() -> (SharedBoard, ItemId) {
-        let path = std::env::temp_dir().join("honr-mcp-test.json");
+        let path = std::env::temp_dir().join(format!(
+            "honr-mcp-test-{}.json",
+            std::process::id()
+        ));
         let b = Arc::new(Board::new(Schema::default(), path));
-        let goal = b.create(None, "Test Goal", "Test Intent", None, Origin::Human, true, None);
+        let goal = b
+            .create(None, "Test Goal", "Test Intent", None, Origin::Human, true, None)
+            .expect("project");
         let _ = b.transition(goal.id, State::Shaping, "test", None);
         (b, goal.id)
     }
@@ -733,28 +807,32 @@ mod tests {
         let cockpit = Cockpit::new(board.clone());
 
         // Ready card
-        let card_ready = board.create(
-            Some(goal_id),
-            "Ready Card",
-            "Ready Intent",
-            Some("DoD".into()),
-            Origin::Human,
-            false,
-            None,
-        );
+        let card_ready = board
+            .create(
+                Some(goal_id),
+                "Ready Card",
+                "Ready Intent",
+                Some("DoD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("ready card");
         let _ = board.transition(card_ready.id, State::Shaping, "test", None);
         let _ = board.transition(card_ready.id, State::Ready, "test", None);
 
         // NeedsYou card (escalated)
-        let card_needs = board.create(
-            Some(goal_id),
-            "NeedsYou Card",
-            "NeedsYou Intent",
-            Some("DoD".into()),
-            Origin::Human,
-            false,
-            None,
-        );
+        let card_needs = board
+            .create(
+                Some(goal_id),
+                "NeedsYou Card",
+                "NeedsYou Intent",
+                Some("DoD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("needs card");
         let _ = board.transition(card_needs.id, State::Shaping, "test", None);
         let _ = board.transition(card_needs.id, State::Ready, "test", None);
         let _ = board.claim(card_needs.id, "agent-1", None, 60);
@@ -765,15 +843,17 @@ mod tests {
         let _ = board.escalate(card_needs.id, "agent-1", "Which option?".into(), options, 0);
 
         // Shaping card
-        let card_shaping = board.create(
-            Some(goal_id),
-            "Shaping Card",
-            "Shaping Intent",
-            None,
-            Origin::Human,
-            false,
-            None,
-        );
+        let card_shaping = board
+            .create(
+                Some(goal_id),
+                "Shaping Card",
+                "Shaping Intent",
+                None,
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("shaping card");
         let _ = board.transition(card_shaping.id, State::Shaping, "test", None);
 
         // Verify list_column for needs_you, ready, shaping returns a record object with "items"
@@ -802,7 +882,12 @@ mod tests {
                 intent: "Intent 1".into(),
                 definition_of_done: "DoD 1".into(),
                 capability: None,
+                key: Some("t1".into()),
+                blocked_by_keys: vec![],
+                blocked_by: vec![],
             }],
+            summary: Some("one task".into()),
+            cancel_keys: vec![],
         };
 
         let bd_res = cockpit

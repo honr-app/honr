@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useState, type MouseEvent } from "react";
 import { Card } from "./Card";
 import { DependencyGraph } from "./DependencyGraph";
 import { BOARD_COLUMNS, COLUMN_OF } from "../types";
 import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types";
-import { money, since } from "../api";
+import { api, money, since } from "../api";
 
 interface Props {
   goals: GoalView[];
@@ -14,6 +14,13 @@ interface Props {
   now: number;
   heartbeatExpect: number;
   onOpen: (id: number) => void;
+  onChanged?: () => void;
+}
+
+function labelOfItem(items: Map<number, WorkItem>, id: number): string {
+  const it = items.get(id);
+  if (it?.beads_id && !it.beads_id.startsWith("bd-honr-")) return it.beads_id;
+  return `#${id}`;
 }
 
 /** How many cards to show before the rest becomes a chunk. */
@@ -67,7 +74,7 @@ export function Board(props: Props) {
 }
 
 /**
- * Swimlanes go by goal, never by agent. You care about "is billing v2 moving",
+ * Swimlanes go by Project, never by agent. You care about "is billing v2 moving",
  * not "what is agent-7 up to".
  */
 function Swimlane({
@@ -78,12 +85,38 @@ function Swimlane({
 }: Props & { goal: GoalView; filterQuery?: string; filterState?: string }) {
   const [open, setOpen] = useState(true);
   const [viewMode, setViewMode] = useState<"columns" | "graph">("columns");
+  const [pauseBusy, setPauseBusy] = useState(false);
   const story = p.stories.get(goal.id) ?? goal.story;
   const q = (filterQuery ?? "").toLowerCase().trim();
+  const projectPaused =
+    p.items.get(goal.id)?.dispatch_paused ?? goal.dispatch_paused ?? false;
 
+  const toggleProjectPause = async (e: MouseEvent) => {
+    e.stopPropagation();
+    if (pauseBusy) return;
+    setPauseBusy(true);
+    try {
+      if (projectPaused) await api.resumeProjectDispatch(goal.id);
+      else await api.pauseProjectDispatch(goal.id);
+      p.onChanged?.();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPauseBusy(false);
+    }
+  };
+
+  // Board cards are claimable Tasks only; Project is the swimlane header.
   const mine = [...p.items.values()].filter((i) => {
-    if (p.goalOf(i.id) !== goal.id) return false;
-    if (q && !i.title.toLowerCase().includes(q) && !`#${i.id}`.includes(q)) return false;
+    if (i.parent !== goal.id) return false;
+    if (i.level === "Project") return false;
+    if (
+      q &&
+      !i.title.toLowerCase().includes(q) &&
+      !`#${i.id}`.includes(q) &&
+      !(i.beads_id ?? "").toLowerCase().includes(q)
+    )
+      return false;
     if (filterState && filterState !== "all") {
       const colKey = COLUMN_OF[i.state];
       if (colKey !== filterState) return false;
@@ -91,11 +124,22 @@ function Swimlane({
     return true;
   });
 
+  const planLabel =
+    goal.plan_status === "awaiting_approval"
+      ? "plan awaiting approval"
+      : goal.plan_status === "no_plan"
+        ? "no plan"
+        : goal.plan_status?.startsWith("approved")
+          ? goal.plan_status.replace("approved_", "plan ")
+          : goal.plan_status;
+
   return (
     <section className="lane">
       <header className="lane-head" onClick={() => setOpen(!open)}>
         <span className="chev">{open ? "▾" : "▸"}</span>
         <h2>◈ {goal.title}</h2>
+        {projectPaused && <span className="pill warn">Paused</span>}
+        {planLabel && <span className="dim plan-status">{planLabel}</span>}
         <div className="progress">
           <div className="bar wide">
             <div className="fill" style={{ width: `${Math.round(goal.progress * 100)}%` }} />
@@ -111,6 +155,19 @@ function Swimlane({
         <span className="live">● {goal.agents_live} live</span>
         {goal.needs_you > 0 && <span className="alarm">⚠ {goal.needs_you} need you</span>}
 
+        <button
+          type="button"
+          className={projectPaused ? "dispatch-toggle paused" : "dispatch-toggle"}
+          disabled={pauseBusy}
+          onClick={toggleProjectPause}
+          title={
+            projectPaused
+              ? "Resume claiming under this Project (allowed even while Pause all is on)"
+              : "Pause claiming under this Project — running cards keep going"
+          }
+        >
+          {projectPaused ? "Resume" : "Pause"}
+        </button>
         <div className="lane-view-switcher" onClick={(e) => e.stopPropagation()}>
           <button
             className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
@@ -265,6 +322,7 @@ function ColumnEl({
   now,
   heartbeatExpect,
   breadcrumbOf,
+  items,
   onOpen,
 }: Props & {
   label: string;
@@ -291,6 +349,7 @@ function ColumnEl({
           now={now}
           heartbeatExpect={heartbeatExpect}
           breadcrumb={breadcrumbOf(item.id)}
+          labelOf={(id) => labelOfItem(items, id)}
           onOpen={onOpen}
         />
       ))}

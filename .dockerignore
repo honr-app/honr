@@ -1,0 +1,9 @@
+.git
+target
+web/node_modules
+web/dist
+web/shots
+*.tar.gz
+sandbox/*.tar.gz
+sandbox/agy
+.gemini

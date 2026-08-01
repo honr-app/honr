@@ -10,7 +10,7 @@ import json, os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 TOKEN = os.environ.get("GOOGLE_VERTEX_AI_TOKEN", "")
-PROJECT = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
+PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"

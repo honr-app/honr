@@ -1,9 +1,8 @@
-//! Your ladder, not mine.
+//! Project + Task — the only two rungs.
 //!
-//! Someone else writes Initiative / Outcome / Increment. Someone else deletes
-//! three rungs and runs Goal -> Task. The engine never reads these names — it
-//! reads the tree. The schema drives labels, default gates, and what the UI
-//! asks a human to fill in.
+//! Project is the container; Tasks are flat claimable leaves under it. The
+//! engine still reads the tree (parent edges) for containment; task↔task
+//! ordering lives in dependency edges (blocks / relates-to), usually via beads.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -148,7 +147,7 @@ pub struct AgentConfig {
 
 fn d_image() -> String { "honr-sandbox:latest".into() }
 fn d_policy() -> String { "sandbox/policy.yaml".into() }
-fn d_engine() -> String { "claude".into() }
+fn d_engine() -> String { "agy".into() }
 fn d_concurrent() -> usize { 2 }
 fn d_agent_timeout() -> u64 { 1800 }
 fn d_max_attempts() -> u32 { 3 }
@@ -214,15 +213,25 @@ impl Schema {
 
 
 
-    /// The rung a node lands on given its depth in the tree. Machine-created
-    /// depth below the line never adds a rung — it collapses into the deepest
-    /// declared level, so a depth-6 branch and a depth-2 branch render the same
-    /// to a human looking at the epic.
+    /// Depth 0 → Project, depth ≥1 → Task (flat under Project). Extra depth
+    /// collapses to Task so a mistaken nest still labels correctly.
     pub fn level_for_depth(&self, depth: usize) -> Option<&Level> {
         if self.levels.is_empty() {
             return None;
         }
-        self.levels.get(depth).or_else(|| self.levels.last())
+        if depth == 0 {
+            self.levels.first()
+        } else {
+            self.levels.iter().find(|l| l.claimable).or_else(|| self.levels.last())
+        }
+    }
+
+    pub fn project_level(&self) -> Option<&Level> {
+        self.levels.iter().find(|l| !l.claimable).or_else(|| self.levels.first())
+    }
+
+    pub fn task_level(&self) -> Option<&Level> {
+        self.levels.iter().find(|l| l.claimable).or_else(|| self.levels.last())
     }
 
     /// A schema that declares a rung a human can't occupy should say so at
@@ -232,15 +241,17 @@ impl Schema {
         if self.levels.is_empty() {
             tracing::warn!("level schema declares no levels; the tree will render unlabelled");
         }
-        if self.levels.len() > 7 {
+        if self.levels.len() > 2 {
             tracing::warn!(
                 count = self.levels.len(),
-                "more than 7 rungs: a human occupies one rung at a time, and this many \
-                 is likely more than anyone can hold"
+                "more than 2 levels: Plan A is Project + Task only; deeper ladders are retired"
             );
         }
         if !self.levels.iter().any(|l| l.claimable) {
             tracing::warn!("no level is marked claimable; agents will find nothing to pick up");
+        }
+        if !self.levels.iter().any(|l| !l.claimable) {
+            tracing::warn!("no non-claimable Project level; every node would look claimable");
         }
     }
 }

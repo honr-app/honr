@@ -1,6 +1,7 @@
 //! honr — an agent orchestrator whose board is a control plane, not a report.
 
 mod api;
+mod beads;
 mod events;
 mod machine;
 mod mcp;
@@ -38,6 +39,15 @@ async fn main() -> anyhow::Result<()> {
     let exec_cfg = schema.execution.clone();
 
     let board: SharedBoard = Arc::new(Board::load_or_new(schema, PathBuf::from("honr.json")));
+
+    // Ensure the beads graph DB exists beside the board (identity + deps).
+    if let Some(beads) = board.beads.clone() {
+        tokio::spawn(async move {
+            if let Err(e) = beads.init_stealth().await {
+                tracing::warn!("beads init: {e}");
+            }
+        });
+    }
 
     // Persist on an interval rather than per mutation, so heartbeating agents
     // don't turn into a write storm. Paired with a flush on shutdown, or the

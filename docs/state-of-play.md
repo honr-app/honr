@@ -37,37 +37,40 @@ Treat operational confidence accordingly.
 
 ## The board
 
-`honr.json` is gitignored, so a fresh clone starts empty. The tree below was
-built through the cockpit (`create_goal` → `propose_breakdown` → `approve_plan`)
-and is reproducible the same way.
+Work is **Project + Plan artifact + flat Tasks**. Vision / Epic / Story are
+retired. A Project is the only container (Board swimlane, never a Ready card).
+Creating a Project seeds an **Initial plan** Task. `propose_breakdown` writes a
+**Plan artifact** (task keys, deps, DoDs) on the Project; **Approve Plan**
+(`approve_plan`) materializes sibling Tasks onto the Board and publishes them
+to Ready. Tasks relate by beads dependency edges (`blocks` / `relates-to`), not
+nested hierarchy.
+
+`honr.json` still holds the rich lifecycle + runtime fields (including the Plan
+artifact); `.beads/` holds identity and the graph (Plan A dual-write). A fresh
+clone starts empty.
+
+Example shape (historical card numbers; recreate via the cockpit):
 
 ```
-#1  honr builds honr                                    (vision)
-  #2  Phase 2 — real agents                             (project)
-    #3  Prove the loop
-      #7  done   Open the sandbox policy for the toolchain
-      #8  done   First self-hosted card: GET /api/version   ← merged
-      #9         Re-adopt live sandboxes on restart
-    #4  Verification the agent cannot influence
-      #10        Supervisor runs the gates                  ← highest value
-      #11        Verify from a clean checkout
-    #5  Agent-initiated decisions
-      #12        Verdict file protocol
-      #13        Split from inside the sandbox
-    #6  The board shows the run
-      #14        Sandbox name and PR link on the card       ← largely done by hand
-    #15 Report the run honestly
-      #16        Query the PR URL instead of scraping it    ← done by hand
-      #17        Report the real diffstat
-      #18        Observe cost during the run, not at the end
-      #19        Make gh pr create idempotent across retries ← done by hand
+Phase 2 — real agents                                   (Project + Plan)
+  done   Initial plan                                   (Task — seed)
+  done   Open the sandbox policy for the toolchain      (Task)
+  done   First self-hosted card: GET /api/version       (Task) ← merged
+         Re-adopt live sandboxes on restart
+         Supervisor runs the gates                      ← highest value
+         Verify from a clean checkout
+         Verdict file protocol
+         Split from inside the sandbox                  → sibling Tasks, not nest
+         Sandbox name and PR link on the card
+         Report the real diffstat
+         Observe cost during the run, not at the end
 ```
 
-Everything except #7 and #8 is in **shaping** — proposed but not approved, so
-nothing is claimable and honr is idle by design. `approve_plan` on an epic is
-the single call that puts agents back to work.
+Tasks from a Plan stay off Ready until **Approve Plan** on their Project —
+that is the single call that puts execution agents to work. The Project itself
+never moves to Ready.
 
-Constraints pinned on the vision, inherited by every card:
+Constraints pinned on the Project, inherited by every Task:
 
 - Merging is a human action. Approving in honr surfaces the PR; it never merges it.
 - Agents may not weaken `machine.rs` invariants, supervisor budget enforcement,

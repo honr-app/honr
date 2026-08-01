@@ -1,21 +1,19 @@
 import { useMemo, useState } from "react";
 import { Board } from "./components/Board";
 import { DetailDrawer } from "./components/Detail";
-import { Digest } from "./components/Digest";
-import { Overview } from "./components/Overview";
+import { Home } from "./components/Home";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
-import { money } from "./api";
+import { api, money } from "./api";
 import type { WorkItem } from "./types";
 
-type Tab = "overview" | "board" | "needs";
+type Tab = "home" | "board";
 
 export default function App() {
   const b = useBoard();
   const now = useNow();
-  // Land on comprehension, not triage. A first visit has no "right now" yet —
-  // it has "what is this system doing?", and nothing else answers that.
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>("home");
   const [open, setOpen] = useState<number | null>(null);
+  const [pauseBusy, setPauseBusy] = useState(false);
 
   const { goalOf, breadcrumbOf } = useMemo(() => buildLookups(b.items), [b.items]);
 
@@ -24,31 +22,40 @@ export default function App() {
   const totalBudget = b.goals.reduce((n, g) => n + (g.budget_cents ?? 0), 0);
   const live = b.goals.reduce((n, g) => n + g.agents_live, 0);
 
-  // How long we have been showing a picture we could not refresh.
   const age = b.lastLoadedAt === null ? null : now - b.lastLoadedAt;
   const staleFor = age !== null && age > STALE_AFTER_MS ? age : null;
+
+  const toggleDispatch = async () => {
+    if (pauseBusy) return;
+    setPauseBusy(true);
+    try {
+      if (b.dispatchPaused) await api.resumeDispatch();
+      else await api.pauseDispatch();
+      await b.refresh();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setPauseBusy(false);
+    }
+  };
 
   return (
     <div className="app">
       <header className="top">
         <div className="brand">honr</div>
         <nav>
-          {/* Named for the question each answers, not for its data structure. */}
           {(
             [
-              ["overview", "Overview"],
-              ["board", "Activity"],
-              ["needs", "Needs you"],
+              ["home", "Home"],
+              ["board", "Board"],
             ] as [Tab, string][]
           ).map(([t, label]) => (
             <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
               {label}
-              {t === "needs" && totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
+              {t === "home" && totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
             </button>
           ))}
         </nav>
-        {/* Numbers need a subject. "$24.18 / $50.00" on its own tells you
-            nothing about what is being managed or spent against. */}
         <div className="stats">
           <span className="dim">spent</span>
           <span>
@@ -60,27 +67,40 @@ export default function App() {
           <span className={b.connected ? "conn ok" : "conn off"}>
             {b.connected ? "live" : "reconnecting…"}
           </span>
+          <button
+            type="button"
+            className={b.dispatchPaused ? "dispatch-toggle paused" : "dispatch-toggle"}
+            disabled={pauseBusy || !b.loaded}
+            onClick={toggleDispatch}
+            title={
+              b.dispatchPaused
+                ? "Resume all projects — clear every project pause"
+                : "Pause all projects — then Resume individual ones as exceptions"
+            }
+          >
+            {b.dispatchPaused ? "Resume all" : "Pause all"}
+          </button>
         </div>
       </header>
 
-      {/* The board keeps rendering its last good snapshot when a poll fails,
-          which is right — blanking it would be worse. But it has to say so.
-          Stale state that looks current is how you end up acting on a picture
-          that stopped being true fifteen minutes ago. */}
+      {b.dispatchPaused && (
+        <div className="info banner">
+          All projects paused — running cards continue. Resume a project below to
+          let only that subtree claim again, or Resume all in the header.
+        </div>
+      )}
       {staleFor !== null && (
-        <div className="err bar">
+        <div className="err banner">
           ⚠ NOT LIVE — showing state from {Math.round(staleFor / 1000)}s ago.
           honr is unreachable; nothing here is current.
           <button className="link" onClick={b.refresh}>retry now</button>
         </div>
       )}
-      {b.error && staleFor === null && <div className="err bar">{b.error}</div>}
+      {b.error && staleFor === null && <div className="err banner">{b.error}</div>}
 
       <main className={open ? "with-drawer" : ""}>
         {!b.loaded ? (
-          <div className="dim pad">loading board…</div>
-        ) : tab === "needs" ? (
-          <Digest onOpen={(id) => { setOpen(id); setTab("board"); }} onChanged={b.refresh} />
+          <div className="dim pad">loading…</div>
         ) : tab === "board" ? (
           <Board
             goals={b.goals}
@@ -91,21 +111,27 @@ export default function App() {
             now={now}
             heartbeatExpect={b.heartbeatExpect}
             onOpen={setOpen}
+            onChanged={b.refresh}
           />
         ) : (
-          <Overview items={b.items} onOpen={setOpen} />
+          <Home
+            items={b.items}
+            goals={b.goals}
+            now={now}
+            onOpen={setOpen}
+            onOpenBoard={() => setTab("board")}
+            onChanged={b.refresh}
+          />
         )}
 
         {open != null && (
           <DetailDrawer id={open} now={now} onClose={() => setOpen(null)} onChanged={b.refresh} />
         )}
       </main>
-
     </div>
   );
 }
 
-/** Goal lane and breadcrumb for every card, derived from the tree once. */
 function buildLookups(items: Map<number, WorkItem>) {
   const chainOf = (id: number): number[] => {
     const out: number[] = [];
@@ -119,10 +145,9 @@ function buildLookups(items: Map<number, WorkItem>) {
 
   const goalOf = (id: number) => {
     const c = chainOf(id);
-    return c[1] ?? c[0] ?? id;
+    return c[0] ?? id;
   };
 
-  // The nearest meaningful ancestor, not six levels of concatenated prose.
   const breadcrumbOf = (id: number) => {
     const c = chainOf(id);
     const parent = c[c.length - 2];

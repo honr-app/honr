@@ -32,18 +32,26 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/version", get(version))
         .route("/board", get(board))
         .route("/digest", get(digest))
+        .route("/dispatch/pause", post(pause_dispatch))
+        .route("/dispatch/resume", post(resume_dispatch))
         .route("/items", post(create_item))
-        .route("/items/{id}", get(item_detail))
+        .route("/items/{id}", get(item_detail).delete(delete_item))
+        .route("/items/{id}/delete", post(delete_item))
         .route("/items/{id}/logs", get(item_logs))
         .route("/items/{id}/transition", post(transition))
         .route("/items/{id}/update", post(update_item))
         .route("/items/{id}/steer", post(steer))
         .route("/items/{id}/pin", post(pin))
+        .route("/items/{id}/unpin", post(unpin))
+        .route("/items/{id}/plan", post(save_plan))
         .route("/items/{id}/halt", post(halt))
         .route("/items/{id}/answer", post(answer))
         .route("/items/{id}/approve", post(approve))
+        .route("/items/{id}/approve-plan", post(approve_plan))
         .route("/items/{id}/request-changes", post(request_changes))
         .route("/items/{id}/cut", post(cut_scope))
+        .route("/items/{id}/dispatch/pause", post(pause_project_dispatch))
+        .route("/items/{id}/dispatch/resume", post(resume_project_dispatch))
 }
 
 #[derive(Serialize)]
@@ -61,6 +69,39 @@ async fn board(AxState(b): AxState<SharedBoard>) -> Json<crate::store::Snapshot>
 
 async fn digest(AxState(b): AxState<SharedBoard>) -> Json<crate::store::Digest> {
     Json(b.digest())
+}
+
+#[derive(Serialize)]
+struct DispatchStatus {
+    dispatch_paused: bool,
+}
+
+async fn pause_dispatch(AxState(b): AxState<SharedBoard>) -> Json<DispatchStatus> {
+    b.set_dispatch_paused(true);
+    Json(DispatchStatus {
+        dispatch_paused: b.dispatch_paused(),
+    })
+}
+
+async fn resume_dispatch(AxState(b): AxState<SharedBoard>) -> Json<DispatchStatus> {
+    b.set_dispatch_paused(false);
+    Json(DispatchStatus {
+        dispatch_paused: b.dispatch_paused(),
+    })
+}
+
+async fn pause_project_dispatch(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(b.set_project_dispatch_paused(id, true)?))
+}
+
+async fn resume_project_dispatch(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(b.set_project_dispatch_paused(id, false)?))
 }
 
 /// Layer 3 of the cognitive model: is this right? Transcript, diff, cost — and
@@ -132,18 +173,38 @@ async fn create_item(
     AxState(b): AxState<SharedBoard>,
     Json(req): Json<CreateItem>,
 ) -> ApiResult<WorkItem> {
-    let item = b.create(
-        req.parent,
-        req.title,
-        req.intent,
-        req.definition_of_done,
-        crate::model::Origin::Human,
-        req.above_line,
-        req.capability,
-    );
-    // A goal dropped in plain language starts shaping immediately.
+    let item = b
+        .create(
+            req.parent,
+            req.title,
+            req.intent,
+            req.definition_of_done,
+            crate::model::Origin::Human,
+            req.above_line,
+            req.capability,
+        )
+        .map_err(ApiError)?;
+    // A project dropped in plain language starts shaping immediately.
     let item = b.transition(item.id, State::Shaping, "human", None).unwrap_or(item);
+    b.schedule_beads_mirror(item.id);
+    for cid in b.children_of(item.id) {
+        b.schedule_beads_mirror(cid);
+    }
+
     Ok(Json(item))
+}
+
+/// Approve Plan: materialize the Project's Plan artifact into Ready Tasks.
+/// Never transitions the Project itself to Ready.
+async fn approve_plan(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+) -> ApiResult<Vec<ItemId>> {
+    let published = b.approve_plan(id).map_err(ApiError)?;
+    for cid in &published {
+        b.schedule_beads_mirror(*cid);
+    }
+    Ok(Json(published))
 }
 
 #[derive(Deserialize)]
@@ -186,6 +247,70 @@ async fn pin(
     Json(req): Json<TextReq>,
 ) -> ApiResult<WorkItem> {
     Ok(Json(b.pin(id, req.text).map_err(ApiError)?))
+}
+
+#[derive(Deserialize)]
+pub struct UnpinReq {
+    index: usize,
+}
+
+async fn unpin(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+    Json(req): Json<UnpinReq>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(b.unpin(id, req.index).map_err(ApiError)?))
+}
+
+#[derive(Deserialize)]
+pub struct PlanTaskBody {
+    key: String,
+    title: String,
+    intent: String,
+    definition_of_done: String,
+    #[serde(default)]
+    blocked_by_keys: Vec<String>,
+    #[serde(default)]
+    capability: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SavePlanReq {
+    #[serde(default)]
+    summary: Option<String>,
+    tasks: Vec<PlanTaskBody>,
+    #[serde(default)]
+    cancel_keys: Vec<String>,
+}
+
+/// Write / revise the Plan artifact (does not materialize Tasks — Approve Plan does).
+async fn save_plan(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+    Json(req): Json<SavePlanReq>,
+) -> ApiResult<crate::model::PlanArtifact> {
+    let summary = req.summary.unwrap_or_else(|| {
+        b.get(id)
+            .map(|i| i.intent.clone())
+            .unwrap_or_default()
+    });
+    let tasks = req
+        .tasks
+        .into_iter()
+        .map(|t| crate::model::PlanTaskSpec {
+            key: t.key,
+            title: t.title,
+            intent: t.intent,
+            definition_of_done: t.definition_of_done,
+            blocked_by_keys: t.blocked_by_keys,
+            capability: t.capability,
+            item_id: None,
+        })
+        .collect();
+    Ok(Json(
+        b.propose_plan(id, summary, tasks, req.cancel_keys)
+            .map_err(ApiError)?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -248,6 +373,14 @@ async fn cut_scope(
     Ok(Json(b.cut_scope(id, req.reason).map_err(ApiError)?))
 }
 
+async fn delete_item(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+) -> ApiResult<serde_json::Value> {
+    b.delete_item(id).map_err(ApiError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +395,10 @@ mod tests {
             crate::schema::Schema::default(),
             std::env::temp_dir().join("honr-test-nowrite.json"),
         ));
-        let id = b.create(None, "t", "i", None, crate::model::Origin::Human, false, None).id;
+        let id = b
+            .create(None, "t", "i", None, crate::model::Origin::Human, false, None)
+            .expect("create")
+            .id;
         b.set_environment(id, Some("honr-card-8-a1".into()));
         b.set_pr_url(id, Some("https://github.com/shanemcd/honr/pull/1".into()));
 
@@ -295,8 +431,31 @@ mod tests {
             crate::schema::Schema::default(),
             std::env::temp_dir().join("honr-test-blockers.json"),
         ));
-        let blocker = b.create(None, "Blocker Task", "Must be done first", None, crate::model::Origin::Human, false, None);
-        let blocked = b.create(None, "Blocked Task", "Waiting on blocker", None, crate::model::Origin::Human, false, None);
+        let project = b
+            .create(None, "Proj", "why", None, crate::model::Origin::Human, true, None)
+            .expect("project");
+        let blocker = b
+            .create(
+                Some(project.id),
+                "Blocker Task",
+                "Must be done first",
+                Some("done".into()),
+                crate::model::Origin::Human,
+                false,
+                None,
+            )
+            .expect("blocker");
+        let blocked = b
+            .create(
+                Some(project.id),
+                "Blocked Task",
+                "Waiting on blocker",
+                Some("done".into()),
+                crate::model::Origin::Human,
+                false,
+                None,
+            )
+            .expect("blocked");
         b.set_blocked_by(blocked.id, vec![blocker.id]);
 
         let Json(snap) = board(AxState(b.clone())).await;
