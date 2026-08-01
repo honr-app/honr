@@ -83,7 +83,7 @@ export function Card({ item, column, now, heartbeatExpect, breadcrumb, labelOf, 
         <>
           <div className="row">
             <span className="tag">
-              {item.engine === "agy"
+              {(item.engine || "agy") === "agy"
                 ? "⚡ agy"
                 : item.engine === "claude"
                   ? "🤖 claude"

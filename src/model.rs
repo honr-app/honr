@@ -285,6 +285,8 @@ pub struct WorkItem {
     #[serde(default)]
     pub lease: Option<Lease>,
     #[serde(default)]
+    pub engine: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub progress: f32,
@@ -375,6 +377,7 @@ impl WorkItem {
             blockers: Vec::new(),
             capability: None,
             lease: None,
+            engine: None,
             model: None,
             progress: 0.0,
             cost_cents: 0,

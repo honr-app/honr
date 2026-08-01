@@ -81,4 +81,35 @@ const unblockedHtml = renderToString(
 assert(!unblockedHtml.includes("blocker-chips"), "Unblocked card should be empty when unblocked (no blocker chips)");
 assert(!unblockedHtml.includes("waiting on"), "Unblocked card should not render waiting on");
 
+// Test 3: Running card with engine null shows agy badge (not model)
+const runningItem = {
+  ...unblockedItem,
+  id: 9,
+  state: "running",
+  engine: null,
+  model: "claude-opus-5",
+  progress: 0.5,
+  cost_cents: 100,
+  lease: {
+    agent_id: "agent-1",
+    granted_at: new Date().toISOString(),
+    last_heartbeat: new Date().toISOString(),
+    expires_at: new Date().toISOString(),
+  },
+};
+
+const runningHtml = renderToString(
+  React.createElement(Card, {
+    item: runningItem,
+    column: "running",
+    now,
+    heartbeatExpect: 600,
+    onOpen: () => {},
+  })
+);
+
+console.log("\nRunning Card HTML:\n", runningHtml);
+assert(runningHtml.includes("agy"), "Running card with engine null should render agy badge");
+assert(!runningHtml.includes("◍ claude-opus-5"), "Running card should not render model name as badge");
+
 console.log("\n✅ All Card component assertions passed!");

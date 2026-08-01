@@ -321,7 +321,7 @@ export function DetailDrawer({
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <span className="pill">{d.state}</span>
           {d.level && <span className="pill">{d.level}</span>}
-          <span className="pill">{d.engine || "claude"}</span>
+          <span className="pill">{d.engine || "agy"}</span>
           <span className="pill">{money(d.cost_cents)}</span>
           {d.beads_id && (
             <span
@@ -430,7 +430,7 @@ export function DetailDrawer({
               </a>
             </p>
           )}
-          {d.environment && <p className="dim">sandbox {d.environment}</p>}
+          {d.environment && <p className="dim">sandbox {d.environment} ({d.engine || "agy"})</p>}
         </Section>
       )}
 
@@ -448,7 +448,7 @@ export function DetailDrawer({
                   style={{ fontSize: "11px", padding: "3px 10px" }}
                   onClick={() => setLogTab("claude")}
                 >
-                  {d.engine === "agy" ? "Antigravity Agent" : "Claude Agent"} ({parsedClaudeLogs.length})
+                  {(d.engine || "agy") === "agy" ? "Antigravity Agent" : "Claude Agent"} ({parsedClaudeLogs.length})
                 </button>
                 <button
                   className={logTab === "openshell" ? "primary" : ""}
@@ -501,7 +501,7 @@ export function DetailDrawer({
                       ))}
                       {(() => {
                         const last = parsedClaudeLogs[parsedClaudeLogs.length - 1];
-                        const engineName = d.engine === "agy" ? "Antigravity (agy)" : "Claude";
+                        const engineName = (d.engine || "agy") === "agy" ? "Antigravity (agy)" : "Claude";
                         let statusText = `${engineName} is thinking / evaluating response...`;
                         if (last.type === "tool") statusText = `Executing ${last.text.replace("🔨 ", "")}...`;
                         if (last.type === "result") statusText = "Tool output received, processing next action...";
@@ -534,7 +534,7 @@ export function DetailDrawer({
                     </>
                   ) : (
                     <span className="dim">
-                      Waiting for {d.engine === "agy" ? "Antigravity" : "Claude"} agent stdout stream…
+                      Waiting for {(d.engine || "agy") === "agy" ? "Antigravity" : "Claude"} agent stdout stream…
                     </span>
                   )
                 ) : logs.openshell.length > 0 ? (
