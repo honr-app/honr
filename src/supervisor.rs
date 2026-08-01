@@ -2339,4 +2339,83 @@ exit 1
         let esc = item.escalation.expect("escalation set");
         assert!(esc.question.contains("a PR already exists"));
     }
+
+    #[tokio::test]
+    async fn process_verdict_refuses_split_when_children_are_off_theme() {
+        let board = test_board();
+        let project = board
+            .create(None, "User Authentication", "Manage user accounts", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "Implement OAuth2 login",
+                "Handle authentication callback",
+                Some("Login working".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
+        let _ = board.transition(task.id, State::Running, "agent-1", None);
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-split-offtheme-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let mock_bin = dir.join("fake_openshell.sh");
+        let split_json_path = dir.join("split.json");
+        std::fs::write(
+            &split_json_path,
+            r#"{
+                "children": [
+                    {"title": "Refactor database pool", "intent": "Tune connection limit", "definition_of_done": "Pool tuned"},
+                    {"title": "Fix CSS margins", "intent": "Adjust padding in header", "definition_of_done": "CSS fixed"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let script_content = format!(
+            r#"#!/usr/bin/env bash
+if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
+    echo "split:{}"
+    exit 0
+elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
+    cp "{}" "$5"
+    exit 0
+fi
+exit 1
+"#,
+            split_json_path.display(),
+            split_json_path.display()
+        );
+        std::fs::write(&mock_bin, script_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let cfg = repo_cfg();
+
+        let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
+            .await
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(handled);
+        let item = board.get(task.id).unwrap();
+        assert_eq!(item.state, State::NeedsHuman);
+        let esc = item.escalation.expect("escalation set");
+        assert!(esc.question.contains("refused by governor"));
+        assert!(esc.question.contains("does not relate to parent card or project theme"));
+    }
 }
+

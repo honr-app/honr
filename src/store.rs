@@ -12,7 +12,7 @@ use crate::schema::{Level, Schema};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -1282,6 +1282,103 @@ impl Board {
         Ok(item)
     }
 
+fn tokenize_text(text: &str) -> HashSet<String> {
+    let stop_words: HashSet<&'static str> = [
+        "a", "an", "the", "and", "or", "but", "if", "because", "as", "until", "while", "of", "at",
+        "by", "for", "with", "about", "against", "between", "into", "through", "during", "before",
+        "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over",
+        "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how",
+        "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor",
+        "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will", "just",
+        "don", "should", "now", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+        "had", "do", "does", "did", "doing", "would", "could", "this", "that", "these", "those",
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them", "my", "your",
+        "his", "their", "our", "its",
+    ]
+    .into_iter()
+    .collect();
+
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.len() >= 2 && !stop_words.contains(s))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn is_token_related(child_token: &str, theme_token: &str) -> bool {
+    if child_token == theme_token {
+        return true;
+    }
+    let min_len = child_token.len().min(theme_token.len());
+    if min_len >= 3 {
+        if child_token.starts_with(theme_token) || theme_token.starts_with(child_token) {
+            return true;
+        }
+        if min_len >= 4
+            && child_token.is_char_boundary(4)
+            && theme_token.is_char_boundary(4)
+            && child_token[..4] == theme_token[..4]
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn child_is_related(child_tokens: &HashSet<String>, theme_tokens: &HashSet<String>) -> bool {
+    if theme_tokens.is_empty() {
+        return true;
+    }
+    for c_tok in child_tokens {
+        for t_tok in theme_tokens {
+            if Self::is_token_related(c_tok, t_tok) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn check_split_relatedness(
+    card: &WorkItem,
+    project: &WorkItem,
+    children: &[(String, String, String)],
+) -> Result<(), String> {
+    let mut theme_text = String::new();
+    theme_text.push_str(&project.title);
+    theme_text.push(' ');
+    theme_text.push_str(&project.intent);
+    theme_text.push(' ');
+    theme_text.push_str(&card.title);
+    theme_text.push(' ');
+    theme_text.push_str(&card.intent);
+    if let Some(ref dod) = card.definition_of_done {
+        theme_text.push(' ');
+        theme_text.push_str(dod);
+    }
+
+    let theme_tokens = Self::tokenize_text(&theme_text);
+
+    for (title, intent, dod) in children {
+        let mut child_text = String::new();
+        child_text.push_str(title);
+        child_text.push(' ');
+        child_text.push_str(intent);
+        child_text.push(' ');
+        child_text.push_str(dod);
+
+        let child_tokens = Self::tokenize_text(&child_text);
+
+        if !Self::child_is_related(&child_tokens, &theme_tokens) {
+            return Err(format!(
+                "split child '{title}' does not relate to parent card or project theme"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
     /// `split` — self-orchestration. Creates **sibling** Tasks under the same
     /// Project (flat model); the original card is Done, not nested into.
     pub fn split(
@@ -1293,7 +1390,7 @@ impl Board {
     ) -> Result<Vec<WorkItem>, String> {
         let card = self.get(id).ok_or("no such item")?;
 
-        if let Some(ref pr_url) = card.pr_url.filter(|s| !s.trim().is_empty()) {
+        if let Some(ref pr_url) = card.pr_url.as_ref().filter(|s| !s.trim().is_empty()) {
             let msg = format!(
                 "cannot split card #{id}: a PR already exists ({pr_url}); split and publish are mutually exclusive"
             );
@@ -1330,12 +1427,16 @@ impl Board {
         let project_id = card.parent.ok_or_else(|| {
             "cannot split a Project; only Tasks under a Project can split into siblings".to_string()
         })?;
+        let project = self.get(project_id).ok_or_else(|| "project not found".to_string())?;
+
         {
             let s = self.state.read().unwrap();
             if s.items.get(&project_id).and_then(|p| p.parent).is_some() {
                 return Err("split target is not under a Project root".into());
             }
         }
+
+        Self::check_split_relatedness(&card, &project, &children)?;
 
         self.transition(id, State::Splitting, agent_id, Some("agent requested split".into()))
             .map_err(|e| e.to_string())?;
@@ -2147,8 +2248,8 @@ mod tests {
         let project_id = b.get(id).unwrap().parent.expect("task under project");
         let _ = b.transition(id, State::Running, "agent", None);
         let children = vec![
-            ("Part 1".into(), "Do part 1".into(), "Part 1 done".into()),
-            ("Part 2".into(), "Do part 2".into(), "Part 2 done".into()),
+            ("Leaf part 1".into(), "Do leaf part 1".into(), "Leaf part 1 done".into()),
+            ("Leaf part 2".into(), "Do leaf part 2".into(), "Leaf part 2 done".into()),
         ];
         let made = b.split(id, "agent", children, 5).expect("split should succeed");
         assert_eq!(made.len(), 2);
@@ -2159,6 +2260,72 @@ mod tests {
 
         let original = b.get(id).expect("original exists");
         assert_eq!(original.state, State::Done);
+    }
+
+    #[test]
+    fn split_accepts_on_theme_children() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-theme-accept.json"));
+        let project = b
+            .create(None, "User Authentication System", "Manage user logins and tokens", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        let task = b
+            .create(
+                Some(project.id),
+                "Implement OAuth2 login flow",
+                "Support Google and GitHub auth",
+                Some("OAuth login working".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        let _ = b.transition(task.id, State::Shaping, "t", None);
+        let _ = b.transition(task.id, State::Ready, "t", None);
+        let _ = b.claim(task.id, "agent", None, 60).expect("claim");
+        let _ = b.transition(task.id, State::Running, "agent", None);
+
+        let children = vec![
+            ("Google OAuth login endpoint".into(), "Add endpoint for google auth callback".into(), "Google auth done".into()),
+            ("GitHub OAuth token exchange".into(), "Exchange code for github access token".into(), "GitHub auth done".into()),
+        ];
+
+        let made = b.split(task.id, "agent", children, 5).expect("on-theme split should succeed");
+        assert_eq!(made.len(), 2);
+        assert_eq!(b.get(task.id).unwrap().state, State::Done);
+    }
+
+    #[test]
+    fn split_rejects_off_theme_children() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-theme-reject.json"));
+        let project = b
+            .create(None, "User Authentication System", "Manage user logins and tokens", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        let task = b
+            .create(
+                Some(project.id),
+                "Implement OAuth2 login flow",
+                "Support Google and GitHub auth",
+                Some("OAuth login working".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        let _ = b.transition(task.id, State::Shaping, "t", None);
+        let _ = b.transition(task.id, State::Ready, "t", None);
+        let _ = b.claim(task.id, "agent", None, 60).expect("claim");
+        let _ = b.transition(task.id, State::Running, "agent", None);
+
+        let children = vec![
+            ("Google OAuth login endpoint".into(), "Add endpoint for google auth callback".into(), "Google auth done".into()),
+            ("Database connection pool".into(), "Optimize postgres max connection limit".into(), "DB config done".into()),
+        ];
+
+        let err = b.split(task.id, "agent", children, 5).unwrap_err();
+        assert!(err.contains("does not relate to parent card or project theme"), "got error: {err}");
+        assert_ne!(b.get(task.id).unwrap().state, State::Done);
     }
 
     #[test]
