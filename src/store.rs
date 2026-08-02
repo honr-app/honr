@@ -98,6 +98,15 @@ pub struct AncestryLine {
     pub intent: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ClaimPlanContext {
+    project_title: Option<String>,
+    project_prompt: Option<String>,
+    plan_summary: Option<String>,
+    plan_tasks: Vec<crate::model::PlanTaskBrief>,
+    plan_task_key: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ClaimGrant {
     pub item_id: ItemId,
@@ -105,10 +114,16 @@ pub struct ClaimGrant {
     pub definition_of_done: Option<String>,
     /// Canonical beads hash id when mirrored (e.g. `honr-a1b2`).
     pub beads_id: Option<String>,
-    /// Project → this Task. Short why-chain for the agent.
-    pub ancestry: Vec<AncestryLine>,
-    /// Standing constraints inherited from every ancestor.
-    pub constraints: Vec<String>,
+    /// Containing Project title (when this card is a Task).
+    pub project_title: Option<String>,
+    /// Project standing instructions (`project_prompt`).
+    pub project_prompt: Option<String>,
+    /// Plan summary from the Project artifact.
+    pub plan_summary: Option<String>,
+    /// Plan tasks (deps included); `current` marks this card's row when known.
+    pub plan_tasks: Vec<crate::model::PlanTaskBrief>,
+    /// Plan key for this card when matched via `item_id`.
+    pub plan_task_key: Option<String>,
     pub notes: Vec<String>,
     pub lease_expires_at: DateTime<Utc>,
     pub budget_remaining_cents: Option<u64>,
@@ -375,16 +390,6 @@ impl Board {
             .collect()
     }
 
-    /// A correction that stops being a one-off: pins bind every descendant.
-    pub fn inherited_pins(&self, id: ItemId) -> Vec<String> {
-        let s = self.state.read().unwrap();
-        Self::chain(&s, id)
-            .into_iter()
-            .filter_map(|cid| s.items.get(&cid))
-            .flat_map(|i| i.pinned.iter().cloned())
-            .collect()
-    }
-
     pub fn append_agent_log(&self, id: ItemId, line: impl Into<String>) {
         let mut s = self.state.write().unwrap();
         let logs = s.agent_logs.entry(id).or_default();
@@ -600,6 +605,7 @@ impl Board {
             };
             if parent.is_none() {
                 item.plan = Some(PlanArtifact::empty());
+                item.project_prompt = Some(crate::model::DEFAULT_PROJECT_PROMPT.to_string());
             }
             s.items.insert(id, item.clone());
             let mut item_out = item;
@@ -661,10 +667,11 @@ impl Board {
             INITIAL_PLAN_TITLE,
             format!(
                 "Produce a Plan for «{project_title}» — flat sibling Tasks with deps and \
-                 mechanically checkable DoDs. You may open one plan/docs PR, then finish by \
-                 writing split.json (PR + split is allowed on this card only)."
+                 mechanically checkable DoDs. Open one plan/docs PR, then finish with \
+                 report.json (Review). Sibling Tasks land via Approve Plan in the cockpit — \
+                 do not write split.json on this card."
             ),
-            Some("Sibling Tasks materialized via split (or Approve Plan).".into()),
+            Some("Plan/docs PR approved in Review; Tasks via Approve Plan.".into()),
             Origin::Planner,
             false,
             None,
@@ -817,6 +824,7 @@ impl Board {
                         Some(spec.intent.clone()),
                         Some(spec.definition_of_done.clone()),
                         None,
+                        None,
                     );
                     continue;
                 }
@@ -894,6 +902,10 @@ impl Board {
         for cid in self.children_of(project_id) {
             let Some(child) = self.get(cid) else { continue };
             if !child.is_initial_plan_task() || child.state.is_terminal() {
+                continue;
+            }
+            // Initial plan in Review finishes only via approve_review (plan PR).
+            if child.state == State::Review {
                 continue;
             }
             // Prefer Done from shaping/ready/running paths the machine allows.
@@ -1382,7 +1394,7 @@ impl Board {
         }
     }
 
-    /// Tweak an item's title, intent, definition of done, or engine.
+    /// Tweak an item's title, intent, definition of done, engine, or project prompt.
     /// Used from Shaping (pre-Backlog), Backlog (pre-dispatch), and Review (with
     /// Request changes) so humans can rewrite the contract the next agent sees.
     pub fn update_item(
@@ -1392,6 +1404,7 @@ impl Board {
         intent: Option<String>,
         definition_of_done: Option<String>,
         engine: Option<String>,
+        project_prompt: Option<String>,
     ) -> Result<WorkItem, String> {
         let item = {
             let mut s = self.state.write().unwrap();
@@ -1417,6 +1430,15 @@ impl Board {
             }
             if let Some(e) = engine {
                 it.engine = if e.trim().is_empty() { None } else { Some(e) };
+            }
+            if let Some(p) = project_prompt {
+                if it.is_project() {
+                    it.project_prompt = if p.trim().is_empty() {
+                        None
+                    } else {
+                        Some(p)
+                    };
+                }
             }
             it.clone()
         };
@@ -1627,18 +1649,75 @@ impl Board {
             }
         }
 
+        let ctx = self.claim_plan_context(id, &item);
+
         Ok(ClaimGrant {
             item_id: id,
             title: item.title.clone(),
             definition_of_done: item.definition_of_done.clone(),
             beads_id: item.beads_id.clone(),
-            ancestry: self.ancestry(id),
-            constraints: self.inherited_pins(id),
+            project_title: ctx.project_title,
+            project_prompt: ctx.project_prompt,
+            plan_summary: ctx.plan_summary,
+            plan_tasks: ctx.plan_tasks,
+            plan_task_key: ctx.plan_task_key,
             notes: item.notes.iter().map(|n| n.text.clone()).collect(),
             lease_expires_at: expires_at,
             budget_remaining_cents: item.budget_cents.map(|b| b.saturating_sub(item.cost_cents)),
             engine: item.engine.clone(),
         })
+    }
+
+    /// Resolve Project prompt + Plan rows for the card being claimed.
+    fn claim_plan_context(&self, id: ItemId, item: &WorkItem) -> ClaimPlanContext {
+        let project = if item.is_project() {
+            Some(item.clone())
+        } else {
+            item.parent.and_then(|pid| self.get(pid))
+        };
+        let Some(project) = project else {
+            return ClaimPlanContext::default();
+        };
+        let project_title = Some(project.title.clone());
+        let project_prompt = project.project_prompt.clone();
+        let Some(plan) = project.plan.as_ref() else {
+            return ClaimPlanContext {
+                project_title,
+                project_prompt,
+                ..Default::default()
+            };
+        };
+        let plan_summary = if plan.summary.trim().is_empty() {
+            None
+        } else {
+            Some(plan.summary.clone())
+        };
+        let mut plan_task_key = None;
+        let plan_tasks: Vec<crate::model::PlanTaskBrief> = plan
+            .tasks
+            .iter()
+            .map(|t| {
+                let current = t.item_id == Some(id);
+                if current {
+                    plan_task_key = Some(t.key.clone());
+                }
+                crate::model::PlanTaskBrief {
+                    key: t.key.clone(),
+                    title: t.title.clone(),
+                    intent: t.intent.clone(),
+                    definition_of_done: t.definition_of_done.clone(),
+                    blocked_by_keys: t.blocked_by_keys.clone(),
+                    current,
+                }
+            })
+            .collect();
+        ClaimPlanContext {
+            project_title,
+            project_prompt,
+            plan_summary,
+            plan_tasks,
+            plan_task_key,
+        }
     }
 
     /// `heartbeat` — carries cost, because budget enforcement lives in the
@@ -1735,7 +1814,7 @@ fn child_is_related(child_tokens: &HashSet<String>, theme_tokens: &HashSet<Strin
 fn check_split_relatedness(
     card: &WorkItem,
     project: &WorkItem,
-    children: &[(String, String, String)],
+    children: &[crate::model::SplitChildSpec],
 ) -> Result<(), String> {
     let mut theme_text = String::new();
     theme_text.push_str(&project.title);
@@ -1752,19 +1831,20 @@ fn check_split_relatedness(
 
     let theme_tokens = Self::tokenize_text(&theme_text);
 
-    for (title, intent, dod) in children {
+    for child in children {
         let mut child_text = String::new();
-        child_text.push_str(title);
+        child_text.push_str(&child.title);
         child_text.push(' ');
-        child_text.push_str(intent);
+        child_text.push_str(&child.intent);
         child_text.push(' ');
-        child_text.push_str(dod);
+        child_text.push_str(&child.definition_of_done);
 
         let child_tokens = Self::tokenize_text(&child_text);
 
         if !Self::child_is_related(&child_tokens, &theme_tokens) {
             return Err(format!(
-                "split child '{title}' does not relate to parent card or project theme"
+                "split child '{}' does not relate to parent card or project theme",
+                child.title
             ));
         }
     }
@@ -1775,43 +1855,47 @@ fn check_split_relatedness(
     /// `split` — self-orchestration. Creates **sibling** Tasks under the same
     /// Project (flat model); the original card is Done, not nested into.
     ///
-    /// Implementation cards: PR and split are mutually exclusive.
-    /// Initial plan cards: a plan/docs PR is allowed, then split materializes
-    /// the Tasks. Sibling titles already present under the Project are reused
-    /// (idempotent) so a second split or a cockpit plan cannot duplicate work.
+    /// PR and split are mutually exclusive. Sibling titles already present under
+    /// the Project are reused (idempotent). Optional `key` / `blocked_by_keys`
+    /// wire the same DAG shape as Approve Plan.
     pub fn split(
         &self,
         id: ItemId,
         agent_id: &str,
-        children: Vec<(String, String, String)>, // title, intent, dod
+        children: Vec<crate::model::SplitChildSpec>,
         max_children: usize,
     ) -> Result<Vec<WorkItem>, String> {
         let card = self.get(id).ok_or("no such item")?;
-        let allow_pr = card.is_initial_plan_task();
+
+        if card.is_initial_plan_task() {
+            return Err(
+                "Initial plan cannot split; finish with report.json + plan/docs PR (Review), \
+                 then Approve Plan for sibling Tasks"
+                    .into(),
+            );
+        }
 
         if let Some(ref pr_url) = card.pr_url.as_ref().filter(|s| !s.trim().is_empty()) {
-            if !allow_pr {
-                let msg = format!(
-                    "cannot split card #{id}: a PR already exists ({pr_url}); split and publish are mutually exclusive"
-                );
-                let _ = self.escalate(
-                    id,
-                    agent_id,
-                    msg.clone(),
-                    vec![
-                        EscalationOption {
-                            label: "Finish card via report".into(),
-                            detail: "Complete the card with the existing PR using report.".into(),
-                        },
-                        EscalationOption {
-                            label: "Close PR and retry split".into(),
-                            detail: "Close or abandon the existing PR before splitting the card.".into(),
-                        },
-                    ],
-                    0,
-                );
-                return Err(msg);
-            }
+            let msg = format!(
+                "cannot split card #{id}: a PR already exists ({pr_url}); split and publish are mutually exclusive"
+            );
+            let _ = self.escalate(
+                id,
+                agent_id,
+                msg.clone(),
+                vec![
+                    EscalationOption {
+                        label: "Finish card via report".into(),
+                        detail: "Complete the card with the existing PR using report.".into(),
+                    },
+                    EscalationOption {
+                        label: "Close PR and retry split".into(),
+                        detail: "Close or abandon the existing PR before splitting the card.".into(),
+                    },
+                ],
+                0,
+            );
+            return Err(msg);
         }
 
         if children.len() < 2 {
@@ -1839,13 +1923,21 @@ fn check_split_relatedness(
 
         Self::check_split_relatedness(&card, &project, &children)?;
 
-        // Dedupe titles within the request (first wins).
+        // Dedupe titles within the request (first wins); assign stable keys.
         let mut seen_req = HashSet::new();
         let mut unique_children = Vec::new();
-        for child in children {
-            let key = Self::normalize_title(&child.0);
-            if key.is_empty() || !seen_req.insert(key) {
+        for (idx, mut child) in children.into_iter().enumerate() {
+            let title_key = Self::normalize_title(&child.title);
+            if title_key.is_empty() || !seen_req.insert(title_key) {
                 continue;
+            }
+            if child
+                .key
+                .as_ref()
+                .map(|k| k.trim().is_empty())
+                .unwrap_or(true)
+            {
+                child.key = Some(format!("s{}", idx + 1));
             }
             unique_children.push(child);
         }
@@ -1875,18 +1967,21 @@ fn check_split_relatedness(
         let mut made = Vec::new();
         let mut created = 0usize;
         let mut reused = 0usize;
-        for (title, intent, dod) in unique_children {
-            let key = Self::normalize_title(&title);
-            if let Some(existing) = existing_by_title.get(&key) {
+        let mut key_to_id: BTreeMap<String, ItemId> = BTreeMap::new();
+        for child in &unique_children {
+            let title_key = Self::normalize_title(&child.title);
+            let plan_key = child.key.clone().unwrap_or_else(|| title_key.clone());
+            if let Some(existing) = existing_by_title.get(&title_key) {
                 reused += 1;
+                key_to_id.insert(plan_key, existing.id);
                 made.push(existing.clone());
                 continue;
             }
             let sibling = self.create(
                 Some(project_id),
-                title,
-                intent,
-                Some(dod),
+                child.title.clone(),
+                child.intent.clone(),
+                Some(child.definition_of_done.clone()),
                 Origin::Split { from: id },
                 false,
                 card.capability.clone(),
@@ -1896,8 +1991,22 @@ fn check_split_relatedness(
             let sibling = self
                 .transition(sibling.id, State::Backlog, agent_id, None)
                 .map_err(|e| e.to_string())?;
+            key_to_id.insert(plan_key, sibling.id);
             created += 1;
             made.push(sibling);
+        }
+
+        for child in &unique_children {
+            let Some(plan_key) = child.key.as_ref() else { continue };
+            let Some(&sid) = key_to_id.get(plan_key) else { continue };
+            let blockers: Vec<ItemId> = child
+                .blocked_by_keys
+                .iter()
+                .filter_map(|k| key_to_id.get(k).copied())
+                .collect();
+            if !blockers.is_empty() {
+                self.set_blocked_by(sid, blockers);
+            }
         }
 
         self.transition(
@@ -2059,39 +2168,6 @@ fn check_split_relatedness(
             it.clone()
         };
         self.emit(&item);
-        Ok(item)
-    }
-
-    /// Pin — becomes standing context for this item *and all descendants*.
-    pub fn pin(&self, id: ItemId, text: String) -> Result<WorkItem, String> {
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            return Err("constraint text is empty".into());
-        }
-        let item = {
-            let mut s = self.state.write().unwrap();
-            let it = s.items.get_mut(&id).ok_or("no such item")?;
-            it.pinned.push(text.clone());
-            it.clone()
-        };
-        self.emit(&item);
-        self.story(id, format!("Constraint pinned on {}: {text}", item.title));
-        Ok(item)
-    }
-
-    /// Remove a pin by index on this item (does not touch ancestor pins).
-    pub fn unpin(&self, id: ItemId, index: usize) -> Result<WorkItem, String> {
-        let (item, removed) = {
-            let mut s = self.state.write().unwrap();
-            let it = s.items.get_mut(&id).ok_or("no such item")?;
-            if index >= it.pinned.len() {
-                return Err(format!("no constraint at index {index}"));
-            }
-            let removed = it.pinned.remove(index);
-            (it.clone(), removed)
-        };
-        self.emit(&item);
-        self.story(id, format!("Constraint removed on {}: {removed}", item.title));
         Ok(item)
     }
 
@@ -2842,8 +2918,8 @@ mod tests {
         let project_id = b.get(id).unwrap().parent.expect("task under project");
         let _ = b.transition(id, State::Running, "agent", None);
         let children = vec![
-            ("Leaf part 1".into(), "Do leaf part 1".into(), "Leaf part 1 done".into()),
-            ("Leaf part 2".into(), "Do leaf part 2".into(), "Leaf part 2 done".into()),
+            SplitChildSpec::new("Leaf part 1", "Do leaf part 1", "Leaf part 1 done"),
+            SplitChildSpec::new("Leaf part 2", "Do leaf part 2", "Leaf part 2 done"),
         ];
         let made = b.split(id, "agent", children, 5).expect("split should succeed");
         assert_eq!(made.len(), 2);
@@ -2880,8 +2956,8 @@ mod tests {
         let _ = b.transition(task.id, State::Running, "agent", None);
 
         let children = vec![
-            ("Google OAuth login endpoint".into(), "Add endpoint for google auth callback".into(), "Google auth done".into()),
-            ("GitHub OAuth token exchange".into(), "Exchange code for github access token".into(), "GitHub auth done".into()),
+            SplitChildSpec::new("Google OAuth login endpoint", "Add endpoint for google auth callback", "Google auth done"),
+            SplitChildSpec::new("GitHub OAuth token exchange", "Exchange code for github access token", "GitHub auth done"),
         ];
 
         let made = b.split(task.id, "agent", children, 5).expect("on-theme split should succeed");
@@ -2913,8 +2989,8 @@ mod tests {
         let _ = b.transition(task.id, State::Running, "agent", None);
 
         let children = vec![
-            ("Google OAuth login endpoint".into(), "Add endpoint for google auth callback".into(), "Google auth done".into()),
-            ("Database connection pool".into(), "Optimize postgres max connection limit".into(), "DB config done".into()),
+            SplitChildSpec::new("Google OAuth login endpoint", "Add endpoint for google auth callback", "Google auth done"),
+            SplitChildSpec::new("Database connection pool", "Optimize postgres max connection limit", "DB config done"),
         ];
 
         let err = b.split(task.id, "agent", children, 5).unwrap_err();
@@ -2926,7 +3002,7 @@ mod tests {
     fn split_refused_below_minimum_siblings() {
         let (b, id) = claimed_leaf();
         let _ = b.transition(id, State::Running, "agent", None);
-        let children = vec![("Single".into(), "Only one".into(), "Done".into())];
+        let children = vec![SplitChildSpec::new("Single", "Only one", "Done")];
         let err = b.split(id, "agent", children, 5).unwrap_err();
         assert!(err.contains("at least two siblings"), "got error: {err}");
     }
@@ -2936,7 +3012,7 @@ mod tests {
         let (b, id) = claimed_leaf();
         let _ = b.transition(id, State::Running, "agent", None);
         let children: Vec<_> = (1..=6)
-            .map(|i| (format!("Child {i}"), format!("Intent {i}"), format!("DoD {i}")))
+            .map(|i| SplitChildSpec::new(format!("Child {i}"), format!("Intent {i}"), format!("DoD {i}")))
             .collect();
         let err = b.split(id, "agent", children, 5).unwrap_err();
         assert!(err.contains("exceeds max_children_per_split=5"), "got error: {err}");
@@ -2956,8 +3032,8 @@ mod tests {
                 project.id,
                 "agent",
                 vec![
-                    ("A".into(), "a".into(), "done".into()),
-                    ("B".into(), "b".into(), "done".into()),
+                    SplitChildSpec::new("A", "a", "done"),
+                    SplitChildSpec::new("B", "b", "done"),
                 ],
                 5,
             )
@@ -2970,8 +3046,8 @@ mod tests {
         let (b, id) = claimed_leaf();
         b.set_pr_url(id, Some("https://github.com/shanemcd/honr/pull/42".to_string()));
         let children = vec![
-            ("Part 1".into(), "Do part 1".into(), "Part 1 done".into()),
-            ("Part 2".into(), "Do part 2".into(), "Part 2 done".into()),
+            SplitChildSpec::new("Part 1", "Do part 1", "Part 1 done"),
+            SplitChildSpec::new("Part 2", "Do part 2", "Part 2 done"),
         ];
         let err = b.split(id, "agent", children, 5).unwrap_err();
         assert!(err.contains("a PR already exists"), "got error: {err}");
@@ -2985,10 +3061,10 @@ mod tests {
     }
 
     #[test]
-    fn initial_plan_may_split_after_pr() {
+    fn initial_plan_refuses_split() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join("honr-test-initial-plan-pr-split.json"),
+            std::env::temp_dir().join("honr-test-initial-plan-no-split.json"),
         );
         let project = b
             .create(
@@ -3006,31 +3082,90 @@ mod tests {
             .into_iter()
             .find(|&id| b.get(id).unwrap().is_initial_plan_task())
             .expect("initial plan");
-        b.set_pr_url(seed_id, Some("https://github.com/shanemcd/honr/pull/41".into()));
         let _ = b.claim(seed_id, "agent", None, 60).expect("claim initial plan");
         let _ = b.transition(seed_id, State::Running, "agent", None);
 
-        let made = b
+        let err = b
             .split(
                 seed_id,
                 "agent",
                 vec![
-                    (
-                        "API archive endpoint".into(),
-                        "Expose archive for board cards".into(),
-                        "Archive API works".into(),
+                    SplitChildSpec::new(
+                        "API archive endpoint",
+                        "Expose archive for board cards",
+                        "Archive API works",
                     ),
-                    (
-                        "UI archive controls".into(),
-                        "Add archive actions in the board UI".into(),
-                        "Archive UI works".into(),
+                    SplitChildSpec::new(
+                        "UI archive controls",
+                        "Add archive actions in the board UI",
+                        "Archive UI works",
                     ),
                 ],
                 5,
             )
-            .expect("Initial plan must split even with a PR");
+            .unwrap_err();
+        assert!(err.contains("Initial plan cannot split"), "got: {err}");
+        assert_eq!(b.get(seed_id).unwrap().state, State::Running);
+    }
+
+    #[test]
+    fn split_wires_blocked_by_keys() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-split-deps.json"),
+        );
+        let project = b
+            .create(
+                None,
+                "Archive UI",
+                "Archive completed work from the board",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .expect("project");
+        let task = b
+            .create(
+                Some(project.id),
+                "Archive feature",
+                "Archive completed work from the board UI",
+                Some("Archive works".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        let _ = b.transition(task.id, State::Shaping, "t", None);
+        let _ = b.transition(task.id, State::Backlog, "t", None);
+        let _ = b.claim(task.id, "agent", None, 60).expect("claim");
+        let _ = b.transition(task.id, State::Running, "agent", None);
+
+        let made = b
+            .split(
+                task.id,
+                "agent",
+                vec![
+                    SplitChildSpec::new(
+                        "API archive endpoint",
+                        "Expose archive for board cards",
+                        "Archive API works",
+                    )
+                    .with_deps("a", vec![]),
+                    SplitChildSpec::new(
+                        "UI archive controls",
+                        "Add archive actions in the board UI",
+                        "Archive UI works",
+                    )
+                    .with_deps("b", vec!["a".into()]),
+                ],
+                5,
+            )
+            .expect("split");
         assert_eq!(made.len(), 2);
-        assert_eq!(b.get(seed_id).unwrap().state, State::Done);
+        let a = made.iter().find(|m| m.title.contains("API")).unwrap();
+        let bb = made.iter().find(|m| m.title.contains("UI")).unwrap();
+        assert_eq!(b.get(bb.id).unwrap().blocked_by, vec![a.id]);
     }
 
     #[test]
@@ -3050,11 +3185,19 @@ mod tests {
                 None,
             )
             .expect("project");
-        let seed_id = b
-            .children_of(project.id)
-            .into_iter()
-            .find(|&id| b.get(id).unwrap().is_initial_plan_task())
-            .expect("initial plan");
+        let card = b
+            .create(
+                Some(project.id),
+                "Archive feature",
+                "Archive completed work from the board",
+                Some("Archive works".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("card");
+        let _ = b.transition(card.id, State::Shaping, "t", None);
+        let _ = b.transition(card.id, State::Backlog, "t", None);
 
         let preexisting = b
             .create(
@@ -3073,22 +3216,22 @@ mod tests {
             .expect("ready");
 
         let before = b.children_of(project.id).len();
-        let _ = b.claim(seed_id, "agent", None, 60).expect("claim");
-        let _ = b.transition(seed_id, State::Running, "agent", None);
+        let _ = b.claim(card.id, "agent", None, 60).expect("claim");
+        let _ = b.transition(card.id, State::Running, "agent", None);
         let made = b
             .split(
-                seed_id,
+                card.id,
                 "agent",
                 vec![
-                    (
-                        "API archive endpoint".into(),
-                        "Expose archive for board cards".into(),
-                        "Archive API works".into(),
+                    SplitChildSpec::new(
+                        "API archive endpoint",
+                        "Expose archive for board cards",
+                        "Archive API works",
                     ),
-                    (
-                        "UI archive controls".into(),
-                        "Add archive actions in the board UI".into(),
-                        "Archive UI works".into(),
+                    SplitChildSpec::new(
+                        "UI archive controls",
+                        "Add archive actions in the board UI",
+                        "Archive UI works",
                     ),
                 ],
                 5,
@@ -3116,20 +3259,6 @@ mod tests {
             .create(Some(task.id), "nested", "no", None, Origin::Human, false, None)
             .unwrap_err();
         assert!(err.contains("flat under a Project"), "got error: {err}");
-    }
-
-    #[test]
-    fn pin_and_unpin_round_trip() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-unpin.json"));
-        let project = b
-            .create(None, "P", "why", None, Origin::Human, true, None)
-            .expect("project");
-        b.pin(project.id, "gates offline".into()).expect("pin");
-        b.pin(project.id, "human merges".into()).expect("pin");
-        assert_eq!(b.get(project.id).unwrap().pinned.len(), 2);
-        b.unpin(project.id, 0).expect("unpin");
-        let pins = b.get(project.id).unwrap().pinned;
-        assert_eq!(pins, vec!["human merges".to_string()]);
     }
 
     #[test]
@@ -3540,8 +3669,8 @@ mod tests {
         let _ = board.claim(task.id, "agent", None, 45);
 
         let children = vec![
-            ("Sibling One".to_string(), "intent 1".to_string(), "dod 1".to_string()),
-            ("Sibling Two".to_string(), "intent 2".to_string(), "dod 2".to_string()),
+            SplitChildSpec::new("Sibling One", "intent 1", "dod 1"),
+            SplitChildSpec::new("Sibling Two", "intent 2", "dod 2"),
         ];
         let made = board.split(task.id, "agent", children, 5).expect("split");
         assert_eq!(made.len(), 2);

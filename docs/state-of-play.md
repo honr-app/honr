@@ -73,13 +73,13 @@ Tasks from a Plan stay off Backlog until **Approve Plan** on their Project.
 **Dispatch** is the call that puts execution agents to work. The Project itself
 never moves to Backlog.
 
-Constraints pinned on the Project, inherited by every Task:
+**Project prompt** (standing instructions) plus the **Plan** are what Task agents
+see. Default prompt seeded on create covers former pin-style policy (human merges,
+no weaken invariants, hangs-as-failure, report/split protocols).
 
-- Merging is a human action. Approving in honr surfaces the PR; it never merges it.
-- Agents may not weaken `machine.rs` invariants, supervisor budget enforcement,
-  or `sandbox/policy.yaml`. If a card seems to require it, escalate instead.
-- Everything in the sandbox stack fails as a hang, not an error. Every exec
-  needs a deadline; treat silence as failure.
+Initial plan finishes like other cards: plan/docs PR + `report.json` → Review →
+Approve. Sibling Tasks land via **Approve Plan**, not agent `split.json`.
+
 ## Known gaps, roughly by value
 
 **Capability routing is dead.** Enqueue does not filter by capability today;

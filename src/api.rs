@@ -39,8 +39,6 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/items/{id}/transition", post(transition))
         .route("/items/{id}/update", post(update_item))
         .route("/items/{id}/steer", post(steer))
-        .route("/items/{id}/pin", post(pin))
-        .route("/items/{id}/unpin", post(unpin))
         .route("/items/{id}/plan", post(save_plan))
         .route("/items/{id}/halt", post(halt))
         .route("/items/{id}/park", post(park))
@@ -77,7 +75,6 @@ pub struct ItemDetail {
     #[serde(flatten)]
     item: WorkItem,
     ancestry: Vec<AncestryLine>,
-    constraints: Vec<String>,
     children: Vec<ItemId>,
     default_engine: String,
     default_model: String,
@@ -92,7 +89,6 @@ async fn item_detail(
     let default_model = b.schema.execution.agents.vertex.model.clone();
     Ok(Json(ItemDetail {
         ancestry: b.ancestry(id),
-        constraints: b.inherited_pins(id),
         children: b.children_of(id),
         item,
         default_engine,
@@ -213,27 +209,6 @@ async fn steer(
     Ok(Json(b.steer(id, req.text).map_err(ApiError)?))
 }
 
-async fn pin(
-    AxState(b): AxState<SharedBoard>,
-    Path(id): Path<ItemId>,
-    Json(req): Json<TextReq>,
-) -> ApiResult<WorkItem> {
-    Ok(Json(b.pin(id, req.text).map_err(ApiError)?))
-}
-
-#[derive(Deserialize)]
-pub struct UnpinReq {
-    index: usize,
-}
-
-async fn unpin(
-    AxState(b): AxState<SharedBoard>,
-    Path(id): Path<ItemId>,
-    Json(req): Json<UnpinReq>,
-) -> ApiResult<WorkItem> {
-    Ok(Json(b.unpin(id, req.index).map_err(ApiError)?))
-}
-
 #[derive(Deserialize)]
 pub struct PlanTaskBody {
     key: String,
@@ -291,6 +266,8 @@ pub struct UpdateItemReq {
     intent: Option<String>,
     definition_of_done: Option<String>,
     engine: Option<String>,
+    #[serde(default)]
+    project_prompt: Option<String>,
 }
 
 async fn update_item(
@@ -298,7 +275,17 @@ async fn update_item(
     Path(id): Path<ItemId>,
     Json(req): Json<UpdateItemReq>,
 ) -> ApiResult<WorkItem> {
-    Ok(Json(b.update_item(id, req.title, req.intent, req.definition_of_done, req.engine).map_err(ApiError)?))
+    Ok(Json(
+        b.update_item(
+            id,
+            req.title,
+            req.intent,
+            req.definition_of_done,
+            req.engine,
+            req.project_prompt,
+        )
+        .map_err(ApiError)?,
+    ))
 }
 
 async fn halt(
