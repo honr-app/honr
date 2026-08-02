@@ -32,8 +32,6 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/version", get(version))
         .route("/board", get(board))
         .route("/digest", get(digest))
-        .route("/dispatch/pause", post(pause_dispatch))
-        .route("/dispatch/resume", post(resume_dispatch))
         .route("/items", post(create_item))
         .route("/items/{id}", get(item_detail).delete(delete_item))
         .route("/items/{id}/delete", post(delete_item))
@@ -52,8 +50,7 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/items/{id}/approve-plan", post(approve_plan))
         .route("/items/{id}/request-changes", post(request_changes))
         .route("/items/{id}/cut", post(cut_scope))
-        .route("/items/{id}/dispatch/pause", post(pause_project_dispatch))
-        .route("/items/{id}/dispatch/resume", post(resume_project_dispatch))
+        .route("/items/{id}/dispatch", post(dispatch_item))
 }
 
 #[derive(Serialize)]
@@ -71,39 +68,6 @@ async fn board(AxState(b): AxState<SharedBoard>) -> Json<crate::store::Snapshot>
 
 async fn digest(AxState(b): AxState<SharedBoard>) -> Json<crate::store::Digest> {
     Json(b.digest())
-}
-
-#[derive(Serialize)]
-struct DispatchStatus {
-    dispatch_paused: bool,
-}
-
-async fn pause_dispatch(AxState(b): AxState<SharedBoard>) -> Json<DispatchStatus> {
-    b.set_dispatch_paused(true);
-    Json(DispatchStatus {
-        dispatch_paused: b.dispatch_paused(),
-    })
-}
-
-async fn resume_dispatch(AxState(b): AxState<SharedBoard>) -> Json<DispatchStatus> {
-    b.set_dispatch_paused(false);
-    Json(DispatchStatus {
-        dispatch_paused: b.dispatch_paused(),
-    })
-}
-
-async fn pause_project_dispatch(
-    AxState(b): AxState<SharedBoard>,
-    Path(id): Path<ItemId>,
-) -> ApiResult<WorkItem> {
-    Ok(Json(b.set_project_dispatch_paused(id, true)?))
-}
-
-async fn resume_project_dispatch(
-    AxState(b): AxState<SharedBoard>,
-    Path(id): Path<ItemId>,
-) -> ApiResult<WorkItem> {
-    Ok(Json(b.set_project_dispatch_paused(id, false)?))
 }
 
 /// Layer 3 of the cognitive model: is this right? Transcript, diff, cost — and
@@ -202,8 +166,8 @@ async fn create_item(
     Ok(Json(item))
 }
 
-/// Approve Plan: materialize the Project's Plan artifact into Ready Tasks.
-/// Never transitions the Project itself to Ready.
+/// Approve Plan: materialize the Project's Plan artifact into Backlog Tasks.
+/// Never transitions the Project itself to Backlog.
 async fn approve_plan(
     AxState(b): AxState<SharedBoard>,
     Path(id): Path<ItemId>,
@@ -358,6 +322,14 @@ async fn unpark(
     Path(id): Path<ItemId>,
 ) -> ApiResult<WorkItem> {
     Ok(Json(b.unpark(id).map_err(ApiError)?))
+}
+
+/// Queue a Backlog card for the supervisor to claim. Explicit start — nothing auto-dispatches.
+async fn dispatch_item(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(b.enqueue_dispatch(id).map_err(ApiError)?))
 }
 
 #[derive(Deserialize)]

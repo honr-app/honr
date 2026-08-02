@@ -80,7 +80,7 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
 ///
 /// Also periodically reconciles sandbox inventory (reap terminal / keep parked).
 /// `active` must be the same set dispatch uses so we never treat an in-flight
-/// setup as "no live agent" and bounce the card back to Ready.
+/// setup as "no live agent" and bounce the card back to Backlog.
 async fn sweeper_loop(
     board: SharedBoard,
     cfg: ExecutionConfig,
@@ -101,7 +101,7 @@ async fn sweeper_loop(
 ///
 /// Must be well under `lease_secs` (default 600). Line-driven heartbeats alone
 /// let a long quiet tool call expire the lease while the supervisor is still
-/// following — then the card shows Ready, `in_flight` stays 1, and nothing else
+/// following — then the card shows Backlog, `in_flight` stays 1, and nothing else
 /// claims.
 const WATCH_HEARTBEAT_SECS: u64 = 30;
 /// How often to notice Halt / lease-sweep while following *or* setting up.
@@ -292,10 +292,8 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     loop {
         tick.tick().await;
 
-        // Pause stops new claims only. Adoption and in-flight runs keep going.
-        // Global pause stamps every Project paused; Resume on a Project is an
-        // exception checked via `may_claim` — do not early-continue on the
-        // global flag alone.
+        // Only awaiting_dispatch cards are claimed (cockpit Start / MCP dispatch).
+        // Adoption and in-flight runs are independent of that queue.
 
         if fleet.in_flight.load(Ordering::Relaxed) as usize >= fleet.agents.max_concurrent {
             continue;
@@ -315,8 +313,9 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
             continue;
         }
 
-        let ready = board.list_ready(&["any".to_string()]);
-        let Some(item) = ready.into_iter().find(|i| {
+        // Only cards the cockpit explicitly dispatched. Backlog alone is inert.
+        let awaiting = board.list_awaiting_dispatch();
+        let Some(item) = awaiting.into_iter().find(|i| {
             !fleet.active.lock().unwrap().contains(&i.id) && board.may_claim(i.id)
         }) else {
             continue;
@@ -501,7 +500,7 @@ async fn reconcile(
                     tracing::warn!("#{id}: {} has no live agent; requeueing", sb.name);
                     let _ = board.transition(
                         id,
-                        State::Ready,
+                        State::Backlog,
                         "supervisor",
                         Some("honr restarted and found no live agent in the sandbox".into()),
                     );
@@ -2038,7 +2037,7 @@ mod tests {
     fn only_claimed_or_running_keeps_the_watch() {
         assert!(board_still_owns_run(State::Claimed));
         assert!(board_still_owns_run(State::Running));
-        assert!(!board_still_owns_run(State::Ready));
+        assert!(!board_still_owns_run(State::Backlog));
         assert!(!board_still_owns_run(State::NeedsHuman));
         assert!(!board_still_owns_run(State::Done));
     }
@@ -2046,16 +2045,16 @@ mod tests {
     #[test]
     fn board_release_is_not_a_card_failure() {
         assert!(is_supervisor_cancel(
-            "run cancelled: card left Ready (lease expired or halted)"
+            "run cancelled: card left Backlog (lease expired or halted)"
         ));
         assert!(!is_supervisor_cancel("clone failed: CONNECT tunnel 403"));
         assert!(!is_infrastructure(
-            "run cancelled: card left Ready (lease expired or halted)"
+            "run cancelled: card left Backlog (lease expired or halted)"
         ));
     }
 
     /// Halt mid-setup used to leave `in_flight` stuck: clone/create ignored the
-    /// board, so `max_concurrent` never freed and Ready cards sat forever.
+    /// board, so `max_concurrent` never freed and Backlog cards sat forever.
     #[tokio::test]
     async fn setup_await_cancels_when_card_is_halted() {
         let board = test_board();
@@ -2074,7 +2073,7 @@ mod tests {
             )
             .unwrap();
         let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
 
         let board_halt = board.clone();
@@ -2103,7 +2102,7 @@ mod tests {
             is_supervisor_cancel(&err.to_string()),
             "expected supervisor cancel, got {err}"
         );
-        assert_eq!(board.get(id).unwrap().state, State::Ready);
+        assert_eq!(board.get(id).unwrap().state, State::Backlog);
     }
 
     #[tokio::test]
@@ -2124,7 +2123,7 @@ mod tests {
             )
             .unwrap();
         let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
         board.set_conversation_id(task.id, Some("conv-keep".into()));
         board.set_environment(task.id, Some("honr-card-park-a1".into()));
@@ -2148,7 +2147,7 @@ mod tests {
 
         assert!(is_supervisor_cancel(&err.to_string()), "got {err}");
         let it = board.get(id).unwrap();
-        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.state, State::Backlog);
         assert_eq!(it.conversation_id.as_deref(), Some("conv-keep"));
         assert_eq!(it.environment.as_deref(), Some("honr-card-park-a1"));
     }
@@ -2171,7 +2170,7 @@ mod tests {
             )
             .unwrap();
         let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
 
         let board_cut = board.clone();
@@ -2460,8 +2459,8 @@ mod tests {
 
         assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
 
-        // Ready with environment set (e.g. Request changes)
-        item.state = State::Ready;
+        // Backlog with environment set (e.g. Request changes)
+        item.state = State::Backlog;
         assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
 
         // Prior attempt for the same card is kept (prefix match) so create
@@ -2483,7 +2482,7 @@ mod tests {
         assert!(!should_keep_sandbox(None, "honr-card-9-a2"));
 
         // Other cards' sandboxes are not kept
-        item.state = State::Ready;
+        item.state = State::Backlog;
         assert!(!should_keep_sandbox(Some(&item), "honr-card-8-a1"));
     }
 
@@ -2804,7 +2803,7 @@ mod tests {
             )
             .unwrap();
         let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
         let _ = board.transition(task.id, State::Running, "agent-1", None);
 
@@ -2885,7 +2884,7 @@ exit 1
             )
             .unwrap();
         let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
         let _ = board.transition(task.id, State::Running, "agent-1", None);
 
@@ -2975,7 +2974,7 @@ exit 1
             )
             .unwrap();
         let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
         let _ = board.transition(task.id, State::Running, "agent-1", None);
 

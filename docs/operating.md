@@ -61,19 +61,22 @@ config is read once at startup, there is no hot reload and no runtime toggle.
 
 ## What dispatch decides, and when
 
+Cockpit decides what starts. A Backlog card is inert until someone calls
+`dispatch` (MCP tool or UI **Start**), which sets `awaiting_dispatch`.
+
 `dispatch_loop` polls every 3 seconds and passes four gates in order: in-flight
 below `max_concurrent`, spend below the daily ceiling, not in an infrastructure
-cooldown, gateway healthy. Then it takes the **lowest-id** Ready card not
-already being run by this process, and claims it.
+cooldown, gateway healthy. Then it takes the **oldest** Backlog card with
+`awaiting_dispatch` that is claimable and not already being run by this process,
+and claims it.
 
-A card is eligible if it is `Ready`, has no children, has no unresolved
-blockers, and its capability matches — which today is hardcoded to `["any"]`,
-so a card tagged anything else is silently never claimed.
+A card is eligible for enqueue when it is `Backlog`, not parked, unblocked,
+has a definition of done, and is not parked. Lease expiry,
+park, halt, release, and request_changes all clear `awaiting_dispatch` — cockpit
+must dispatch again. Unpark only clears the hold; it does not start a run.
 
-Nothing pushes work. A card becoming Ready is the entire trigger, which means
-the real human decision point is **Approve Plan** (`approve_plan` — materialize
-the Project's Plan artifact into Ready Tasks; the Project itself never goes
-Ready), not dispatch.
+**Approve Plan** materializes Tasks into Backlog; the Project itself never goes
+to Backlog. Approve Plan does not auto-dispatch.
 
 ## Steering a card
 
@@ -156,7 +159,7 @@ Four things worth knowing:
   the log, so it under-reports rather than double-counting. The per-card budget
   check still sees the run's real total.
 - If the sandbox is up but nothing is running in it — honr died during setup,
-  say — the card returns to Ready without spending a retry. That was the
+  say — the card returns to Backlog without spending a retry. That was the
   restart's fault, not the card's.
 
 Failure signatures worth recognising:
@@ -168,4 +171,4 @@ Failure signatures worth recognising:
 | `push failed:` with nothing after it | git writes errors to stderr; check `outerr`, not stdout |
 | `(stale info)` on push | `--force-with-lease` against an ad-hoc URL instead of a named remote |
 | `create sandbox failed: connection error` | podman died; classified as infrastructure, does not count against the card |
-| Card flips Running → Ready → Running | lease expired during a silent build; `lease_secs` too low |
+| Card flips Running → Backlog (needs dispatch again) | lease expired during a silent build; `lease_secs` too low |

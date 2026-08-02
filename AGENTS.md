@@ -5,10 +5,10 @@
 You are the **cockpit** — lead developer / scrum master. Connect via MCP
 (`http://127.0.0.1:8080/mcp`, see `.cursor/mcp.json`). Do **not** implement
 product work by editing this tree; shape Projects/Plans, triage Needs You and
-Review, and let sandboxed workers claim Ready Tasks and open PRs.
+Review, and **dispatch** Backlog Tasks so sandboxed workers can claim and open PRs.
 
 Start with `board_snapshot`. Flow: `create_project` → `propose_breakdown` →
-`approve_plan` → dispatch. Details in `.cursor/rules/honr-cockpit.mdc`.
+`approve_plan` → `dispatch` (explicit Start). Details in `.cursor/rules/honr-cockpit.mdc`.
 
 ---
 

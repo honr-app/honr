@@ -16,24 +16,24 @@ pub fn allowed(from: State, to: State) -> bool {
     match (from, to) {
         (Draft, Shaping) => true,
 
-        (Shaping, Ready) => true,
+        (Shaping, Backlog) => true,
         // Too ambiguous to split.
         (Shaping, NeedsHuman) => true,
 
-        (Ready, Claimed) => true,
+        (Backlog, Claimed) => true,
         // Contract rewritten: unclaimed leaves return to shaping.
-        (Ready, Shaping) => true,
+        (Backlog, Shaping) => true,
 
         (Claimed, Running) => true,
         (Claimed, Splitting) => true,
         (Claimed, NeedsHuman) => true,
         // Graceful release before any work happened.
-        (Claimed, Ready) => true,
+        (Claimed, Backlog) => true,
 
         // Heartbeat + progress.
         (Running, Running) => true,
         // Lease expired, released, or halted by a human.
-        (Running, Ready) => true,
+        (Running, Backlog) => true,
         // Self-orchestration: the work was bigger than the card.
         (Running, Splitting) => true,
         (Running, NeedsHuman) => true,
@@ -41,7 +41,7 @@ pub fn allowed(from: State, to: State) -> bool {
         (Running, Review) => true,
 
         // Sibling tasks created under the Project; original may requeue or finish.
-        (Splitting, Ready) => true,
+        (Splitting, Backlog) => true,
         (Splitting, Shaping) => true,
         // Flat model: the split card is replaced by siblings, not nested under.
         (Splitting, Done) => true,
@@ -49,14 +49,14 @@ pub fn allowed(from: State, to: State) -> bool {
 
         (NeedsHuman, Running) => true,
         // Human reassigns.
-        (NeedsHuman, Ready) => true,
+        (NeedsHuman, Backlog) => true,
 
         (Review, Done) => true,
         (Shaping, Done) => true,
-        (Ready, Done) => true,
+        (Backlog, Done) => true,
         (NeedsHuman, Done) => true,
         (Running, Done) => true,
-        (Review, Ready) => true,
+        (Review, Backlog) => true,
 
         _ => false,
     }
@@ -104,7 +104,7 @@ pub fn check(
     }
 
     // Without this, the tree is a wish list.
-    if to == State::Ready && !has_children && item.definition_of_done.is_none() {
+    if to == State::Backlog && !has_children && item.definition_of_done.is_none() {
         return Err(TransitionError::LeafNeedsDoD { id: item.id });
     }
 
@@ -133,8 +133,8 @@ mod tests {
     fn happy_path_edges_are_legal() {
         for (a, b) in [
             (Draft, Shaping),
-            (Shaping, Ready),
-            (Ready, Claimed),
+            (Shaping, Backlog),
+            (Backlog, Claimed),
             (Claimed, Running),
             (Running, Review),
             (Review, Done),
@@ -152,14 +152,14 @@ mod tests {
 
     #[test]
     fn skipping_the_queue_is_illegal() {
-        assert!(!allowed(Ready, Running), "must go through Claimed");
-        assert!(!allowed(Draft, Ready), "must be shaped first");
+        assert!(!allowed(Backlog, Running), "must go through Claimed");
+        assert!(!allowed(Draft, Backlog), "must be shaped first");
         assert!(!allowed(Draft, Done), "must be shaped first");
     }
 
     #[test]
     fn done_is_terminal_but_retire_is_always_available() {
-        assert!(!allowed(Done, Ready));
+        assert!(!allowed(Done, Backlog));
         assert!(allowed(Done, Retired));
         assert!(allowed(Running, Retired));
         assert!(!allowed(Retired, Retired));
@@ -167,15 +167,15 @@ mod tests {
 
     #[test]
     fn lease_expiry_and_halt_return_to_ready() {
-        assert!(allowed(Running, Ready));
-        assert!(allowed(Claimed, Ready));
+        assert!(allowed(Running, Backlog));
+        assert!(allowed(Claimed, Backlog));
     }
 
     #[test]
     fn escalation_round_trips() {
         assert!(allowed(Running, NeedsHuman));
         assert!(allowed(NeedsHuman, Running));
-        assert!(allowed(NeedsHuman, Ready));
+        assert!(allowed(NeedsHuman, Backlog));
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn containers_cannot_be_claimed() {
-        let item = { let mut i = leaf(); i.state = Ready; i };
+        let item = { let mut i = leaf(); i.state = Backlog; i };
         let err = check(&item, Claimed, true, &[]).unwrap_err();
         assert!(matches!(err, TransitionError::ContainerNotClaimable { .. }));
         // The same node without children is fine.
@@ -197,19 +197,19 @@ mod tests {
     fn leaves_need_a_definition_of_done_to_reach_ready() {
         let mut item = WorkItem::new(2, "t", "intent");
         item.state = Shaping;
-        let err = check(&item, Ready, false, &[]).unwrap_err();
+        let err = check(&item, Backlog, false, &[]).unwrap_err();
         assert!(matches!(err, TransitionError::LeafNeedsDoD { .. }));
 
         // Containers are exempt — they are never executed directly.
-        assert!(check(&item, Ready, true, &[]).is_ok());
+        assert!(check(&item, Backlog, true, &[]).is_ok());
 
         item.definition_of_done = Some("integration tests green".into());
-        assert!(check(&item, Ready, false, &[]).is_ok());
+        assert!(check(&item, Backlog, false, &[]).is_ok());
     }
 
     #[test]
     fn blocked_items_cannot_be_claimed() {
-        let item = { let mut i = leaf(); i.state = Ready; i };
+        let item = { let mut i = leaf(); i.state = Backlog; i };
         let err = check(&item, Claimed, false, &[41]).unwrap_err();
         assert!(matches!(err, TransitionError::Blocked { .. }));
     }

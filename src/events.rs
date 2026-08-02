@@ -14,8 +14,5 @@ pub enum BoardEvent {
     Story { seq: u64, goal: ItemId, at: String, text: String },
     /// A work item was deleted. Remove by `id`.
     Delete { seq: u64, id: ItemId },
-    /// Supervisor will not claim new Ready cards while paused. In-flight runs
-    /// are untouched.
-    DispatchPaused { seq: u64, paused: bool },
 }
 

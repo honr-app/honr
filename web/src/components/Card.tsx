@@ -34,7 +34,7 @@ export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaul
 
   const blockersList = (item.blockers && item.blockers.length > 0
     ? item.blockers
-    : item.blocked_by.map((id) => ({ id, title: `Task #${id}`, state: "ready" as const }))
+    : item.blocked_by.map((id) => ({ id, title: `Task #${id}`, state: "backlog" as const }))
   ).filter((b) => b.state !== "done" && b.state !== "retired");
 
   return (
@@ -76,10 +76,12 @@ export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaul
         </div>
       )}
 
-      {column === "ready" && (
+      {(column === "backlog" || column === "ready") && (
         <>
           <div className="row">
             <span className="tag">⊙ {item.capability ?? "any"}</span>
+            {item.awaiting_dispatch && <span className="tag">⏳ queued</span>}
+            {item.parked && <span className="tag">⏸ parked</span>}
             <span className="dim">{since(item.entered_state_at, now)}</span>
           </div>
           {breadcrumb && <div className="crumb">↑ {breadcrumb}</div>}

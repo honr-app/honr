@@ -1,10 +1,13 @@
 export type State =
-  | "draft" | "shaping" | "ready" | "claimed" | "running" | "splitting"
-  | "needs_human" | "review" | "done" | "retired";
+  | "draft" | "shaping" | "backlog" | "claimed" | "running" | "splitting"
+  | "needs_human" | "review" | "done" | "retired"
+  /** Legacy wire value — treat as backlog. */
+  | "ready";
 
 export type ColumnKey =
-  | "intake" | "shaping" | "ready" | "running"
-  | "needs_you" | "review" | "done" | "retired";
+  | "intake" | "shaping" | "backlog" | "running"
+  | "needs_you" | "review" | "done" | "retired"
+  | "ready";
 
 export interface Lease {
   agent_id: string;
@@ -99,15 +102,15 @@ export interface WorkItem {
   environment: string | null;
   /** agy conversation id; park keeps it for resume, halt clears it. */
   conversation_id?: string | null;
-  /** Park hold: Ready but not claimable until unpark. */
+  /** Park hold: Backlog but not dispatchable until unpark. */
   parked?: boolean;
+  /** Cockpit asked supervisor to start this Backlog card. */
+  awaiting_dispatch?: boolean;
   engine?: string | null;
   beads_id?: string | null;
   github_issue_url?: string | null;
   pr_url: string | null;
   plan?: PlanArtifact | null;
-  /** Projects only: pause claiming under this project. */
-  dispatch_paused?: boolean;
   created_at: string;
   entered_state_at: string;
   history: Transition[];
@@ -130,8 +133,6 @@ export interface GoalView {
   needs_you: number;
   /** `no_plan` | `awaiting_approval` | `approved_vN` */
   plan_status: string;
-  /** Project-level dispatch pause (independent of global). */
-  dispatch_paused?: boolean;
   /** Soft-retired Project — cockpit hides unless "Show archived". */
   archived?: boolean;
   columns: ColumnView[];
@@ -154,7 +155,6 @@ export interface Snapshot {
   server_time: string;
   heartbeat_expect_secs: number;
   seq: number;
-  dispatch_paused: boolean;
   default_engine?: string;
   default_model?: string;
 }
@@ -162,14 +162,22 @@ export interface Snapshot {
 export type BoardEvent =
   | { type: "upsert"; seq: number; item: WorkItem }
   | { type: "story"; seq: number; goal: number; at: string; text: string }
-  | { type: "delete"; seq: number; id: number }
-  | { type: "dispatch_paused"; seq: number; paused: boolean };
+  | { type: "delete"; seq: number; id: number };
+
+/** Normalize legacy `ready` wire values to `backlog`. */
+export function normState(s: State): Exclude<State, "ready"> {
+  return s === "ready" ? "backlog" : s;
+}
+
+export function normColumn(c: ColumnKey): Exclude<ColumnKey, "ready"> {
+  return c === "ready" ? "backlog" : c;
+}
 
 /** Which board column a state renders in. Mirrors `State::column` on the server. */
-export const COLUMN_OF: Record<State, ColumnKey> = {
+export const COLUMN_OF: Record<Exclude<State, "ready">, Exclude<ColumnKey, "ready">> = {
   draft: "intake",
   shaping: "shaping",
-  ready: "ready",
+  backlog: "backlog",
   claimed: "running",
   running: "running",
   splitting: "running",
@@ -180,8 +188,8 @@ export const COLUMN_OF: Record<State, ColumnKey> = {
 };
 
 /** Board columns. Intake and Shaping live off the kanban strip. */
-export const BOARD_COLUMNS: { key: ColumnKey; label: string; question: string }[] = [
-  { key: "ready", label: "READY", question: "Is this actually ready?" },
+export const BOARD_COLUMNS: { key: Exclude<ColumnKey, "ready">; label: string; question: string }[] = [
+  { key: "backlog", label: "BACKLOG", question: "What should start next?" },
   { key: "running", label: "RUNNING", question: "Is it alive, and is it worth it?" },
   { key: "needs_you", label: "⚠ NEEDS YOU", question: "How fast must I act?" },
   { key: "review", label: "REVIEW", question: "Can I approve this in 30 seconds?" },

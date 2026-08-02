@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { Card } from "./Card.js";
 import { DependencyGraph } from "./DependencyGraph.js";
 import { humanizeEscalation } from "../humanize.js";
-import { BOARD_COLUMNS, COLUMN_OF } from "../types.js";
+import { BOARD_COLUMNS, COLUMN_OF, normState } from "../types.js";
 import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types.js";
 import { api, money, since } from "../api.js";
 
@@ -14,7 +14,6 @@ export interface CockpitProps {
   breadcrumbOf: (id: number) => string;
   now: number;
   heartbeatExpect: number;
-  dispatchPaused: boolean;
   defaultEngine?: string;
   defaultModel?: string;
   onOpen: (id: number) => void;
@@ -80,16 +79,16 @@ export function Cockpit(props: CockpitProps) {
     let needsYou = 0;
     let running = 0;
     let review = 0;
-    let ready = 0;
+    let backlog = 0;
     let done = 0;
     for (const t of tasks) {
       if (t.state === "needs_human") needsYou += 1;
       if (["claimed", "running", "splitting"].includes(t.state)) running += 1;
       if (t.state === "review") review += 1;
-      if (t.state === "ready") ready += 1;
+      if (normState(t.state) === "backlog") backlog += 1;
       if (t.state === "done") done += 1;
     }
-    return { needsYou, running, review, ready, done, total: tasks.length };
+    return { needsYou, running, review, backlog, done, total: tasks.length };
   }, [tasks]);
 
   // Stable order from the board (id / creation). Activity shows on badges and
@@ -107,7 +106,7 @@ export function Cockpit(props: CockpitProps) {
     needsYou: totals.needsYou,
     running: totals.running,
     inReview: totals.review,
-    ready: totals.ready,
+    backlog: totals.backlog,
     done: totals.done,
     totalTasks: totals.total,
   });
@@ -127,7 +126,7 @@ export function Cockpit(props: CockpitProps) {
           <h2>No projects yet</h2>
           <p className="dim">
             From a cockpit agent with the honr MCP: create_project →
-            propose_breakdown → approve_plan. Then Ready tasks can claim.
+            propose_breakdown → approve_plan. Then dispatch Backlog tasks to start.
           </p>
           {archivedGoals.length > 0 && (
             <p style={{ marginTop: 12 }}>
@@ -295,18 +294,17 @@ function modeCopy({
   needsYou,
   running,
   inReview,
-  ready,
+  backlog,
   done,
   totalTasks,
 }: {
   needsYou: number;
   running: number;
   inReview: number;
-  ready: number;
+  backlog: number;
   done: number;
   totalTasks: number;
 }): { title: string; lede: string } {
-  // Global pause is owned by the banner — mode only reports what work is doing.
   if (needsYou > 0) {
     return {
       title: `${needsYou} decision${needsYou === 1 ? "" : "s"} waiting on you`,
@@ -325,10 +323,10 @@ function modeCopy({
       lede: "Finished work is waiting. Review when you have time — nothing is blocked on you right now.",
     };
   }
-  if (ready > 0) {
+  if (backlog > 0) {
     return {
-      title: `${ready} ready to claim`,
-      lede: "Agents can pick these up. Expand a project to watch columns, or filter to Review when PRs land.",
+      title: `${backlog} in backlog`,
+      lede: "Nothing starts until you dispatch. Open a card and press Start, or use the MCP dispatch tool.",
     };
   }
   if (done === totalTasks && totalTasks > 0) {
@@ -352,7 +350,7 @@ function HowItWorks() {
           <strong>Project</strong> — a goal. An Initial plan task writes the Plan.
         </li>
         <li>
-          <strong>Approve Plan</strong> — tasks become Ready for agents to claim.
+          <strong>Approve Plan</strong> — tasks land in Backlog; dispatch to start a run.
         </li>
         <li>
           <strong>Needs you</strong> — an agent stopped; answer so it can continue.
@@ -460,13 +458,10 @@ function Swimlane({
   const hot = !archived && laneRank(goal, p.items) < 3;
   const urgent = !archived && goal.needs_you > 0;
   const [viewMode, setViewMode] = useState<"columns" | "graph">("columns");
-  const [pauseBusy, setPauseBusy] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const story = p.stories.get(goal.id) ?? goal.story;
   const q = filterQuery.toLowerCase().trim();
-  const projectPaused =
-    p.items.get(goal.id)?.dispatch_paused ?? goal.dispatch_paused ?? false;
 
   const mine = [...p.items.values()].filter((i) => {
     if (i.parent !== goal.id) return false;
@@ -479,7 +474,7 @@ function Swimlane({
     )
       return false;
     if (!archived && filterState !== "all") {
-      const colKey = COLUMN_OF[i.state];
+      const colKey = COLUMN_OF[normState(i.state)];
       if (colKey !== filterState) return false;
     }
     return true;
@@ -488,21 +483,6 @@ function Swimlane({
   useEffect(() => {
     if (filterState !== "all" && mine.length > 0 && !open) onOpenChange(true);
   }, [filterState, mine.length, open, onOpenChange]);
-
-  const toggleProjectPause = async (e: MouseEvent) => {
-    e.stopPropagation();
-    if (pauseBusy) return;
-    setPauseBusy(true);
-    try {
-      if (projectPaused) await api.resumeProjectDispatch(goal.id);
-      else await api.pauseProjectDispatch(goal.id);
-      p.onChanged?.();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setPauseBusy(false);
-    }
-  };
 
   const archiveProject = async (e: MouseEvent) => {
     e.stopPropagation();
@@ -560,11 +540,6 @@ function Swimlane({
         {!archived && reviewCount > 0 && goal.needs_you === 0 && (
           <span className="pill review-pill">{reviewCount} review</span>
         )}
-        {!archived && projectPaused && (
-          <span className="pill warn" title="This project won't claim until Resume">
-            Paused
-          </span>
-        )}
         {!archived && planLabel && (
           <span className="dim plan-status">{planLabel}</span>
         )}
@@ -589,19 +564,6 @@ function Swimlane({
 
         {!archived && (
           <div className="lane-actions" onClick={(e) => e.stopPropagation()}>
-            <button
-              type="button"
-              className={projectPaused ? "dispatch-toggle paused" : "dispatch-toggle"}
-              disabled={pauseBusy}
-              onClick={toggleProjectPause}
-              title={
-                projectPaused
-                  ? "Resume claiming under this Project (allowed even while Pause all is on)"
-                  : "Pause claiming under this Project — running cards keep going"
-              }
-            >
-              {projectPaused ? "Resume" : "Pause"}
-            </button>
             {!confirmArchive ? (
               <button
                 type="button"
@@ -711,7 +673,7 @@ function Swimlane({
             >
               {BOARD_COLUMNS.map((col) => {
                 const cards = mine
-                  .filter((i) => COLUMN_OF[i.state] === col.key)
+                  .filter((i) => COLUMN_OF[normState(i.state)] === col.key)
                   .sort(sortFor(col.key));
                 const summary = goal.columns.find((c) => c.column === col.key)?.summary;
                 return (
@@ -742,11 +704,11 @@ function laneRank(goal: GoalView, items: Map<number, WorkItem>): number {
     [...items.values()].filter((i) => i.parent === goal.id && i.state === "review")
       .length;
   if (review > 0) return 2;
-  const ready =
-    goal.columns.find((c) => c.column === "ready")?.summary.count ??
-    [...items.values()].filter((i) => i.parent === goal.id && i.state === "ready")
+  const backlog =
+    goal.columns.find((c) => c.column === "backlog" || c.column === "ready")?.summary.count ??
+    [...items.values()].filter((i) => i.parent === goal.id && normState(i.state) === "backlog")
       .length;
-  if (ready > 0) return 3;
+  if (backlog > 0) return 3;
   return 4;
 }
 
@@ -774,9 +736,9 @@ export function isBlocked(item: WorkItem): boolean {
 }
 
 /** Sort Review by regret risk, not arrival time: blast radius × novelty.
-    Sort Ready by claimable first: unblocked cards sort above blocked cards. */
+    Sort Backlog by dispatchable first: unblocked cards sort above blocked cards. */
 export function sortFor(key: ColumnKey) {
-  if (key === "ready") {
+  if (key === "backlog" || key === "ready") {
     return (a: WorkItem, b: WorkItem) => {
       const aBlocked = isBlocked(a) ? 1 : 0;
       const bBlocked = isBlocked(b) ? 1 : 0;

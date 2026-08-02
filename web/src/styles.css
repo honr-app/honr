@@ -79,58 +79,12 @@ textarea {
 }
 .info.banner { margin: 10px 14px 4px 14px; }
 
-.pause-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  /* Don't paint the whole strip in warn ink — only the lead-in is the signal. */
-  color: var(--ink);
-  border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
-  background: color-mix(in srgb, var(--warn) 8%, var(--panel));
-}
-.pause-banner .banner-text {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--ink);
-  min-width: 0;
-}
-.pause-banner .banner-text strong {
-  color: var(--warn);
-  font-weight: 600;
-}
-.pause-banner .banner-action {
-  background: var(--warn);
-  color: #0b1017;
-  border: 1px solid var(--warn);
-  font-weight: 600;
-  font-size: 12px;
-  padding: 4px 12px;
-  border-radius: 4px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.pause-banner .banner-action:hover:not(:disabled) {
-  opacity: 0.9;
-  border-color: #ffd93d;
-}
-.pause-banner .banner-action:disabled {
-  opacity: 0.5;
-  cursor: wait;
-}
-
 .dispatch-toggle {
   font-size: 12px;
   padding: 3px 10px;
-  min-width: 5.5rem; /* Pause/Resume (and Archive) stay the same width */
+  min-width: 5.5rem;
   text-align: center;
   box-sizing: border-box;
-}
-.dispatch-toggle.paused {
-  background: var(--warn);
-  color: #0b1017;
-  border-color: var(--warn);
 }
 .dispatch-toggle.archive-toggle {
   color: var(--muted);
@@ -463,7 +417,8 @@ main > :first-child { flex: 1; min-width: 0; }
    versus what the system decided on its own. */
 .card.machine { border-style: dashed; }
 
-.card.col-ready { border-left-color: var(--ready); }
+.card.col-ready,
+.card.col-backlog { border-left-color: var(--ready); }
 .card.col-running { border-left-color: var(--accent); animation: pulse-subtle 3s infinite ease-in-out; }
 .card.col-needs_you { border-left-color: var(--needs-human); background: #2a1a1d; border-color: rgba(255, 107, 107, 0.3); }
 .card.col-review { border-left-color: var(--review); background: #232219; }
@@ -527,7 +482,8 @@ main > :first-child { flex: 1; min-width: 0; }
   color: var(--dim);
   text-transform: lowercase;
 }
-.blocker-chip.state-ready .state-cue {
+.blocker-chip.state-ready .state-cue,
+.blocker-chip.state-backlog .state-cue {
   background: rgba(232, 244, 248, 0.15);
   color: var(--ready);
 }
@@ -841,7 +797,8 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 .ostate.s-needs_human { color: #ff6b6b; background: rgba(255, 107, 107, 0.15); border-color: rgba(255, 107, 107, 0.3); font-weight: 600; }
 .ostate.s-review { color: #facc15; background: rgba(250, 204, 21, 0.12); border-color: rgba(250, 204, 21, 0.25); font-weight: 600; }
 .ostate.s-done { color: #4ba36a; background: rgba(75, 163, 106, 0.12); border-color: rgba(75, 163, 106, 0.25); }
-.ostate.s-ready { color: #94a3b8; }
+.ostate.s-ready,
+.ostate.s-backlog { color: #94a3b8; }
 
 .ointent {
   padding-left: calc(46px + var(--depth, 0) * 20px);
@@ -1092,7 +1049,8 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
 }
 
-.graph-node-card.state-ready { border-left-color: var(--ready); }
+.graph-node-card.state-ready,
+.graph-node-card.state-backlog { border-left-color: var(--ready); }
 .graph-node-card.state-running { border-left-color: var(--accent); }
 .graph-node-card.state-needs_human { border-left-color: var(--needs-human); background: #2a1a1d; }
 .graph-node-card.state-review { border-left-color: var(--review); }
@@ -1125,7 +1083,8 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   border-radius: 8px;
   font-weight: 600;
 }
-.node-state-badge.state-ready { background: rgba(232, 244, 248, 0.15); color: var(--ready); }
+.node-state-badge.state-ready,
+.node-state-badge.state-backlog { background: rgba(232, 244, 248, 0.15); color: var(--ready); }
 .node-state-badge.state-running { background: rgba(111, 168, 255, 0.15); color: var(--accent); }
 .node-state-badge.state-needs_human { background: rgba(255, 107, 107, 0.2); color: var(--needs-human); }
 .node-state-badge.state-review { background: rgba(255, 217, 61, 0.15); color: var(--review); }

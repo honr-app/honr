@@ -80,13 +80,13 @@ const task = (title, intent, extra = {}) =>
     title,
     intent,
     definition_of_done: `${title} is done and covered by a test.`,
-    state: "ready",
+    state: "backlog",
     level: "Task",
     capability: "any",
     ...extra,
   });
 
-// ---- Ready (Diamond DAG: A -> B, A -> C, B+C -> D) -------------------------
+// ---- Backlog (Diamond DAG: A -> B, A -> C, B+C -> D) -------------------------
 
 const taskA = task("Surface PR checks on the Review card", "CI is the mechanical gate; the board should show it.", {
   since: 2400,
@@ -308,7 +308,7 @@ for (const item of Object.values(items)) {
     item.blockers = item.blocked_by.map((bid) => ({
       id: bid,
       title: items[bid]?.title ?? `Task #${bid}`,
-      state: items[bid]?.state ?? "ready",
+      state: items[bid]?.state ?? "backlog",
     }));
   }
 }

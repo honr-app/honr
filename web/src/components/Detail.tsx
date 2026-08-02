@@ -917,32 +917,6 @@ export function DetailDrawer({
         <>
           <Section title="Project">
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <div className="btns" style={{ alignItems: "center", gap: 8 }}>
-                <button
-                  type="button"
-                  className={d.dispatch_paused ? "dispatch-toggle paused" : "dispatch-toggle"}
-                  onClick={() =>
-                    act(
-                      d.dispatch_paused
-                        ? api.resumeProjectDispatch(d.id)
-                        : api.pauseProjectDispatch(d.id),
-                    )
-                  }
-                  title={
-                    d.dispatch_paused
-                      ? "Resume claiming under this Project (allowed even while Pause all is on)"
-                      : "Pause claiming under this Project — running cards keep going"
-                  }
-                >
-                  {d.dispatch_paused ? "Resume dispatch" : "Pause dispatch"}
-                </button>
-                {d.dispatch_paused && (
-                  <span className="dim">
-                    New claims under this Project are stopped. While Pause all is
-                    on, Resume here makes this Project an exception.
-                  </span>
-                )}
-              </div>
               <div>
                 <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
                   Title
@@ -1049,7 +1023,7 @@ export function DetailDrawer({
           <Section title="Plan">
             <p className="dim" style={{ marginBottom: 8 }}>
               Task breakdown (keys, deps, DoDs). Save Plan, then Approve Plan to
-              materialize Ready Tasks — this Project never becomes a Board card.
+              materialize Backlog Tasks — this Project never becomes a Board card.
             </p>
             {d.plan && (
               <p style={{ marginBottom: 8 }}>
@@ -1116,7 +1090,7 @@ export function DetailDrawer({
                   d.plan?.status === "approved"
                     ? "Already approved — edit & Save Plan to propose a new revision"
                     : d.plan?.status === "awaiting_approval"
-                      ? "Materialize Tasks to Ready"
+                      ? "Materialize Tasks to Backlog"
                       : "Save Plan first (status must be awaiting approval)"
                 }
                 onClick={() => act(api.approvePlan(d.id))}
@@ -1129,16 +1103,16 @@ export function DetailDrawer({
       )}
 
       {/* Title / Why / DoD are the contract the next agent is graded on. Editable
-          in Shaping, Ready, and Review — not only before first Ready — because
+          in Shaping, Backlog, and Review — not only before first Backlog — because
           Request changes notes lose to a stale DoD if you cannot rewrite it. */}
       {d.level !== "Project" &&
-        (d.state === "shaping" || d.state === "ready" || d.state === "review") && (
+        (d.state === "shaping" || d.state === "backlog" || d.state === "ready" || d.state === "review") && (
         <Section title={d.state === "review" ? "Card contract" : "Refine"}>
           <p className="dim" style={{ marginBottom: 8 }}>
             {d.state === "shaping"
-              ? "Tweak this Task before moving it into the Ready queue."
-              : d.state === "ready"
-                ? "Still editable until an agent claims it. DoD is what the next run must satisfy."
+              ? "Tweak this Task before moving it into the Backlog."
+              : d.state === "backlog" || d.state === "ready"
+                ? "Still editable until you Start a run. DoD is what the next run must satisfy."
                 : "If the PR missed the point, fix DoD / Why here — Request changes saves these with your note."}
           </p>
 
@@ -1213,10 +1187,10 @@ export function DetailDrawer({
                       definition_of_done: editDod,
                       engine: editEngine,
                     });
-                    act(saveP.then(() => api.transition(d.id, "ready", "human approved")));
+                    act(saveP.then(() => api.transition(d.id, "backlog", "human approved")));
                   }}
                 >
-                  Move to Ready
+                  Move to Backlog
                 </button>
               )}
             </div>
@@ -1337,16 +1311,35 @@ export function DetailDrawer({
         </Section>
       )}
 
-      {d.state === "ready" && d.parked && (
+      {(d.state === "backlog" || d.state === "ready") && d.parked && (
         <Section title="Parked session">
           <p className="dim" style={{ marginBottom: 8 }}>
             Agent is stopped. Sandbox
             {d.environment ? ` ${d.environment}` : ""} and conversation are kept.
-            Resume when you want it claimed again.
+            Unpark, then Start to resume the same conversation.
           </p>
           <div className="btns">
             <button className="primary" onClick={() => act(api.unpark(d.id))}>
-              Resume session
+              Unpark
+            </button>
+          </div>
+        </Section>
+      )}
+
+      {(d.state === "backlog" || d.state === "ready") && !d.parked && (
+        <Section title="Dispatch">
+          <p className="dim" style={{ marginBottom: 8 }}>
+            {d.awaiting_dispatch
+              ? "Queued — the supervisor will claim this when a sandbox slot opens."
+              : "Nothing auto-starts from Backlog. Start when you want a run."}
+          </p>
+          <div className="btns">
+            <button
+              className="primary"
+              disabled={!!d.awaiting_dispatch}
+              onClick={() => act(api.dispatch(d.id))}
+            >
+              {d.awaiting_dispatch ? "Queued…" : "Start"}
             </button>
           </div>
         </Section>
@@ -1368,15 +1361,15 @@ export function DetailDrawer({
             className="primary"
             onClick={() => {
               const steerP = api.steer(d.id, text.trim());
-              const p =
-                d.state !== "ready"
-                  ? steerP.then(() => api.transition(d.id, "ready", "steered by human"))
-                  : steerP;
+              const inBacklog = d.state === "backlog" || d.state === "ready";
+              const p = !inBacklog
+                ? steerP.then(() => api.transition(d.id, "backlog", "steered by human"))
+                : steerP;
               act(p);
               setText("");
             }}
           >
-            Send Instruction & Queue for Agent
+            Send Instruction
           </button>
         </div>
       </Section>

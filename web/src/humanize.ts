@@ -40,6 +40,8 @@ export function friendlyState(state: string): string {
     case "running":
     case "splitting":
       return "working";
+    case "ready":
+      return "backlog";
     default:
       return state.replace(/_/g, " ");
   }
