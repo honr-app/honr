@@ -18,7 +18,11 @@ pub type ItemId = u64;
 pub enum State {
     Draft,
     Shaping,
-    Ready,
+    /// Claimable pool — cockpit must explicitly dispatch; nothing auto-starts.
+    ///
+    /// `alias = "ready"` loads legacy boards/history that used Ready.
+    #[serde(alias = "ready")]
+    Backlog,
     Claimed,
     Running,
     Splitting,
@@ -42,7 +46,7 @@ impl State {
         match self {
             State::Draft => Column::Intake,
             State::Shaping => Column::Shaping,
-            State::Ready => Column::Ready,
+            State::Backlog => Column::Backlog,
             State::Claimed | State::Running | State::Splitting => Column::Running,
             State::NeedsHuman => Column::NeedsYou,
             State::Review => Column::Review,
@@ -61,7 +65,9 @@ impl State {
 pub enum Column {
     Intake,
     Shaping,
-    Ready,
+    /// Formerly `ready` — serde alias keeps old snapshots loading.
+    #[serde(alias = "ready")]
+    Backlog,
     Running,
     NeedsYou,
     Review,
@@ -84,7 +90,7 @@ pub enum Origin {
 
 
 /// What makes pull-based dispatch survivable: a dead agent simply stops
-/// renewing, and the card returns to Ready with no supervisor involved.
+/// renewing, and the card returns to Backlog with no supervisor involved.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Lease {
     pub agent_id: String,
@@ -323,7 +329,7 @@ pub struct WorkItem {
     #[serde(default)]
     pub pinned: Vec<String>,
 
-    /// The bounce reason if this card was returned to Ready due to an infra or execution bounce.
+    /// The bounce reason if this card was returned to Backlog due to an infra or execution bounce.
     #[serde(default)]
     pub last_bounce_reason: Option<String>,
 
@@ -340,10 +346,14 @@ pub struct WorkItem {
     /// the next claim can `--conversation` resume; halt clears it.
     #[serde(default)]
     pub conversation_id: Option<String>,
-    /// Set by park: card is Ready but must not be claimed until the human
-    /// explicitly resumes. Without this, park immediately re-dispatches.
+    /// Set by park: card is Backlog but must not be dispatched until the human
+    /// explicitly unparks. Dispatch is always explicit; park only adds a hold.
     #[serde(default)]
     pub parked: bool,
+    /// Cockpit asked the supervisor to start this Backlog card. Cleared on
+    /// claim, bounce to Backlog, or cancel. Nothing auto-sets this.
+    #[serde(default)]
+    pub awaiting_dispatch: bool,
     /// Beads issue hash ID (e.g. `bd-a1b2`).
     #[serde(default)]
     pub beads_id: Option<String>,
@@ -358,12 +368,6 @@ pub struct WorkItem {
     /// Plan artifact — Projects only (Phase 1). Source of truth for Approve Plan.
     #[serde(default)]
     pub plan: Option<PlanArtifact>,
-
-    /// Projects only: supervisor will not claim Ready Tasks under this Project
-    /// while true. Independent of the global board `dispatch_paused` flag —
-    /// both must be clear for a card to be claimable. Ignored on Tasks.
-    #[serde(default)]
-    pub dispatch_paused: bool,
 
     pub created_at: DateTime<Utc>,
     pub entered_state_at: DateTime<Utc>,
@@ -406,11 +410,11 @@ impl WorkItem {
             environment: None,
             conversation_id: None,
             parked: false,
+            awaiting_dispatch: false,
             beads_id: None,
             github_issue_url: None,
             pr_url: None,
             plan: None,
-            dispatch_paused: false,
             created_at: now,
             entered_state_at: now,
             history: Vec::new(),
@@ -428,7 +432,6 @@ impl WorkItem {
                 .as_deref()
                 .is_some_and(|d| d.contains("Plan artifact approved"))
     }
-
 
     pub fn time_in_state(&self, now: DateTime<Utc>) -> Duration {
         now - self.entered_state_at
@@ -450,5 +453,19 @@ pub fn humanize(d: Duration) -> String {
         } else {
             format!("{h}h {m}m")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_ready_wire_value_loads_as_backlog() {
+        let json = r#"{"id":1,"title":"t","intent":"i","state":"ready","origin":{"kind":"human"},"created_at":"2026-01-01T00:00:00Z","entered_state_at":"2026-01-01T00:00:00Z"}"#;
+        let item: WorkItem = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(item.state, State::Backlog);
+        assert_eq!(item.state.column(), Column::Backlog);
+        assert!(!item.awaiting_dispatch);
     }
 }

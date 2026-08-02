@@ -6,7 +6,7 @@ import { DependencyGraph } from "./dist-test/components/DependencyGraph.js";
 const now = Math.floor(Date.now() / 1000);
 
 // Helper to create dummy WorkItem
-function makeItem(id, title, blockedBy = [], state = "ready") {
+function makeItem(id, title, blockedBy = [], state = "backlog") {
   return {
     id,
     parent: 2,
@@ -18,7 +18,7 @@ function makeItem(id, title, blockedBy = [], state = "ready") {
     origin: { kind: "human" },
     above_line: false,
     blocked_by: blockedBy,
-    blockers: blockedBy.map((bId) => ({ id: bId, title: `Task #${bId}`, state: "ready" })),
+    blockers: blockedBy.map((bId) => ({ id: bId, title: `Task #${bId}`, state: "backlog" })),
     capability: "any",
     lease: null,
     model: null,

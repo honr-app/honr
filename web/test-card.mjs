@@ -15,12 +15,12 @@ const blockedItem = {
   title: "Fail closed when CI is red",
   intent: "A Review card with failing checks should be obvious.",
   definition_of_done: "Done",
-  state: "ready",
+  state: "backlog",
   origin: { kind: "human" },
   above_line: false,
   blocked_by: [6],
   blockers: [
-    { id: 6, title: "Surface PR checks on the Review card", state: "ready" },
+    { id: 6, title: "Surface PR checks on the Review card", state: "backlog" },
   ],
   capability: "any",
   lease: null,
@@ -46,7 +46,7 @@ const blockedItem = {
 const blockedHtml = renderToString(
   React.createElement(Card, {
     item: blockedItem,
-    column: "ready",
+    column: "backlog",
     now,
     heartbeatExpect: 600,
     onOpen: () => {},
@@ -57,10 +57,10 @@ console.log("Blocked Card HTML:\n", blockedHtml);
 
 // Assertions for blocked card
 assert(blockedHtml.includes('class="blocker-chips"'), "Should contain blocker-chips container");
-assert(blockedHtml.includes('class="blocker-chip state-ready"'), "Should contain blocker-chip with state class");
+assert(blockedHtml.includes('class="blocker-chip state-backlog"'), "Should contain blocker-chip with state class");
 assert(blockedHtml.includes('#6'), "Should contain blocker ID");
-assert(blockedHtml.includes('Supervisor runs the gates'), "Should contain human-readable blocker title");
-assert(blockedHtml.includes('ready'), "Should contain state cue");
+assert(blockedHtml.includes('Surface PR checks on the Review card'), "Should contain human-readable blocker title");
+assert(blockedHtml.includes('backlog'), "Should contain state cue");
 
 // Test 2: Unblocked card is empty when unblocked (no blocker chips rendered)
 const unblockedItem = {
@@ -73,7 +73,7 @@ const unblockedItem = {
 const unblockedHtml = renderToString(
   React.createElement(Card, {
     item: unblockedItem,
-    column: "ready",
+    column: "backlog",
     now,
     heartbeatExpect: 600,
     onOpen: () => {},
@@ -141,7 +141,7 @@ const resolvedBlockerItem = {
 };
 assert.strictEqual(isBlocked(resolvedBlockerItem), false, "Item with done blocker should be unblocked");
 
-// Test 6: Ready column sorts claimable cards first, including after claim-release bounce
+// Test 6: Backlog column sorts claimable cards first, including after claim-release bounce
 const oldDate = new Date(Date.now() - 3600 * 1000).toISOString();
 const olderDate = new Date(Date.now() - 7200 * 1000).toISOString();
 
@@ -180,17 +180,17 @@ const card5_blocked = {
   entered_state_at: olderDate,
 };
 
-// Ready column sorting: Card 1 (unblocked) must sort before Cards 2..5 (blocked)
+// Backlog column sorting: Card 1 (unblocked) must sort before Cards 2..5 (blocked)
 let readyCards = [card2_blocked, card3_blocked, card4_blocked, card5_blocked, card1_unblocked];
-readyCards.sort(sortFor("ready"));
+readyCards.sort(sortFor("backlog"));
 assert.strictEqual(readyCards[0].id, 1, "Unblocked card #1 must sort first");
 
-// Claim -> Release bounce: Card 1 is claimed and then released back to Ready.
+// Claim -> Release bounce: Card 1 is claimed and then released back to Backlog.
 // Its entered_state_at refreshes to NOW (newest timestamp).
 card1_unblocked.entered_state_at = new Date().toISOString();
 
 readyCards = [card2_blocked, card3_blocked, card4_blocked, card5_blocked, card1_unblocked];
-readyCards.sort(sortFor("ready"));
+readyCards.sort(sortFor("backlog"));
 
 assert.strictEqual(readyCards[0].id, 1, "After claim-release bounce, unblocked card #1 must STILL sort first");
 
@@ -202,7 +202,7 @@ const projectItem = {
   title: "Test Project",
   intent: "Test project intent",
   definition_of_done: "Done",
-  state: "ready",
+  state: "backlog",
   origin: { kind: "human" },
   above_line: true,
   blocked_by: [],
@@ -276,7 +276,6 @@ const cockpitHtml = renderToString(
     breadcrumbOf: () => "Test Project",
     now,
     heartbeatExpect: 600,
-    dispatchPaused: false,
     onOpen: () => {},
     onChanged: () => {},
   })

@@ -37,12 +37,13 @@ Treat operational confidence accordingly.
 ## The board
 
 Work is **Project + Plan artifact + flat Tasks**. Vision / Epic / Story are
-retired. A Project is the only container (Board swimlane, never a Ready card).
+retired. A Project is the only container (Board swimlane, never a Backlog card).
 Creating a Project seeds an **Initial plan** Task. `propose_breakdown` writes a
 **Plan artifact** (task keys, deps, DoDs) on the Project; **Approve Plan**
-(`approve_plan`) materializes sibling Tasks onto the Board and publishes them
-to Ready. Tasks relate by beads dependency edges (`blocks` / `relates-to`), not
-nested hierarchy. Upon Plan approval, tasks with dependency constraints materialize
+(`approve_plan`) materializes sibling Tasks onto the Board into **Backlog**.
+Nothing auto-starts — cockpit must **dispatch** (MCP or UI Start) each card.
+Tasks relate by beads dependency edges (`blocks` / `relates-to`), not nested
+hierarchy. Upon Plan approval, tasks with dependency constraints materialize
 as a DAG (e.g. A→B, A→C, B+C→D). Friendly plain-language blocker chips appear on cards,
 and the Board visual graph (`npm --prefix web run shots` / `web/shots/desktop-graph.png`)
 renders the topological dependency DAG step by step.
@@ -66,9 +67,9 @@ Phase 2 — real agents                                   (Project + Plan)
          Observe cost during the run, not at the end
 ```
 
-Tasks from a Plan stay off Ready until **Approve Plan** on their Project —
-that is the single call that puts execution agents to work. The Project itself
-never moves to Ready.
+Tasks from a Plan stay off Backlog until **Approve Plan** on their Project.
+**Dispatch** is the call that puts execution agents to work. The Project itself
+never moves to Backlog.
 
 Constraints pinned on the Project, inherited by every Task:
 
@@ -79,11 +80,10 @@ Constraints pinned on the Project, inherited by every Task:
   needs a deadline; treat silence as failure.
 ## Known gaps, roughly by value
 
-**Capability routing is dead.** `dispatch_loop` hardcodes `["any"]`, so a card
-tagged `writer` is silently never claimed. It just sits in Ready looking
-healthy. Also, the `claimable` flag in `honr.yaml` is decorative — `list_ready`
-never consults the level schema, so leaves land at whatever depth they're
-created and are claimable regardless.
+**Capability routing is dead.** Enqueue does not filter by capability today;
+`dispatch_loop` claims any awaiting card that passes `may_claim`. Also, the
+`claimable` flag in `honr.yaml` is decorative — `list_backlog` never consults
+the level schema, so leaves land at whatever depth they're created.
 
 **The daily budget resets on restart.** `SPENT_TODAY` is a process static, and
 honr restarts constantly while honr is what's being built. It's a runaway

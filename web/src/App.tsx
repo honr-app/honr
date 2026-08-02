@@ -2,14 +2,13 @@ import { useMemo, useState } from "react";
 import { Cockpit } from "./components/Cockpit";
 import { DetailDrawer } from "./components/Detail";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
-import { api, money } from "./api";
+import { money } from "./api";
 import type { WorkItem } from "./types";
 
 export default function App() {
   const b = useBoard();
   const now = useNow();
   const [open, setOpen] = useState<number | null>(null);
-  const [pauseBusy, setPauseBusy] = useState(false);
 
   const { goalOf, breadcrumbOf } = useMemo(() => buildLookups(b.items), [b.items]);
 
@@ -21,20 +20,6 @@ export default function App() {
 
   const age = b.lastLoadedAt === null ? null : now - b.lastLoadedAt;
   const staleFor = age !== null && age > STALE_AFTER_MS ? age : null;
-
-  const toggleDispatch = async () => {
-    if (pauseBusy) return;
-    setPauseBusy(true);
-    try {
-      if (b.dispatchPaused) await api.resumeDispatch();
-      else await api.pauseDispatch();
-      await b.refresh();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setPauseBusy(false);
-    }
-  };
 
   return (
     <div className="app">
@@ -54,38 +39,9 @@ export default function App() {
           <span className={b.connected ? "conn ok" : "conn off"}>
             {b.connected ? "live" : "reconnecting…"}
           </span>
-          {!b.dispatchPaused && (
-            <button
-              type="button"
-              className="dispatch-toggle"
-              disabled={pauseBusy || !b.loaded}
-              onClick={toggleDispatch}
-              title="Pause all projects — then Resume individual ones as exceptions"
-            >
-              Pause all
-            </button>
-          )}
         </div>
       </header>
 
-      {b.dispatchPaused && (
-        <div className="info banner pause-banner" role="status">
-          <p className="banner-text">
-            <strong>All projects paused.</strong>{" "}
-            Running cards keep going. Resume all, or resume one project in its
-            swimlane to let only that subtree claim.
-          </p>
-          <button
-            type="button"
-            className="banner-action"
-            disabled={pauseBusy || !b.loaded}
-            onClick={toggleDispatch}
-            title="Resume all projects — clear every project pause"
-          >
-            Resume all
-          </button>
-        </div>
-      )}
       {staleFor !== null && (
         <div className="err banner">
           ⚠ NOT LIVE — showing state from {Math.round(staleFor / 1000)}s ago.
@@ -109,7 +65,6 @@ export default function App() {
             breadcrumbOf={breadcrumbOf}
             now={now}
             heartbeatExpect={b.heartbeatExpect}
-            dispatchPaused={b.dispatchPaused}
             defaultEngine={b.defaultEngine}
             defaultModel={b.defaultModel}
             onOpen={setOpen}
@@ -121,10 +76,10 @@ export default function App() {
           <DetailDrawer
             id={open}
             now={now}
-            defaultEngine={b.defaultEngine}
-            defaultModel={b.defaultModel}
             onClose={() => setOpen(null)}
             onChanged={b.refresh}
+            defaultEngine={b.defaultEngine}
+            defaultModel={b.defaultModel}
           />
         )}
       </main>

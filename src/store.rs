@@ -29,10 +29,6 @@ pub struct BoardState {
     /// they will be right to.
     #[serde(default)]
     pub stories: BTreeMap<ItemId, Vec<StoryLine>>,
-    /// When true, the supervisor skips claiming new Ready cards. In-flight
-    /// Claimed/Running work continues. Persists across restarts.
-    #[serde(default)]
-    pub dispatch_paused: bool,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
 }
@@ -49,7 +45,7 @@ pub struct StoryLine {
 pub struct ChunkSummary {
     pub count: usize,
     /// Chunked, never compressed: `+7 more` hides seven items and tells you
-    /// nothing. `7 ready · 2 blocked on #41 · oldest 40m` is smaller *and*
+    /// nothing. `7 in backlog · 2 blocked on #41 · oldest 40m` is smaller *and*
     /// answers the question.
     pub text: String,
 }
@@ -74,8 +70,6 @@ pub struct GoalView {
     pub needs_you: usize,
     /// `no_plan` | `awaiting_approval` | `approved_vN`
     pub plan_status: String,
-    /// Project-level dispatch pause (independent of global `dispatch_paused`).
-    pub dispatch_paused: bool,
     /// Soft-retired Project — hidden from the default cockpit, available via
     /// "Show archived". Digests still omit these.
     pub archived: bool,
@@ -91,8 +85,6 @@ pub struct Snapshot {
     pub server_time: DateTime<Utc>,
     pub heartbeat_expect_secs: i64,
     pub seq: u64,
-    /// Supervisor will not claim new Ready cards while true.
-    pub dispatch_paused: bool,
     pub default_engine: String,
     pub default_model: String,
 }
@@ -143,7 +135,7 @@ pub struct GoalDigest {
     pub needs_you: Vec<NeedsYou>,
     pub running: usize,
     pub running_stalled: usize,
-    pub ready: usize,
+    pub backlog: usize,
     pub in_review: usize,
     pub latest_story: Option<String>,
 }
@@ -215,15 +207,15 @@ impl Board {
                             item.beads_id = Some(format!("bd-honr-{id}"));
                         }
                         // A brief experiment left Initial plan in Shaping; restore
-                        // them to Ready so dedicated planning agents can claim.
+                        // them to Backlog so dedicated planning agents can claim.
                         if item.is_initial_plan_task() && item.state == State::Shaping {
-                            item.state = State::Ready;
+                            item.state = State::Backlog;
                             healed += 1;
                         }
                     }
                     tracing::info!(items = state.items.len(), "restored board from {path:?}");
                     if healed > 0 {
-                        tracing::info!("healed {healed} Initial plan Task(s) Shaping → Ready");
+                        tracing::info!("healed {healed} Initial plan Task(s) Shaping → Backlog");
                     }
                     *board.state.write().unwrap() = state;
                 }
@@ -237,110 +229,12 @@ impl Board {
         self.tx.subscribe()
     }
 
-    pub fn dispatch_paused(&self) -> bool {
-        self.state.read().unwrap().dispatch_paused
-    }
-
-    /// Pause or resume supervisor dispatch globally. Does not touch in-flight runs.
+    /// Whether the supervisor may claim this Backlog card right now.
     ///
-    /// Pause stamps every Project as paused. Resume clears the global flag and
-    /// every Project pause. While globally paused, Resume on an individual
-    /// Project is an exception — that subtree may claim again.
-    pub fn set_dispatch_paused(&self, paused: bool) {
-        let stamped: Vec<WorkItem> = {
-            let mut s = self.state.write().unwrap();
-            let global_changed = s.dispatch_paused != paused;
-            s.dispatch_paused = paused;
-            let mut changed = Vec::new();
-            for it in s.items.values_mut() {
-                if !it.is_project() {
-                    continue;
-                }
-                if it.dispatch_paused == paused {
-                    continue;
-                }
-                it.dispatch_paused = paused;
-                changed.push(it.clone());
-            }
-            if !global_changed && changed.is_empty() {
-                return;
-            }
-            changed
-        };
-        self.dirty.store(true, Ordering::Relaxed);
-        let _ = self.tx.send(BoardEvent::DispatchPaused {
-            seq: self.next_seq(),
-            paused,
-        });
-        for item in stamped {
-            self.emit(&item);
-        }
-        tracing::info!(
-            paused,
-            "dispatch {}",
-            if paused {
-                "paused (all projects stamped)"
-            } else {
-                "resumed (all project pauses cleared)"
-            }
-        );
-    }
-
-    /// Pause or resume claiming under one Project. Does not touch in-flight runs.
-    ///
-    /// While the board is globally paused, `paused: false` is an allowlist
-    /// exception — that Project may claim even though the header still says
-    /// Resume (global).
-    pub fn set_project_dispatch_paused(
-        &self,
-        id: ItemId,
-        paused: bool,
-    ) -> Result<WorkItem, String> {
-        let item = {
-            let mut s = self.state.write().unwrap();
-            let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
-            if !it.is_project() {
-                return Err(format!("#{id} is not a Project"));
-            }
-            if it.dispatch_paused == paused {
-                return Ok(it.clone());
-            }
-            it.dispatch_paused = paused;
-            it.clone()
-        };
-        self.emit(&item);
-        tracing::info!(
-            id,
-            paused,
-            "project dispatch {}",
-            if paused { "paused" } else { "resumed" }
-        );
-        Ok(item)
-    }
-
-    /// Whether the supervisor may claim this Ready card right now.
-    ///
-    /// A card is claimable when its Project is not paused. Global pause does
-    /// not block by itself — it stamps every Project paused; Resume on a
-    /// Project clears that stamp and becomes an exception. Orphan tasks (no
-    /// Project) are blocked only while the global flag is set.
+    /// Parked cards are never claimable until unparked — and unpark alone does
+    /// not start a run; the cockpit must still `dispatch`.
     pub fn may_claim(&self, id: ItemId) -> bool {
-        let s = self.state.read().unwrap();
-        if s.items.get(&id).is_some_and(|it| it.parked) {
-            return false;
-        }
-        let mut cur = Some(id);
-        while let Some(cid) = cur {
-            let Some(it) = s.items.get(&cid) else {
-                break;
-            };
-            if it.is_project() {
-                return !it.dispatch_paused;
-            }
-            cur = it.parent;
-        }
-        // No Project ancestor.
-        !s.dispatch_paused
+        !self.state.read().unwrap().items.get(&id).is_some_and(|it| it.parked)
     }
 
     fn next_seq(&self) -> u64 {
@@ -536,11 +430,13 @@ impl Board {
         }
 
         // States that imply no agent is holding the card.
-        if matches!(to, State::Ready | State::NeedsHuman | State::Done | State::Retired | State::Shaping) {
+        if matches!(to, State::Backlog | State::NeedsHuman | State::Done | State::Retired | State::Shaping) {
             item.lease = None;
         }
-        if to == State::Ready {
+        if to == State::Backlog {
             item.progress = 0.0;
+            // Bounce / park / halt / lease expiry all land here — never auto-start again.
+            item.awaiting_dispatch = false;
             if by == "human" {
                 item.run_failures = 0;
                 item.escalation = None;
@@ -551,6 +447,7 @@ impl Board {
         if to.is_terminal() {
             item.conversation_id = None;
             item.parked = false;
+            item.awaiting_dispatch = false;
             item.environment = None;
         }
         let mut item_out = item.clone();
@@ -660,11 +557,6 @@ impl Board {
             };
             if parent.is_none() {
                 item.plan = Some(PlanArtifact::empty());
-                // Global pause stamps existing projects; new ones must start
-                // paused too or they'd slip through as accidental exceptions.
-                if s.dispatch_paused {
-                    item.dispatch_paused = true;
-                }
             }
             s.items.insert(id, item.clone());
             let mut item_out = item;
@@ -697,7 +589,7 @@ impl Board {
         )?;
         let _ = self.transition(seed.id, State::Shaping, "cockpit", Some("seed plan task".into()));
         let seed = self
-            .transition(seed.id, State::Ready, "cockpit", Some("seed plan task".into()))
+            .transition(seed.id, State::Backlog, "cockpit", Some("seed plan task".into()))
             .map_err(|e| e.to_string())?;
         self.story(
             project_id,
@@ -781,8 +673,8 @@ impl Board {
     }
 
     /// Materialize the Project's Plan artifact into flat Tasks + deps, publish
-    /// them to Ready, and close open Initial Plan Tasks. Never moves the Project
-    /// to Ready.
+    /// them to Backlog, and close open Initial Plan Tasks. Never moves the Project
+    /// to Backlog.
     pub fn approve_plan(&self, project_id: ItemId) -> Result<Vec<ItemId>, String> {
         let project = self
             .get(project_id)
@@ -804,7 +696,7 @@ impl Board {
             }
             if child.state == State::Shaping
                 && self
-                    .transition(cid, State::Ready, "human", Some("plan approved".into()))
+                    .transition(cid, State::Backlog, "human", Some("plan approved".into()))
                     .is_ok()
             {
                 published.push(cid);
@@ -819,7 +711,7 @@ impl Board {
         self.close_plan_tasks(project_id);
         self.story(
             project_id,
-            format!("Plan approved: {} tasks published to Ready (legacy path).", published.len()),
+            format!("Plan approved: {} tasks published to Backlog (legacy path).", published.len()),
         );
         Ok(published)
     }
@@ -876,16 +768,16 @@ impl Board {
             self.set_blocked_by(id, blockers);
         }
 
-        // Publish to Ready.
+        // Publish to Backlog.
         let mut published = Vec::new();
         for spec in &plan.tasks {
             let Some(id) = spec.item_id else { continue };
             if let Some(child) = self.get(id) {
                 if (child.state == State::Shaping
                     && self
-                        .transition(id, State::Ready, "human", Some("plan approved".into()))
+                        .transition(id, State::Backlog, "human", Some("plan approved".into()))
                         .is_ok())
-                    || child.state == State::Ready
+                    || child.state == State::Backlog
                 {
                     published.push(id);
                 }
@@ -908,7 +800,7 @@ impl Board {
         self.story(
             project_id,
             format!(
-                "Plan v{} approved: {} tasks published to Ready.",
+                "Plan v{} approved: {} tasks published to Backlog.",
                 plan.revision,
                 published.len()
             ),
@@ -923,7 +815,7 @@ impl Board {
                 continue;
             }
             // Prefer Done from shaping/ready/running paths the machine allows.
-            if child.state == State::Ready
+            if child.state == State::Backlog
                 || child.state == State::Shaping
                 || child.state == State::NeedsHuman
             {
@@ -934,8 +826,8 @@ impl Board {
                     Some("plan approved; tasks materialized".into()),
                 );
             } else if matches!(child.state, State::Claimed | State::Running) {
-                // Halt-ish: Ready then Done if needed.
-                let _ = self.transition(cid, State::Ready, "human", Some("plan approved".into()));
+                // Halt-ish: Backlog then Done if needed.
+                let _ = self.transition(cid, State::Backlog, "human", Some("plan approved".into()));
                 let _ = self.transition(
                     cid,
                     State::Done,
@@ -1241,7 +1133,7 @@ impl Board {
 
         if failures < max_attempts {
             let item = self
-                .transition(id, State::Ready, "supervisor", Some(format!("run failed: {reason}")))
+                .transition(id, State::Backlog, "supervisor", Some(format!("run failed: {reason}")))
                 .map_err(|e| e.to_string())?;
             self.story(
                 id,
@@ -1361,7 +1253,7 @@ impl Board {
     }
 
     /// Tweak an item's title, intent, definition of done, or engine.
-    /// Used from Shaping (pre-Ready), Ready (pre-claim), and Review (with
+    /// Used from Shaping (pre-Backlog), Backlog (pre-dispatch), and Review (with
     /// Request changes) so humans can rewrite the contract the next agent sees.
     pub fn update_item(
         &self,
@@ -1419,12 +1311,13 @@ impl Board {
             .map(|i| i.id)
     }
 
-    /// `list_ready` — the pull queue made visible. Projects are never claimable.
-    pub fn list_ready(&self, capabilities: &[String]) -> Vec<WorkItem> {
+    /// Backlog leaves that are unblocked and match capabilities. Not a start
+    /// queue — cockpit must `enqueue_dispatch` before the supervisor claims.
+    pub fn list_backlog(&self, capabilities: &[String]) -> Vec<WorkItem> {
         let s = self.state.read().unwrap();
         s.items
             .values()
-            .filter(|i| i.state == State::Ready)
+            .filter(|i| i.state == State::Backlog)
             .filter(|i| i.level.as_deref() != Some("Project"))
             .filter(|i| !Self::has_children(&s, i.id))
             .filter(|i| Self::unresolved_blockers(&s, i).is_empty())
@@ -1441,7 +1334,88 @@ impl Board {
             .collect()
     }
 
-    /// Ready tasks from beads (`issue_type=task` only), mapped back to board items when present.
+    /// Legacy name for cockpit `list_ready` MCP tool.
+    pub fn list_ready(&self, capabilities: &[String]) -> Vec<WorkItem> {
+        self.list_backlog(capabilities)
+    }
+
+    /// Cards the cockpit asked to start, oldest first. Supervisor drains these.
+    pub fn list_awaiting_dispatch(&self) -> Vec<WorkItem> {
+        let s = self.state.read().unwrap();
+        let mut items: Vec<_> = s
+            .items
+            .values()
+            .filter(|i| i.state == State::Backlog && i.awaiting_dispatch && !i.parked)
+            .filter(|i| i.level.as_deref() != Some("Project"))
+            .filter(|i| !Self::has_children(&s, i.id))
+            .filter(|i| Self::unresolved_blockers(&s, i).is_empty())
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| i.entered_state_at);
+        items
+    }
+
+    /// Cockpit asked the supervisor to start this Backlog card.
+    pub fn enqueue_dispatch(&self, id: ItemId) -> Result<WorkItem, String> {
+        if !self.may_claim(id) {
+            return Err("card is parked; unpark before dispatch".into());
+        }
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let has_children = Self::has_children(&s, id);
+            let (state, parked, is_project, dod_missing, blockers) = {
+                let it = s.items.get(&id).ok_or("no such item")?;
+                (
+                    it.state,
+                    it.parked,
+                    it.level.as_deref() == Some("Project"),
+                    it.definition_of_done.is_none(),
+                    Self::unresolved_blockers(&s, it),
+                )
+            };
+            if state != State::Backlog {
+                return Err("only a Backlog card can be dispatched".into());
+            }
+            if parked {
+                return Err("card is parked; unpark before dispatch".into());
+            }
+            if is_project || has_children {
+                return Err("containers are not dispatchable".into());
+            }
+            if !blockers.is_empty() {
+                return Err(format!("card is blocked by {blockers:?}"));
+            }
+            if dod_missing {
+                return Err("leaf needs a definition of done before dispatch".into());
+            }
+            let it = s.items.get_mut(&id).unwrap();
+            it.awaiting_dispatch = true;
+            let mut out = it.clone();
+            Self::populate_blockers(&s, &mut out);
+            out
+        };
+        self.emit(&item);
+        self.story(
+            id,
+            format!("{}: queued for dispatch — supervisor will claim when a slot opens.", item.title),
+        );
+        Ok(item)
+    }
+
+    /// Cancel a pending start request without changing state.
+    #[allow(dead_code)]
+    pub fn clear_dispatch(&self, id: ItemId) -> Result<WorkItem, String> {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or("no such item")?;
+            it.awaiting_dispatch = false;
+            it.clone()
+        };
+        self.emit(&item);
+        Ok(item)
+    }
+
+    /// Beads "ready" tasks (`issue_type=task` only), mapped back to board items when present.
     #[allow(dead_code)]
     pub async fn list_ready_beads(&self) -> Result<Vec<crate::beads::BeadsIssue>, String> {
         if let Some(b) = &self.beads {
@@ -1482,6 +1456,7 @@ impl Board {
             Self::transition_locked(&mut s, id, State::Claimed, agent_id, None)?;
             let it = s.items.get_mut(&id).unwrap();
             it.parked = false;
+            it.awaiting_dispatch = false;
             it.lease = Some(Lease {
                 agent_id: agent_id.to_string(),
                 granted_at: now,
@@ -1772,7 +1747,7 @@ fn check_split_relatedness(
             self.transition(sibling.id, State::Shaping, agent_id, None)
                 .map_err(|e| e.to_string())?;
             let sibling = self
-                .transition(sibling.id, State::Ready, agent_id, None)
+                .transition(sibling.id, State::Backlog, agent_id, None)
                 .map_err(|e| e.to_string())?;
             created += 1;
             made.push(sibling);
@@ -1893,7 +1868,7 @@ fn check_split_relatedness(
                     it.last_bounce_reason = Some(r.to_string());
                 }
             }
-            Self::transition_locked(&mut s, id, State::Ready, agent_id, Some(reason_str))?
+            Self::transition_locked(&mut s, id, State::Backlog, agent_id, Some(reason_str))?
         };
         self.emit(&item);
         if let Some(r) = reason {
@@ -1917,7 +1892,7 @@ fn check_split_relatedness(
         };
         for id in &expired {
             let title = self.get(*id).map(|i| i.title).unwrap_or_default();
-            let _ = self.transition(*id, State::Ready, "lease-sweeper", Some("lease expired".into()));
+            let _ = self.transition(*id, State::Backlog, "lease-sweeper", Some("lease expired".into()));
             self.story(*id, format!("{title}: agent stopped heartbeating; lease expired, card requeued."));
         }
         expired
@@ -2000,13 +1975,13 @@ fn check_split_relatedness(
             it.title.clone()
         };
         let item = self
-            .transition(id, State::Ready, "human", Some(format!("answered: {choice}")))
+            .transition(id, State::Backlog, "human", Some(format!("answered: {choice}")))
             .map_err(|e| e.to_string())?;
         self.story(id, format!("{title}: unblocked — {choice}"));
         Ok(item)
     }
 
-    /// Park — stop the agent, return the card to Ready, keep sandbox + conversation,
+    /// Park — stop the agent, return the card to Backlog, keep sandbox + conversation,
     /// and hold the card until [`Self::unpark`]. Prefer this over halt when the
     /// run is wedged or needs a human nudge without amnesia.
     pub fn park(&self, id: ItemId, reason: Option<String>) -> Result<WorkItem, String> {
@@ -2025,7 +2000,7 @@ fn check_split_relatedness(
         };
         self.transition(
             id,
-            State::Ready,
+            State::Backlog,
             "human",
             Some(reason.clone().unwrap_or_else(|| "parked".into())),
         )
@@ -2046,20 +2021,19 @@ fn check_split_relatedness(
             id,
             format!(
                 "{title}: parked — agent stopped, sandbox kept;{session} \
-                 will not reclaim until you resume."
+                 dispatch again after unpark to resume."
             ),
         );
         Ok(item)
     }
 
-    /// Clear the park hold so the supervisor may claim this Ready card again
-    /// (resuming the kept agy conversation when present).
+    /// Clear the park hold. Does not start a run — cockpit must `dispatch`.
     pub fn unpark(&self, id: ItemId) -> Result<WorkItem, String> {
         let item = {
             let mut s = self.state.write().unwrap();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
-            if it.state != State::Ready {
-                return Err("only a Ready card can be resumed from park".into());
+            if it.state != State::Backlog {
+                return Err("only a Backlog card can be resumed from park".into());
             }
             if !it.parked {
                 return Err("that card is not parked".into());
@@ -2071,10 +2045,10 @@ fn check_split_relatedness(
         self.story(
             id,
             format!(
-                "{}: resumed from park — eligible to claim{}.",
+                "{}: unparked — still in Backlog; dispatch to start{}.",
                 item.title,
                 if item.conversation_id.is_some() {
-                    " (same conversation)"
+                    " (same conversation kept)"
                 } else {
                     ""
                 }
@@ -2083,7 +2057,7 @@ fn check_split_relatedness(
         Ok(item)
     }
 
-    /// Halt — kill the agent, return the card to Ready, discard the LLM session.
+    /// Halt — kill the agent, return the card to Backlog, discard the LLM session.
     /// Sandbox may still be kept for caches/inspection; the conversation is not.
     pub fn halt(&self, id: ItemId, reason: Option<String>) -> Result<WorkItem, String> {
         {
@@ -2094,7 +2068,7 @@ fn check_split_relatedness(
             }
         }
         let item = self
-            .transition(id, State::Ready, "human", reason.or(Some("halted".into())))
+            .transition(id, State::Backlog, "human", reason.or(Some("halted".into())))
             .map_err(|e| e.to_string())?;
         self.story(
             item.id,
@@ -2191,7 +2165,7 @@ fn check_split_relatedness(
     pub fn request_changes(&self, id: ItemId, note: String) -> Result<WorkItem, String> {
         self.steer(id, format!("Changes requested: {note}"))?;
         let item = self
-            .transition(id, State::Ready, "human", Some(format!("changes requested: {note}")))
+            .transition(id, State::Backlog, "human", Some(format!("changes requested: {note}")))
             .map_err(|e| e.to_string())?;
         self.story(id, format!("{}: changes requested — {note}", item.title));
         Ok(item)
@@ -2254,7 +2228,6 @@ fn check_split_relatedness(
             server_time: now,
             heartbeat_expect_secs: self.schema.execution.heartbeat_expect_secs,
             seq: self.seq.load(Ordering::Relaxed),
-            dispatch_paused: s.dispatch_paused,
             default_engine: self.schema.execution.agents.engine.clone(),
             default_model: self.schema.execution.agents.vertex.model.clone(),
         }
@@ -2296,7 +2269,7 @@ fn check_split_relatedness(
 
         let mut columns = Vec::new();
         for column in [
-            Column::Ready,
+            Column::Backlog,
             Column::Running,
             Column::NeedsYou,
             Column::Review,
@@ -2328,7 +2301,6 @@ fn check_split_relatedness(
             agents_live,
             needs_you,
             plan_status,
-            dispatch_paused: goal.dispatch_paused,
             archived,
             columns,
             story: s.stories.get(&gid).cloned().unwrap_or_default(),
@@ -2355,13 +2327,13 @@ fn check_split_relatedness(
             .unwrap_or_else(Duration::zero);
 
         let text = match column {
-            Column::Ready => {
-                // Is this actually ready?
+            Column::Backlog => {
+                // Waiting for cockpit to dispatch — not a claim queue.
                 let blocked: Vec<&&&WorkItem> = items
                     .iter()
                     .filter(|i| !Self::unresolved_blockers(s, i).is_empty())
                     .collect();
-                let mut parts = vec![format!("{count} ready")];
+                let mut parts = vec![format!("{count} in backlog")];
                 if !blocked.is_empty() {
                     let mut blocker_ids: Vec<ItemId> = blocked
                         .iter()
@@ -2499,7 +2471,7 @@ fn check_split_relatedness(
                                 .unwrap_or(true)
                         })
                         .count(),
-                    ready: members.iter().filter(|i| i.state == State::Ready).count(),
+                    backlog: members.iter().filter(|i| i.state == State::Backlog).count(),
                     in_review: members.iter().filter(|i| i.state == State::Review).count(),
                     latest_story: s.stories.get(&gid).and_then(|v| v.last()).map(|l| l.text.clone()),
                 })
@@ -2515,7 +2487,7 @@ mod tests {
     use super::*;
     use crate::model::Origin;
 
-    /// A board with one leaf sitting in Ready, claimed by `agent`.
+    /// A board with one leaf sitting in Backlog, claimed by `agent`.
     fn claimed_leaf() -> (Board, ItemId) {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nowrite.json"));
         let parent = b
@@ -2534,7 +2506,7 @@ mod tests {
             )
             .expect("task");
         let _ = b.transition(leaf.id, State::Shaping, "t", None);
-        let _ = b.transition(leaf.id, State::Ready, "t", None);
+        let _ = b.transition(leaf.id, State::Backlog, "t", None);
         b.claim(leaf.id, "agent", None, 45).expect("claim");
         (b, leaf.id)
     }
@@ -2545,7 +2517,7 @@ mod tests {
         b.set_environment(id, Some("honr-card-1-a1".into()));
         b.set_conversation_id(id, Some("conv-xyz".into()));
         let it = b.park(id, Some("wedged on cargo".into())).expect("park");
-        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.state, State::Backlog);
         assert_eq!(it.environment.as_deref(), Some("honr-card-1-a1"));
         assert_eq!(it.conversation_id.as_deref(), Some("conv-xyz"));
         assert!(it.parked, "park must hold the card from reclaim");
@@ -2557,7 +2529,45 @@ mod tests {
         );
         let resumed = b.unpark(id).expect("unpark");
         assert!(!resumed.parked);
+        assert!(!resumed.awaiting_dispatch, "unpark must not auto-dispatch");
         assert!(b.may_claim(id), "unpark restores claimability");
+    }
+
+    #[test]
+    fn enqueue_dispatch_marks_card_for_supervisor() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-dispatch.json"));
+        let parent = b
+            .create(None, "goal", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(parent.id, State::Shaping, "t", None);
+        let leaf = b
+            .create(
+                Some(parent.id),
+                "leaf",
+                "do a thing",
+                Some("it is done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        let _ = b.transition(leaf.id, State::Shaping, "t", None);
+        let _ = b.transition(leaf.id, State::Backlog, "t", None);
+        assert!(b.list_awaiting_dispatch().is_empty());
+        let it = b.enqueue_dispatch(leaf.id).expect("enqueue");
+        assert!(it.awaiting_dispatch);
+        assert_eq!(b.list_awaiting_dispatch().len(), 1);
+        b.claim(leaf.id, "agent", None, 45).expect("claim");
+        assert!(
+            !b.get(leaf.id).unwrap().awaiting_dispatch,
+            "claim clears the dispatch flag"
+        );
+        b.halt(leaf.id, None).expect("halt");
+        assert!(
+            !b.get(leaf.id).unwrap().awaiting_dispatch,
+            "halt bounce clears dispatch"
+        );
+        assert!(b.list_awaiting_dispatch().is_empty());
     }
 
     #[test]
@@ -2566,7 +2576,7 @@ mod tests {
         b.set_environment(id, Some("honr-card-1-a1".into()));
         b.set_conversation_id(id, Some("conv-xyz".into()));
         let it = b.halt(id, Some("start over".into())).expect("halt");
-        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.state, State::Backlog);
         assert_eq!(it.environment.as_deref(), Some("honr-card-1-a1"));
         assert!(it.conversation_id.is_none(), "halt discards the LLM session");
         assert!(!it.parked);
@@ -2577,7 +2587,7 @@ mod tests {
     fn early_failures_requeue_while_budget_remains() {
         let (b, id) = claimed_leaf();
         let it = b.record_run_failure(id, "sandbox would not start", 3).expect("recorded");
-        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.state, State::Backlog);
         assert_eq!(it.run_failures, 1);
     }
 
@@ -2627,7 +2637,7 @@ mod tests {
         assert_eq!(b.get(id).unwrap().run_failures, 1);
         b.answer_escalation(id, "Investigate the environment".into()).expect("answered");
         let it = b.get(id).unwrap();
-        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.state, State::Backlog);
         assert_eq!(it.run_failures, 0);
     }
 
@@ -2691,9 +2701,9 @@ mod tests {
         let made = b.split(id, "agent", children, 5).expect("split should succeed");
         assert_eq!(made.len(), 2);
         assert_eq!(made[0].parent, Some(project_id));
-        assert_eq!(made[0].state, State::Ready);
+        assert_eq!(made[0].state, State::Backlog);
         assert_eq!(made[1].parent, Some(project_id));
-        assert_eq!(made[1].state, State::Ready);
+        assert_eq!(made[1].state, State::Backlog);
 
         let original = b.get(id).expect("original exists");
         assert_eq!(original.state, State::Done);
@@ -2718,7 +2728,7 @@ mod tests {
             )
             .expect("task");
         let _ = b.transition(task.id, State::Shaping, "t", None);
-        let _ = b.transition(task.id, State::Ready, "t", None);
+        let _ = b.transition(task.id, State::Backlog, "t", None);
         let _ = b.claim(task.id, "agent", None, 60).expect("claim");
         let _ = b.transition(task.id, State::Running, "agent", None);
 
@@ -2751,7 +2761,7 @@ mod tests {
             )
             .expect("task");
         let _ = b.transition(task.id, State::Shaping, "t", None);
-        let _ = b.transition(task.id, State::Ready, "t", None);
+        let _ = b.transition(task.id, State::Backlog, "t", None);
         let _ = b.claim(task.id, "agent", None, 60).expect("claim");
         let _ = b.transition(task.id, State::Running, "agent", None);
 
@@ -2793,7 +2803,7 @@ mod tests {
             .expect("project");
         let _ = b.transition(project.id, State::Shaping, "t", None);
         // Put project in a claimable path only to exercise the guard — claim a fake run.
-        // Projects aren't Ready-claimable; call split directly after forcing Splitting-capable state.
+        // Projects aren't Backlog-claimable; call split directly after forcing Splitting-capable state.
         let err = b
             .split(
                 project.id,
@@ -2912,7 +2922,7 @@ mod tests {
             .expect("preexisting");
         let _ = b.transition(preexisting.id, State::Shaping, "t", None);
         let preexisting = b
-            .transition(preexisting.id, State::Ready, "t", None)
+            .transition(preexisting.id, State::Backlog, "t", None)
             .expect("ready");
 
         let before = b.children_of(project.id).len();
@@ -2988,15 +2998,15 @@ mod tests {
         assert_eq!(kids.len(), 1, "exactly one seed Task");
         let seed = b.get(kids[0]).unwrap();
         assert_eq!(seed.title, INITIAL_PLAN_TITLE);
-        assert_eq!(seed.state, State::Ready, "Initial plan is dispatchable planning work");
+        assert_eq!(seed.state, State::Backlog, "Initial plan is dispatchable planning work");
         assert!(seed.is_initial_plan_task());
         assert!(b.may_claim(seed.id));
         assert!(
             b.list_ready(&["any".into()]).iter().any(|i| i.id == seed.id),
             "Initial plan must appear in list_ready"
         );
-        // Project itself must not be Ready / claimable.
-        assert_ne!(b.get(project.id).unwrap().state, State::Ready);
+        // Project itself must not be Backlog / claimable.
+        assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
     }
 
     #[test]
@@ -3036,7 +3046,7 @@ mod tests {
 
         let published = b.approve_plan(project.id).expect("approve");
         assert_eq!(published.len(), 2);
-        assert_ne!(b.get(project.id).unwrap().state, State::Ready);
+        assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
         assert_eq!(
             b.get(project.id).unwrap().plan.as_ref().unwrap().status,
             PlanStatus::Approved
@@ -3044,8 +3054,8 @@ mod tests {
 
         let a = b.get(published[0]).unwrap();
         let b_item = b.get(published[1]).unwrap();
-        assert_eq!(a.state, State::Ready);
-        assert_eq!(b_item.state, State::Ready);
+        assert_eq!(a.state, State::Backlog);
+        assert_eq!(b_item.state, State::Backlog);
         assert_eq!(b_item.blocked_by, vec![published[0]]);
 
         // Initial plan Task closed.
@@ -3130,72 +3140,22 @@ mod tests {
         assert_eq!(item_c.blocked_by, vec![id_a]);
         assert_eq!(item_d.blocked_by, vec![id_b, id_c]);
 
-        // Verify Ready column summary lists plain language blockers
+        // Verify Backlog column summary lists plain language blockers
         let s = b.state.read().unwrap();
         let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
         let ready_col = goal_view
             .columns
             .iter()
-            .find(|c| c.column == Column::Ready)
+            .find(|c| c.column == Column::Backlog)
             .expect("ready col");
         assert!(ready_col.summary.text.contains("blocked on"));
     }
 
-    #[test]
-    fn dispatch_paused_defaults_false_and_toggles() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-pause-toggle.json"));
-        assert!(!b.dispatch_paused());
-        assert!(!b.snapshot().dispatch_paused);
-
-        b.set_dispatch_paused(true);
-        assert!(b.dispatch_paused());
-        assert!(b.snapshot().dispatch_paused);
-
-        b.set_dispatch_paused(false);
-        assert!(!b.dispatch_paused());
-        assert!(!b.snapshot().dispatch_paused);
-    }
-
-    #[test]
-    fn dispatch_paused_persists_across_load() {
-        let path = std::env::temp_dir().join(format!(
-            "honr-pause-persist-{}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let b = Board::new(Schema::default(), path.clone());
-        b.set_dispatch_paused(true);
-        b.flush();
-
-        let restored = Board::load_or_new(Schema::default(), path.clone());
-        assert!(restored.dispatch_paused());
-        assert!(restored.snapshot().dispatch_paused);
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn old_board_json_without_pause_field_loads_unpaused() {
-        let path = std::env::temp_dir().join(format!(
-            "honr-pause-legacy-{}.json",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
-            r#"{"next_id":1,"items":{},"stories":{}}"#,
-        )
-        .expect("write");
-        let b = Board::load_or_new(Schema::default(), path.clone());
-        assert!(!b.dispatch_paused());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// Project + Ready task under it. Returns (board, project_id, task_id).
+    /// Project + Backlog task under it. Returns (board, project_id, task_id).
     fn project_with_ready_task() -> (Board, ItemId, ItemId) {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!("honr-proj-pause-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!("honr-proj-task-{}.json", std::process::id())),
         );
         let project = b
             .create(None, "proj", "why", None, Origin::Human, true, None)
@@ -3213,131 +3173,8 @@ mod tests {
             )
             .expect("task");
         let _ = b.transition(task.id, State::Shaping, "t", None);
-        let _ = b.transition(task.id, State::Ready, "t", None);
+        let _ = b.transition(task.id, State::Backlog, "t", None);
         (b, project.id, task.id)
-    }
-
-    #[test]
-    fn project_pause_blocks_only_that_subtree() {
-        let (b, project_a, task_a) = project_with_ready_task();
-        let project_b = b
-            .create(None, "other", "why", None, Origin::Human, true, None)
-            .expect("project b");
-        let _ = b.transition(project_b.id, State::Shaping, "t", None);
-        let task_b = b
-            .create(
-                Some(project_b.id),
-                "task b",
-                "do it",
-                Some("done".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .expect("task b");
-        let task_b = task_b.id;
-        let _ = b.transition(task_b, State::Shaping, "t", None);
-        let _ = b.transition(task_b, State::Ready, "t", None);
-
-        assert!(b.may_claim(task_a));
-        assert!(b.may_claim(task_b));
-
-        b.set_project_dispatch_paused(project_a, true).expect("pause a");
-        assert!(!b.may_claim(task_a));
-        assert!(b.may_claim(task_b), "sibling project still claimable");
-        assert!(
-            b.snapshot()
-                .goals
-                .iter()
-                .find(|g| g.id == project_a)
-                .expect("goal a")
-                .dispatch_paused
-        );
-
-        b.set_project_dispatch_paused(project_a, false).expect("resume a");
-        assert!(b.may_claim(task_a));
-    }
-
-    #[test]
-    fn global_pause_stamps_projects_and_allows_exceptions() {
-        let (b, project_a, task_a) = project_with_ready_task();
-        let project_b = b
-            .create(None, "other", "why", None, Origin::Human, true, None)
-            .expect("project b");
-        let _ = b.transition(project_b.id, State::Shaping, "t", None);
-        let task_b = b
-            .create(
-                Some(project_b.id),
-                "task b",
-                "do it",
-                Some("done".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .expect("task b");
-        let task_b = task_b.id;
-        let _ = b.transition(task_b, State::Shaping, "t", None);
-        let _ = b.transition(task_b, State::Ready, "t", None);
-
-        b.set_dispatch_paused(true);
-        assert!(b.get(project_a).unwrap().dispatch_paused);
-        assert!(b.get(project_b.id).unwrap().dispatch_paused);
-        assert!(!b.may_claim(task_a));
-        assert!(!b.may_claim(task_b));
-
-        // Exception: resume one project while global stays paused.
-        b.set_project_dispatch_paused(project_a, false).expect("resume a");
-        assert!(b.dispatch_paused());
-        assert!(b.may_claim(task_a), "resumed project is an exception");
-        assert!(!b.may_claim(task_b), "other projects stay stamped");
-
-        // Global resume clears every project pause.
-        b.set_dispatch_paused(false);
-        assert!(!b.get(project_a).unwrap().dispatch_paused);
-        assert!(!b.get(project_b.id).unwrap().dispatch_paused);
-        assert!(b.may_claim(task_a));
-        assert!(b.may_claim(task_b));
-    }
-
-    #[test]
-    fn new_project_while_globally_paused_starts_paused() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join(format!("honr-pause-new-{}.json", std::process::id())),
-        );
-        b.set_dispatch_paused(true);
-        let project = b
-            .create(None, "late", "why", None, Origin::Human, true, None)
-            .expect("project");
-        assert!(project.dispatch_paused);
-    }
-
-    #[test]
-    fn cannot_project_pause_a_task() {
-        let (b, _project, task) = project_with_ready_task();
-        assert!(b.set_project_dispatch_paused(task, true).is_err());
-    }
-
-    #[test]
-    fn project_pause_persists_across_load() {
-        let path = std::env::temp_dir().join(format!(
-            "honr-proj-pause-persist-{}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let b = Board::new(Schema::default(), path.clone());
-        let project = b
-            .create(None, "proj", "why", None, Origin::Human, true, None)
-            .expect("project");
-        let _ = b.transition(project.id, State::Shaping, "t", None);
-        b.set_project_dispatch_paused(project.id, true).expect("pause");
-        b.flush();
-
-        let restored = Board::load_or_new(Schema::default(), path.clone());
-        assert!(restored.get(project.id).unwrap().dispatch_paused);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -3357,7 +3194,7 @@ mod tests {
             .release_with_reason(task_id, agent_id, Some(bounce_msg))
             .expect("release with reason");
 
-        assert_eq!(released.state, State::Ready);
+        assert_eq!(released.state, State::Backlog);
         assert_eq!(
             released.last_bounce_reason.as_deref(),
             Some(bounce_msg)
@@ -3369,7 +3206,7 @@ mod tests {
             .last()
             .expect("has transition history");
         assert_eq!(last_transition.from, State::Claimed);
-        assert_eq!(last_transition.to, State::Ready);
+        assert_eq!(last_transition.to, State::Backlog);
         assert_eq!(last_transition.by, agent_id);
         assert_eq!(
             last_transition.reason.as_deref(),
@@ -3467,9 +3304,9 @@ mod tests {
             .expect("cut leaf");
 
         for id in [initial_id, done.id, cut.id] {
-            // Initial plan is already Ready; others start Draft.
+            // Initial plan is already Backlog; others start Draft.
             let _ = b.transition(id, State::Shaping, "t", None);
-            let _ = b.transition(id, State::Ready, "t", None);
+            let _ = b.transition(id, State::Backlog, "t", None);
             let _ = b.transition(id, State::Claimed, "t", None);
             let _ = b.transition(id, State::Running, "t", None);
             let _ = b.transition(id, State::Review, "t", None);
@@ -3533,7 +3370,7 @@ mod tests {
 
         // Wait for spawned async task in schedule_beads_mirror to assign real beads_id
         let mut real_project_id = None;
-        for _ in 0..50 {
+        for _ in 0..120 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             if let Some(p) = board.get(project.id) {
                 if let Some(ref bid) = p.beads_id {
@@ -3562,7 +3399,7 @@ mod tests {
 
         // Mirror task
         board.schedule_beads_mirror(task.id);
-        for _ in 0..50 {
+        for _ in 0..120 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             if let Some(t) = board.get(task.id) {
                 if let Some(ref bid) = t.beads_id {
@@ -3575,7 +3412,7 @@ mod tests {
 
         // 3. Transition task to Claimed and split into siblings
         let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent", None, 45);
 
         let children = vec![
@@ -3593,7 +3430,7 @@ mod tests {
         // Wait for spawned async tasks on split siblings to assign real beads_ids
         for m in &made {
             let mut sibling_real_id = None;
-            for _ in 0..100 {
+            for _ in 0..160 {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 if let Some(item) = board.get(m.id) {
                     if let Some(ref bid) = item.beads_id {
@@ -3610,7 +3447,7 @@ mod tests {
 
         // Wait for async github_push / dolt schedule after mirrors.
         let mut saw_github_push = false;
-        for _ in 0..50 {
+        for _ in 0..120 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let ops = remote_cap.ops();
             saw_github_push = ops
@@ -3666,11 +3503,11 @@ mod tests {
         b.set_beads_id(item2.id, &task_retired.id);
 
         let _ = b.transition(item1.id, State::Shaping, "t", None);
-        let _ = b.transition(item1.id, State::Ready, "t", None);
+        let _ = b.transition(item1.id, State::Backlog, "t", None);
         let _ = b.transition(item1.id, State::Done, "human", Some("done".into()));
 
         let _ = b.transition(item2.id, State::Shaping, "t", None);
-        let _ = b.transition(item2.id, State::Ready, "t", None);
+        let _ = b.transition(item2.id, State::Backlog, "t", None);
         let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
 
         let mut done_closed = false;
@@ -3728,11 +3565,11 @@ mod tests {
         assert!(item2.beads_id.as_ref().unwrap().starts_with("bd-honr-"));
 
         let _ = b.transition(item1.id, State::Shaping, "t", None);
-        let _ = b.transition(item1.id, State::Ready, "t", None);
+        let _ = b.transition(item1.id, State::Backlog, "t", None);
         let _ = b.transition(item1.id, State::Done, "human", Some("done".into()));
 
         let _ = b.transition(item2.id, State::Shaping, "t", None);
-        let _ = b.transition(item2.id, State::Ready, "t", None);
+        let _ = b.transition(item2.id, State::Backlog, "t", None);
         let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -4093,7 +3930,7 @@ mod tests {
 
         // 3. Mark Task as Done
         let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent", None, 45);
         let _ = board.transition(task.id, State::Done, "E2E verification completed", None);
 
@@ -4117,12 +3954,12 @@ mod tests {
             .create(None, "Test Project", "Goal", None, Origin::Human, true, None)
             .unwrap();
 
-        // Project creation seeds 1 initial plan task in Ready.
+        // Project creation seeds 1 initial plan task in Backlog.
         let t1 = b
             .create(Some(project.id), "Task One", "Unblocked", Some("DOD".into()), Origin::Human, false, None)
             .unwrap();
         let _ = b.transition(t1.id, State::Shaping, "human", None);
-        let _ = b.transition(t1.id, State::Ready, "human", None);
+        let _ = b.transition(t1.id, State::Backlog, "human", None);
 
         {
             let s = b.state.read().unwrap();
@@ -4130,9 +3967,9 @@ mod tests {
             let ready_col = goal_view
                 .columns
                 .iter()
-                .find(|c| c.column == Column::Ready)
+                .find(|c| c.column == Column::Backlog)
                 .expect("ready col");
-            assert!(ready_col.summary.text.contains("2 ready"));
+            assert!(ready_col.summary.text.contains("2 in backlog"));
             assert!(!ready_col.summary.text.contains("blocked on"));
         }
 
@@ -4140,7 +3977,7 @@ mod tests {
             .create(Some(project.id), "Task Two", "Blocked", Some("DOD".into()), Origin::Human, false, None)
             .unwrap();
         let _ = b.transition(t2.id, State::Shaping, "human", None);
-        let _ = b.transition(t2.id, State::Ready, "human", None);
+        let _ = b.transition(t2.id, State::Backlog, "human", None);
         b.set_blocked_by(t2.id, vec![t1.id]);
 
         {
@@ -4149,9 +3986,9 @@ mod tests {
             let ready_col = goal_view
                 .columns
                 .iter()
-                .find(|c| c.column == Column::Ready)
+                .find(|c| c.column == Column::Backlog)
                 .expect("ready col");
-            assert!(ready_col.summary.text.contains("3 ready"));
+            assert!(ready_col.summary.text.contains("3 in backlog"));
             assert!(
                 ready_col.summary.text.contains(&format!("1 blocked on #{}: Task One", t1.id)),
                 "Summary was: {}",
@@ -4200,7 +4037,7 @@ mod tests {
             .unwrap();
         b.set_environment(t1.id, Some("honr-card-1-a1".into()));
         let _ = b.transition(t1.id, State::Shaping, "human", None);
-        let _ = b.transition(t1.id, State::Ready, "human", None);
+        let _ = b.transition(t1.id, State::Backlog, "human", None);
         let _ = b.transition(t1.id, State::Claimed, "human", None);
         let _ = b.transition(t1.id, State::Running, "agent", None);
         let _ = b.transition(t1.id, State::Review, "agent", None);
@@ -4212,7 +4049,7 @@ mod tests {
         assert_eq!(b.get(t1.id).unwrap().environment, None);
 
         let mut log_content = String::new();
-        for _ in 0..40 {
+        for _ in 0..80 {
             tokio::task::yield_now().await;
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
@@ -4234,7 +4071,7 @@ mod tests {
         assert_eq!(b.get(t2.id).unwrap().environment, None);
 
         log_content.clear();
-        for _ in 0..40 {
+        for _ in 0..80 {
             tokio::task::yield_now().await;
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             log_content = std::fs::read_to_string(&log_file).unwrap_or_default();

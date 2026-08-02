@@ -113,7 +113,7 @@ pub struct BreakdownArg {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ColumnArg {
-    /// One of: ready, running, needs_you, verify, review, done, shaping, intake, retired.
+    /// One of: backlog, running, needs_you, review, done, shaping, intake, retired.
     pub column: Column,
     /// Restrict to one goal. Omit for all goals.
     #[serde(default)]
@@ -372,7 +372,7 @@ impl Cockpit {
             })
             .collect();
 
-        if a.column == Column::Ready {
+        if a.column == Column::Backlog {
             items.sort_by(|a, b| {
                 let a_blocked = a.blockers.iter().any(|blk| !blk.state.is_terminal())
                     || (a.blockers.is_empty() && !a.blocked_by.is_empty());
@@ -404,7 +404,7 @@ impl Cockpit {
                         i.lease.as_ref().map(|l| l.agent_id.as_str()).unwrap_or("?")
                     ),
                     State::Review => format!("+{} −{} · gates passed", i.diff_added, i.diff_removed),
-                    State::Ready if !i.blocked_by.is_empty() => {
+                    State::Backlog if !i.blocked_by.is_empty() => {
                         if !i.blockers.is_empty() {
                             let summaries: Vec<String> = i
                                 .blockers
@@ -443,8 +443,9 @@ impl Cockpit {
     #[tool(
         name = "create_project",
         description = "Create a Project (top-level container). Seeds an Initial plan Task in \
-                       Ready. An agent may open one plan/docs PR then split into sibling Tasks; \
-                       cockpit may also propose_breakdown + Approve Plan."
+                       Backlog — dispatch it explicitly to start planning. An agent may open one \
+                       plan/docs PR then split into sibling Tasks; cockpit may also \
+                       propose_breakdown + Approve Plan."
     )]
     fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
         if a.parent.is_some() {
@@ -469,7 +470,7 @@ impl Cockpit {
         }
         self.ack(
             item.id,
-            "Project created in shaping with Initial plan Task Ready (agent may plan-PR + split)",
+            "Project created in shaping with Initial plan Task in Backlog — dispatch to start",
         )
     }
 
@@ -549,8 +550,9 @@ impl Cockpit {
     #[tool(
         name = "approve_plan",
         description = "Approve a Project's Plan artifact: materialize flat Tasks + deps and \
-                       publish them to Ready. Never moves the Project itself to Ready. Only \
-                       call this once the human has actually seen and approved the shape."
+                       publish them to Backlog. Never moves the Project itself to Backlog. \
+                       Does not start runs — dispatch each Task (or Initial plan) explicitly. \
+                       Only call this once the human has actually seen and approved the shape."
     )]
     fn approve_plan(&self, Parameters(a): Parameters<IdArg>) -> Out<ApprovePlanOut> {
         let published = self.board.approve_plan(a.id).map_err(bad)?;
@@ -596,36 +598,51 @@ impl Cockpit {
     }
 
     #[tool(
+        name = "dispatch",
+        description = "Queue a Backlog card for the supervisor to claim and start a sandbox run. \
+                       Nothing auto-starts from Backlog — call this (or the UI Start button) \
+                       when the human wants work to begin. Requires unblocked and unparked. \
+                       Does not start immediately if max_concurrent or budget is saturated; \
+                       the supervisor drains the queue."
+    )]
+    fn dispatch(&self, Parameters(a): Parameters<IdArg>) -> Out<Ack> {
+        self.board.enqueue_dispatch(a.id).map_err(bad)?;
+        self.ack(a.id, "queued for dispatch")
+    }
+
+    #[tool(
         name = "park",
-        description = "Stop the agent and return the card to Ready, keep the sandbox and agy \
-                       conversation, and hold the card until unpark — it will not auto-reclaim. \
-                       Prefer this when a run is wedged. Optional reason becomes a binding note \
-                       on resume."
+        description = "Stop the agent and return the card to Backlog, keep the sandbox and agy \
+                       conversation, and hold the card until unpark. Does not auto-reclaim — \
+                       after unpark you must dispatch again. Prefer this when a run is wedged. \
+                       Optional reason becomes a binding note on resume."
     )]
     fn park(&self, Parameters(a): Parameters<ReasonArg>) -> Out<Ack> {
         self.board.park(a.id, a.reason).map_err(bad)?;
-        self.ack(a.id, "agent parked; held until unpark")
+        self.ack(a.id, "agent parked; held until unpark + dispatch")
     }
 
     #[tool(
         name = "unpark",
-        description = "Clear a park hold so the Ready card may be claimed again. If a conversation \
-                       id is still on the card, the next claim resumes that agy session."
+        description = "Clear a park hold on a Backlog card. Does not start a run — call dispatch \
+                       next. If a conversation id is still on the card, the next claim resumes \
+                       that agy session."
     )]
     fn unpark(&self, Parameters(a): Parameters<IdArg>) -> Out<Ack> {
         self.board.unpark(a.id).map_err(bad)?;
-        self.ack(a.id, "park cleared; eligible to claim")
+        self.ack(a.id, "park cleared; dispatch to start")
     }
 
     #[tool(
         name = "halt",
-        description = "Kill the agent, discard the LLM session, and return the card to Ready. \
-                       Prefer park when you want to resume the same conversation; prefer steer \
-                       for a soft note that can wait until the next turn."
+        description = "Kill the agent, discard the LLM session, and return the card to Backlog. \
+                       Does not auto-reclaim — dispatch again to restart. Prefer park when you \
+                       want to resume the same conversation; prefer steer for a soft note that \
+                       can wait until the next turn."
     )]
     fn halt(&self, Parameters(a): Parameters<ReasonArg>) -> Out<Ack> {
         self.board.halt(a.id, a.reason).map_err(bad)?;
-        self.ack(a.id, "agent released, session discarded, card requeued")
+        self.ack(a.id, "agent released, session discarded; dispatch to restart")
     }
 
     #[tool(
@@ -652,20 +669,20 @@ impl Cockpit {
 
     #[tool(
         name = "request_changes",
-        description = "Send a reviewed card back to Ready with a note. The note is attached to \
-                       the card, so whoever picks it up next sees why."
+        description = "Send a reviewed card back to Backlog with a note. The note is attached to \
+                       the card, so the next run (after dispatch) sees why. Does not auto-start."
     )]
     fn request_changes(&self, Parameters(a): Parameters<TextArg>) -> Out<Ack> {
         self.board.request_changes(a.id, a.text).map_err(bad)?;
-        self.ack(a.id, "returned to the queue with your note")
+        self.ack(a.id, "returned to Backlog with your note — dispatch to restart")
     }
 
     // =============================================================== worker
 
     #[tool(
         name = "list_ready",
-        description = "WORKER VERB. The claimable pool, filtered to your capabilities. Poll this \
-                       when you are not holding a card."
+        description = "WORKER VERB / cockpit alias. Lists Backlog leaves filtered by capabilities. \
+                       Not a start queue — cockpit must dispatch before the supervisor claims."
     )]
     fn list_ready(&self, Parameters(a): Parameters<ListReadyArg>) -> Out<ListReadyOut> {
         let rows = self
@@ -675,7 +692,7 @@ impl Cockpit {
             .map(|i| CardLine {
                 id: i.id,
                 title: i.title.clone(),
-                state: "Ready".into(),
+                state: "Backlog".into(),
                 detail: i.intent.clone(),
             })
             .collect();
@@ -684,11 +701,10 @@ impl Cockpit {
 
     #[tool(
         name = "claim",
-        description = "WORKER VERB. Take a lease on a ready card. Returns the full intent chain \
-                       from the vision down plus every inherited constraint — read it before you \
-                       start, because it is what stops you making a decision nobody would catch \
-                       until a customer install failed. Keep heartbeating or the lease expires \
-                       and the card is requeued."
+        description = "WORKER VERB. Take a lease on a Backlog card (supervisor path after \
+                       dispatch). Returns the full intent chain from the vision down plus every \
+                       inherited constraint — read it before you start. Keep heartbeating or the \
+                       lease expires and the card returns to Backlog (dispatch again to restart)."
     )]
     fn claim(&self, Parameters(a): Parameters<ClaimArg>) -> Out<crate::store::ClaimGrant> {
         let grant = self
@@ -714,7 +730,7 @@ impl Cockpit {
         name = "split",
         description = "WORKER VERB. The work is bigger than this card: create children rather \
                        than heroically overrunning. The parent becomes a container and your \
-                       children fan into Ready. Needs two or more children; if it is really one \
+                       children fan into Backlog. Needs two or more children; if it is really one \
                        card, just report."
     )]
     fn split(&self, Parameters(a): Parameters<SplitArg>) -> Out<SplitOut> {
@@ -756,7 +772,7 @@ impl Cockpit {
     #[tool(
         name = "report",
         description = "WORKER VERB. You believe the definition of done is met. Hands the card to \
-                       the verifier — gates decide, not you. Failing gates return it to Ready."
+                       Review — CI on the PR is the mechanical gate."
     )]
     fn report(&self, Parameters(a): Parameters<ReportArg>) -> Out<Ack> {
         self.board
@@ -773,14 +789,14 @@ impl Cockpit {
 
     #[tool(
         name = "release",
-        description = "WORKER VERB. Graceful surrender — give the card back to Ready without \
-                       waiting for your lease to expire."
+        description = "WORKER VERB. Graceful surrender — give the card back to Backlog without \
+                       waiting for your lease to expire. Cockpit must dispatch again to restart."
     )]
     fn release(&self, Parameters(a): Parameters<AgentItemArg>) -> Out<Ack> {
         self.board
             .release(a.item_id, &a.agent_id)
             .map_err(|e| bad(e.to_string()))?;
-        self.ack(a.item_id, "released back to the queue")
+        self.ack(a.item_id, "released to Backlog")
     }
 }
 
@@ -809,12 +825,15 @@ impl ServerHandler for Cockpit {
                  Interrupt the human for four things only: irreversible actions, budget breach, \
                  an ambiguity blocking several items, and repeated failure on the same card. \
                  Otherwise summarise and let them walk away.\n\n\
-                 Prefer park over halt when a run is wedged — park keeps the sandbox and agy \
-                 session for resume; halt discards the conversation. Prefer steer for a soft note \
-                 that can wait. When you correct something that could recur, pin_constraint so it \
-                 binds every descendant instead of being a one-off. Read item_detail's intent \
-                 chain before approving or answering; a card that passes its gates can still be \
-                 building the wrong thing, because coherence is not a property of any single card.",
+                 Backlog cards do not auto-start. Use dispatch (or the UI Start button) when the \
+                 human wants a run. Park/halt/lease expiry/request_changes all return to Backlog \
+                 without reclaim — dispatch again. Prefer park over halt when a run is wedged — \
+                 park keeps the sandbox and agy session; unpark then dispatch to resume. Prefer \
+                 steer for a soft note that can wait. When you correct something that could recur, \
+                 pin_constraint so it binds every descendant instead of being a one-off. Read \
+                 item_detail's intent chain before approving or answering; a card that passes its \
+                 gates can still be building the wrong thing, because coherence is not a property \
+                 of any single card.",
         )
     }
 }
@@ -994,7 +1013,7 @@ mod tests {
             )
             .expect("ready card");
         let _ = board.transition(card_ready.id, State::Shaping, "test", None);
-        let _ = board.transition(card_ready.id, State::Ready, "test", None);
+        let _ = board.transition(card_ready.id, State::Backlog, "test", None);
 
         // NeedsYou card (escalated)
         let card_needs = board
@@ -1009,7 +1028,7 @@ mod tests {
             )
             .expect("needs card");
         let _ = board.transition(card_needs.id, State::Shaping, "test", None);
-        let _ = board.transition(card_needs.id, State::Ready, "test", None);
+        let _ = board.transition(card_needs.id, State::Backlog, "test", None);
         let _ = board.claim(card_needs.id, "agent-1", None, 60);
         let options = vec![
             crate::model::EscalationOption { label: "Opt A".into(), detail: "Detail A".into() },
@@ -1032,7 +1051,7 @@ mod tests {
         let _ = board.transition(card_shaping.id, State::Shaping, "test", None);
 
         // Verify list_column for needs_you, ready, shaping returns a record object with "items"
-        for col in [Column::NeedsYou, Column::Ready, Column::Shaping] {
+        for col in [Column::NeedsYou, Column::Backlog, Column::Shaping] {
             let res = cockpit
                 .list_column(Parameters(ColumnArg { column: col, goal: None }))
                 .expect("list_column should succeed");
@@ -1110,12 +1129,12 @@ mod tests {
         // Card 1: unblocked
         let c1 = board.create(Some(goal_id), "Card 1", "Unblocked", Some("DoD".into()), Origin::Human, false, None).expect("c1");
         let _ = board.transition(c1.id, State::Shaping, "test", None);
-        let _ = board.transition(c1.id, State::Ready, "test", None);
+        let _ = board.transition(c1.id, State::Backlog, "test", None);
 
         // Card 2: blocked by Card 1
         let c2 = board.create(Some(goal_id), "Card 2", "Blocked", Some("DoD".into()), Origin::Human, false, None).expect("c2");
         let _ = board.transition(c2.id, State::Shaping, "test", None);
-        let _ = board.transition(c2.id, State::Ready, "test", None);
+        let _ = board.transition(c2.id, State::Backlog, "test", None);
         board.set_blocked_by(c2.id, vec![c1.id]);
 
         // Bounce Card 1 through claim and release so its entered_state_at is NEWER than Card 2
@@ -1123,7 +1142,7 @@ mod tests {
         let _ = board.release(c1.id, "agent-1").expect("release");
 
         let res = cockpit
-            .list_column(Parameters(ColumnArg { column: Column::Ready, goal: Some(goal_id) }))
+            .list_column(Parameters(ColumnArg { column: Column::Backlog, goal: Some(goal_id) }))
             .expect("list_column should succeed");
 
         let pos_c1 = res.0.items.iter().position(|i| i.id == c1.id).expect("c1 present");

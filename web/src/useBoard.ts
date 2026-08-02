@@ -10,7 +10,6 @@ interface BoardState {
   heartbeatExpect: number;
   loaded: boolean;
   connected: boolean;
-  dispatchPaused: boolean;
   defaultEngine: string;
   defaultModel: string;
   /** When the last successful load happened. Drives the staleness warning. */
@@ -20,8 +19,7 @@ interface BoardState {
 type Action =
   | { type: "snapshot"; snap: Snapshot }
   | { type: "event"; ev: BoardEvent }
-  | { type: "connected"; ok: boolean }
-  | { type: "dispatch_paused"; paused: boolean };
+  | { type: "connected"; ok: boolean };
 
 const initial: BoardState = {
   items: new Map(),
@@ -31,7 +29,6 @@ const initial: BoardState = {
   heartbeatExpect: 6,
   loaded: false,
   connected: false,
-  dispatchPaused: false,
   defaultEngine: "",
   defaultModel: "",
   lastLoadedAt: null,
@@ -49,7 +46,6 @@ function reduce(s: BoardState, a: Action): BoardState {
         goals: a.snap.goals,
         serverTime: a.snap.server_time,
         heartbeatExpect: a.snap.heartbeat_expect_secs,
-        dispatchPaused: a.snap.dispatch_paused ?? false,
         defaultEngine: a.snap.default_engine ?? "",
         defaultModel: a.snap.default_model ?? "",
         loaded: true,
@@ -58,26 +54,14 @@ function reduce(s: BoardState, a: Action): BoardState {
     }
     case "event": {
       if (a.ev.type === "upsert") {
-        const item = a.ev.item;
         const items = new Map(s.items);
-        items.set(item.id, item);
-        // Project pause lives on the item; keep GoalView chip in sync without
-        // waiting for the next snapshot poll.
-        const gi = s.goals.findIndex((g) => g.id === item.id);
-        if (gi >= 0 && item.dispatch_paused !== undefined) {
-          const goals = s.goals.slice();
-          goals[gi] = { ...goals[gi], dispatch_paused: !!item.dispatch_paused };
-          return { ...s, items, goals };
-        }
+        items.set(a.ev.item.id, a.ev.item);
         return { ...s, items };
       }
       if (a.ev.type === "delete") {
         const items = new Map(s.items);
         items.delete(a.ev.id);
         return { ...s, items };
-      }
-      if (a.ev.type === "dispatch_paused") {
-        return { ...s, dispatchPaused: a.ev.paused };
       }
       if (a.ev.type === "story") {
         const stories = new Map(s.stories);
@@ -87,8 +71,6 @@ function reduce(s: BoardState, a: Action): BoardState {
       }
       return s;
     }
-    case "dispatch_paused":
-      return { ...s, dispatchPaused: a.paused };
     case "connected":
       return { ...s, connected: a.ok };
   }
@@ -149,7 +131,11 @@ export function useBoard() {
     };
   }, []);
 
-  return { ...state, error, refresh: () => api.board().then((snap) => dispatch({ type: "snapshot", snap })) };
+  return {
+    ...state,
+    error,
+    refresh: () => api.board().then((snap) => dispatch({ type: "snapshot", snap })),
+  };
 }
 
 /** A ticking clock so relative times ("♥ 4s") stay honest between events. */

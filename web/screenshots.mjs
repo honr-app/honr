@@ -157,7 +157,7 @@ await shoot("desktop-cockpit", DESKTOP, async (page) => {
     console.log(`  [Playwright Assertion] Needs you block visible`);
   }
 
-  // Expand a lane if needed, then assert blocker chips on Ready cards.
+  // Expand a lane if needed, then assert blocker chips on Backlog cards.
   const toggleGraphBtn = page.locator('[data-testid="toggle-graph-view"]');
   if ((await toggleGraphBtn.count()) === 0) {
     await page.locator(".lane-head").first().click();
@@ -168,7 +168,7 @@ await shoot("desktop-cockpit", DESKTOP, async (page) => {
   await blockerChips.first().waitFor({ state: "visible", timeout: 5000 });
   const text = await blockerChips.first().textContent();
   console.log(`  [Playwright Assertion] Blocker chips content: "${text?.trim()}"`);
-  if (!text?.includes("Supervisor runs the gates") || !text?.includes("ready")) {
+  if (!text?.includes("Supervisor runs the gates") || !text?.includes("backlog")) {
     throw new Error(`Blocker chips missing expected human-readable text. Got: ${text}`);
   }
 
