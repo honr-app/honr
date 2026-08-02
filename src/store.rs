@@ -76,6 +76,9 @@ pub struct GoalView {
     pub plan_status: String,
     /// Project-level dispatch pause (independent of global `dispatch_paused`).
     pub dispatch_paused: bool,
+    /// Soft-retired Project — hidden from the default cockpit, available via
+    /// "Show archived". Digests still omit these.
+    pub archived: bool,
     pub columns: Vec<ColumnView>,
     pub story: Vec<StoryLine>,
 }
@@ -2308,18 +2311,25 @@ fn check_split_relatedness(
         if Self::depth(s, gid) != 0 {
             return None;
         }
-        // Archived / cut Projects stay in state for history but leave the board.
-        if goal.state == State::Retired {
-            return None;
-        }
+        let archived = goal.state == State::Retired;
 
         // Tasks under this Project only — the Project itself is never a Board card.
         let members: Vec<&WorkItem> = s.items.values().filter(|i| i.parent == Some(gid)).collect();
 
-        let leaves: Vec<&&WorkItem> =
-            members.iter().filter(|i| !Self::has_children(s, i.id)).collect();
+        // Active projects: retired leaves are out of scope (cut duplicates must
+        // not inflate the bar). Archived projects: cut_scope retires the whole
+        // subtree, so count every leaf — the scope is closed.
+        let leaves: Vec<&&WorkItem> = members
+            .iter()
+            .filter(|i| archived || i.state != State::Retired)
+            .filter(|i| !Self::has_children(s, i.id))
+            .collect();
         let leaves_total = leaves.len();
-        let leaves_done = leaves.iter().filter(|i| i.state == State::Done).count();
+        let leaves_done = if archived {
+            leaves_total
+        } else {
+            leaves.iter().filter(|i| i.state == State::Done).count()
+        };
 
         let spend_cents = members.iter().map(|i| i.cost_cents).sum();
         let agents_live = members
@@ -2364,6 +2374,7 @@ fn check_split_relatedness(
             needs_you,
             plan_status,
             dispatch_paused: goal.dispatch_paused,
+            archived,
             columns,
             story: s.stories.get(&gid).cloned().unwrap_or_default(),
         })
@@ -3428,7 +3439,7 @@ mod tests {
     }
 
     #[test]
-    fn archived_project_omitted_from_snapshot_and_digest() {
+    fn archived_project_marked_in_snapshot_omitted_from_digest() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join("honr-test-archive-hide.json"),
@@ -3448,18 +3459,93 @@ mod tests {
         b.cut_scope(archive.id, Some("archived".into()))
             .expect("cut");
         assert_eq!(b.get(archive.id).unwrap().state, State::Retired);
+        let snap = b.snapshot();
+        let archived_goal = snap
+            .goals
+            .iter()
+            .find(|g| g.id == archive.id)
+            .expect("retired Project stays in snapshot for Show archived");
         assert!(
-            b.snapshot().goals.iter().all(|g| g.id != archive.id),
-            "retired Project must not appear in snapshot goals"
+            archived_goal.archived,
+            "retired Project must be marked archived"
         );
         assert!(
             b.digest().goals.iter().all(|g| g.goal_id != archive.id),
             "retired Project must not appear in digest"
         );
         assert!(
-            b.snapshot().goals.iter().any(|g| g.id == keep.id),
+            b.snapshot().goals.iter().any(|g| g.id == keep.id && !g.archived),
             "active Project still listed"
         );
+    }
+
+    #[test]
+    fn retired_leaves_excluded_from_goal_progress() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-retired-leaves-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(None, "Keep sandboxes", "why", None, Origin::Human, true, None)
+            .expect("project");
+        // create() seeds Initial plan — park it Done so it doesn't muddy the ratio.
+        let initial_id = b
+            .children_of(project.id)
+            .into_iter()
+            .next()
+            .expect("seeded Initial plan");
+        let done = b
+            .create(
+                Some(project.id),
+                "Finished leaf",
+                "why",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("done leaf");
+        let cut = b
+            .create(
+                Some(project.id),
+                "Cut duplicate",
+                "why",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("cut leaf");
+
+        for id in [initial_id, done.id, cut.id] {
+            // Initial plan is already Ready; others start Draft.
+            let _ = b.transition(id, State::Shaping, "t", None);
+            let _ = b.transition(id, State::Ready, "t", None);
+            let _ = b.transition(id, State::Claimed, "t", None);
+            let _ = b.transition(id, State::Running, "t", None);
+            let _ = b.transition(id, State::Review, "t", None);
+            let _ = b.transition(id, State::Done, "t", None);
+        }
+        b.cut_scope(cut.id, Some("duplicate".into()))
+            .expect("retire duplicate");
+
+        let snap = b.snapshot();
+        let goal = snap
+            .goals
+            .iter()
+            .find(|g| g.id == project.id)
+            .expect("goal");
+        assert_eq!(
+            (goal.leaves_done, goal.leaves_total),
+            (2, 2),
+            "retired leaf must not inflate denominator: got {}/{}",
+            goal.leaves_done,
+            goal.leaves_total
+        );
+        assert!((goal.progress - 1.0).abs() < f32::EPSILON);
     }
 
     #[tokio::test]

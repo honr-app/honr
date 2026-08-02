@@ -42,12 +42,15 @@ export function Cockpit(props: CockpitProps) {
   const [filterQuery, setFilterQuery] = useState("");
   const [filterState, setFilterState] = useState<BoardFilter>("all");
   const [projectFilter, setProjectFilter] = useState<number | "all">("all");
+  const [showArchived, setShowArchived] = useState(false);
   /** Explicit open/closed overrides; missing keys use the lane's default. */
   const [laneOpen, setLaneOpen] = useState<Record<number, boolean>>({});
 
-  const activeGoals = props.goals.filter(
-    (goal) => props.items.get(goal.id)?.state !== "retired",
-  );
+  const isArchivedGoal = (goal: GoalView) =>
+    goal.archived === true || props.items.get(goal.id)?.state === "retired";
+
+  const activeGoals = props.goals.filter((goal) => !isArchivedGoal(goal));
+  const archivedGoals = props.goals.filter((goal) => isArchivedGoal(goal));
 
   const tasks = useMemo(
     () =>
@@ -91,10 +94,14 @@ export function Cockpit(props: CockpitProps) {
 
   // Stable order from the board (id / creation). Activity shows on badges and
   // lane styling — reordering swimlanes as work moves is disorienting.
+  // Archived lanes sort after active when revealed.
   const sortedGoals = useMemo(() => {
-    if (projectFilter === "all") return activeGoals;
-    return activeGoals.filter((g) => g.id === projectFilter);
-  }, [activeGoals, projectFilter]);
+    const base = showArchived
+      ? [...activeGoals, ...archivedGoals]
+      : activeGoals;
+    if (projectFilter === "all") return base;
+    return base.filter((g) => g.id === projectFilter);
+  }, [activeGoals, archivedGoals, projectFilter, showArchived]);
 
   const mode = modeCopy({
     needsYou: totals.needsYou,
@@ -105,7 +112,7 @@ export function Cockpit(props: CockpitProps) {
     totalTasks: totals.total,
   });
 
-  if (!activeGoals.length) {
+  if (!activeGoals.length && !(showArchived && archivedGoals.length)) {
     return (
       <div className="cockpit">
         <header className="cockpit-hero">
@@ -122,6 +129,17 @@ export function Cockpit(props: CockpitProps) {
             From a cockpit agent with the honr MCP: create_project →
             propose_breakdown → approve_plan. Then Ready tasks can claim.
           </p>
+          {archivedGoals.length > 0 && (
+            <p style={{ marginTop: 12 }}>
+              <button
+                type="button"
+                className="filter-btn active"
+                onClick={() => setShowArchived(true)}
+              >
+                Show {archivedGoals.length} archived
+              </button>
+            </p>
+          )}
         </div>
         <HowItWorks />
       </div>
@@ -147,7 +165,7 @@ export function Cockpit(props: CockpitProps) {
           value={filterQuery}
           onChange={(e) => setFilterQuery(e.target.value)}
         />
-        {activeGoals.length > 1 && (
+        {(showArchived ? sortedGoals : activeGoals).length > 1 && (
           <select
             className="cockpit-project-select"
             value={projectFilter === "all" ? "all" : String(projectFilter)}
@@ -162,6 +180,12 @@ export function Cockpit(props: CockpitProps) {
                 {g.title}
               </option>
             ))}
+            {showArchived &&
+              archivedGoals.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.title} (archived)
+                </option>
+              ))}
           </select>
         )}
         {(
@@ -183,6 +207,16 @@ export function Cockpit(props: CockpitProps) {
             {label}
           </button>
         ))}
+        {archivedGoals.length > 0 && (
+          <button
+            type="button"
+            className={`filter-btn ${showArchived ? "active" : ""}`}
+            onClick={() => setShowArchived((v) => !v)}
+            title="Soft-retired projects stay in state; toggle to browse them"
+          >
+            Archived{showArchived ? "" : ` (${archivedGoals.length})`}
+          </button>
+        )}
         {sortedGoals.length > 0 && (
           <span className="lane-expand-controls">
             <button
@@ -228,8 +262,13 @@ export function Cockpit(props: CockpitProps) {
 
       <div className="cockpit-lanes">
         {sortedGoals.map((goal) => {
-          const hot = laneRank(goal, props.items) < 3;
-          const defaultOpen = hot || filterState !== "all";
+          const archived =
+            goal.archived === true ||
+            props.items.get(goal.id)?.state === "retired";
+          const hot = !archived && laneRank(goal, props.items) < 3;
+          const defaultOpen = archived
+            ? false
+            : hot || filterState !== "all";
           const open = laneOpen[goal.id] ?? defaultOpen;
           return (
             <Swimlane
@@ -416,8 +455,10 @@ function Swimlane({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const hot = laneRank(goal, p.items) < 3;
-  const urgent = goal.needs_you > 0;
+  const archived =
+    goal.archived === true || p.items.get(goal.id)?.state === "retired";
+  const hot = !archived && laneRank(goal, p.items) < 3;
+  const urgent = !archived && goal.needs_you > 0;
   const [viewMode, setViewMode] = useState<"columns" | "graph">("columns");
   const [pauseBusy, setPauseBusy] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
@@ -437,7 +478,7 @@ function Swimlane({
       !(i.beads_id ?? "").toLowerCase().includes(q)
     )
       return false;
-    if (filterState !== "all") {
+    if (!archived && filterState !== "all") {
       const colKey = COLUMN_OF[i.state];
       if (colKey !== filterState) return false;
     }
@@ -485,7 +526,7 @@ function Swimlane({
 
   return (
     <section
-      className={`lane ${urgent ? "lane-hot" : hot ? "" : "lane-quiet"} ${open ? "open" : ""}`}
+      className={`lane ${archived ? "lane-archived" : urgent ? "lane-hot" : hot ? "" : "lane-quiet"} ${open ? "open" : ""}`}
     >
       <header
         className="lane-head"
@@ -505,27 +546,36 @@ function Swimlane({
         >
           {goal.title}
         </h2>
-        {goal.needs_you > 0 && (
+        {archived && (
+          <span className="pill" title="Soft-retired — history only">
+            Archived
+          </span>
+        )}
+        {!archived && goal.needs_you > 0 && (
           <span className="alarm">⚠ {goal.needs_you} need you</span>
         )}
-        {goal.agents_live > 0 && (
+        {!archived && goal.agents_live > 0 && (
           <span className="live">● {goal.agents_live} working</span>
         )}
-        {reviewCount > 0 && goal.needs_you === 0 && (
+        {!archived && reviewCount > 0 && goal.needs_you === 0 && (
           <span className="pill review-pill">{reviewCount} review</span>
         )}
-        {projectPaused && (
+        {!archived && projectPaused && (
           <span className="pill warn" title="This project won't claim until Resume">
             Paused
           </span>
         )}
-        {planLabel && <span className="dim plan-status">{planLabel}</span>}
+        {!archived && planLabel && (
+          <span className="dim plan-status">{planLabel}</span>
+        )}
         <div className="progress">
           <div className="bar wide">
             <div className="fill" style={{ width: `${Math.round(goal.progress * 100)}%` }} />
           </div>
           <span className="dim">
-            {goal.leaves_done}/{goal.leaves_total}
+            {archived
+              ? `${mine.length} cards`
+              : `${goal.leaves_done}/${goal.leaves_total}`}
           </span>
         </div>
         {(goal.spend_cents > 0 || goal.budget_cents != null) && (
@@ -537,73 +587,75 @@ function Swimlane({
           </span>
         )}
 
-        <div className="lane-actions" onClick={(e) => e.stopPropagation()}>
-          <button
-            type="button"
-            className={projectPaused ? "dispatch-toggle paused" : "dispatch-toggle"}
-            disabled={pauseBusy}
-            onClick={toggleProjectPause}
-            title={
-              projectPaused
-                ? "Resume claiming under this Project (allowed even while Pause all is on)"
-                : "Pause claiming under this Project — running cards keep going"
-            }
-          >
-            {projectPaused ? "Resume" : "Pause"}
-          </button>
-          {!confirmArchive ? (
+        {!archived && (
+          <div className="lane-actions" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
-              className="dispatch-toggle archive-toggle"
-              disabled={archiveBusy}
-              onClick={() => setConfirmArchive(true)}
-              title="Archive this Project and its subtree (retire, not delete)"
+              className={projectPaused ? "dispatch-toggle paused" : "dispatch-toggle"}
+              disabled={pauseBusy}
+              onClick={toggleProjectPause}
+              title={
+                projectPaused
+                  ? "Resume claiming under this Project (allowed even while Pause all is on)"
+                  : "Pause claiming under this Project — running cards keep going"
+              }
             >
-              Archive
+              {projectPaused ? "Resume" : "Pause"}
             </button>
-          ) : (
-            <span className="lane-archive-confirm">
-              <span className="dim">Retire project?</span>
+            {!confirmArchive ? (
               <button
                 type="button"
-                className="dispatch-toggle archive-confirm"
+                className="dispatch-toggle archive-toggle"
                 disabled={archiveBusy}
-                onClick={archiveProject}
+                onClick={() => setConfirmArchive(true)}
+                title="Archive this Project and its subtree (retire, not delete)"
               >
-                Confirm
+                Archive
               </button>
-              <button
-                type="button"
-                className="dispatch-toggle"
-                disabled={archiveBusy}
-                onClick={() => setConfirmArchive(false)}
-              >
-                Cancel
-              </button>
-            </span>
-          )}
-          {open && (
-            <div className="lane-view-switcher">
-              <button
-                type="button"
-                className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
-                onClick={() => setViewMode("columns")}
-                title="Kanban columns"
-              >
-                Columns
-              </button>
-              <button
-                type="button"
-                className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
-                onClick={() => setViewMode("graph")}
-                title="Dependency graph"
-                data-testid="toggle-graph-view"
-              >
-                Graph
-              </button>
-            </div>
-          )}
-        </div>
+            ) : (
+              <span className="lane-archive-confirm">
+                <span className="dim">Retire project?</span>
+                <button
+                  type="button"
+                  className="dispatch-toggle archive-confirm"
+                  disabled={archiveBusy}
+                  onClick={archiveProject}
+                >
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  className="dispatch-toggle"
+                  disabled={archiveBusy}
+                  onClick={() => setConfirmArchive(false)}
+                >
+                  Cancel
+                </button>
+              </span>
+            )}
+            {open && (
+              <div className="lane-view-switcher">
+                <button
+                  type="button"
+                  className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
+                  onClick={() => setViewMode("columns")}
+                  title="Kanban columns"
+                >
+                  Columns
+                </button>
+                <button
+                  type="button"
+                  className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
+                  onClick={() => setViewMode("graph")}
+                  title="Dependency graph"
+                  data-testid="toggle-graph-view"
+                >
+                  Graph
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </header>
 
       {open && (
@@ -627,7 +679,30 @@ function Swimlane({
             </details>
           )}
 
-          {viewMode === "graph" ? (
+          {archived ? (
+            mine.length === 0 ? (
+              <div className="lane-empty dim">No cards in this archived project.</div>
+            ) : (
+              <div className="lane-archived-cards">
+                {[...mine]
+                  .sort((a, b) => a.id - b.id)
+                  .map((item) => (
+                    <Card
+                      key={item.id}
+                      item={item}
+                      column="retired"
+                      now={p.now}
+                      heartbeatExpect={p.heartbeatExpect}
+                      breadcrumb={p.breadcrumbOf(item.id)}
+                      defaultEngine={p.defaultEngine}
+                      defaultModel={p.defaultModel}
+                      labelOf={(id) => labelOfItem(p.items, id)}
+                      onOpen={p.onOpen}
+                    />
+                  ))}
+              </div>
+            )
+          ) : viewMode === "graph" ? (
             <DependencyGraph items={mine} onOpen={p.onOpen} />
           ) : (
             <div
