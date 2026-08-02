@@ -76,4 +76,27 @@ assert(/Step\s*(<!-- -->)?\s*3/.test(html), "Should compute Rank 2 (Step 3)");
 assert(html.includes("blocked by"), "Should contain plain-language blocker cue");
 assert(html.includes("ready / unblocked"), "Should contain ready / unblocked cue for root task");
 
+// Test Case 2: UI Fixture Board Diamond DAG (Supervisor -> Verify & Report -> Observe cost)
+import { execSync } from "node:child_process";
+const fixtureJson = JSON.parse(execSync("node ui-fixture.mjs").toString());
+const fixtureItems = Object.values(fixtureJson.items);
+
+const fixtureHtml = renderToString(
+  React.createElement(DependencyGraph, {
+    items: fixtureItems,
+    onOpen: () => {},
+  })
+);
+
+assert(fixtureHtml.includes("Supervisor runs the gates"), "Fixture should include Task A");
+assert(fixtureHtml.includes("Verify from a clean checkout"), "Fixture should include Task B");
+assert(fixtureHtml.includes("Report the real diffstat"), "Fixture should include Task C");
+assert(fixtureHtml.includes("Observe cost during the run"), "Fixture should include Task D");
+
+// Verify step ranks in fixture HTML output
+assert(/Step\s*(<!-- -->)?\s*1/.test(fixtureHtml), "Fixture should contain Step 1 rank");
+assert(/Step\s*(<!-- -->)?\s*2/.test(fixtureHtml), "Fixture should contain Step 2 rank");
+assert(/Step\s*(<!-- -->)?\s*3/.test(fixtureHtml), "Fixture should contain Step 3 rank");
+
 console.log("✅ All DependencyGraph component assertions passed!");
+

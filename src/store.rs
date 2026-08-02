@@ -2930,6 +2930,91 @@ mod tests {
     }
 
     #[test]
+    fn approve_plan_materializes_diamond_dag() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-approve-diamond-dag.json"),
+        );
+        let project = b
+            .create(None, "Phase Diamond", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+
+        b.propose_plan(
+            project.id,
+            "diamond plan",
+            vec![
+                PlanTaskSpec {
+                    key: "a".into(),
+                    title: "Task A".into(),
+                    intent: "do a".into(),
+                    definition_of_done: "a done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    item_id: None,
+                },
+                PlanTaskSpec {
+                    key: "b".into(),
+                    title: "Task B".into(),
+                    intent: "do b".into(),
+                    definition_of_done: "b done".into(),
+                    blocked_by_keys: vec!["a".into()],
+                    capability: None,
+                    item_id: None,
+                },
+                PlanTaskSpec {
+                    key: "c".into(),
+                    title: "Task C".into(),
+                    intent: "do c".into(),
+                    definition_of_done: "c done".into(),
+                    blocked_by_keys: vec!["a".into()],
+                    capability: None,
+                    item_id: None,
+                },
+                PlanTaskSpec {
+                    key: "d".into(),
+                    title: "Task D".into(),
+                    intent: "do d".into(),
+                    definition_of_done: "d done".into(),
+                    blocked_by_keys: vec!["b".into(), "c".into()],
+                    capability: None,
+                    item_id: None,
+                },
+            ],
+            vec![],
+        )
+        .expect("propose");
+
+        let published = b.approve_plan(project.id).expect("approve");
+        assert_eq!(published.len(), 4);
+
+        let id_a = published[0];
+        let id_b = published[1];
+        let id_c = published[2];
+        let id_d = published[3];
+
+        let item_a = b.get(id_a).unwrap();
+        let item_b = b.get(id_b).unwrap();
+        let item_c = b.get(id_c).unwrap();
+        let item_d = b.get(id_d).unwrap();
+
+        assert_eq!(item_a.blocked_by, Vec::<ItemId>::new());
+        assert_eq!(item_b.blocked_by, vec![id_a]);
+        assert_eq!(item_c.blocked_by, vec![id_a]);
+        assert_eq!(item_d.blocked_by, vec![id_b, id_c]);
+
+        // Verify Ready column summary lists plain language blockers
+        let s = b.state.read().unwrap();
+        let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
+        let ready_col = goal_view
+            .columns
+            .iter()
+            .find(|c| c.column == Column::Ready)
+            .expect("ready col");
+        assert!(ready_col.summary.text.contains("blocked on"));
+    }
+
+    #[test]
     fn dispatch_paused_defaults_false_and_toggles() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-pause-toggle.json"));
         assert!(!b.dispatch_paused());

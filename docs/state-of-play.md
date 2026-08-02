@@ -43,7 +43,10 @@ Creating a Project seeds an **Initial plan** Task. `propose_breakdown` writes a
 **Plan artifact** (task keys, deps, DoDs) on the Project; **Approve Plan**
 (`approve_plan`) materializes sibling Tasks onto the Board and publishes them
 to Ready. Tasks relate by beads dependency edges (`blocks` / `relates-to`), not
-nested hierarchy.
+nested hierarchy. Upon Plan approval, tasks with dependency constraints materialize
+as a DAG (e.g. A→B, A→C, B+C→D). Friendly plain-language blocker chips appear on cards,
+and the Board visual graph (`npm --prefix web run shots` / `web/shots/desktop-graph.png`)
+renders the topological dependency DAG step by step.
 
 `honr.json` still holds the rich lifecycle + runtime fields (including the Plan
 artifact); `.beads/` holds identity and the graph (Plan A dual-write). A fresh

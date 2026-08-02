@@ -86,22 +86,24 @@ const task = (title, intent, extra = {}) =>
     ...extra,
   });
 
-// ---- Ready ----------------------------------------------------------------
+// ---- Ready (Diamond DAG: A -> B, A -> C, B+C -> D) -------------------------
 
-const first = task("Supervisor runs the gates", "The agent's own claim of success is what reaches the board.", {
+const taskA = task("Supervisor runs the gates", "The agent's own claim of success is what reaches the board.", {
   since: 2400,
   beads_id: "honr-t10",
 });
-task("Verify from a clean checkout", "Gates in the agent's sandbox can be influenced by the agent.", {
-  blocked_by: [first],
+const taskB = task("Verify from a clean checkout", "Gates in the agent's sandbox can be influenced by the agent.", {
+  blocked_by: [taskA],
   since: 2100,
   beads_id: "honr-t11",
 });
-task("Report the real diffstat", "Review sorts by a blast radius it does not actually know.", {
+const taskC = task("Report the real diffstat", "Review sorts by a blast radius it does not actually know.", {
+  blocked_by: [taskA],
   since: 1500,
   beads_id: "honr-t17",
 });
-task("Observe cost during the run", "Spend only arrives in the final message, so no cap can interrupt.", {
+const taskD = task("Observe cost during the run", "Spend only arrives in the final message, so no cap can interrupt.", {
+  blocked_by: [taskB, taskC],
   since: 900,
   beads_id: "honr-t18",
 });
