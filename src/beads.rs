@@ -233,6 +233,29 @@ impl BeadsClient {
         c
     }
 
+    /// Sync `bd` spawn — used from `Board::create` so we never
+    /// `Handle::block_on` an async create on the runtime that owns the board.
+    fn sync_cmd(&self) -> std::process::Command {
+        let mut c = std::process::Command::new("bd");
+        c.env("BEADS_DIR", &self.beads_dir);
+        if let Some(parent) = self.beads_dir.parent() {
+            if !parent.as_os_str().is_empty() {
+                c.current_dir(parent);
+            }
+        }
+        c
+    }
+
+    /// Namespaced orchestrator metadata (`bd create/update --metadata`).
+    pub fn honr_metadata(item_id: u64, pr_url: Option<&str>) -> String {
+        let mut honr = serde_json::Map::new();
+        honr.insert("item_id".into(), serde_json::json!(item_id));
+        if let Some(url) = pr_url.filter(|u| !u.trim().is_empty()) {
+            honr.insert("pr_url".into(), serde_json::json!(url));
+        }
+        serde_json::json!({ "honr": honr }).to_string()
+    }
+
     /// True when `id` looks like a real beads hash, not a local placeholder.
     pub fn is_real_id(id: &str) -> bool {
         !id.is_empty() && !id.starts_with("bd-honr-")
@@ -317,6 +340,10 @@ impl BeadsClient {
 
     /// Run `bd init --quiet --stealth` in the target directory.
     pub async fn init_stealth(&self) -> Result<(), String> {
+        self.init_stealth_sync()
+    }
+
+    fn init_stealth_sync(&self) -> Result<(), String> {
         if self.beads_dir.join("metadata.json").exists()
             || self.beads_dir.join("embeddeddolt").exists()
         {
@@ -325,10 +352,9 @@ impl BeadsClient {
         std::fs::create_dir_all(&self.beads_dir)
             .map_err(|e| format!("mkdir beads dir: {e}"))?;
         let status = self
-            .cmd()
+            .sync_cmd()
             .args(["init", "--quiet", "--stealth", "--prefix", "honr", "--remote", ""])
             .status()
-            .await
             .map_err(|e| format!("failed to execute bd init: {e}"))?;
         if status.success() {
             Ok(())
@@ -408,7 +434,7 @@ impl BeadsClient {
         issue_type: &str,
         description: Option<&str>,
     ) -> Result<BeadsIssue, String> {
-        self.create_linked(title, priority, issue_type, description, None, &[])
+        self.create_linked(title, priority, issue_type, description, None, &[], None)
             .await
     }
 
@@ -416,7 +442,9 @@ impl BeadsClient {
     ///
     /// - Projects → `issue_type=epic`
     /// - Tasks → `issue_type=task` with `--parent=<project beads id>`
-    /// - `blocked_by` → `bd dep add <new> <blocker>` (type blocks)
+    /// - `blocked_by` → `blocks:` deps at create time, plus `bd dep add` fallback
+    /// - `metadata` → `--metadata` JSON (honr namespaced fields)
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_linked(
         &self,
         title: &str,
@@ -425,9 +453,46 @@ impl BeadsClient {
         description: Option<&str>,
         parent: Option<&str>,
         blocked_by: &[String],
+        metadata: Option<&str>,
     ) -> Result<BeadsIssue, String> {
-        let _ = self.init_stealth().await;
-        let mut cmd = self.cmd();
+        // Prefer the sync path so create/mirror share one argv shape; spawn_blocking
+        // keeps the async runtime free while `bd` talks to Dolt.
+        let this = self.clone();
+        let title = title.to_string();
+        let issue_type = issue_type.to_string();
+        let description = description.map(str::to_string);
+        let parent = parent.map(str::to_string);
+        let blocked_by = blocked_by.to_vec();
+        let metadata = metadata.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            this.create_linked_sync(
+                &title,
+                priority,
+                &issue_type,
+                description.as_deref(),
+                parent.as_deref(),
+                &blocked_by,
+                metadata.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| format!("bd create join: {e}"))?
+    }
+
+    /// Synchronous create for `Board::create` (must not nest `block_on`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_linked_sync(
+        &self,
+        title: &str,
+        priority: u32,
+        issue_type: &str,
+        description: Option<&str>,
+        parent: Option<&str>,
+        blocked_by: &[String],
+        metadata: Option<&str>,
+    ) -> Result<BeadsIssue, String> {
+        let _ = self.init_stealth_sync();
+        let mut cmd = self.sync_cmd();
         cmd.arg("create")
             .arg(title)
             .arg("-p")
@@ -442,10 +507,20 @@ impl BeadsClient {
         if let Some(p) = parent.filter(|p| Self::is_real_id(p)) {
             cmd.arg("--parent").arg(p);
         }
+        let deps: Vec<String> = blocked_by
+            .iter()
+            .filter(|b| Self::is_real_id(b))
+            .map(|b| format!("blocks:{b}"))
+            .collect();
+        if !deps.is_empty() {
+            cmd.arg("--deps").arg(deps.join(","));
+        }
+        if let Some(meta) = metadata.filter(|m| !m.trim().is_empty()) {
+            cmd.arg("--metadata").arg(meta);
+        }
 
         let out = cmd
             .output()
-            .await
             .map_err(|e| format!("failed to execute bd create: {e}"))?;
 
         if !out.status.success() {
@@ -456,11 +531,66 @@ impl BeadsClient {
         let issue: BeadsIssue = serde_json::from_slice(&out.stdout)
             .map_err(|e| format!("failed to parse bd create output: {e}"))?;
 
+        // `--deps` should have wired blockers; if bd ignored them, add explicitly.
         for blocker in blocked_by.iter().filter(|b| Self::is_real_id(b)) {
-            let _ = self.dep_add(&issue.id, blocker, "blocks").await;
+            let _ = self.dep_add_sync(&issue.id, blocker, "blocks");
         }
 
         Ok(issue)
+    }
+
+    fn dep_add_sync(&self, issue_id: &str, depends_on: &str, dep_type: &str) -> Result<(), String> {
+        if !Self::is_real_id(issue_id) || !Self::is_real_id(depends_on) {
+            return Ok(());
+        }
+        let out = self
+            .sync_cmd()
+            .args(["dep", "add", issue_id, depends_on, "-t", dep_type])
+            .output()
+            .map_err(|e| format!("failed to execute bd dep add: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(format!("bd dep add failed: {err}"))
+        }
+    }
+
+    /// `bd update <id>` for title / description / metadata write-through.
+    pub async fn update_fields(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+        metadata: Option<&str>,
+    ) -> Result<(), String> {
+        if !Self::is_real_id(id) {
+            return Ok(());
+        }
+        if title.is_none() && description.is_none() && metadata.is_none() {
+            return Ok(());
+        }
+        let mut cmd = self.cmd();
+        cmd.arg("update").arg(id);
+        if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+            cmd.arg("--title").arg(t);
+        }
+        if let Some(d) = description {
+            cmd.arg("-d").arg(d);
+        }
+        if let Some(m) = metadata.filter(|m| !m.trim().is_empty()) {
+            cmd.arg("--metadata").arg(m);
+        }
+        let out = cmd
+            .output()
+            .await
+            .map_err(|e| format!("failed to execute bd update: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(format!("bd update fields failed: {err}"))
+        }
     }
 
     /// `bd update <id> --status <status>`
@@ -532,12 +662,14 @@ impl BeadsClient {
         if ids.is_empty() {
             return Ok(());
         }
-        if !self.db_ready() {
-            return Ok(());
-        }
+        // Record Capture/Disabled before db_ready so tests see the intent even
+        // when a temp beads dir is mid-init.
         match self.gate_remote(RemoteOp::GithubPush(ids.clone())) {
             RemoteGate::Skip => return Ok(()),
             RemoteGate::Proceed => {}
+        }
+        if !self.db_ready() {
+            return Ok(());
         }
         let token = Self::resolve_github_token().unwrap_or_default();
 
@@ -756,13 +888,22 @@ mod tests {
                 Some("Test Project Description"),
                 None,
                 &[],
+                Some(r#"{"honr":{"item_id":1}}"#),
             )
             .await
             .expect("create project");
         assert_eq!(project.title, "Project Test");
 
         let task = client
-            .create_linked("Task Test", 1, "task", None, Some(&project.id), &[])
+            .create_linked(
+                "Task Test",
+                1,
+                "task",
+                None,
+                Some(&project.id),
+                &[],
+                Some(r#"{"honr":{"item_id":2}}"#),
+            )
             .await
             .expect("create task");
 

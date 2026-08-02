@@ -49,8 +49,10 @@ and the Board visual graph (`npm --prefix web run shots` / `web/shots/desktop-gr
 renders the topological dependency DAG step by step.
 
 `honr.json` still holds the rich lifecycle + runtime fields (including the Plan
-artifact); `.beads/` holds identity and the graph (Plan A dual-write). A fresh
-clone starts empty.
+artifact); `.beads/` holds identity and the graph. Board create binds a real
+beads id synchronously (Project→epic, Task→`--parent`); GitHub Issue push is
+epic-first so Task Issues can be children. Sandbox beads is a host snapshot for
+`bd show` — durable graph writes stay on the host. A fresh clone starts empty.
 
 Example shape (historical card numbers; recreate via the cockpit):
 

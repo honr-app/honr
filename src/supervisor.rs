@@ -1562,8 +1562,12 @@ fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
     ]
 }
 
-/// Snapshot the host beads DB into the sandbox so `bd show` / `bd remember` see
-/// the same Project + Task graph the supervisor dispatched from.
+/// Snapshot the host beads DB into the sandbox so `bd show` can read the same
+/// Project + Task graph the supervisor dispatched from.
+///
+/// This is a **read snapshot**. Durable graph mutations (create/close/dep/remember)
+/// belong on the host after report/split — sandbox writes to this copy do not
+/// sync back.
 async fn sync_beads_into_sandbox(
     board: &SharedBoard,
     os: &OpenShell,
@@ -1890,10 +1894,11 @@ fn briefing(
              Children must stay on-theme for this Project. Do not invent work for another Project — escalate instead.\n\
              If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` with \
              options (at least two) and a recommended index, then exit.\n\
-             \n`bd` (beads CLI) is available for the task graph and project memory. \
-             Run `bd prime` for context, `bd show <id>` for this card's Project/deps, \
-             `bd remember \"insight\"` to store learned insights, and `bd dep add` for \
-             blocks/relates-to edges between sibling tasks. Do not nest tasks under tasks.\n",
+             \nTreat the Project Plan (and this card's contract above) as your primary input. \
+             `bd` in the sandbox is a **read snapshot** of the host graph — use `bd prime` / \
+             `bd show <id>` for Project/deps context. Do not rely on `bd remember` or \
+             `bd dep add` here for durable state; the host writes beads after split/report. \
+             Do not nest tasks under tasks.\n",
         );
     } else {
         b.push_str(
@@ -1908,10 +1913,11 @@ fn briefing(
              Do not invent work that belongs to another Project — escalate instead. \
              If a PR already exists for the card, do not split — finish via report or request human guidance. \
              Split and publish are mutually exclusive for one run.\n\
-             \n`bd` (beads CLI) is available for the task graph and project memory. \
-             Run `bd prime` for context, `bd show <id>` for this card's Project/deps, \
-             `bd remember \"insight\"` to store learned insights, and `bd dep add` for \
-             blocks/relates-to edges between sibling tasks. Do not nest tasks under tasks.\n",
+             \nTreat the Project Plan (and this card's contract above) as your primary input. \
+             `bd` in the sandbox is a **read snapshot** of the host graph — use `bd prime` / \
+             `bd show <id>` for Project/deps context. Do not rely on `bd remember` or \
+             `bd dep add` here for durable state; the host writes beads after split/report. \
+             Do not nest tasks under tasks.\n",
         );
 
         b.push_str(&format!(
