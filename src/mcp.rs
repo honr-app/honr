@@ -135,12 +135,13 @@ pub struct ClaimArg {
     pub agent_id: String,
     #[serde(default)]
     pub model: Option<String>,
-    /// How long you promise to keep heartbeating. Expiry requeues the card.
+    /// Ignored — run deadline is `agents.agent_timeout_secs` on the board.
     #[serde(default = "default_lease")]
+    #[allow(dead_code)]
     pub lease_secs: i64,
 }
 fn default_lease() -> i64 {
-    45
+    1800
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -153,6 +154,7 @@ pub struct HeartbeatArg {
     /// plane, not on your good behaviour.
     #[serde(default)]
     pub cost_cents: u64,
+    /// Ignored — does not extend the run deadline.
     #[serde(default = "default_lease")]
     pub lease_secs: i64,
 }
@@ -481,9 +483,11 @@ impl Cockpit {
 
     #[tool(
         name = "propose_breakdown",
-        description = "Write a Plan artifact on a Project (flat Tasks + deps by plan key). Does \
-                       not create board cards — Approve Plan materializes them. Every task needs \
-                       a definition of done a verifier can mechanically check."
+        description = "Write a Task proposal on the Project's Initial plan card (flat Tasks + \
+                       deps by plan key). Does not create board cards — Approve on that card \
+                       (or approve_plan) materializes them. Every task needs a definition of \
+                       done a verifier can mechanically check. Parent may be the Project or \
+                       the Initial plan Task id."
     )]
     fn propose_breakdown(&self, Parameters(a): Parameters<BreakdownArg>) -> Out<BreakdownOut> {
         use crate::model::PlanTaskSpec;
@@ -492,17 +496,24 @@ impl Cockpit {
             .board
             .get(a.parent)
             .ok_or_else(|| bad(format!("no work item #{}", a.parent)))?;
-        if parent.parent.is_some() || parent.level.as_deref() == Some("Task") {
-            return Err(bad("breakdown parent must be a Project"));
+        let is_project = parent.is_project();
+        let is_initial = parent.is_initial_plan_task();
+        if !is_project && !is_initial {
+            return Err(bad("breakdown parent must be a Project or Initial plan Task"));
         }
         if a.children.is_empty() {
             return Err(bad("a breakdown needs at least one task"));
         }
 
-        // Map legacy blocked_by ItemIds → keys of already-materialized plan tasks.
-        let id_to_key: std::collections::BTreeMap<ItemId, String> = parent
-            .plan
-            .as_ref()
+        // Map legacy blocked_by ItemIds → keys from an existing proposal (if any).
+        let seed_id = self
+            .board
+            .resolve_initial_plan_id(a.parent)
+            .map_err(bad)?;
+        let id_to_key: std::collections::BTreeMap<ItemId, String> = self
+            .board
+            .get(seed_id)
+            .and_then(|s| s.proposal)
             .map(|p| {
                 p.tasks
                     .iter()
@@ -524,7 +535,6 @@ impl Cockpit {
                         blocked_by_keys.push(k.clone());
                     }
                 } else {
-                    // Sibling not yet in plan — use synthetic key from board id.
                     let k = format!("id-{bid}");
                     if !blocked_by_keys.contains(&k) {
                         blocked_by_keys.push(k);
@@ -544,19 +554,19 @@ impl Cockpit {
         let summary = a.summary.unwrap_or_else(|| {
             format!("{} tasks proposed", specs.len())
         });
-        let plan = self
+        let proposal = self
             .board
             .propose_plan(a.parent, summary, specs, a.cancel_keys)
             .map_err(bad)?;
-        let linked: Vec<ItemId> = plan.tasks.iter().filter_map(|t| t.item_id).collect();
+        let linked: Vec<ItemId> = proposal.tasks.iter().filter_map(|t| t.item_id).collect();
         Ok(ToolJson(BreakdownOut { items: linked }))
     }
 
     #[tool(
         name = "approve_plan",
-        description = "Approve a Project's Plan artifact: materialize flat Tasks + deps, \
-                       publish them to Backlog, and finish any open Initial plan card \
-                       (including Review). Same gate as approve_review on Initial plan. \
+        description = "Approve the Initial plan proposal: materialize flat Tasks + deps to \
+                       Backlog and finish the Initial plan card. Pass the Project id or the \
+                       Initial plan Task id. Same gate as approve_review on Initial plan. \
                        Never moves the Project itself to Backlog. Does not start runs — \
                        dispatch each Task explicitly."
     )]
@@ -710,29 +720,29 @@ impl Cockpit {
 
     #[tool(
         name = "claim",
-        description = "WORKER VERB. Take a lease on a Backlog card (supervisor path after \
-                       dispatch). Returns the full intent chain from the vision down plus every \
-                       inherited constraint — read it before you start. Keep heartbeating or the \
-                       lease expires and the card returns to Backlog (dispatch again to restart)."
+        description = "WORKER VERB. Take a Backlog card (supervisor path after dispatch). \
+                       Returns the full intent chain — read it before you start. The run \
+                       ends at agent_timeout_secs; heartbeats do not extend that deadline."
     )]
     fn claim(&self, Parameters(a): Parameters<ClaimArg>) -> Out<crate::store::ClaimGrant> {
+        let timeout = self.board.schema.execution.agents.agent_timeout_secs as i64;
         let grant = self
             .board
-            .claim(a.item_id, &a.agent_id, a.model, a.lease_secs)
+            .claim(a.item_id, &a.agent_id, a.model, timeout)
             .map_err(|e| bad(e.to_string()))?;
         Ok(ToolJson(grant))
     }
 
     #[tool(
         name = "heartbeat",
-        description = "WORKER VERB. Prove you are alive, report progress, and declare spend \
-                       since the last beat. Call this on a regular interval while working."
+        description = "WORKER VERB. Report spend (and optional progress). Does not extend \
+                       the run deadline — that was fixed at claim."
     )]
     fn heartbeat(&self, Parameters(a): Parameters<HeartbeatArg>) -> Out<Ack> {
         self.board
             .heartbeat(a.item_id, &a.agent_id, a.progress, a.cost_cents, a.lease_secs)
             .map_err(|e| bad(e.to_string()))?;
-        self.ack(a.item_id, "lease renewed")
+        self.ack(a.item_id, "cost recorded")
     }
 
     #[tool(

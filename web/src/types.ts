@@ -92,6 +92,8 @@ export interface WorkItem {
   blockers?: BlockerSummary[];
   capability: string | null;
   lease: Lease | null;
+  /** Hard end of this run (claim + agent_timeout). Not renewed. */
+  run_deadline_at?: string | null;
   model: string | null;
   progress: number;
   cost_cents: number;
@@ -160,7 +162,8 @@ export interface Snapshot {
   levels: Level[];
   goals: GoalView[];
   server_time: string;
-  heartbeat_expect_secs: number;
+  /** Wall-clock cap for a run (`agents.agent_timeout_secs`). */
+  agent_timeout_secs: number;
   seq: number;
   default_engine?: string;
   default_model?: string;

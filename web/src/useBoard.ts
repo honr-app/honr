@@ -7,7 +7,7 @@ interface BoardState {
   goals: GoalView[];
   stories: Map<number, StoryLine[]>;
   serverTime: string | null;
-  heartbeatExpect: number;
+  agentTimeout: number;
   loaded: boolean;
   connected: boolean;
   defaultEngine: string;
@@ -26,7 +26,7 @@ const initial: BoardState = {
   goals: [],
   stories: new Map(),
   serverTime: null,
-  heartbeatExpect: 6,
+  agentTimeout: 1800,
   loaded: false,
   connected: false,
   defaultEngine: "",
@@ -45,7 +45,7 @@ function reduce(s: BoardState, a: Action): BoardState {
         stories,
         goals: a.snap.goals,
         serverTime: a.snap.server_time,
-        heartbeatExpect: a.snap.heartbeat_expect_secs,
+        agentTimeout: a.snap.agent_timeout_secs,
         defaultEngine: a.snap.default_engine ?? "",
         defaultModel: a.snap.default_model ?? "",
         loaded: true,
@@ -138,7 +138,7 @@ export function useBoard() {
   };
 }
 
-/** A ticking clock so relative times ("♥ 4s") stay honest between events. */
+/** A ticking clock so relative times and countdowns stay honest between events. */
 export function useNow(intervalMs = 1000) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {

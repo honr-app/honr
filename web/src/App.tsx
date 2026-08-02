@@ -64,7 +64,7 @@ export default function App() {
             goalOf={goalOf}
             breadcrumbOf={breadcrumbOf}
             now={now}
-            heartbeatExpect={b.heartbeatExpect}
+            agentTimeout={b.agentTimeout}
             defaultEngine={b.defaultEngine}
             defaultModel={b.defaultModel}
             onOpen={setOpen}

@@ -171,4 +171,4 @@ Failure signatures worth recognising:
 | `push failed:` with nothing after it | git writes errors to stderr; check `outerr`, not stdout |
 | `(stale info)` on push | `--force-with-lease` against an ad-hoc URL instead of a named remote |
 | `create sandbox failed: connection error` | podman died; classified as infrastructure, does not count against the card |
-| Card flips Running → Backlog (needs dispatch again) | lease expired during a silent build; `lease_secs` too low |
+| Card flips Running → Backlog (needs dispatch again) | `run_deadline_at` exceeded (`agent_timeout_secs`); or Halt / infrastructure bounce |

@@ -441,7 +441,9 @@ export function DetailDrawer({
         setEditDod(item.definition_of_done ?? "");
         setEditEngine(item.engine ?? item.default_engine ?? defaultEngine ?? "");
         setEditPrompt(item.project_prompt ?? "");
-        setPlanTasks(planTasksFromArtifact(item.plan?.tasks));
+        setPlanTasks(
+          planTasksFromArtifact(item.proposal?.tasks ?? item.plan?.tasks),
+        );
       })
       .catch((e) => setErr(String(e)));
 
@@ -964,7 +966,8 @@ export function DetailDrawer({
 
           <Section title="Project prompt">
             <p className="dim" style={{ marginBottom: 8 }}>
-              Standing instructions every Task agent sees (with the Plan). Replaces pins.
+              Standing instructions every Task agent sees (with the Plan from
+              Initial plan). Replaces pins.
             </p>
             <textarea
               className="search-input"
@@ -974,88 +977,115 @@ export function DetailDrawer({
               placeholder="Standing agent instructions for this Project…"
             />
           </Section>
-
-          <Section title="Plan">
-            <p className="dim" style={{ marginBottom: 8 }}>
-              Task breakdown (keys, deps, DoDs). Initial plan agents propose this
-              via plan.json; Approve creates Backlog Tasks. Save Plan is for
-              manual replan — this Project never becomes a Board card.
-            </p>
-            {d.plan && (
-              <p style={{ marginBottom: 8 }}>
-                <span className="badge">{d.plan.status}</span>{" "}
-                <span className="dim">v{d.plan.revision}</span>
-              </p>
-            )}
-
-            <PlanEditor planTasks={planTasks} setPlanTasks={setPlanTasks} />
-
-            <div className="btns" style={{ marginBottom: 8 }}>
-              <button
-                type="button"
-                onClick={() => setPlanTasks([...planTasks, emptyPlanTask(planTasks.length + 1)])}
-              >
-                Add Task
-              </button>
-              <button
-                type="button"
-                disabled={
-                  planTasks.length === 0 ||
-                  planTasks.some(
-                    (t) =>
-                      !t.key.trim() ||
-                      !t.title.trim() ||
-                      !t.definition_of_done.trim(),
-                  )
-                }
-                onClick={() => {
-                  const body = {
-                    summary: editIntent.trim() || undefined,
-                    tasks: planTasks.map((t) => ({
-                      key: t.key.trim(),
-                      title: t.title.trim(),
-                      intent: t.intent.trim() || t.title.trim(),
-                      definition_of_done: t.definition_of_done.trim(),
-                      blocked_by_keys: t.blocked_by_keys
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    })),
-                  };
-                  act(
-                    api
-                      .update(d.id, {
-                        title: editTitle,
-                        intent: editIntent,
-                        engine: editEngine,
-                      })
-                      .then(() => api.savePlan(d.id, body)),
-                  );
-                }}
-              >
-                Save Plan
-              </button>
-              <button
-                className="primary"
-                disabled={(() => {
-                  const hasArtifact = !!(d.plan && d.plan.tasks.length > 0);
-                  if (d.plan?.status === "approved") return true;
-                  if (hasArtifact) return d.plan!.status !== "awaiting_approval";
-                  return d.children.length <= 1;
-                })()}
-                title={
-                  d.plan?.status === "approved"
-                    ? "Already approved — edit & Save Plan to propose a new revision"
-                    : d.plan?.status === "awaiting_approval"
-                      ? "Materialize Tasks to Backlog"
-                      : "Save Plan first (status must be awaiting approval)"
-                }
-                onClick={() => act(api.approvePlan(d.id))}
-              >
-                Approve Plan
-              </button>
-            </div>
-          </Section>
         </>
+      )}
+
+      {/* Plan lives on Initial plan — editable until Approve freezes it. */}
+      {d.title === "Initial plan" && (
+        <Section title="Proposed Tasks">
+          <p className="dim" style={{ marginBottom: 8 }}>
+            {d.state === "done"
+              ? "Accepted — frozen on this card. Task agents see this breakdown in their briefing."
+              : "Task breakdown (keys, deps, DoDs). Edit until you Approve; then sibling Tasks are created and this list freezes."}
+          </p>
+          {d.state === "done" ? (
+            d.proposal && d.proposal.tasks.length > 0 ? (
+              <ol style={{ margin: 0, paddingLeft: 18 }}>
+                {d.proposal.tasks.map((t) => (
+                  <li key={t.key} style={{ marginBottom: 8 }}>
+                    <strong>{t.key}</strong> {t.title}
+                    {t.blocked_by_keys?.length > 0 && (
+                      <span className="dim"> (after {t.blocked_by_keys.join(", ")})</span>
+                    )}
+                    <div className="dim" style={{ fontSize: "0.9em" }}>
+                      {t.intent}
+                    </div>
+                    <div className="dim" style={{ fontSize: "0.85em" }}>
+                      DoD: {t.definition_of_done}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="dim">No frozen proposal on this card.</p>
+            )
+          ) : (
+            <>
+              <PlanEditor planTasks={planTasks} setPlanTasks={setPlanTasks} />
+              <div className="btns" style={{ marginBottom: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => setPlanTasks([...planTasks, emptyPlanTask(planTasks.length + 1)])}
+                >
+                  Add Task
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    planTasks.length === 0 ||
+                    planTasks.some(
+                      (t) =>
+                        !t.key.trim() ||
+                        !t.title.trim() ||
+                        !t.definition_of_done.trim(),
+                    )
+                  }
+                  onClick={() => {
+                    const body = {
+                      summary: editIntent.trim() || undefined,
+                      tasks: planTasks.map((t) => ({
+                        key: t.key.trim(),
+                        title: t.title.trim(),
+                        intent: t.intent.trim() || t.title.trim(),
+                        definition_of_done: t.definition_of_done.trim(),
+                        blocked_by_keys: t.blocked_by_keys
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                      })),
+                    };
+                    act(api.savePlan(d.id, body));
+                  }}
+                >
+                  Save Plan
+                </button>
+                <button
+                  className="primary"
+                  disabled={
+                    planTasks.length === 0 ||
+                    planTasks.some(
+                      (t) =>
+                        !t.key.trim() ||
+                        !t.title.trim() ||
+                        !t.definition_of_done.trim(),
+                    )
+                  }
+                  title="Create Backlog Tasks from this proposal and finish Initial plan"
+                  onClick={() => {
+                    const body = {
+                      summary: editIntent.trim() || undefined,
+                      tasks: planTasks.map((t) => ({
+                        key: t.key.trim(),
+                        title: t.title.trim(),
+                        intent: t.intent.trim() || t.title.trim(),
+                        definition_of_done: t.definition_of_done.trim(),
+                        blocked_by_keys: t.blocked_by_keys
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                      })),
+                    };
+                    act(
+                      api
+                        .savePlan(d.id, body)
+                        .then(() => api.approvePlan(d.id)),
+                    );
+                  }}
+                >
+                  Approve — create Tasks
+                </button>
+              </div>
+            </>
+          )}
+        </Section>
       )}
 
       {/* Title / Why / DoD are the contract the next agent is graded on. Editable

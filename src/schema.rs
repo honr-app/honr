@@ -22,20 +22,18 @@ pub struct Level {
     pub claimable: bool,
 }
 
-/// How work actually gets executed. Timings here are control-plane facts, not
-/// simulation knobs: the lease is what makes a dead agent survivable, and the
-/// expected heartbeat interval is what the UI decays a card against.
+/// How work actually gets executed. The run budget is
+/// `agents.agent_timeout_secs`; `lease_secs` / `heartbeat_expect_secs` are
+/// ignored leftovers kept so older `honr.yaml` files still parse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionConfig {
-    /// How long a card may go without a heartbeat before the sweeper requeues
-    /// it. Must exceed the longest *legitimate* silence: heartbeats come from
-    /// agent output, and a build emits none while it runs.
+    /// Deprecated — ignored. Run deadline is `agents.agent_timeout_secs`.
     #[serde(default = "d_lease")]
     pub lease_secs: i64,
-    /// Expected heartbeat interval; cards decay visibly past this.
+    /// Deprecated — ignored. UI shows countdown to `run_deadline_at`.
     #[serde(default = "d_hb")]
     pub heartbeat_expect_secs: i64,
-    /// How often to check for expired leases.
+    /// How often to check for overdue run deadlines.
     #[serde(default = "d_sweep")]
     pub sweep_interval_ms: u64,
     /// Real agents in real sandboxes. Off by default: the board must still run

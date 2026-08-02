@@ -13,7 +13,7 @@ export interface CockpitProps {
   goalOf: (id: number) => number;
   breadcrumbOf: (id: number) => string;
   now: number;
-  heartbeatExpect: number;
+  agentTimeout: number;
   defaultEngine?: string;
   defaultModel?: string;
   onOpen: (id: number) => void;
@@ -118,8 +118,8 @@ export function Cockpit(props: CockpitProps) {
           <h1>Welcome to honr</h1>
           <p className="cockpit-lede">
             This is the control plane for agent work. Create a Project — it
-            seeds an Initial plan Task — approve the Plan, and Tasks show up
-            here. Agents stay idle until you approve.
+            seeds an Initial plan Task — Approve that card to create Tasks.
+            Agents stay idle until you dispatch.
           </p>
         </header>
         <div className="cockpit-empty-card">
@@ -347,10 +347,10 @@ function HowItWorks() {
       <summary>How this works</summary>
       <ol className="cockpit-howto-steps">
         <li>
-          <strong>Project</strong> — a goal. Initial plan (or a split) proposes Tasks on the card.
+          <strong>Project</strong> — a goal. The Initial plan card holds the proposed Tasks until you accept them.
         </li>
         <li>
-          <strong>Approve</strong> — creates those Tasks in Backlog; dispatch to start a run.
+          <strong>Approve Initial plan</strong> — creates those Tasks in Backlog (proposal freezes on the card); dispatch to start a run.
         </li>
         <li>
           <strong>Needs you</strong> — an agent stopped; answer so it can continue.
@@ -654,7 +654,7 @@ function Swimlane({
                       item={item}
                       column="retired"
                       now={p.now}
-                      heartbeatExpect={p.heartbeatExpect}
+                      agentTimeout={p.agentTimeout}
                       breadcrumb={p.breadcrumbOf(item.id)}
                       defaultEngine={p.defaultEngine}
                       defaultModel={p.defaultModel}
@@ -770,7 +770,7 @@ function ColumnEl({
   cards,
   summary,
   now,
-  heartbeatExpect,
+  agentTimeout,
   defaultEngine,
   defaultModel,
   breadcrumbOf,
@@ -799,7 +799,7 @@ function ColumnEl({
           item={item}
           column={colKey}
           now={now}
-          heartbeatExpect={heartbeatExpect}
+          agentTimeout={agentTimeout}
           defaultEngine={defaultEngine}
           defaultModel={defaultModel}
           breadcrumb={breadcrumbOf(item.id)}

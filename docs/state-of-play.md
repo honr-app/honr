@@ -124,12 +124,10 @@ working when tool output changes.
 wedged relay — none of them error. Every exec carries a deadline and silence
 counts as failure.
 
-**Liveness must be observed, not asserted.** Heartbeats come from the agent's
-output stream, so a hung agent cannot claim to be fine. The corollary bit us:
-a heartbeat is a side effect of *output*, not of work, and a silent
-`cargo build` runs ~30s. `lease_secs` must exceed the longest legitimate
-silence — it's 600 now, was 45, and at 45 the sweeper requeued a live card and
-two agents raced on one branch.
+**One run clock: `agent_timeout_secs`.** Claim sets `run_deadline_at`; stream
+heartbeats update cost only and do not renew the deadline. The UI shows a
+countdown on Running cards. A hung follower still fails when the sandbox
+`timeout` or the board sweeper fires — not via a separate lease.
 
 **Separate infrastructure failure from card failure.** The podman machine
 stopped on its own three times in one session. Those outages consumed a card's
