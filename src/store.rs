@@ -162,6 +162,7 @@ pub struct Board {
     path: PathBuf,
     started_at: DateTime<Utc>,
     pub beads: Option<crate::beads::BeadsClient>,
+    pub openshell: Option<crate::openshell::OpenShell>,
 }
 
 pub type SharedBoard = Arc<Board>;
@@ -195,6 +196,7 @@ impl Board {
             path,
             started_at: Utc::now(),
             beads,
+            openshell: Some(crate::openshell::OpenShell::default()),
         }
     }
 
@@ -542,10 +544,11 @@ impl Board {
                 item.last_bounce_reason = None;
             }
         }
-        // Terminal cards discard the LLM session; the sandbox is reaped separately.
+        // Terminal cards discard the LLM session and sandbox environment.
         if to.is_terminal() {
             item.conversation_id = None;
             item.parked = false;
+            item.environment = None;
         }
         let mut item_out = item.clone();
         Self::populate_blockers(s, &mut item_out);
@@ -559,11 +562,23 @@ impl Board {
         by: &str,
         reason: Option<String>,
     ) -> Result<WorkItem, TransitionError> {
-        let item = {
+        let (item, env_to_delete) = {
             let mut s = self.state.write().unwrap();
-            Self::transition_locked(&mut s, id, to, by, reason)?
+            let prev_env = s.items.get(&id).and_then(|i| i.environment.clone());
+            let item = Self::transition_locked(&mut s, id, to, by, reason)?;
+            let env_to_delete = if to.is_terminal() { prev_env } else { None };
+            (item, env_to_delete)
         };
         self.emit(&item);
+
+        if let Some(env) = env_to_delete {
+            let os = self.openshell.clone().unwrap_or_default();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = os.delete(&env).await;
+                });
+            }
+        }
 
         if to == State::Done || to == State::Retired {
             let beads = self.beads.clone();
@@ -2172,8 +2187,13 @@ fn check_split_relatedness(
             if let Some(it) = s.items.remove(del_id) {
                 let beads = self.beads.clone();
                 let beads_id = it.beads_id.clone();
+                let env = it.environment.clone();
+                let os = self.openshell.clone().unwrap_or_default();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
+                        if let Some(env_name) = env {
+                            let _ = os.delete(&env_name).await;
+                        }
                         if let (Some(b), Some(bid)) = (beads, beads_id) {
                             if crate::beads::BeadsClient::is_real_id(&bid) {
                                 let _ = b.close(&bid, Some("Deleted from honr board")).await;
@@ -4080,5 +4100,97 @@ mod tests {
                 ready_col.summary.text
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sandbox_deleted_on_done_retired_and_item_deletion() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("honr-sb-del-test-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_file = dir.join("openshell_calls.log");
+        let mock_bin = dir.join("mock_openshell.sh");
+
+        let script = format!(
+            "#!/bin/bash\necho \"$@\" >> \"{}\"\nexit 0\n",
+            log_file.display()
+        );
+        std::fs::write(&mock_bin, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let os = crate::openshell::OpenShell::new(
+            mock_bin.to_string_lossy().to_string(),
+            std::time::Duration::from_secs(5),
+        );
+
+        let mut board_raw = Board::new(
+            crate::schema::Schema::default(),
+            dir.join("board.json"),
+        );
+        board_raw.openshell = Some(os);
+        let b = Arc::new(board_raw);
+
+        // 1. Transition to Review keeps sandbox environment
+        let p = b
+            .create(None, "Project", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(Some(p.id), "Task 1", "intent", Some("DOD".into()), Origin::Human, false, None)
+            .unwrap();
+        b.set_environment(t1.id, Some("honr-card-1-a1".into()));
+        let _ = b.transition(t1.id, State::Shaping, "human", None);
+        let _ = b.transition(t1.id, State::Ready, "human", None);
+        let _ = b.transition(t1.id, State::Claimed, "human", None);
+        let _ = b.transition(t1.id, State::Running, "agent", None);
+        let _ = b.transition(t1.id, State::Verifying, "agent", None);
+        let _ = b.transition(t1.id, State::Review, "verifier", None);
+
+        assert_eq!(b.get(t1.id).unwrap().environment.as_deref(), Some("honr-card-1-a1"));
+
+        // 2. Transition to Done clears environment and triggers sandbox deletion
+        let _ = b.transition(t1.id, State::Done, "human", None);
+        assert_eq!(b.get(t1.id).unwrap().environment, None);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
+        assert!(
+            log_content.contains("sandbox delete honr-card-1-a1"),
+            "expected 'sandbox delete honr-card-1-a1' in log, got: {log_content}"
+        );
+
+        // 3. Transition to Retired clears environment and triggers sandbox deletion
+        let t2 = b
+            .create(Some(p.id), "Task 2", "intent", Some("DOD".into()), Origin::Human, false, None)
+            .unwrap();
+        b.set_environment(t2.id, Some("honr-card-2-a1".into()));
+        let _ = b.transition(t2.id, State::Retired, "human", None);
+        assert_eq!(b.get(t2.id).unwrap().environment, None);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
+        assert!(
+            log_content.contains("sandbox delete honr-card-2-a1"),
+            "expected 'sandbox delete honr-card-2-a1' in log, got: {log_content}"
+        );
+
+        // 4. Item deletion triggers sandbox deletion
+        let t3 = b
+            .create(Some(p.id), "Task 3", "intent", Some("DOD".into()), Origin::Human, false, None)
+            .unwrap();
+        b.set_environment(t3.id, Some("honr-card-3-a1".into()));
+        b.delete_item(t3.id).expect("delete_item succeeds");
+        assert!(b.get(t3.id).is_none());
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
+        assert!(
+            log_content.contains("sandbox delete honr-card-3-a1"),
+            "expected 'sandbox delete honr-card-3-a1' in log, got: {log_content}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
