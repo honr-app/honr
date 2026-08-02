@@ -3473,7 +3473,11 @@ mod tests {
 
         let board_file = test_dir.join("honr.json");
         let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
+        let remote_cap = crate::beads::RemoteCapture::new();
+        let beads_client = crate::beads::BeadsClient::with_remotes(
+            &beads_dir,
+            crate::beads::Remotes::Capture(remote_cap.clone()),
+        );
         beads_client.init_stealth().await.expect("stealth init");
 
         let mut board_raw = Board::new(Schema::default(), board_file);
@@ -3571,6 +3575,24 @@ mod tests {
             let sib_id = sibling_real_id.expect("expected real beads_id after schedule_beads_mirror on split");
             assert!(crate::beads::BeadsClient::is_real_id(&sib_id));
         }
+
+        // Wait for async github_push / dolt schedule after mirrors.
+        let mut saw_github_push = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let ops = remote_cap.ops();
+            saw_github_push = ops
+                .iter()
+                .any(|op| matches!(op, crate::beads::RemoteOp::GithubPush(ids) if !ids.is_empty()));
+            if saw_github_push {
+                break;
+            }
+        }
+        assert!(
+            saw_github_push,
+            "expected captured github_push after create/split mirrors, got {:?}",
+            remote_cap.ops()
+        );
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
@@ -3913,6 +3935,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_live_e2e_beads_github_auto_sync() {
+        // SAFETY: Live remotes create real issues — point github.owner/repo at a throwaway.
         let test_dir = std::env::temp_dir().join(format!(
             "honr-e2e-live-sync-{}",
             std::process::id()
@@ -3922,7 +3945,10 @@ mod tests {
 
         let board_file = test_dir.join("honr.json");
         let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
+        let beads_client = crate::beads::BeadsClient::with_remotes(
+            &beads_dir,
+            crate::beads::Remotes::Live,
+        );
         beads_client.init_stealth().await.expect("stealth init");
 
         let _ = beads_client
