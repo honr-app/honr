@@ -13,6 +13,12 @@
 use crate::model::{Column, EscalationOption, ItemId, State};
 use crate::store::SharedBoard;
 
+use axum::extract::Request;
+use axum::http::{header, HeaderValue, Method};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::Router;
+
 use rmcp::handler::server::wrapper::{Json as ToolJson, Parameters};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -56,7 +62,7 @@ pub struct AnswerArg {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct CreateGoalArg {
+pub struct CreateProjectArg {
     /// Short and distinct — you cannot chunk what you cannot name.
     pub title: String,
     /// One sentence of intent. This is the contract everything below inherits.
@@ -435,12 +441,12 @@ impl Cockpit {
     }
 
     #[tool(
-        name = "create_goal",
+        name = "create_project",
         description = "Create a Project (top-level container). Seeds an Initial plan Task in \
                        Ready. An agent may open one plan/docs PR then split into sibling Tasks; \
                        cockpit may also propose_breakdown + Approve Plan."
     )]
-    fn create_goal(&self, Parameters(a): Parameters<CreateGoalArg>) -> Out<Ack> {
+    fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
         if a.parent.is_some() {
             return Err(bad("Projects are roots; omit parent"));
         }
@@ -798,6 +804,134 @@ pub fn service(board: SharedBoard) -> StreamableHttpService<Cockpit, LocalSessio
     )
 }
 
+async fn normalize_mcp_request(req: Request, next: Next) -> Response {
+    let (mut parts, body) = req.into_parts();
+    let method = parts.method.clone();
+    let query_string = parts.uri.query().map(|q| q.to_owned());
+
+    // Copy session id from query parameters if missing in headers.
+    if let Some(query) = query_string {
+        for pair in query.split('&') {
+            let mut sub = pair.splitn(2, '=');
+            if let (Some(k), Some(v)) = (sub.next(), sub.next()) {
+                if (k.eq_ignore_ascii_case("sessionid")
+                    || k.eq_ignore_ascii_case("mcp-session-id")
+                    || k.eq_ignore_ascii_case("session_id"))
+                    && !parts.headers.contains_key("mcp-session-id")
+                {
+                    if let Ok(hv) = HeaderValue::from_str(v) {
+                        parts.headers.insert("mcp-session-id", hv);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut body_bytes = None;
+
+    if method == Method::POST {
+        // `rmcp` strictly validates that Accept contains BOTH `application/json` AND `text/event-stream`.
+        // Standard MCP clients (Cursor, VS Code, Claude, etc.) send `Accept: application/json` or `Accept: */*`.
+        let needs_fix = match parts.headers.get(header::ACCEPT) {
+            Some(val) => {
+                if let Ok(s) = val.to_str() {
+                    !(s.contains("application/json") && s.contains("text/event-stream"))
+                } else {
+                    true
+                }
+            }
+            None => true,
+        };
+        if needs_fix {
+            parts.headers.insert(
+                header::ACCEPT,
+                HeaderValue::from_static("application/json, text/event-stream"),
+            );
+        }
+
+        // Buffer body to check if this is an `initialize` request or unsupported custom method.
+        if let Ok(bytes) = axum::body::to_bytes(body, 4 * 1024 * 1024).await {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                let method_str = json.get("method").and_then(|m| m.as_str());
+                if method_str == Some("initialize") {
+                    parts.headers.remove("mcp-session-id");
+                    parts.headers.remove("x-mcp-session-id");
+                } else if method_str == Some("subscriptions/listen") || method_str == Some("subscriptions/subscribe") {
+                    let id = json.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let resp_json = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {}
+                    });
+                    let mut response = (
+                        [
+                            (header::CONTENT_TYPE, "application/json"),
+                            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                            (header::ACCESS_CONTROL_EXPOSE_HEADERS, "*"),
+                        ],
+                        serde_json::to_string(&resp_json).unwrap_or_default(),
+                    )
+                        .into_response();
+                    if let Some(sess_id) = parts.headers.get("mcp-session-id") {
+                        response.headers_mut().insert("mcp-session-id", sess_id.clone());
+                    }
+                    return response;
+                }
+            }
+            body_bytes = Some(bytes);
+        }
+    } else if method == Method::GET {
+        // If GET request lacks mcp-session-id header, handle standard SSE endpoint discovery.
+        if !parts.headers.contains_key("mcp-session-id") {
+            let is_sse = parts
+                .headers
+                .get(header::ACCEPT)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.contains("text/event-stream"))
+                .unwrap_or(false);
+
+            if is_sse {
+                return (
+                    [
+                        (header::CONTENT_TYPE, "text/event-stream"),
+                        (header::CACHE_CONTROL, "no-cache"),
+                        (header::CONNECTION, "keep-alive"),
+                        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                        (header::ACCESS_CONTROL_EXPOSE_HEADERS, "*"),
+                    ],
+                    "event: endpoint\ndata: /mcp\n\n",
+                )
+                    .into_response();
+            }
+        } else if !parts.headers.contains_key(header::ACCEPT) {
+            parts.headers.insert(header::ACCEPT, HeaderValue::from_static("text/event-stream"));
+        }
+    }
+
+    let req_body = body_bytes
+        .map(axum::body::Body::from)
+        .unwrap_or_else(axum::body::Body::empty);
+    let req = Request::from_parts(parts, req_body);
+
+    let mut response = next.run(req).await;
+    let res_headers = response.headers_mut();
+    res_headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    res_headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("mcp-session-id, content-type, authorization"),
+    );
+    response
+}
+
+pub fn router<S>(board: SharedBoard) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .fallback_service(service(board))
+        .layer(middleware::from_fn(normalize_mcp_request))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,5 +1105,56 @@ mod tests {
         let pos_c1 = res.0.items.iter().position(|i| i.id == c1.id).expect("c1 present");
         let pos_c2 = res.0.items.iter().position(|i| i.id == c2.id).expect("c2 present");
         assert!(pos_c1 < pos_c2, "Unblocked card #1 must sort before blocked card #2");
+    }
+
+    #[tokio::test]
+    async fn normalize_mcp_request_fixes_accept_header_and_handles_sse_discovery() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower_service::Service;
+
+        let (board, _) = test_board();
+        let mut app = router::<()>(board);
+
+        // POST request with Accept: application/json should NOT return 406
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":1}"#,
+            ))
+            .unwrap();
+
+        let response = app.call(req).await.unwrap();
+        assert_ne!(response.status(), StatusCode::NOT_ACCEPTABLE);
+
+        // GET request without session id should return SSE endpoint discovery
+        let req = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("accept", "text/event-stream")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.call(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.contains("text/event-stream"));
+
+        // POST request with subscriptions/listen method should return JSON-RPC 200 result
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"subscriptions/listen","id":99}"#,
+            ))
+            .unwrap();
+
+        let response = app.call(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

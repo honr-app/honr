@@ -1,4 +1,5 @@
 import { money, secsSince, since } from "../api.js";
+import { friendlyState, humanizeEscalation } from "../humanize.js";
 import type { ColumnKey, WorkItem } from "../types";
 
 interface Props {
@@ -65,11 +66,11 @@ export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaul
             <span
               key={b.id}
               className={`blocker-chip state-${b.state}`}
-              title={`#${b.id}: ${b.title} (${b.state.replace("_", " ")})`}
+              title={`#${b.id}: ${b.title} (${friendlyState(b.state)})`}
             >
               <span className="blocker-id">#{b.id}</span>
               <span className="blocker-title">{b.title}</span>
-              <span className="state-cue">{b.state.replace("_", " ")}</span>
+              <span className="state-cue">{friendlyState(b.state)}</span>
             </span>
           ))}
         </div>
@@ -110,11 +111,16 @@ export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaul
 
       {column === "needs_you" && item.escalation && (
         <>
-          <div className="question">{item.escalation.question}</div>
+          <div className="question">
+            {humanizeEscalation(item.escalation.question).summary}
+          </div>
           <div className="row">
-            <span className="tag">{item.escalation.options.length} options</span>
+            <span className="tag">
+              {item.escalation.options.length} option
+              {item.escalation.options.length === 1 ? "" : "s"}
+            </span>
             <span className="blocked-for">
-              ⏱ blocked {since(item.escalation.blocked_since, now)}
+              waiting {since(item.escalation.blocked_since, now)}
             </span>
           </div>
         </>

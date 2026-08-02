@@ -144,56 +144,80 @@ async function shoot(name, { width, height }, prepare) {
 const DESKTOP = { width: 1600, height: 1000 };
 const PHONE = { width: 390, height: 844 };
 
-const tab = (name) => async (page) => {
-  await page.getByRole("button", { name }).first().click();
-  await sleep(500);
-};
-
 console.log("capturing & asserting:");
-await shoot("desktop-home", DESKTOP, tab("Home"));
 
-// Board view: verify Playwright assertions on blocked card with blocker chips
-await shoot("desktop-board", DESKTOP, async (page) => {
-  await tab("Board")(page);
+// Single cockpit surface (no Home/Board tabs).
+await shoot("desktop-cockpit", DESKTOP, async (page) => {
+  await page.waitForSelector(".cockpit", { timeout: 5000 });
 
-  // Playwright assertion: Board cards show human-readable blocker chips
+  // Needs you action block when the fixture has an escalation.
+  const needs = page.locator(".cockpit-needs");
+  if ((await needs.count()) > 0) {
+    await needs.first().waitFor({ state: "visible", timeout: 5000 });
+    console.log(`  [Playwright Assertion] Needs you block visible`);
+  }
+
+  // Expand a lane if needed, then assert blocker chips on Ready cards.
+  const toggleGraphBtn = page.locator('[data-testid="toggle-graph-view"]');
+  if ((await toggleGraphBtn.count()) === 0) {
+    await page.locator(".lane-head").first().click();
+    await sleep(300);
+  }
+
   const blockerChips = page.locator(".blocker-chips");
   await blockerChips.first().waitFor({ state: "visible", timeout: 5000 });
-
   const text = await blockerChips.first().textContent();
   console.log(`  [Playwright Assertion] Blocker chips content: "${text?.trim()}"`);
   if (!text?.includes("Supervisor runs the gates") || !text?.includes("ready")) {
     throw new Error(`Blocker chips missing expected human-readable text. Got: ${text}`);
   }
 
-  // Also verify blocked card screenshot
   const blockedCard = page.locator(".card", { has: page.locator(".blocker-chips") });
-  await blockedCard.first().waitFor({ state: "visible" });
   await blockedCard.first().screenshot({ path: `${OUT}/blocked-card-chip.png` });
   console.log(`  blocked-card-chip.png`);
 });
 
-// Dependency Graph view: capture visual dependency graph on the Board
 await shoot("desktop-graph", DESKTOP, async (page) => {
-  await tab("Board")(page);
   const toggleGraphBtn = page.locator('[data-testid="toggle-graph-view"]');
-  await toggleGraphBtn.first().click();
+  if ((await toggleGraphBtn.count()) === 0) {
+    await page.locator(".lane-head").first().click();
+    await sleep(300);
+  }
+  await page.locator('[data-testid="toggle-graph-view"]').first().click();
   await sleep(600);
-
-  const graphContainer = page.locator('[data-testid="graph-container"]');
-  await graphContainer.first().waitFor({ state: "visible", timeout: 5000 });
+  await page.locator('[data-testid="graph-container"]').first().waitFor({
+    state: "visible",
+    timeout: 5000,
+  });
   console.log(`  [Playwright Assertion] Visual dependency graph loaded`);
 });
 
-await shoot("phone-home", PHONE, tab("Home"));
+await shoot("phone-cockpit", PHONE);
 
 await shoot("desktop-drawer-needs-you", DESKTOP, async (page) => {
-  await tab("Board")(page);
-  await page.locator(".column-needs_you .card").first().click();
+  const card = page.locator(".column-needs_you .card").first();
+  if ((await card.count()) === 0) {
+    // Open a hot lane, or use the Needs you action title.
+    const lane = page.locator(".lane-hot .lane-head").first();
+    if ((await lane.count()) > 0) await lane.click();
+    await sleep(300);
+  }
+  if ((await page.locator(".column-needs_you .card").count()) > 0) {
+    await page.locator(".column-needs_you .card").first().click();
+  } else {
+    await page.locator(".cockpit-need-title").first().click();
+  }
   await sleep(600);
 });
+
 await shoot("desktop-drawer-review", DESKTOP, async (page) => {
-  await tab("Board")(page);
+  await page.getByRole("button", { name: /Review/ }).first().click();
+  await sleep(400);
+  const reviewCard = page.locator(".column-review .card").first();
+  if ((await reviewCard.count()) === 0) {
+    await page.locator(".lane-head").first().click();
+    await sleep(300);
+  }
   await page.locator(".column-review .card").first().click();
   await sleep(600);
 });
