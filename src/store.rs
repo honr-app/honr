@@ -2419,6 +2419,16 @@ fn check_split_relatedness(
         });
     }
 
+    /// Notify connected subscribers that the main branch advanced (via push or PR merge).
+    pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
+        tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
+        let _ = self.tx.send(BoardEvent::MainAdvanced {
+            seq: self.next_seq(),
+            ref_name: ref_name.to_string(),
+            commit_sha,
+        });
+    }
+
     // -------------------------------------------------------- derived reads
 
     pub fn snapshot(&self) -> Snapshot {
