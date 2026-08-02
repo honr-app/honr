@@ -48,6 +48,10 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!("beads init: {e}");
             }
             b.heal_placeholder_beads_ids().await;
+            // Publish refs/dolt/data even when heal was a no-op (debounced).
+            if let Some(beads) = b.beads.clone() {
+                beads.schedule_dolt_push();
+            }
         });
     }
 
