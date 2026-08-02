@@ -579,6 +579,24 @@ main > :first-child { flex: 1; min-width: 0; }
   gap: 4px;
   margin-left: auto;
 }
+.lane.lane-archived {
+  opacity: 0.72;
+  border-style: dashed;
+}
+.lane.lane-archived .lane-title {
+  color: var(--muted);
+}
+.lane-archived-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0 8px;
+}
+.lane-archived-cards .card {
+  min-width: 220px;
+  max-width: 320px;
+  flex: 1 1 220px;
+}
 .filter-btn.alarmish:not(.active) {
   color: var(--needs-human);
   border-color: color-mix(in srgb, var(--needs-human) 45%, var(--line));

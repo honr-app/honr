@@ -132,6 +132,8 @@ export interface GoalView {
   plan_status: string;
   /** Project-level dispatch pause (independent of global). */
   dispatch_paused?: boolean;
+  /** Soft-retired Project — cockpit hides unless "Show archived". */
+  archived?: boolean;
   columns: ColumnView[];
   story: StoryLine[];
 }
