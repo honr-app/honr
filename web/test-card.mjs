@@ -48,7 +48,7 @@ const blockedHtml = renderToString(
     item: blockedItem,
     column: "backlog",
     now,
-    heartbeatExpect: 600,
+    agentTimeout: 600,
     onOpen: () => {},
   })
 );
@@ -75,7 +75,7 @@ const unblockedHtml = renderToString(
     item: unblockedItem,
     column: "backlog",
     now,
-    heartbeatExpect: 600,
+    agentTimeout: 600,
     onOpen: () => {},
   })
 );
@@ -95,8 +95,9 @@ const runningItem = {
     agent_id: "agent-1",
     granted_at: new Date().toISOString(),
     last_heartbeat: new Date().toISOString(),
-    expires_at: new Date().toISOString(),
+    expires_at: new Date(now + 600_000).toISOString(),
   },
+  run_deadline_at: new Date(now + 600_000).toISOString(),
 };
 
 const runningAgyHtml = renderToString(
@@ -104,7 +105,7 @@ const runningAgyHtml = renderToString(
     item: runningItem,
     column: "running",
     now,
-    heartbeatExpect: 600,
+    agentTimeout: 600,
     defaultEngine: "agy",
     onOpen: () => {},
   })
@@ -120,7 +121,7 @@ const runningClaudeHtml = renderToString(
     item: runningItem,
     column: "running",
     now,
-    heartbeatExpect: 600,
+    agentTimeout: 600,
     defaultEngine: "claude",
     onOpen: () => {},
   })
@@ -275,7 +276,7 @@ const cockpitHtml = renderToString(
     goalOf: () => 100,
     breadcrumbOf: () => "Test Project",
     now,
-    heartbeatExpect: 600,
+    agentTimeout: 600,
     onOpen: () => {},
     onChanged: () => {},
   })

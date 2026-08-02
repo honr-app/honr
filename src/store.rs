@@ -83,7 +83,8 @@ pub struct Snapshot {
     pub levels: Vec<Level>,
     pub goals: Vec<GoalView>,
     pub server_time: DateTime<Utc>,
-    pub heartbeat_expect_secs: i64,
+    /// Wall-clock cap for a run (same as `agents.agent_timeout_secs`).
+    pub agent_timeout_secs: u64,
     pub seq: u64,
     pub default_engine: String,
     pub default_model: String,
@@ -125,7 +126,9 @@ pub struct ClaimGrant {
     /// Plan key for this card when matched via `item_id`.
     pub plan_task_key: Option<String>,
     pub notes: Vec<String>,
+    /// Alias of `run_deadline_at` at claim — not extended by heartbeats.
     pub lease_expires_at: DateTime<Utc>,
+    pub run_deadline_at: DateTime<Utc>,
     pub budget_remaining_cents: Option<u64>,
     pub engine: Option<String>,
 }
@@ -236,50 +239,9 @@ impl Board {
                             healed += 1;
                         }
                     }
-                    // Initial plan in Review with empty proposal but parent Plan
-                    // awaiting: copy Tasks onto the card so Approve / drawer work.
-                    let mut proposal_healed = 0usize;
-                    let awaiting_by_project: HashMap<ItemId, TaskProposal> = state
-                        .items
-                        .values()
-                        .filter(|p| p.is_project())
-                        .filter_map(|p| {
-                            let plan = p.plan.as_ref()?;
-                            if plan.status == PlanStatus::AwaitingApproval && !plan.tasks.is_empty()
-                            {
-                                Some((
-                                    p.id,
-                                    TaskProposal {
-                                        summary: plan.summary.clone(),
-                                        tasks: plan.tasks.clone(),
-                                    },
-                                ))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    for item in state.items.values_mut() {
-                        if !item.is_initial_plan_task() || item.state != State::Review {
-                            continue;
-                        }
-                        if item.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty()) {
-                            continue;
-                        }
-                        let Some(parent) = item.parent else { continue };
-                        if let Some(prop) = awaiting_by_project.get(&parent) {
-                            item.proposal = Some(prop.clone());
-                            proposal_healed += 1;
-                        }
-                    }
                     tracing::info!(items = state.items.len(), "restored board from {path:?}");
                     if healed > 0 {
                         tracing::info!("healed {healed} Initial plan Task(s) Shaping → Backlog");
-                    }
-                    if proposal_healed > 0 {
-                        tracing::info!(
-                            "healed {proposal_healed} Initial plan proposal(s) from Project Plan"
-                        );
                     }
                     *board.state.write().unwrap() = state;
                 }
@@ -486,10 +448,11 @@ impl Board {
         // States that imply no agent is holding the card.
         if matches!(to, State::Backlog | State::NeedsHuman | State::Done | State::Retired | State::Shaping) {
             item.lease = None;
+            item.run_deadline_at = None;
         }
         if to == State::Backlog {
             item.progress = 0.0;
-            // Bounce / park / halt / lease expiry all land here — never auto-start again.
+            // Bounce / park / halt / deadline expiry all land here — never auto-start again.
             item.awaiting_dispatch = false;
             if by == "human" {
                 item.run_failures = 0;
@@ -645,7 +608,8 @@ impl Board {
                     .or_else(|| Some("Task".into()))
             };
             if parent.is_none() {
-                item.plan = Some(PlanArtifact::empty());
+                // Plan lives on the Initial plan Task (`proposal`), not the Project.
+                item.plan = None;
                 item.project_prompt = Some(crate::model::DEFAULT_PROJECT_PROMPT.to_string());
             }
             s.items.insert(id, item.clone());
@@ -728,15 +692,72 @@ impl Board {
         Ok(seed)
     }
 
-    /// Write / revise the Plan artifact on a Project. Does not create board Tasks
-    /// — Approve Plan materializes them.
+    /// Resolve a Project id or Initial plan id to the Initial plan Task id.
+    pub fn resolve_initial_plan_id(&self, id: ItemId) -> Result<ItemId, String> {
+        let item = self
+            .get(id)
+            .ok_or_else(|| format!("no work item #{id}"))?;
+        if item.is_initial_plan_task() {
+            return Ok(id);
+        }
+        if item.is_project() {
+            return self
+                .children_of(id)
+                .into_iter()
+                .find(|&cid| self.get(cid).is_some_and(|c| c.is_initial_plan_task()))
+                .ok_or_else(|| format!("Project #{id} has no Initial plan Task"));
+        }
+        Err("plan operations require a Project or Initial plan Task".into())
+    }
+
+    fn initial_plan_of(&self, project_id: ItemId) -> Option<WorkItem> {
+        self.children_of(project_id)
+            .into_iter()
+            .find_map(|cid| self.get(cid).filter(|c| c.is_initial_plan_task()))
+    }
+
+    /// GoalView label from the Initial plan card (not Project.plan).
+    fn plan_status_label(&self, project_id: ItemId) -> String {
+        let Some(seed) = self.initial_plan_of(project_id) else {
+            return "no_plan".into();
+        };
+        let has_proposal = seed
+            .proposal
+            .as_ref()
+            .is_some_and(|p| !p.tasks.is_empty());
+        if seed.state == State::Done {
+            return if has_proposal {
+                "approved".into()
+            } else {
+                // Legacy boards: Tasks exist but proposal was cleared.
+                let has_impl = self.children_of(project_id).into_iter().any(|cid| {
+                    self.get(cid)
+                        .is_some_and(|c| !c.is_initial_plan_task() && c.state != State::Retired)
+                });
+                if has_impl {
+                    "approved".into()
+                } else {
+                    "no_plan".into()
+                }
+            };
+        }
+        if has_proposal {
+            "awaiting_approval".into()
+        } else {
+            "no_plan".into()
+        }
+    }
+
+    /// Write / revise the proposal on the Initial plan card. Does not create
+    /// board Tasks — Approve materializes them. `id` may be the Project or the
+    /// Initial plan Task. `cancel_keys` is ignored (replan is out of scope).
     pub fn propose_plan(
         &self,
-        project_id: ItemId,
+        id: ItemId,
         summary: impl Into<String>,
         tasks: Vec<PlanTaskSpec>,
-        cancel_keys: Vec<String>,
-    ) -> Result<PlanArtifact, String> {
+        _cancel_keys: Vec<String>,
+    ) -> Result<TaskProposal, String> {
         if tasks.is_empty() {
             return Err("a plan needs at least one task".into());
         }
@@ -751,224 +772,98 @@ impl Board {
                 return Err(format!("task '{}' needs a stable plan key", t.title));
             }
         }
-        let plan = {
-            let mut s = self.state.write().unwrap();
-            let project = s
-                .items
-                .get_mut(&project_id)
-                .ok_or_else(|| format!("no work item #{project_id}"))?;
-            if !project.is_project() {
-                return Err("plan parent must be a Project".into());
-            }
-            let mut next = project.plan.clone().unwrap_or_else(PlanArtifact::empty);
-            // Preserve item_id links for keys that already materialized.
-            let prev_ids: BTreeMap<String, ItemId> = next
-                .tasks
-                .iter()
-                .filter_map(|t| t.item_id.map(|id| (t.key.clone(), id)))
-                .collect();
-            let cancel_item_ids: Vec<ItemId> = cancel_keys
-                .iter()
-                .filter_map(|k| prev_ids.get(k).copied())
-                .collect();
-            next.revision = next.revision.saturating_add(1);
-            next.summary = summary.into();
-            next.status = PlanStatus::AwaitingApproval;
-            next.cancel_keys = cancel_keys;
-            next.cancel_item_ids = cancel_item_ids;
-            next.tasks = tasks
-                .into_iter()
-                .map(|mut t| {
-                    if t.item_id.is_none() {
-                        t.item_id = prev_ids.get(&t.key).copied();
-                    }
-                    t
-                })
-                .collect();
-            project.plan = Some(next.clone());
-            let snap = project.clone();
-            drop(s);
-            self.emit(&snap);
-            next
+        let seed_id = self.resolve_initial_plan_id(id)?;
+        let seed = self
+            .get(seed_id)
+            .ok_or_else(|| format!("no work item #{seed_id}"))?;
+        if seed.state.is_terminal() {
+            return Err("Initial plan already accepted — proposal is frozen".into());
+        }
+        let proposal = TaskProposal {
+            summary: summary.into(),
+            tasks,
         };
+        self.set_proposal(seed_id, proposal.clone())?;
+        let project_id = seed.parent.unwrap_or(seed_id);
         self.story(
             project_id,
             format!(
-                "Plan v{} proposed ({} tasks) — awaiting Approve Plan.",
-                plan.revision,
-                plan.tasks.len()
+                "Plan proposed on Initial plan ({} tasks) — awaiting Approve.",
+                proposal.tasks.len()
             ),
         );
-        Ok(plan)
+        Ok(proposal)
     }
 
-    /// Materialize the Project's Plan artifact into flat Tasks + deps, publish
-    /// them to Backlog, and close open Initial Plan Tasks. Never moves the Project
-    /// to Backlog.
-    pub fn approve_plan(&self, project_id: ItemId) -> Result<Vec<ItemId>, String> {
-        let project = self
-            .get(project_id)
-            .ok_or_else(|| format!("no work item #{project_id}"))?;
-        if !project.is_project() {
-            return Err("approve_plan requires a Project".into());
+    /// Approve the Initial plan proposal: materialize Tasks and finish the card.
+    /// `id` may be the Project or the Initial plan Task.
+    pub fn approve_plan(&self, id: ItemId) -> Result<Vec<ItemId>, String> {
+        let seed_id = self.resolve_initial_plan_id(id)?;
+        let seed = self
+            .get(seed_id)
+            .ok_or_else(|| format!("no work item #{seed_id}"))?;
+        if seed.state.is_terminal() {
+            return Err("Initial plan already accepted".into());
         }
 
-        if let Some(plan) = project.plan.clone().filter(|p| !p.tasks.is_empty()) {
-            return self.materialize_and_publish_plan(project_id, plan);
+        // Legacy boards: proposal empty but Project still holds an awaiting Plan.
+        if !seed
+            .proposal
+            .as_ref()
+            .is_some_and(|p| !p.tasks.is_empty())
+        {
+            if let Some(project_id) = seed.parent {
+                if let Some(project) = self.get(project_id) {
+                    if let Some(plan) = project
+                        .plan
+                        .as_ref()
+                        .filter(|p| !p.tasks.is_empty())
+                    {
+                        self.set_proposal(
+                            seed_id,
+                            TaskProposal {
+                                summary: plan.summary.clone(),
+                                tasks: plan.tasks.clone(),
+                            },
+                        )?;
+                        {
+                            let mut s = self.state.write().unwrap();
+                            if let Some(p) = s.items.get_mut(&project_id) {
+                                p.plan = None;
+                                let snap = p.clone();
+                                drop(s);
+                                self.emit(&snap);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // Legacy: shaping children with no artifact (pre-plan boards).
-        let mut published = Vec::new();
-        for cid in self.children_of(project_id) {
-            let Some(child) = self.get(cid) else { continue };
-            if child.is_initial_plan_task() {
-                continue;
-            }
-            if child.state == State::Shaping
-                && self
-                    .transition(cid, State::Backlog, "human", Some("plan approved".into()))
-                    .is_ok()
-            {
-                published.push(cid);
-            }
-        }
-        if published.is_empty() {
+        let seed = self
+            .get(seed_id)
+            .ok_or_else(|| format!("no work item #{seed_id}"))?;
+        if !seed
+            .proposal
+            .as_ref()
+            .is_some_and(|p| !p.tasks.is_empty())
+        {
             return Err(
-                "no Plan artifact to approve — run propose_breakdown (or wait for the Initial plan Task)"
+                "no proposal on Initial plan — run propose_breakdown or wait for plan.json"
                     .into(),
             );
         }
-        self.close_plan_tasks(project_id);
-        self.story(
-            project_id,
-            format!("Plan approved: {} tasks published to Backlog (legacy path).", published.len()),
-        );
+
+        let done = self.approve_review(seed_id)?;
+        let published: Vec<ItemId> = done
+            .proposal
+            .as_ref()
+            .map(|p| p.tasks.iter().filter_map(|t| t.item_id).collect())
+            .unwrap_or_default();
+        if published.is_empty() {
+            return Err("Approve finished Initial plan but created no Tasks".into());
+        }
         Ok(published)
-    }
-
-    fn materialize_and_publish_plan(
-        &self,
-        project_id: ItemId,
-        mut plan: PlanArtifact,
-    ) -> Result<Vec<ItemId>, String> {
-        for id in &plan.cancel_item_ids {
-            let _ = self.transition(*id, State::Retired, "human", Some("cancelled by replan".into()));
-        }
-
-        // Create / update Tasks for each plan spec.
-        for spec in plan.tasks.iter_mut() {
-            if let Some(existing_id) = spec.item_id {
-                if self.get(existing_id).is_some() {
-                    let _ = self.update_item(
-                        existing_id,
-                        Some(spec.title.clone()),
-                        Some(spec.intent.clone()),
-                        Some(spec.definition_of_done.clone()),
-                        None,
-                        None,
-                    );
-                    continue;
-                }
-            }
-            let child = self.create(
-                Some(project_id),
-                spec.title.clone(),
-                spec.intent.clone(),
-                Some(spec.definition_of_done.clone()),
-                Origin::Planner,
-                false,
-                spec.capability.clone(),
-            )?;
-            let _ = self.transition(child.id, State::Shaping, "planner", Some("from plan".into()));
-            spec.item_id = Some(child.id);
-        }
-
-        // Resolve key → id, then wire blocked_by.
-        let key_to_id: BTreeMap<String, ItemId> = plan
-            .tasks
-            .iter()
-            .filter_map(|t| t.item_id.map(|id| (t.key.clone(), id)))
-            .collect();
-        for spec in &plan.tasks {
-            let Some(id) = spec.item_id else { continue };
-            let blockers: Vec<ItemId> = spec
-                .blocked_by_keys
-                .iter()
-                .filter_map(|k| key_to_id.get(k).copied())
-                .collect();
-            self.set_blocked_by(id, blockers);
-        }
-
-        // Publish to Backlog.
-        let mut published = Vec::new();
-        for spec in &plan.tasks {
-            let Some(id) = spec.item_id else { continue };
-            if let Some(child) = self.get(id) {
-                if (child.state == State::Shaping
-                    && self
-                        .transition(id, State::Backlog, "human", Some("plan approved".into()))
-                        .is_ok())
-                    || child.state == State::Backlog
-                {
-                    published.push(id);
-                }
-            }
-        }
-
-        plan.status = PlanStatus::Approved;
-        plan.approved_revision = Some(plan.revision);
-        {
-            let mut s = self.state.write().unwrap();
-            if let Some(p) = s.items.get_mut(&project_id) {
-                p.plan = Some(plan.clone());
-                let snap = p.clone();
-                drop(s);
-                self.emit(&snap);
-            }
-        }
-
-        self.close_plan_tasks(project_id);
-        self.story(
-            project_id,
-            format!(
-                "Plan v{} approved: {} tasks published to Backlog.",
-                plan.revision,
-                published.len()
-            ),
-        );
-        Ok(published)
-    }
-
-    fn close_plan_tasks(&self, project_id: ItemId) {
-        for cid in self.children_of(project_id) {
-            let Some(child) = self.get(cid) else { continue };
-            if !child.is_initial_plan_task() || child.state.is_terminal() {
-                continue;
-            }
-            // One gate: Approve Plan (or approve_review that delegates here) finishes
-            // Initial plan even when it is sitting in Review with the docs PR.
-            if child.state == State::Backlog
-                || child.state == State::Shaping
-                || child.state == State::NeedsHuman
-                || child.state == State::Review
-            {
-                let _ = self.transition(
-                    cid,
-                    State::Done,
-                    "human",
-                    Some("plan approved; tasks materialized".into()),
-                );
-            } else if matches!(child.state, State::Claimed | State::Running) {
-                // Halt-ish: Backlog then Done if needed.
-                let _ = self.transition(cid, State::Backlog, "human", Some("plan approved".into()));
-                let _ = self.transition(
-                    cid,
-                    State::Done,
-                    "human",
-                    Some("plan approved; tasks materialized".into()),
-                );
-            }
-        }
     }
 
     /// Dual-write a single board item into beads (Project→epic, Task→task with `--parent`).
@@ -1644,17 +1539,17 @@ impl Board {
         }
     }
 
-    /// `claim` — takes a lease and returns the full goal ancestry, not just the
-    /// card.
+    /// `claim` — assigns the card and a fixed run deadline (`timeout_secs`).
+    /// The deadline is not extended by heartbeats.
     pub fn claim(
         &self,
         id: ItemId,
         agent_id: &str,
         model: Option<String>,
-        lease_secs: i64,
+        timeout_secs: i64,
     ) -> Result<ClaimGrant, TransitionError> {
         let now = Utc::now();
-        let expires_at = now + Duration::seconds(lease_secs);
+        let deadline = now + Duration::seconds(timeout_secs.max(1));
 
         let item = {
             let mut s = self.state.write().unwrap();
@@ -1665,11 +1560,12 @@ impl Board {
             let it = s.items.get_mut(&id).unwrap();
             it.parked = false;
             it.awaiting_dispatch = false;
+            it.run_deadline_at = Some(deadline);
             it.lease = Some(Lease {
                 agent_id: agent_id.to_string(),
                 granted_at: now,
                 last_heartbeat: now,
-                expires_at,
+                expires_at: deadline,
             });
             if model.is_some() {
                 it.model = model;
@@ -1701,13 +1597,15 @@ impl Board {
             plan_tasks: ctx.plan_tasks,
             plan_task_key: ctx.plan_task_key,
             notes: item.notes.iter().map(|n| n.text.clone()).collect(),
-            lease_expires_at: expires_at,
+            lease_expires_at: deadline,
+            run_deadline_at: deadline,
             budget_remaining_cents: item.budget_cents.map(|b| b.saturating_sub(item.cost_cents)),
             engine: item.engine.clone(),
         })
     }
 
     /// Resolve Project prompt + Plan rows for the card being claimed.
+    /// Plan rows come from the Initial plan card's (frozen) proposal.
     fn claim_plan_context(&self, id: ItemId, item: &WorkItem) -> ClaimPlanContext {
         let project = if item.is_project() {
             Some(item.clone())
@@ -1719,24 +1617,31 @@ impl Board {
         };
         let project_title = Some(project.title.clone());
         let project_prompt = project.project_prompt.clone();
-        let Some(plan) = project.plan.as_ref() else {
+
+        let seed = self.initial_plan_of(project.id);
+        let proposal = seed.as_ref().and_then(|s| s.proposal.as_ref());
+        let Some(proposal) = proposal.filter(|p| !p.tasks.is_empty()) else {
             return ClaimPlanContext {
                 project_title,
                 project_prompt,
                 ..Default::default()
             };
         };
-        let plan_summary = if plan.summary.trim().is_empty() {
+
+        let plan_summary = if proposal.summary.trim().is_empty() {
             None
         } else {
-            Some(plan.summary.clone())
+            Some(proposal.summary.clone())
         };
+        let title_key = Self::normalize_title(&item.title);
         let mut plan_task_key = None;
-        let plan_tasks: Vec<crate::model::PlanTaskBrief> = plan
+        let plan_tasks: Vec<crate::model::PlanTaskBrief> = proposal
             .tasks
             .iter()
             .map(|t| {
-                let current = t.item_id == Some(id);
+                let current = t.item_id == Some(id)
+                    || (t.item_id.is_none()
+                        && Self::normalize_title(&t.title) == title_key);
                 if current {
                     plan_task_key = Some(t.key.clone());
                 }
@@ -1759,15 +1664,15 @@ impl Board {
         }
     }
 
-    /// `heartbeat` — carries cost, because budget enforcement lives in the
-    /// control plane and not in agent good behaviour.
+    /// `heartbeat` — cost (and optional progress) only. Does **not** extend
+    /// `run_deadline_at`. `lease_secs` is ignored (kept for MCP compatibility).
     pub fn heartbeat(
         &self,
         id: ItemId,
         agent_id: &str,
         progress: f32,
         cost_delta_cents: u64,
-        lease_secs: i64,
+        _lease_secs: i64,
     ) -> Result<WorkItem, TransitionError> {
         let item = {
             let mut s = self.state.write().unwrap();
@@ -1781,7 +1686,7 @@ impl Board {
             it.cost_cents += cost_delta_cents;
             if let Some(l) = it.lease.as_mut() {
                 l.last_heartbeat = now;
-                l.expires_at = now + Duration::seconds(lease_secs);
+                // Do not touch expires_at / run_deadline_at — one fixed timeout.
             }
             it.clone()
         };
@@ -2022,6 +1927,7 @@ fn check_split_relatedness(
     }
 
     /// Store a TaskProposal on a card (Initial plan or impl split). Does not transition.
+    /// Refuses once Initial plan is Done (frozen).
     pub fn set_proposal(&self, id: ItemId, proposal: TaskProposal) -> Result<WorkItem, String> {
         if proposal.tasks.is_empty() {
             return Err("proposal needs at least one task".into());
@@ -2040,6 +1946,9 @@ fn check_split_relatedness(
                 .items
                 .get_mut(&id)
                 .ok_or_else(|| format!("no work item #{id}"))?;
+            if it.is_initial_plan_task() && it.state.is_terminal() {
+                return Err("Initial plan already accepted — proposal is frozen".into());
+            }
             it.proposal = Some(proposal);
             it.clone()
         };
@@ -2048,7 +1957,8 @@ fn check_split_relatedness(
     }
 
     /// Materialize `item.proposal` into sibling Tasks under the parent Project.
-    /// Clears the proposal. Does not transition the parent card.
+    /// Initial plan: keep proposal and stamp `item_id`s (freeze for briefings).
+    /// Impl splits: clear the proposal. Does not transition the parent card.
     fn materialize_proposal(
         &self,
         id: ItemId,
@@ -2056,6 +1966,7 @@ fn check_split_relatedness(
         origin: Origin,
     ) -> Result<Vec<WorkItem>, String> {
         let card = self.get(id).ok_or("no such item")?;
+        let keep_proposal = card.is_initial_plan_task();
         let proposal = card
             .proposal
             .clone()
@@ -2119,7 +2030,17 @@ fn check_split_relatedness(
         {
             let mut s = self.state.write().unwrap();
             if let Some(it) = s.items.get_mut(&id) {
-                it.proposal = None;
+                if keep_proposal {
+                    if let Some(prop) = it.proposal.as_mut() {
+                        for t in prop.tasks.iter_mut() {
+                            if let Some(&sid) = key_to_id.get(&t.key) {
+                                t.item_id = Some(sid);
+                            }
+                        }
+                    }
+                } else {
+                    it.proposal = None;
+                }
                 let snap = it.clone();
                 drop(s);
                 self.emit(&snap);
@@ -2231,8 +2152,7 @@ fn check_split_relatedness(
         Ok(item)
     }
 
-    /// Dead agents need no cleanup job: the lease is what makes pull-based
-    /// dispatch survivable.
+    /// Requeue runs past their fixed `run_deadline_at` (agent timeout).
     pub fn sweep_leases(&self) -> Vec<ItemId> {
         let now = Utc::now();
         let expired: Vec<ItemId> = {
@@ -2240,14 +2160,27 @@ fn check_split_relatedness(
             s.items
                 .values()
                 .filter(|i| matches!(i.state, State::Claimed | State::Running))
-                .filter(|i| i.lease.as_ref().map(|l| l.is_expired(now)).unwrap_or(false))
+                .filter(|i| {
+                    i.run_deadline_at
+                        .map(|d| now > d)
+                        .or_else(|| i.lease.as_ref().map(|l| l.is_expired(now)))
+                        .unwrap_or(false)
+                })
                 .map(|i| i.id)
                 .collect()
         };
         for id in &expired {
             let title = self.get(*id).map(|i| i.title).unwrap_or_default();
-            let _ = self.transition(*id, State::Backlog, "lease-sweeper", Some("lease expired".into()));
-            self.story(*id, format!("{title}: agent stopped heartbeating; lease expired, card requeued."));
+            let _ = self.transition(
+                *id,
+                State::Backlog,
+                "deadline-sweeper",
+                Some("run deadline exceeded".into()),
+            );
+            self.story(
+                *id,
+                format!("{title}: run deadline exceeded; card requeued."),
+            );
         }
         expired
     }
@@ -2487,9 +2420,6 @@ fn check_split_relatedness(
 
         if has_proposal {
             let is_initial = item.is_initial_plan_task();
-            let proposal = item.proposal.clone().unwrap();
-            let parent = item.parent;
-
             let origin = if is_initial {
                 Origin::Planner
             } else {
@@ -2497,39 +2427,16 @@ fn check_split_relatedness(
             };
             let made = self.materialize_proposal(id, "human", origin)?;
 
-            // Initial plan: sync approved Plan onto the Project for later briefings.
+            // Drop legacy Project.plan — truth is the (frozen) card proposal.
             if is_initial {
-                if let Some(project_id) = parent {
-                    let _ = self.propose_plan(
-                        project_id,
-                        proposal.summary.clone(),
-                        proposal.tasks.clone(),
-                        vec![],
-                    );
-                    // Mark approved without re-creating (materialize already did).
-                    // approve_plan would try to materialize again — instead stamp status.
-                    {
-                        let mut s = self.state.write().unwrap();
-                        if let Some(p) = s.items.get_mut(&project_id) {
-                            if let Some(plan) = p.plan.as_mut() {
-                                // Link item_ids from just-created siblings by key/title.
-                                let by_title: HashMap<String, ItemId> = made
-                                    .iter()
-                                    .map(|m| (Self::normalize_title(&m.title), m.id))
-                                    .collect();
-                                for t in plan.tasks.iter_mut() {
-                                    if t.item_id.is_none() {
-                                        t.item_id = by_title
-                                            .get(&Self::normalize_title(&t.title))
-                                            .copied();
-                                    }
-                                }
-                                plan.status = PlanStatus::Approved;
-                                plan.approved_revision = Some(plan.revision);
-                                let snap = p.clone();
-                                drop(s);
-                                self.emit(&snap);
-                            }
+                if let Some(project_id) = item.parent {
+                    let mut s = self.state.write().unwrap();
+                    if let Some(p) = s.items.get_mut(&project_id) {
+                        if p.plan.is_some() {
+                            p.plan = None;
+                            let snap = p.clone();
+                            drop(s);
+                            self.emit(&snap);
                         }
                     }
                 }
@@ -2558,32 +2465,18 @@ fn check_split_relatedness(
         if item.is_initial_plan_task() {
             if let Some(parent) = item.parent {
                 if let Some(project) = self.get(parent) {
-                    let awaiting = project.plan.as_ref().is_some_and(|p| {
-                        p.status == PlanStatus::AwaitingApproval && !p.tasks.is_empty()
-                    });
+                    let awaiting = project.plan.as_ref().is_some_and(|p| !p.tasks.is_empty());
                     if awaiting {
-                        self.approve_plan(parent)?;
+                        let published = self.approve_plan(parent)?;
                         let done = self
                             .get(id)
                             .ok_or_else(|| format!("no work item #{id}"))?;
-                        if done.state == State::Done {
-                            self.story(
-                                id,
-                                format!(
-                                    "{} approved — Plan materialized; PR surfaced (honr never merges).",
-                                    done.title
-                                ),
-                            );
-                            return Ok(done);
-                        }
-                        let done = self
-                            .transition(id, State::Done, "human", Some("approved".into()))
-                            .map_err(|e| e.to_string())?;
                         self.story(
                             id,
                             format!(
-                                "{} approved — Plan materialized; PR surfaced (honr never merges).",
-                                done.title
+                                "{} approved — {} Tasks created from legacy Project Plan.",
+                                done.title,
+                                published.len()
                             ),
                         );
                         return Ok(done);
@@ -2670,7 +2563,7 @@ fn check_split_relatedness(
             levels: self.schema.levels.clone(),
             goals,
             server_time: now,
-            heartbeat_expect_secs: self.schema.execution.heartbeat_expect_secs,
+            agent_timeout_secs: self.schema.execution.agents.agent_timeout_secs,
             seq: self.seq.load(Ordering::Relaxed),
             default_engine: self.schema.execution.agents.engine.clone(),
             default_model: self.schema.execution.agents.vertex.model.clone(),
@@ -2723,15 +2616,17 @@ fn check_split_relatedness(
                 members.iter().filter(|i| i.state.column() == column).collect();
             columns.push(ColumnView {
                 column,
-                summary: Self::chunk(column, &in_col, s, now, self.schema.execution.heartbeat_expect_secs),
+                summary: Self::chunk(
+                    column,
+                    &in_col,
+                    s,
+                    now,
+                    self.schema.execution.agents.agent_timeout_secs,
+                ),
             });
         }
 
-        let plan_status = goal
-            .plan
-            .as_ref()
-            .map(|p| p.status_label())
-            .unwrap_or_else(|| "no_plan".into());
+        let plan_status = self.plan_status_label(gid);
 
         Some(GoalView {
             id: gid,
@@ -2758,7 +2653,7 @@ fn check_split_relatedness(
         items: &[&&WorkItem],
         s: &BoardState,
         now: DateTime<Utc>,
-        hb_expect: i64,
+        agent_timeout_secs: u64,
     ) -> ChunkSummary {
         let count = items.len();
         if count == 0 {
@@ -2811,22 +2706,23 @@ fn check_split_relatedness(
                 parts.join(" · ")
             }
             Column::Running => {
-                // Is it alive, and is it worth it?
-                let stalled = items
+                // Near deadline = remaining under 10% of the agent timeout.
+                let warn_secs = (agent_timeout_secs as i64).max(1) / 10;
+                let ending_soon = items
                     .iter()
                     .filter(|i| {
-                        i.lease
-                            .as_ref()
-                            .map(|l| l.heartbeat_age_secs(now) > hb_expect)
+                        i.run_deadline_at
+                            .or_else(|| i.lease.as_ref().map(|l| l.expires_at))
+                            .map(|d| (d - now).num_seconds() <= warn_secs)
                             .unwrap_or(true)
                     })
                     .count();
                 let spend: u64 = items.iter().map(|i| i.cost_cents).sum();
-                if stalled == 0 {
-                    format!("{count} running · all healthy · ${:.2} so far", spend as f64 / 100.0)
+                if ending_soon == 0 {
+                    format!("{count} running · ${:.2} so far", spend as f64 / 100.0)
                 } else {
                     format!(
-                        "{count} running · {stalled} stalled · ${:.2} so far",
+                        "{count} running · {ending_soon} ending soon · ${:.2} so far",
                         spend as f64 / 100.0
                     )
                 }
@@ -2896,7 +2792,8 @@ fn check_split_relatedness(
                     .iter()
                     .filter(|i| matches!(i.state, State::Claimed | State::Running | State::Splitting))
                     .collect();
-                let hb = self.schema.execution.heartbeat_expect_secs;
+                let warn_secs =
+                    (self.schema.execution.agents.agent_timeout_secs as i64).max(1) / 10;
 
                 Some(GoalDigest {
                     goal_id: gid,
@@ -2909,9 +2806,9 @@ fn check_split_relatedness(
                     running_stalled: running
                         .iter()
                         .filter(|i| {
-                            i.lease
-                                .as_ref()
-                                .map(|l| l.heartbeat_age_secs(now) > hb)
+                            i.run_deadline_at
+                                .or_else(|| i.lease.as_ref().map(|l| l.expires_at))
+                                .map(|d| (d - now).num_seconds() <= warn_secs)
                                 .unwrap_or(true)
                         })
                         .count(),
@@ -2953,6 +2850,70 @@ mod tests {
         let _ = b.transition(leaf.id, State::Backlog, "t", None);
         b.claim(leaf.id, "agent", None, 45).expect("claim");
         (b, leaf.id)
+    }
+
+    #[test]
+    fn claim_sets_run_deadline_from_timeout() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-deadline.json"));
+        let parent = b
+            .create(None, "goal", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(parent.id, State::Shaping, "t", None);
+        let leaf = b
+            .create(
+                Some(parent.id),
+                "leaf",
+                "do a thing",
+                Some("it is done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        let _ = b.transition(leaf.id, State::Shaping, "t", None);
+        let _ = b.transition(leaf.id, State::Backlog, "t", None);
+        let before = Utc::now();
+        let grant = b.claim(leaf.id, "agent", None, 1800).expect("claim");
+        let after = Utc::now();
+        let item = b.get(leaf.id).unwrap();
+        let deadline = item.run_deadline_at.expect("run_deadline_at set");
+        assert_eq!(grant.run_deadline_at, deadline);
+        assert_eq!(grant.lease_expires_at, deadline);
+        assert!(deadline >= before + Duration::seconds(1799));
+        assert!(deadline <= after + Duration::seconds(1801));
+    }
+
+    #[test]
+    fn heartbeat_does_not_extend_run_deadline() {
+        let (b, id) = claimed_leaf();
+        let original = b.get(id).unwrap().run_deadline_at.expect("deadline");
+        b.heartbeat(id, "agent", 0.5, 10, 9999).expect("heartbeat");
+        let after = b.get(id).unwrap();
+        assert_eq!(after.run_deadline_at, Some(original));
+        assert_eq!(
+            after.lease.as_ref().map(|l| l.expires_at),
+            Some(original),
+            "lease.expires_at must stay pinned to the claim deadline"
+        );
+        assert_eq!(after.cost_cents, 10);
+        assert_eq!(after.state, State::Running);
+    }
+
+    #[test]
+    fn sweep_requeues_past_run_deadline() {
+        let (b, id) = claimed_leaf();
+        {
+            let mut s = b.state.write().unwrap();
+            let it = s.items.get_mut(&id).unwrap();
+            it.run_deadline_at = Some(Utc::now() - Duration::seconds(1));
+            if let Some(l) = it.lease.as_mut() {
+                l.expires_at = Utc::now() - Duration::seconds(1);
+            }
+        }
+        let expired = b.sweep_leases();
+        assert_eq!(expired, vec![id]);
+        assert_eq!(b.get(id).unwrap().state, State::Backlog);
+        assert!(b.get(id).unwrap().run_deadline_at.is_none());
     }
 
     #[test]
@@ -3545,8 +3506,7 @@ mod tests {
         let project = b
             .create(None, "Phase X", "why", None, Origin::Human, true, None)
             .expect("project");
-        assert!(project.plan.is_some());
-        assert_eq!(project.plan.as_ref().unwrap().status, PlanStatus::Empty);
+        assert!(project.plan.is_none(), "Plan lives on Initial plan, not Project");
 
         let kids = b.children_of(project.id);
         assert_eq!(kids.len(), 1, "exactly one seed Task");
@@ -3564,7 +3524,7 @@ mod tests {
     }
 
     #[test]
-    fn approve_plan_materializes_from_artifact_not_project() {
+    fn approve_plan_materializes_from_initial_plan_proposal() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-approve-plan.json"));
         let project = b
             .create(None, "Phase Y", "why", None, Origin::Human, true, None)
@@ -3598,13 +3558,18 @@ mod tests {
         )
         .expect("propose");
 
+        let seed = b
+            .children_of(project.id)
+            .into_iter()
+            .find_map(|id| b.get(id).filter(|i| i.is_initial_plan_task()))
+            .expect("seed");
+        assert!(seed.proposal.as_ref().is_some_and(|p| p.tasks.len() == 2));
+        assert!(b.get(project.id).unwrap().plan.is_none());
+
         let published = b.approve_plan(project.id).expect("approve");
         assert_eq!(published.len(), 2);
         assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
-        assert_eq!(
-            b.get(project.id).unwrap().plan.as_ref().unwrap().status,
-            PlanStatus::Approved
-        );
+        assert!(b.get(project.id).unwrap().plan.is_none());
 
         let a = b.get(published[0]).unwrap();
         let b_item = b.get(published[1]).unwrap();
@@ -3612,12 +3577,12 @@ mod tests {
         assert_eq!(b_item.state, State::Backlog);
         assert_eq!(b_item.blocked_by, vec![published[0]]);
 
-        // Initial plan Task closed.
-        let seed = b
-            .children_of(project.id)
-            .into_iter()
-            .find_map(|id| b.get(id).filter(|i| i.is_initial_plan_task()));
-        assert!(seed.unwrap().state.is_terminal());
+        let seed = b.get(seed.id).unwrap();
+        assert!(seed.state.is_terminal());
+        // Frozen proposal with stamped item_ids.
+        let prop = seed.proposal.expect("frozen proposal");
+        assert_eq!(prop.tasks.len(), 2);
+        assert!(prop.tasks.iter().all(|t| t.item_id.is_some()));
     }
 
     #[test]
@@ -3716,10 +3681,8 @@ mod tests {
 
         let done = b.approve_review(seed_id).expect("approve_review");
         assert_eq!(done.state, State::Done);
-        assert_eq!(
-            b.get(project.id).unwrap().plan.as_ref().unwrap().status,
-            PlanStatus::Approved
-        );
+        assert!(b.get(project.id).unwrap().plan.is_none());
+        assert!(done.proposal.as_ref().is_some_and(|p| p.tasks.len() == 2));
         let tasks: Vec<_> = b
             .children_of(project.id)
             .into_iter()
@@ -3728,6 +3691,85 @@ mod tests {
             .collect();
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|t| t.state == State::Backlog));
+    }
+
+    #[test]
+    fn propose_plan_refused_after_initial_plan_accepted() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-plan-frozen.json"),
+        );
+        let project = b
+            .create(None, "Phase Freeze", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        b.propose_plan(
+            project.id,
+            "once",
+            vec![PlanTaskSpec {
+                key: "a".into(),
+                title: "Task A".into(),
+                intent: "do a".into(),
+                definition_of_done: "a done".into(),
+                blocked_by_keys: vec![],
+                capability: None,
+                item_id: None,
+            }],
+            vec![],
+        )
+        .expect("propose");
+        let _ = b.approve_plan(project.id).expect("approve");
+        let err = b
+            .propose_plan(
+                project.id,
+                "again",
+                vec![PlanTaskSpec {
+                    key: "b".into(),
+                    title: "Task B".into(),
+                    intent: "do b".into(),
+                    definition_of_done: "b done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    item_id: None,
+                }],
+                vec![],
+            )
+            .expect_err("frozen");
+        assert!(err.contains("frozen") || err.contains("accepted"), "{err}");
+    }
+
+    #[test]
+    fn claim_briefing_reads_frozen_initial_plan_proposal() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-claim-from-proposal.json"),
+        );
+        let project = b
+            .create(None, "Phase Brief", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        b.propose_plan(
+            project.id,
+            "brief plan",
+            vec![PlanTaskSpec {
+                key: "a".into(),
+                title: "Task A".into(),
+                intent: "do a".into(),
+                definition_of_done: "a done".into(),
+                blocked_by_keys: vec![],
+                capability: None,
+                item_id: None,
+            }],
+            vec![],
+        )
+        .expect("propose");
+        let published = b.approve_plan(project.id).expect("approve");
+        let task_id = published[0];
+        let grant = b.claim(task_id, "agent", None, 60).expect("claim");
+        assert_eq!(grant.plan_summary.as_deref(), Some("brief plan"));
+        assert_eq!(grant.plan_tasks.len(), 1);
+        assert!(grant.plan_tasks[0].current);
+        assert_eq!(grant.plan_task_key.as_deref(), Some("a"));
     }
 
     #[test]

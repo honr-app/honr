@@ -25,6 +25,7 @@ function item(o) {
     blocked_by: [],
     capability: null,
     lease: null,
+    run_deadline_at: null,
     model: null,
     progress: 0,
     cost_cents: 0,
@@ -46,6 +47,9 @@ function item(o) {
     history: [],
     ...o,
   };
+  if (items[id].lease && !items[id].run_deadline_at) {
+    items[id].run_deadline_at = items[id].lease.expires_at;
+  }
   delete items[id].age;
   delete items[id].since;
   return id;
@@ -55,7 +59,8 @@ const lease = (agent, hbAgo) => ({
   agent_id: agent,
   granted_at: iso(hbAgo + 900),
   last_heartbeat: iso(hbAgo),
-  expires_at: iso(hbAgo - 600),
+  // ~30m remaining (agent_timeout default); hbAgo shifts slightly for variety.
+  expires_at: iso(hbAgo - 1800),
 });
 
 // ---- Project root ---------------------------------------------------------

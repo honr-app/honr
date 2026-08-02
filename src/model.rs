@@ -89,24 +89,22 @@ pub enum Origin {
 }
 
 
-/// What makes pull-based dispatch survivable: a dead agent simply stops
-/// renewing, and the card returns to Backlog with no supervisor involved.
+/// Who holds the card while a run is in flight. The hard stop is
+/// [`WorkItem::run_deadline_at`] (agent timeout), not lease renewal.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Lease {
     pub agent_id: String,
     pub granted_at: DateTime<Utc>,
+    /// Retained for older clients; not used for liveness or sweep.
+    #[serde(default)]
     pub last_heartbeat: DateTime<Utc>,
+    /// Mirrors `run_deadline_at` at claim time; not extended by heartbeats.
     pub expires_at: DateTime<Utc>,
 }
 
 impl Lease {
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         now > self.expires_at
-    }
-
-    /// The one number that tells you an agent is thinking versus hung.
-    pub fn heartbeat_age_secs(&self, now: DateTime<Utc>) -> i64 {
-        (now - self.last_heartbeat).num_seconds().max(0)
     }
 }
 
@@ -208,7 +206,8 @@ pub struct PlanTaskSpec {
     pub item_id: Option<ItemId>,
 }
 
-/// Source of truth for a Project's breakdown. Approve Plan applies this DAG.
+/// Legacy Project-level plan blob (ignored for new boards). Live plans are
+/// `TaskProposal` on the Initial plan card.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlanArtifact {
     pub revision: u32,
@@ -228,6 +227,7 @@ pub struct PlanArtifact {
 }
 
 impl PlanArtifact {
+    #[allow(dead_code)] // kept for legacy board JSON / future replan tooling
     pub fn empty() -> Self {
         Self {
             revision: 0,
@@ -241,6 +241,7 @@ impl PlanArtifact {
     }
 
     /// Compact status for Home / GoalView: `no_plan`, `awaiting_approval`, `approved_vN`.
+    #[allow(dead_code)] // GoalView now derives status from Initial plan proposal
     pub fn status_label(&self) -> String {
         match self.status {
             PlanStatus::Empty => "no_plan".into(),
@@ -369,6 +370,10 @@ pub struct WorkItem {
 
     #[serde(default)]
     pub lease: Option<Lease>,
+    /// Hard end of this run (`claim` + `agent_timeout_secs`). Not renewed.
+    /// Sweeper requeues when past; UI shows countdown to this instant.
+    #[serde(default)]
+    pub run_deadline_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub engine: Option<String>,
     #[serde(default)]
@@ -475,6 +480,7 @@ impl WorkItem {
             blockers: Vec::new(),
             capability: None,
             lease: None,
+            run_deadline_at: None,
             engine: None,
             model: None,
             progress: 0.0,

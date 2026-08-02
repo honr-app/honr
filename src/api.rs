@@ -162,7 +162,7 @@ async fn create_item(
     Ok(Json(item))
 }
 
-/// Approve Plan: materialize the Project's Plan artifact into Backlog Tasks.
+/// Approve Initial plan proposal (id = Project or Initial plan Task).
 /// Never transitions the Project itself to Backlog.
 async fn approve_plan(
     AxState(b): AxState<SharedBoard>,
@@ -230,12 +230,13 @@ pub struct SavePlanReq {
     cancel_keys: Vec<String>,
 }
 
-/// Write / revise the Plan artifact (does not materialize Tasks — Approve Plan does).
+/// Write / revise the proposal on the Initial plan card (id = Project or Initial plan).
+/// Does not materialize Tasks — Approve does.
 async fn save_plan(
     AxState(b): AxState<SharedBoard>,
     Path(id): Path<ItemId>,
     Json(req): Json<SavePlanReq>,
-) -> ApiResult<crate::model::PlanArtifact> {
+) -> ApiResult<crate::model::TaskProposal> {
     let summary = req.summary.unwrap_or_else(|| {
         b.get(id)
             .map(|i| i.intent.clone())

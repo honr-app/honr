@@ -69,7 +69,7 @@ if (existsSync(`${ROOT}target/debug/honr`)) {
       },
     ],
     server_time: new Date().toISOString(),
-    heartbeat_expect_secs: 600,
+    agent_timeout_secs: 600,
     seq: 1,
   });
   const server = createServer((req, res) => {

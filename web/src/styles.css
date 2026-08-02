@@ -500,9 +500,10 @@ main > :first-child { flex: 1; min-width: 0; }
   color: var(--needs-human);
 }
 
-.hb { color: var(--ok); }
-.hb.stale { color: var(--needs-human); font-weight: 600; }
-.card.stale { border-left-style: dotted; }
+.countdown { color: var(--ok); font-variant-numeric: tabular-nums; }
+.countdown.ending-soon { color: var(--needs-human); font-weight: 600; }
+.card.ending-soon { border-left-style: dotted; }
+.bar .fill.ending-soon { background: var(--needs-human); }
 
 /* Filter bar above Activity board */
 .board-filter {

@@ -1,4 +1,4 @@
-import { money, secsSince, since } from "../api.js";
+import { formatCountdown, money, secsUntil, since } from "../api.js";
 import { friendlyState, humanizeEscalation } from "../humanize.js";
 import type { ColumnKey, WorkItem } from "../types";
 
@@ -6,7 +6,8 @@ interface Props {
   item: WorkItem;
   column: ColumnKey;
   now: number;
-  heartbeatExpect: number;
+  /** Wall-clock run budget from the board (`agent_timeout_secs`). */
+  agentTimeout: number;
   defaultEngine?: string;
   defaultModel?: string;
   breadcrumb?: string;
@@ -15,22 +16,32 @@ interface Props {
   onOpen: (id: number) => void;
 }
 
+/** Remaining fraction of the fixed run timeout (1 = full time left). */
+export function countdownRemainFrac(
+  deadlineIso: string | null | undefined,
+  totalSecs: number,
+  now: number,
+): number {
+  if (!deadlineIso || totalSecs <= 0) return 0;
+  const remaining = secsUntil(deadlineIso, now);
+  return Math.min(1, Math.max(0, remaining / totalSecs));
+}
+
 /**
  * Card anatomy differs by column, because the question you're asking differs.
  * Everything on the face is here to answer that column's one question.
  */
-export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaultModel, breadcrumb, labelOf, onOpen }: Props) {
+export function Card({ item, column, now, agentTimeout, defaultEngine, defaultModel, breadcrumb, labelOf, onOpen }: Props) {
   const machine = item.origin.kind !== "human";
   const idLabel = (id: number) => (labelOf ? labelOf(id) : `#${id}`);
 
   const engine = item.engine ?? defaultEngine;
   const model = item.model ?? defaultModel;
 
-  // The one number that tells you an agent is thinking versus hung. It belongs
-  // on the card face, not behind a click — and the card decays as it ages.
-  const hbAge = item.lease ? secsSince(item.lease.last_heartbeat, now) : null;
-  const stale = hbAge !== null && hbAge > heartbeatExpect;
-  const decay = hbAge === null ? 0 : Math.min(1, Math.max(0, (hbAge - heartbeatExpect) / (heartbeatExpect * 4)));
+  const deadline = item.run_deadline_at ?? item.lease?.expires_at ?? null;
+  const remaining = deadline ? secsUntil(deadline, now) : null;
+  const remainFrac = countdownRemainFrac(deadline, agentTimeout, now);
+  const endingSoon = remaining !== null && remainFrac < 0.1;
 
   const blockersList = (item.blockers && item.blockers.length > 0
     ? item.blockers
@@ -39,8 +50,7 @@ export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaul
 
   return (
     <div
-      className={`card col-${column} ${machine ? "machine" : ""} ${stale ? "stale" : ""}`}
-      style={decay ? { opacity: 1 - decay * 0.45, filter: `saturate(${1 - decay * 0.8})` } : undefined}
+      className={`card col-${column} ${machine ? "machine" : ""} ${endingSoon ? "ending-soon" : ""}`}
       onClick={() => onOpen(item.id)}
       title={
         machine
@@ -98,14 +108,19 @@ export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaul
                   ? "🤖 claude"
                   : `◍ ${engine || model || "?"}`}
             </span>
-            <span className={stale ? "hb stale" : "hb"}>♥ {hbAge ?? "—"}s</span>
+            <span className={endingSoon ? "countdown ending-soon" : "countdown"}>
+              {remaining !== null ? formatCountdown(remaining) : "—"}
+            </span>
             <span className="dim">{money(item.cost_cents)}</span>
           </div>
           <div className="bar">
-            <div className="fill" style={{ width: `${Math.round(item.progress * 100)}%` }} />
+            <div
+              className={`fill${endingSoon ? " ending-soon" : ""}`}
+              style={{ width: `${Math.round(remainFrac * 100)}%` }}
+            />
           </div>
           <div className="row dim">
-            <span>{Math.round(item.progress * 100)}%</span>
+            <span>{Math.round(remainFrac * 100)}% left</span>
             <span>{since(item.entered_state_at, now)}</span>
           </div>
         </>

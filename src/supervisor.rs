@@ -74,8 +74,8 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     tokio::spawn(dispatch_loop(board, cfg));
 }
 
-/// Requeue cards whose leases lapsed. The matching supervise task notices on
-/// its next liveness tick (see `watch_agent`) and frees the concurrency slot —
+/// Requeue cards past `run_deadline_at`. The matching supervise task notices on
+/// its next board poll (see `watch_agent`) and frees the concurrency slot —
 /// the sweeper alone must not leave `in_flight` stuck on a zombie watch.
 ///
 /// Also periodically reconciles sandbox inventory (reap terminal / keep parked).
@@ -91,20 +91,13 @@ async fn sweeper_loop(
     loop {
         t.tick().await;
         for id in board.sweep_leases() {
-            tracing::info!("lease expired on #{id}; requeued");
+            tracing::info!("run deadline exceeded on #{id}; requeued");
         }
-        let _ = reconcile(&os, &board, cfg.lease_secs, &active).await;
+        let _ = reconcile(&os, &board, &active).await;
     }
 }
 
-/// How often a live watch renews the lease even when the agent log is silent.
-///
-/// Must be well under `lease_secs` (default 600). Line-driven heartbeats alone
-/// let a long quiet tool call expire the lease while the supervisor is still
-/// following — then the card shows Backlog, `in_flight` stays 1, and nothing else
-/// claims.
-const WATCH_HEARTBEAT_SECS: u64 = 30;
-/// How often to notice Halt / lease-sweep while following *or* setting up.
+/// How often to notice Halt / deadline-sweep while following *or* setting up.
 /// Keeps cancel latency short without hammering the board lock. Setup used to
 /// ignore this — a Halt mid-clone left `in_flight` stuck at `max_concurrent`.
 const WATCH_BOARD_POLL_SECS: u64 = 2;
@@ -114,20 +107,20 @@ fn board_still_owns_run(state: State) -> bool {
     matches!(state, State::Claimed | State::Running)
 }
 
-/// Supervise ended because the board (lease sweeper / Halt) already released
+/// Supervise ended because the board (deadline sweeper / Halt) already released
 /// the card — not because the work failed.
 fn is_supervisor_cancel(err: &str) -> bool {
     err.contains("run cancelled:")
 }
 
-/// Bail if Halt / lease sweep / cut already moved the card off Claimed|Running.
+/// Bail if Halt / deadline sweep / cut already moved the card off Claimed|Running.
 fn ensure_board_owns_run(board: &SharedBoard, id: ItemId) -> anyhow::Result<()> {
     let Some(item) = board.get(id) else {
         anyhow::bail!("run cancelled: card #{id} gone from the board");
     };
     if !board_still_owns_run(item.state) {
         anyhow::bail!(
-            "run cancelled: card left {:?} (lease expired or halted)",
+            "run cancelled: card left {:?} (deadline exceeded or halted)",
             item.state
         );
     }
@@ -202,15 +195,15 @@ struct Fleet {
     /// Which cards this process is actively supervising.
     ///
     /// Prevents dispatch from double-claiming a card whose watch is still
-    /// alive. Paired with timer heartbeats in `watch_agent` (so a silent tool
-    /// call cannot expire the lease) and `with_board_cancel` during setup +
-    /// watch (so a Halt / cut / lease sweep frees `in_flight` even mid-clone).
-    /// A sandbox label is *not* the right evidence here — failed sandboxes are
-    /// kept for inspection, so the label outlives the run. `reconcile` is the
-    /// one place that reads labels, and it cross-checks them against the card.
+    /// alive. Paired with `with_board_cancel` during setup + watch (so a Halt /
+    /// cut / deadline sweep frees `in_flight` even mid-clone). A sandbox label
+    /// is *not* the right evidence here — failed sandboxes are kept for
+    /// inspection, so the label outlives the run. `reconcile` is the one place
+    /// that reads labels, and it cross-checks them against the card.
     active: Active,
     cooldown: Cooldown,
-    lease_secs: i64,
+    /// Fixed run budget in seconds (`agents.agent_timeout_secs`).
+    timeout_secs: i64,
 }
 
 impl Fleet {
@@ -231,7 +224,7 @@ impl Fleet {
                 Err(e) => {
                     let msg = e.to_string();
                     if is_supervisor_cancel(&msg) {
-                        // Lease sweeper or Halt already moved the card. Do not
+                        // Deadline sweeper or Halt already moved the card. Do not
                         // burn retry budget or release again — just let
                         // finalize stop the agent and free the slot below.
                         tracing::info!("#{id}: {msg}");
@@ -264,6 +257,7 @@ impl Fleet {
 }
 
 async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
+    let timeout_secs = cfg.agents.agent_timeout_secs as i64;
     let fleet = Fleet {
         board: board.clone(),
         os: Arc::new(OpenShell::default()),
@@ -271,12 +265,12 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         in_flight: Arc::default(),
         active: Arc::default(),
         cooldown: Arc::default(),
-        lease_secs: cfg.lease_secs,
+        timeout_secs,
     };
 
     // Pick up whatever survived the last process before anything else — the
     // sweeper included — gets a chance to act on those cards.
-    for a in reconcile_once_reachable(&fleet.os, &board, cfg.lease_secs, GATEWAY_GRACE).await {
+    for a in reconcile_once_reachable(&fleet.os, &board, timeout_secs, GATEWAY_GRACE).await {
         let (id, agent_id) = (a.item_id, a.agent_id.clone());
         fleet.supervise(id, agent_id, adopt_card(fleet.clone(), a));
     }
@@ -326,7 +320,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
             item.id,
             &agent_id,
             Some(fleet.agents.vertex.model.clone()),
-            cfg.lease_secs,
+            fleet.timeout_secs,
         ) {
             Ok(g) => g,
             Err(e) => {
@@ -415,7 +409,7 @@ const GATEWAY_POLL: Duration = Duration::from_secs(5);
 async fn reconcile_once_reachable(
     os: &OpenShell,
     board: &SharedBoard,
-    lease_secs: i64,
+    _timeout_secs: i64,
     grace: Duration,
 ) -> Vec<Adoption> {
     let deadline = std::time::Instant::now() + grace;
@@ -444,7 +438,7 @@ async fn reconcile_once_reachable(
     }
     // Startup: nothing is supervised yet, so empty `active` is correct — a
     // Claimed/Running card with a dead agent process should be requeued.
-    reconcile(os, board, lease_secs, &Active::default()).await
+    reconcile(os, board, &Active::default()).await
 }
 
 /// Match live sandboxes back to the board, before anything else touches them.
@@ -456,7 +450,6 @@ async fn reconcile_once_reachable(
 async fn reconcile(
     os: &OpenShell,
     board: &SharedBoard,
-    lease_secs: i64,
     active: &Active,
 ) -> Vec<Adoption> {
     let Ok(ours) = os.list_ours().await else {
@@ -486,7 +479,21 @@ async fn reconcile(
             if active.lock().unwrap().contains(&id) {
                 continue;
             }
-            match adopt(os, board, item, &sb.name, lease_secs).await {
+            // Fixed deadline already passed — bounce without resetting the clock.
+            if item
+                .run_deadline_at
+                .is_some_and(|d| chrono::Utc::now() > d)
+            {
+                tracing::warn!("#{id}: run deadline already past; requeueing");
+                let _ = board.transition(
+                    id,
+                    State::Backlog,
+                    "deadline-sweeper",
+                    Some("run deadline exceeded".into()),
+                );
+                continue;
+            }
+            match adopt(os, board, item, &sb.name).await {
                 Some(a) => {
                     tracing::info!("#{id}: re-attached to {} from line {}", sb.name, a.from_line);
                     adopted.push(a);
@@ -512,12 +519,12 @@ async fn reconcile(
 }
 
 /// Ask a sandbox what its agent is doing, and take over if there is one.
+/// Does not reset `run_deadline_at` — that clock was set at the original claim.
 async fn adopt(
     os: &OpenShell,
     board: &SharedBoard,
     item: &WorkItem,
     sandbox: &str,
-    lease_secs: i64,
 ) -> Option<Adoption> {
     let id = item.id;
     // A probe that hangs is a sandbox we cannot reason about, and this stack
@@ -542,16 +549,10 @@ async fn adopt(
         .map(|l| l.agent_id.clone())
         .unwrap_or_else(|| format!("sandbox-{id}"));
 
-    // Renew the lease now. It has not been touched since before the restart,
-    // and the sweeper is seconds from deciding this card is dead. This is also
-    // what puts a Claimed card back into Running.
-    //
-    // A failure here is not a reason to abandon the run: the agent is alive
-    // either way, and watching it beats leaving it to spend unobserved. But it
-    // does mean the sweeper may requeue a live card, so it must not pass
-    // silently.
-    if let Err(e) = board.heartbeat(id, &agent_id, item.progress, 0, lease_secs) {
-        tracing::error!("#{id}: adopted {sandbox} but could not renew its lease: {e}");
+    // Promote Claimed → Running / refresh last_heartbeat for diagnostics.
+    // Does not move the deadline — remaining time is what the original claim set.
+    if let Err(e) = board.heartbeat(id, &agent_id, item.progress, 0, 0) {
+        tracing::error!("#{id}: adopted {sandbox} but could not mark it running: {e}");
     }
     board.story(id, format!("honr restarted; picked {sandbox} back up rather than killing it."));
 
@@ -648,7 +649,7 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     };
 
     let result = run_inside(
-        board, os, cfg, &agent_id, &grant, &name, &branch, f.lease_secs, &spec, is_reused,
+        board, os, cfg, &agent_id, &grant, &name, &branch, &spec, is_reused,
     )
     .await;
     finalize(os, id, &name, &result).await;
@@ -671,7 +672,6 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
             &a.sandbox,
             a.from_line,
             a.seen_cents,
-            f.lease_secs,
         )
         .await?;
         finish(board, os, cfg, &a.agent_id, id, &a.sandbox, &branch, &run, spent).await
@@ -826,7 +826,6 @@ async fn run_inside(
     grant: &ClaimGrant,
     name: &str,
     branch: &str,
-    lease_secs: i64,
     spec: &SandboxSpec,
     is_reused: bool,
 ) -> anyhow::Result<()> {
@@ -834,15 +833,13 @@ async fn run_inside(
     let short = Duration::from_secs(180);
     board.clear_agent_logs(id);
 
-    // Setup emits no agent output, so without this the card looks dead from
-    // the moment it is claimed until `claude` produces its first line — long
-    // enough for the sweeper to requeue a healthy run. Each call marks a step
-    // that actually completed, so this stays evidence of progress rather than
-    // an assertion of liveness. Also refuses to heartbeat a Halted card —
-    // setup must not outlive the board's claim.
+    // Setup emits no agent output. Heartbeats here promote Claimed → Running
+    // and record setup milestones; they do not extend the run deadline.
+    // Also refuses to heartbeat a Halted card — setup must not outlive the
+    // board's claim.
     let beat = |p: f32| -> anyhow::Result<()> {
         ensure_board_owns_run(board, id)?;
-        let _ = board.heartbeat(id, agent_id, p, 0, lease_secs);
+        let _ = board.heartbeat(id, agent_id, p, 0, 0);
         Ok(())
     };
 
@@ -945,22 +942,21 @@ async fn run_inside(
 
     // From the top of the log with nothing spent: this run is ours from its
     // first line. An adopted run joins here instead, further in.
-    let (run, spent) =
-        watch_agent(board, os, cfg, agent_id, id, name, 1, 0, lease_secs).await?;
+    let (run, spent) = watch_agent(board, os, cfg, agent_id, id, name, 1, 0).await?;
     finish(board, os, cfg, agent_id, id, name, branch, &run, spent).await
 }
 
-/// Watch a detached agent to completion: heartbeat on every line it writes,
-/// charge cost as it arrives, and hand back its exit status.
+/// Watch a detached agent to completion: charge cost as stream lines arrive,
+/// and hand back its exit status.
 ///
 /// `from_line` and `seen_cents` are the whole reason this is a separate step.
 /// They make watching *resumable*: a supervisor that starts halfway through a
 /// run skips the lines a previous one already streamed, and starts its cost
 /// arithmetic from what that one already charged.
 ///
-/// Liveness is also on a wall-clock timer: silent tool calls must not expire
-/// the lease. If the board leaves Claimed/Running (lease sweep or Halt), the
-/// watch ends immediately so `in_flight` frees and the agent is stopped.
+/// The run deadline is fixed at claim — stream updates must not push it out.
+/// If the board leaves Claimed/Running (deadline sweep or Halt), the watch
+/// ends immediately so `in_flight` frees and the agent is stopped.
 #[allow(clippy::too_many_arguments)]
 async fn watch_agent(
     board: &SharedBoard,
@@ -971,29 +967,17 @@ async fn watch_agent(
     name: &str,
     from_line: u64,
     seen_cents: u64,
-    lease_secs: i64,
 ) -> anyhow::Result<(Output, u64)> {
     let spent = Arc::new(AtomicU64::new(seen_cents));
-    let started = std::time::Instant::now();
     // The agent carries its own deadline inside the sandbox; this one only has
     // to outlast it, so a hung *follower* still fails rather than waiting.
     let timeout = Duration::from_secs(cfg.agent_timeout_secs) + Duration::from_secs(120);
-    // An adopted run is already part-way along, and a card whose progress bar
-    // walks backwards after a restart is the board lying about the run.
-    let floor = board.get(id).map(|i| i.progress).unwrap_or(0.0);
 
     let (board2, spent2) = (board.clone(), spent.clone());
     let agent_owned = agent_id.to_string();
 
     let follow = follow_script(from_line);
     let stream = os.exec_streaming(name, &follow, timeout, move |line| {
-        // Progress is not knowable from the stream, so it is reported as
-        // elapsed-against-deadline and capped below 1.0 — honest about
-        // being an estimate, and monotonic, which is what the card face
-        // needs. Only `report` sets 1.0.
-        let frac = started.elapsed().as_secs_f32() / timeout.as_secs_f32();
-        let progress = frac.max(floor).clamp(0.0, 0.95);
-
         let cents = parse_cost_cents(line);
         let delta = cents
             .map(|c| {
@@ -1012,21 +996,16 @@ async fn watch_agent(
         // Buffer live agent output lines for UI stream view.
         board2.append_agent_log(id, line.to_string());
 
-        // Do not renew a lease the board has already ended (Halt / park / sweep).
+        // Cost-only heartbeat — does not extend run_deadline_at.
         if board2
             .get(id)
             .is_some_and(|i| board_still_owns_run(i.state))
         {
-            let _ = board2.heartbeat(id, &agent_owned, progress, delta, lease_secs);
+            let progress = board2.get(id).map(|i| i.progress).unwrap_or(0.0);
+            let _ = board2.heartbeat(id, &agent_owned, progress, delta, 0);
         }
     });
     tokio::pin!(stream);
-
-    let mut hb = tokio::time::interval(Duration::from_secs(WATCH_HEARTBEAT_SECS));
-    hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // First tick completes immediately; skip it so we don't double-beat the
-    // claim/setup heartbeats that just ran.
-    hb.tick().await;
 
     let mut poll = tokio::time::interval(Duration::from_secs(WATCH_BOARD_POLL_SECS));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1037,13 +1016,6 @@ async fn watch_agent(
             res = &mut stream => {
                 let run = res?;
                 return Ok((run, spent.load(Ordering::Relaxed)));
-            }
-            _ = hb.tick() => {
-                // Dropping `stream` kills the follow exec (kill_on_drop).
-                ensure_board_owns_run(board, id)?;
-                let frac = started.elapsed().as_secs_f32() / timeout.as_secs_f32();
-                let progress = frac.max(floor).clamp(0.0, 0.95);
-                let _ = board.heartbeat(id, agent_id, progress, 0, lease_secs);
             }
             _ = poll.tick() => {
                 ensure_board_owns_run(board, id)?;
@@ -1213,7 +1185,7 @@ async fn apply_initial_plan_sidecar(
                     },
                     crate::model::EscalationOption {
                         label: "Propose Plan in cockpit".into(),
-                        detail: "Use propose_breakdown on the Project, then Approve.".into(),
+                        detail: "Use propose_breakdown (writes the Initial plan proposal), then Approve that card.".into(),
                     },
                 ],
                 0,
@@ -2258,11 +2230,9 @@ mod tests {
     use crate::model::Origin;
 
     #[test]
-    fn watch_liveness_outpaces_the_default_lease() {
-        // Timer heartbeats must renew well before the sweeper can requeue.
+    fn board_poll_is_frequent_enough_to_notice_halt() {
         const {
-            assert!(WATCH_HEARTBEAT_SECS < 600 / 4);
-            assert!(WATCH_BOARD_POLL_SECS < WATCH_HEARTBEAT_SECS);
+            assert!(WATCH_BOARD_POLL_SECS <= 5);
         }
     }
 
@@ -2278,11 +2248,11 @@ mod tests {
     #[test]
     fn board_release_is_not_a_card_failure() {
         assert!(is_supervisor_cancel(
-            "run cancelled: card left Backlog (lease expired or halted)"
+            "run cancelled: card left Backlog (deadline exceeded or halted)"
         ));
         assert!(!is_supervisor_cancel("clone failed: CONNECT tunnel 403"));
         assert!(!is_infrastructure(
-            "run cancelled: card left Backlog (lease expired or halted)"
+            "run cancelled: card left Backlog (deadline exceeded or halted)"
         ));
     }
 
@@ -2814,6 +2784,7 @@ mod tests {
     }
 
     fn grant() -> ClaimGrant {
+        let deadline = chrono::Utc::now() + chrono::Duration::seconds(1800);
         ClaimGrant {
             item_id: 7,
             title: "t".into(),
@@ -2832,7 +2803,8 @@ mod tests {
             }],
             plan_task_key: Some("t1".into()),
             notes: vec![],
-            lease_expires_at: chrono::Utc::now(),
+            lease_expires_at: deadline,
+            run_deadline_at: deadline,
             budget_remaining_cents: None,
             engine: None,
         }
@@ -3384,16 +3356,8 @@ exit 1
         assert_eq!(prop.tasks.len(), 2);
         assert_eq!(prop.tasks[0].key, "a");
         assert_eq!(prop.tasks[1].blocked_by_keys, vec!["a".to_string()]);
-        // Project Plan is synced on Approve, not at propose time.
-        assert_ne!(
-            board
-                .get(project.id)
-                .unwrap()
-                .plan
-                .as_ref()
-                .map(|p| p.status),
-            Some(crate::model::PlanStatus::AwaitingApproval)
-        );
+        // Plan stays on the Initial plan card — Project.plan is unused.
+        assert!(board.get(project.id).unwrap().plan.is_none());
     }
 
     #[tokio::test]
@@ -3464,15 +3428,7 @@ exit 1
             "expected plan.json escalate, got {:?}",
             seed.escalation
         );
-        assert_ne!(
-            board
-                .get(project.id)
-                .unwrap()
-                .plan
-                .as_ref()
-                .map(|p| p.status),
-            Some(crate::model::PlanStatus::AwaitingApproval)
-        );
+        assert!(board.get(project.id).unwrap().plan.is_none());
     }
 }
 

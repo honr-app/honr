@@ -21,7 +21,7 @@ export const api = {
   // The human verbs. Each costs the system something different.
   steer: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/steer`, { text }),
-  /** Write / revise Plan artifact (does not materialize Tasks). */
+  /** Write / revise Initial plan proposal (does not materialize Tasks). */
   savePlan: (
     id: number,
     body: {
@@ -36,7 +36,7 @@ export const api = {
       }[];
       cancel_keys?: string[];
     },
-  ): Promise<import("./types").PlanArtifact> => post(`/items/${id}/plan`, body),
+  ): Promise<import("./types").TaskProposal> => post(`/items/${id}/plan`, body),
   park: (id: number, reason?: string): Promise<WorkItem> =>
     post(`/items/${id}/park`, { reason }),
   unpark: (id: number): Promise<WorkItem> => post(`/items/${id}/unpark`),
@@ -45,7 +45,7 @@ export const api = {
   answer: (id: number, choice: string): Promise<WorkItem> =>
     post(`/items/${id}/answer`, { choice }),
   approve: (id: number): Promise<WorkItem> => post(`/items/${id}/approve`),
-  /** Materialize Project Plan → Backlog Tasks. Never moves the Project to Backlog. */
+  /** Approve Initial plan proposal → Backlog Tasks. Id = Project or Initial plan. */
   approvePlan: (id: number): Promise<number[]> => post(`/items/${id}/approve-plan`),
   /** Queue a Backlog card for the supervisor to claim. Explicit start. */
   dispatch: (id: number): Promise<WorkItem> => post(`/items/${id}/dispatch`),
@@ -83,3 +83,20 @@ export function since(iso: string, now: number): string {
 
 export const secsSince = (iso: string, now: number) =>
   Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+
+/** Seconds until an ISO deadline (0 if already past). */
+export const secsUntil = (iso: string, now: number) =>
+  Math.max(0, Math.floor((new Date(iso).getTime() - now) / 1000));
+
+/** `12m 04s`, `4s`, `1h 02m` — countdown on a Running card. */
+export function formatCountdown(secs: number): string {
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m ${String(s).padStart(2, "0")}s`;
+  }
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return `${h}h ${String(m).padStart(2, "0")}m`;
+}
