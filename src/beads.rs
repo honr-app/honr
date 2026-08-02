@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Notify;
@@ -15,6 +15,72 @@ use tokio::sync::Notify;
 /// Coalesce Dolt remote pushes after Issue-sync mutations so create storms
 /// don't N× `bd dolt push` the whole DB.
 const DOLT_PUSH_DEBOUNCE: Duration = Duration::from_secs(30);
+
+/// A remote side-effect `BeadsClient` would perform (`bd github …` / `bd dolt push`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteOp {
+    GithubPush(Vec<String>),
+    GithubSync,
+    DoltPush { remote: String },
+}
+
+/// Shared log of [`RemoteOp`]s for tests (never shells out).
+#[derive(Clone, Default)]
+pub struct RemoteCapture {
+    ops: Arc<Mutex<Vec<RemoteOp>>>,
+}
+
+impl std::fmt::Debug for RemoteCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.ops.lock().map(|g| g.len()).unwrap_or(0);
+        f.debug_struct("RemoteCapture").field("ops", &n).finish()
+    }
+}
+
+#[allow(dead_code)] // constructed from #[cfg(test)] seams; keep usable in dry-run later
+impl RemoteCapture {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn ops(&self) -> Vec<RemoteOp> {
+        self.ops.lock().expect("remote capture lock").clone()
+    }
+
+    pub fn take(&self) -> Vec<RemoteOp> {
+        std::mem::take(&mut *self.ops.lock().expect("remote capture lock"))
+    }
+
+    fn record(&self, op: RemoteOp) {
+        self.ops.lock().expect("remote capture lock").push(op);
+    }
+}
+
+/// Whether GitHub Issue sync / Dolt push may leave the machine.
+///
+/// [`BeadsClient::new`] defaults to [`Remotes::Capture`] under `cargo test`
+/// and [`Remotes::Live`] in the real binary — ambient `gh` auth used to turn
+/// temp-dir unit tests into real shanemcd/honr Issues. Assert on the capture
+/// when you care about the remote edge; the ignored live e2e uses `Live`.
+#[derive(Clone, Debug, Default)]
+pub enum Remotes {
+    /// Shell out to `bd` (production).
+    #[default]
+    Live,
+    /// Drop remote ops (explicit opt-out; not the test default).
+    #[allow(dead_code)]
+    Disabled,
+    /// Record ops; never leave the machine (test default via [`BeadsClient::new`]).
+    #[allow(dead_code)]
+    Capture(RemoteCapture),
+}
+
+enum RemoteGate {
+    /// Do not shell out (Disabled recorded nothing; Capture already logged).
+    Skip,
+    /// Perform the real `bd` / git remote call.
+    Proceed,
+}
 
 struct DoltPushDebouncer {
     pending: AtomicBool,
@@ -93,6 +159,7 @@ impl BeadsIssue {
 #[derive(Clone)]
 pub struct BeadsClient {
     pub beads_dir: PathBuf,
+    remotes: Remotes,
     dolt_push: Arc<DoltPushDebouncer>,
 }
 
@@ -100,16 +167,54 @@ impl std::fmt::Debug for BeadsClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BeadsClient")
             .field("beads_dir", &self.beads_dir)
+            .field("remotes", &self.remotes)
             .finish()
     }
 }
 
 #[allow(dead_code)] // Plan A API surface — not every verb is on the hot path yet.
 impl BeadsClient {
+    /// Production: live remotes. Under `cargo test`: capture (no network).
     pub fn new(beads_dir: impl Into<PathBuf>) -> Self {
+        Self::with_remotes(beads_dir, Self::default_remotes())
+    }
+
+    pub fn with_remotes(beads_dir: impl Into<PathBuf>, remotes: Remotes) -> Self {
         Self {
             beads_dir: beads_dir.into(),
+            remotes,
             dolt_push: Arc::new(DoltPushDebouncer::default()),
+        }
+    }
+
+    fn default_remotes() -> Remotes {
+        if cfg!(test) {
+            Remotes::Capture(RemoteCapture::new())
+        } else {
+            Remotes::Live
+        }
+    }
+
+    pub fn remotes(&self) -> &Remotes {
+        &self.remotes
+    }
+
+    /// Shared capture log when remotes are [`Remotes::Capture`].
+    pub fn remote_capture(&self) -> Option<&RemoteCapture> {
+        match &self.remotes {
+            Remotes::Capture(cap) => Some(cap),
+            Remotes::Live | Remotes::Disabled => None,
+        }
+    }
+
+    fn gate_remote(&self, op: RemoteOp) -> RemoteGate {
+        match &self.remotes {
+            Remotes::Live => RemoteGate::Proceed,
+            Remotes::Disabled => RemoteGate::Skip,
+            Remotes::Capture(cap) => {
+                cap.record(op);
+                RemoteGate::Skip
+            }
         }
     }
 
@@ -167,6 +272,12 @@ impl BeadsClient {
     pub fn schedule_dolt_push(&self) {
         if !self.db_ready() {
             return;
+        }
+        match self.gate_remote(RemoteOp::DoltPush {
+            remote: "origin".into(),
+        }) {
+            RemoteGate::Skip => return,
+            RemoteGate::Proceed => {}
         }
         self.dolt_push.pending.store(true, Ordering::SeqCst);
         self.ensure_dolt_push_worker();
@@ -413,16 +524,20 @@ impl BeadsClient {
     /// `push` / `sync --issues` the selective path. A whole-graph sync after
     /// every card create is what made Issue creation crawl.
     pub async fn github_push(&self, ids: &[String]) -> Result<(), String> {
-        let ids: Vec<&str> = ids
+        let ids: Vec<String> = ids
             .iter()
-            .map(|s| s.as_str())
             .filter(|id| Self::is_real_id(id))
+            .cloned()
             .collect();
         if ids.is_empty() {
             return Ok(());
         }
         if !self.db_ready() {
             return Ok(());
+        }
+        match self.gate_remote(RemoteOp::GithubPush(ids.clone())) {
+            RemoteGate::Skip => return Ok(()),
+            RemoteGate::Proceed => {}
         }
         let token = Self::resolve_github_token().unwrap_or_default();
 
@@ -449,6 +564,10 @@ impl BeadsClient {
     pub async fn github_sync(&self) -> Result<(), String> {
         if !self.db_ready() {
             return Ok(());
+        }
+        match self.gate_remote(RemoteOp::GithubSync) {
+            RemoteGate::Skip => return Ok(()),
+            RemoteGate::Proceed => {}
         }
 
         let repo_full = std::env::var("GITHUB_REPOSITORY")
@@ -588,6 +707,12 @@ impl BeadsClient {
             return Ok(());
         }
         let target_remote = remote.unwrap_or("origin");
+        match self.gate_remote(RemoteOp::DoltPush {
+            remote: target_remote.to_string(),
+        }) {
+            RemoteGate::Skip => return Ok(()),
+            RemoteGate::Proceed => {}
+        }
         let mut cmd = self.cmd();
         cmd.args(["dolt", "push", target_remote]);
         Self::apply_github_git_auth(&mut cmd);
@@ -703,6 +828,15 @@ mod tests {
         let _ = client.cmd();
     }
 
+    #[test]
+    fn test_new_captures_remotes_under_cargo_test() {
+        let client = BeadsClient::new(temp_dir().join("honr-beads-default-remotes"));
+        assert!(
+            client.remote_capture().is_some(),
+            "BeadsClient::new must Capture remotes under cargo test (not Live)"
+        );
+    }
+
     #[tokio::test]
     async fn test_github_sync_skips_when_no_beads_dir() {
         let test_dir = temp_dir().join(format!(
@@ -725,8 +859,36 @@ mod tests {
         // Even with a fake beads dir present, placeholders must not invoke `bd`.
         std::fs::create_dir_all(&test_dir).unwrap();
         std::fs::write(test_dir.join("metadata.json"), "{}").unwrap();
-        let client = BeadsClient::new(&test_dir);
+        let cap = RemoteCapture::new();
+        let client = BeadsClient::with_remotes(&test_dir, Remotes::Capture(cap.clone()));
         assert!(client.github_push(&["bd-honr-1".into()]).await.is_ok());
+        assert!(
+            cap.ops().is_empty(),
+            "placeholders must not record a remote push"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_github_push_capture_records_real_ids() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-push-cap-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(test_dir.join("metadata.json"), "{}").unwrap();
+        let cap = RemoteCapture::new();
+        let client = BeadsClient::with_remotes(&test_dir, Remotes::Capture(cap.clone()));
+        assert!(
+            client
+                .github_push(&["honr-abc".into(), "bd-honr-1".into()])
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            cap.take(),
+            vec![RemoteOp::GithubPush(vec!["honr-abc".into()])]
+        );
     }
 
     #[tokio::test]
@@ -744,7 +906,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_schedule_dolt_push_marks_pending_when_db_ready() {
+    async fn test_schedule_dolt_push_capture_when_db_ready() {
         let test_dir = temp_dir().join(format!(
             "honr-beads-dolt-sched-{}/.beads",
             std::process::id()
@@ -752,10 +914,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).unwrap();
         std::fs::write(test_dir.join("metadata.json"), "{}").unwrap();
-        let client = BeadsClient::new(&test_dir);
+        let cap = RemoteCapture::new();
+        let client = BeadsClient::with_remotes(&test_dir, Remotes::Capture(cap.clone()));
+        client.schedule_dolt_push();
+        assert_eq!(
+            cap.take(),
+            vec![RemoteOp::DoltPush {
+                remote: "origin".into()
+            }]
+        );
+        // Capture must not arm the live debouncer.
+        assert!(!client.dolt_push.pending.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_schedule_dolt_push_marks_pending_when_live() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-dolt-live-sched-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(test_dir.join("metadata.json"), "{}").unwrap();
+        // Live arms the worker; the eventual push will fail (no real remote) —
+        // we only assert the pending bit, then drop the client with the test.
+        let client = BeadsClient::with_remotes(&test_dir, Remotes::Live);
         client.schedule_dolt_push();
         assert!(client.dolt_push.pending.load(Ordering::SeqCst));
-        // Don't await the 30s debounce / real push in unit tests.
     }
 
     #[test]
