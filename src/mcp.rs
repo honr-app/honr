@@ -72,6 +72,9 @@ pub struct CreateProjectArg {
     pub parent: Option<ItemId>,
     #[serde(default = "default_above_line")]
     pub above_line: bool,
+    /// Standing agent instructions for this Project (defaults on create if omitted).
+    #[serde(default)]
+    pub project_prompt: Option<String>,
 }
 
 fn default_above_line() -> bool {
@@ -425,17 +428,16 @@ impl Cockpit {
 
     #[tool(
         name = "item_detail",
-        description = "Everything about one card: the intent chain from the vision down, \
-                       inherited constraints, cost, history and any pending question. Call this \
-                       before answering an escalation or approving a review — the chain is what \
-                       tells you whether the work actually serves the goal."
+        description = "Everything about one card: ancestry, Plan on the Project, project_prompt, \
+                       cost, history and any pending question. Call this before answering an \
+                       escalation or approving a review — the Plan says whether the work serves \
+                       the goal."
     )]
     fn item_detail(&self, Parameters(a): Parameters<IdArg>) -> Out<serde_json::Value> {
         let item = self.board.get(a.id).ok_or_else(|| bad(format!("no work item #{}", a.id)))?;
         Ok(ToolJson(serde_json::json!({
             "item": item,
             "ancestry": self.board.ancestry(a.id),
-            "constraints": self.board.inherited_pins(a.id),
             "children": self.board.children_of(a.id),
         })))
     }
@@ -443,9 +445,9 @@ impl Cockpit {
     #[tool(
         name = "create_project",
         description = "Create a Project (top-level container). Seeds an Initial plan Task in \
-                       Backlog — dispatch it explicitly to start planning. An agent may open one \
-                       plan/docs PR then split into sibling Tasks; cockpit may also \
-                       propose_breakdown + Approve Plan."
+                       Backlog — dispatch it to open a plan/docs PR (Review). Sibling Tasks land \
+                       via propose_breakdown + Approve Plan. Optional project_prompt overrides \
+                       the default standing instructions."
     )]
     fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
         if a.parent.is_some() {
@@ -463,6 +465,9 @@ impl Cockpit {
                 None,
             )
             .map_err(bad)?;
+        if let Some(prompt) = a.project_prompt {
+            let _ = self.board.update_item(item.id, None, None, None, None, Some(prompt));
+        }
         let _ = self.board.transition(item.id, State::Shaping, "cockpit", None);
         self.board.schedule_beads_mirror(item.id);
         for cid in self.board.children_of(item.id) {
@@ -583,18 +588,6 @@ impl Cockpit {
     fn steer(&self, Parameters(a): Parameters<TextArg>) -> Out<Ack> {
         self.board.steer(a.id, a.text).map_err(bad)?;
         self.ack(a.id, "note will reach the agent on its next turn")
-    }
-
-    #[tool(
-        name = "pin_constraint",
-        description = "Make a correction permanent: the text becomes standing context for this \
-                       item and every descendant, forever. Use this whenever you catch a mistake \
-                       that could recur — a correction said once should not need saying twice. \
-                       Pin high in the tree for constraints that are really project-wide."
-    )]
-    fn pin_constraint(&self, Parameters(a): Parameters<TextArg>) -> Out<Ack> {
-        self.board.pin(a.id, a.text).map_err(bad)?;
-        self.ack(a.id, "pinned; inherited by all descendants")
     }
 
     #[tool(
@@ -737,7 +730,13 @@ impl Cockpit {
         let children = a
             .children
             .into_iter()
-            .map(|c| (c.title, c.intent, c.definition_of_done))
+            .map(|c| {
+                let mut spec =
+                    crate::model::SplitChildSpec::new(c.title, c.intent, c.definition_of_done);
+                spec.key = c.key;
+                spec.blocked_by_keys = c.blocked_by_keys;
+                spec
+            })
             .collect();
         let made = self.board.split(a.item_id, &a.agent_id, children, 5).map_err(bad)?;
         for m in &made {
@@ -829,11 +828,11 @@ impl ServerHandler for Cockpit {
                  human wants a run. Park/halt/lease expiry/request_changes all return to Backlog \
                  without reclaim — dispatch again. Prefer park over halt when a run is wedged — \
                  park keeps the sandbox and agy session; unpark then dispatch to resume. Prefer \
-                 steer for a soft note that can wait. When you correct something that could recur, \
-                 pin_constraint so it binds every descendant instead of being a one-off. Read \
-                 item_detail's intent chain before approving or answering; a card that passes its \
-                 gates can still be building the wrong thing, because coherence is not a property \
-                 of any single card.",
+                 steer for a soft note that can wait. Standing policy belongs in the Project \
+                 project_prompt (edit via update); task inputs are the Plan. Initial plan finishes \
+                 via plan/docs PR → Review; siblings via Approve Plan. Read item_detail's Plan \
+                 before approving or answering; a card that passes its gates can still be building \
+                 the wrong thing, because coherence is not a property of any single card.",
         )
     }
 }

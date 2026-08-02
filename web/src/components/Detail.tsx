@@ -4,7 +4,6 @@ import type { PlanTaskSpec, WorkItem } from "../types.js";
 
 interface Detail extends WorkItem {
   ancestry: { level: string; title: string; intent: string }[];
-  constraints: string[];
   children: number[];
   default_engine?: string;
   default_model?: string;
@@ -389,7 +388,7 @@ export function DetailDrawer({
   const [editIntent, setEditIntent] = useState("");
   const [editDod, setEditDod] = useState("");
   const [editEngine, setEditEngine] = useState("");
-  const [constraintText, setConstraintText] = useState("");
+  const [editPrompt, setEditPrompt] = useState("");
   const [planTasks, setPlanTasks] = useState<EditPlanTask[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
@@ -441,6 +440,7 @@ export function DetailDrawer({
         setEditIntent(item.intent);
         setEditDod(item.definition_of_done ?? "");
         setEditEngine(item.engine ?? item.default_engine ?? defaultEngine ?? "");
+        setEditPrompt(item.project_prompt ?? "");
         setPlanTasks(planTasksFromArtifact(item.plan?.tasks));
       })
       .catch((e) => setErr(String(e)));
@@ -674,19 +674,6 @@ export function DetailDrawer({
               </div>
             )}
           </div>
-        </Section>
-      )}
-
-      {d.level !== "Project" && d.constraints.length > 0 && (
-        <Section title="Inherited constraints">
-          <p className="dim" style={{ marginBottom: 6 }}>
-            From the Project (and ancestors). Edit them on the Project.
-          </p>
-          <ul className="plain">
-            {d.constraints.map((c, n) => (
-              <li key={n}>📌 {c}</li>
-            ))}
-          </ul>
         </Section>
       )}
 
@@ -964,6 +951,7 @@ export function DetailDrawer({
                         title: editTitle,
                         intent: editIntent,
                         engine: editEngine,
+                        project_prompt: editPrompt,
                       }),
                     )
                   }
@@ -974,50 +962,17 @@ export function DetailDrawer({
             </div>
           </Section>
 
-          <Section title="Constraints">
+          <Section title="Project prompt">
             <p className="dim" style={{ marginBottom: 8 }}>
-              Standing rules inherited by every Task under this Project.
+              Standing instructions every Task agent sees (with the Plan). Replaces pins.
             </p>
-            <ul className="plain" style={{ marginBottom: 8 }}>
-              {(d.pinned ?? []).map((c, n) => (
-                <li
-                  key={`${n}-${c.slice(0, 24)}`}
-                  style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}
-                >
-                  <span style={{ flex: 1 }}>📌 {c}</span>
-                  <button
-                    type="button"
-                    className="dim"
-                    style={{ fontSize: 11, padding: "2px 8px" }}
-                    onClick={() => act(api.unpin(d.id, n))}
-                  >
-                    Remove
-                  </button>
-                </li>
-              ))}
-              {(d.pinned ?? []).length === 0 && (
-                <li className="dim">No constraints yet.</li>
-              )}
-            </ul>
-            <div style={{ display: "flex", gap: 6 }}>
-              <input
-                type="text"
-                className="search-input"
-                style={{ flex: 1 }}
-                placeholder="e.g. Gates run with --offline"
-                value={constraintText}
-                onChange={(e) => setConstraintText(e.target.value)}
-              />
-              <button
-                disabled={!constraintText.trim()}
-                onClick={() => {
-                  act(api.pin(d.id, constraintText.trim()));
-                  setConstraintText("");
-                }}
-              >
-                Add
-              </button>
-            </div>
+            <textarea
+              className="search-input"
+              style={{ width: "100%", minHeight: 120, marginBottom: 8 }}
+              value={editPrompt}
+              onChange={(e) => setEditPrompt(e.target.value)}
+              placeholder="Standing agent instructions for this Project…"
+            />
           </Section>
 
           <Section title="Plan">

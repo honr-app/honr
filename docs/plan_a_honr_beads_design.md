@@ -26,14 +26,15 @@ graph TD
 |---|---|---|
 | Project | `issue_type: epic`, root | Container, not claimable, Board swimlane header only |
 | Plan | (honr artifact; optional beads note later) | Source of truth: Tasks + keys + deps + DoDs |
-| Initial plan Task | `issue_type: task`, `--parent=<project>` | Seeded Ready Task; writes/refines the Plan |
+| Initial plan Task | `issue_type: task`, `--parent=<project>` | Seeded Backlog Task; plan/docs PR → Review |
 | Task | `issue_type: task`, `--parent=<project>` | Only claimable Board unit |
 | Ordering | `bd dep add` (`blocks`, `relates-to`) | `blocked_by` projection + ready filter |
-| Split | Sibling tasks under same Project | Original Task → Done |
+| Split | Sibling tasks under same Project (`key` + `blocked_by_keys`) | Impl only; Original Task → Done |
 
-Lifecycle: create Project → seed Initial plan Task (Ready) → `propose_breakdown`
-writes Plan artifact → human **Approve Plan** materializes Tasks to Ready.
-The Project itself never enters Ready.
+Lifecycle: create Project → seed Initial plan Task (Backlog) → dispatch → plan/docs
+PR → Review → Approve. `propose_breakdown` + **Approve Plan** materializes Tasks
+to Backlog (with deps). Agent inputs: Project `project_prompt` + Plan. The Project
+itself never enters Backlog.
 
 ---
 
@@ -77,7 +78,8 @@ graph TD
 
 - `bd` baked into `sandbox/Containerfile`
 - Host `.beads` tarball uploaded as a **read snapshot**; durable writes happen on the host
-- Briefing: Plan + task contract; `bd show` / `bd prime` for context (not durable remember/dep)
+- Briefing: Project prompt + Plan slice + steer notes; `bd show` / `bd prime` for context
+- Pins removed; standing policy is Project `project_prompt`
 
 ### UI
 

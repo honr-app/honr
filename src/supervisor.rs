@@ -1100,6 +1100,10 @@ struct RawSplitChild {
         alias = "definitionOfDone"
     )]
     dod: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    blocked_by_keys: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1194,6 +1198,33 @@ async fn process_verdict(
             Ok(true)
         }
         "split" => {
+            if board.get(id).is_some_and(|i| i.is_initial_plan_task()) {
+                tracing::warn!("#{id}: Initial plan tried to finish via split; refusing");
+                board
+                    .escalate(
+                        id,
+                        agent_id,
+                        format!(
+                            "Initial plan must finish with {VERDICT_DIR}/report.json and a \
+                             plan/docs PR (Review). Sibling Tasks land via Approve Plan — \
+                             not split.json."
+                        ),
+                        vec![
+                            crate::model::EscalationOption {
+                                label: "Resume and report".into(),
+                                detail: "Open the plan PR and write report.json.".into(),
+                            },
+                            crate::model::EscalationOption {
+                                label: "Approve Plan in cockpit".into(),
+                                detail: "Use propose_breakdown + Approve Plan for siblings.".into(),
+                            },
+                        ],
+                        0,
+                    )
+                    .map_err(|e| anyhow::anyhow!("initial-plan split refuse: {e}"))?;
+                return Ok(true);
+            }
+
             let split: SplitFile = serde_json::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("invalid split.json: {e}"))?;
 
@@ -1226,7 +1257,10 @@ async fn process_verdict(
                 .into_iter()
                 .map(|c| {
                     let dod = c.dod.unwrap_or_else(|| format!("{} completed.", c.title));
-                    (c.title, c.intent, dod)
+                    let mut spec = crate::model::SplitChildSpec::new(c.title, c.intent, dod);
+                    spec.key = c.key;
+                    spec.blocked_by_keys = c.blocked_by_keys;
+                    spec
                 })
                 .collect();
             match board.split(id, agent_id, children, 5) {
@@ -1265,33 +1299,6 @@ async fn process_verdict(
             }
         }
         "report" => {
-            if board.get(id).is_some_and(|i| i.is_initial_plan_task()) {
-                tracing::warn!("#{id}: Initial plan tried to finish via report; refusing");
-                board
-                    .escalate(
-                        id,
-                        agent_id,
-                        format!(
-                            "Initial plan must finish by writing {VERDICT_DIR}/split.json \
-                             (optional one plan/docs PR first). report.json is for implementation cards."
-                        ),
-                        vec![
-                            crate::model::EscalationOption {
-                                label: "Resume and split".into(),
-                                detail: "Re-dispatch so the agent writes split.json with sibling Tasks."
-                                    .into(),
-                            },
-                            crate::model::EscalationOption {
-                                label: "Approve Plan in cockpit".into(),
-                                detail: "Use propose_breakdown + Approve Plan instead of the sandbox split."
-                                    .into(),
-                            },
-                        ],
-                        0,
-                    )
-                    .map_err(|e| anyhow::anyhow!("initial-plan report refuse: {e}"))?;
-                return Ok(true);
-            }
             let rep: ReportFile = serde_json::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("invalid report.json: {e}"))?;
             let pr_url = if let Some(url) = rep.pr_url.filter(|s| !s.trim().is_empty()) {
@@ -1787,6 +1794,9 @@ fn resume_briefing(grant: &ClaimGrant) -> String {
          start over unless the notes below say so.\n\n",
     );
     b.push_str(&format!("Your card: {}\n", grant.title));
+    if let Some(key) = &grant.plan_task_key {
+        b.push_str(&format!("Plan key: {key}\n"));
+    }
     if let Some(bid) = &grant.beads_id {
         if crate::beads::BeadsClient::is_real_id(bid) {
             b.push_str(&format!("Beads id: {bid} (use `bd show {bid}`)\n"));
@@ -1811,8 +1821,8 @@ fn resume_briefing(grant: &ClaimGrant) -> String {
     b
 }
 
-/// The intent chain is the highest-leverage payload in the system, and a fresh
-/// `claude -p` in an empty container has none of it.
+/// Project prompt + Plan are the primary inputs; a fresh `claude -p` has none
+/// of them unless we put them here.
 fn briefing(
     grant: &ClaimGrant,
     branch: BranchState,
@@ -1821,17 +1831,48 @@ fn briefing(
     base: &str,
 ) -> String {
     let mut b = String::new();
-    b.push_str("You are working on one card in a larger plan. Do exactly this card.\n\n");
+    b.push_str("You are working on one card. Do exactly this card.\n\n");
 
-    if !grant.ancestry.is_empty() {
-        b.push_str("Why this exists, from the top down:\n");
-        for a in &grant.ancestry {
-            b.push_str(&format!("  {}: {} — {}\n", a.level, a.title, a.intent));
+    if let Some(pt) = &grant.project_title {
+        b.push_str(&format!("Project: {pt}\n"));
+    }
+    if let Some(prompt) = &grant.project_prompt {
+        if !prompt.trim().is_empty() {
+            b.push_str("\nProject prompt (standing instructions):\n");
+            b.push_str(prompt.trim());
+            b.push('\n');
+        }
+    }
+
+    if grant.plan_summary.is_some() || !grant.plan_tasks.is_empty() {
+        b.push_str("\nProject Plan (source of truth for the breakdown):\n");
+        if let Some(sum) = &grant.plan_summary {
+            b.push_str(&format!("Summary: {sum}\n"));
+        }
+        for t in &grant.plan_tasks {
+            let mark = if t.current { " ← YOUR CARD" } else { "" };
+            let deps = if t.blocked_by_keys.is_empty() {
+                String::new()
+            } else {
+                format!(" [blocked_by: {}]", t.blocked_by_keys.join(", "))
+            };
+            b.push_str(&format!(
+                "  - {key}: {title} — {intent} (DoD: {dod}){deps}{mark}\n",
+                key = t.key,
+                title = t.title,
+                intent = t.intent,
+                dod = t.definition_of_done,
+                deps = deps,
+                mark = mark,
+            ));
         }
         b.push('\n');
     }
 
     b.push_str(&format!("Your card: {}\n", grant.title));
+    if let Some(key) = &grant.plan_task_key {
+        b.push_str(&format!("Plan key: {key}\n"));
+    }
     if let Some(bid) = &grant.beads_id {
         if crate::beads::BeadsClient::is_real_id(bid) {
             b.push_str(&format!("Beads id: {bid} (use `bd show {bid}`)\n"));
@@ -1841,12 +1882,6 @@ fn briefing(
         b.push_str(&format!("Definition of done: {dod}\n"));
     }
 
-    if !grant.constraints.is_empty() {
-        b.push_str("\nStanding constraints. These bind everything below them:\n");
-        for c in &grant.constraints {
-            b.push_str(&format!("  - {c}\n"));
-        }
-    }
     if !grant.notes.is_empty() {
         // Notes are the human's live correction. When they conflict with title
         // or definition of done (common after Request changes), notes win —
@@ -1869,8 +1904,6 @@ fn briefing(
              onto the current base — review what is there and address the notes above rather \
              than starting over.\n"
         }
-        // The supervisor deliberately does not resolve this: only something
-        // that understands the change can decide what the merged result means.
         BranchState::Conflicted => {
             "\nThis card has been worked before and its branch CONFLICTS with the base. The \
              rebase was left un-applied, so you are on the branch as it was. Rebase onto \
@@ -1883,41 +1916,40 @@ fn briefing(
 
     if is_initial_plan {
         b.push_str(
-            "\nThis is the Project's **Initial plan** card. Your job is to materialize sibling Tasks.\n\
-             You MAY open **one** plan/docs PR (publish the plan artifact), then you MUST finish by \
-             writing `/sandbox/.honr/split.json` with an array of `children` \
-             (each having `title`, `intent`, and optional `definition_of_done`). \
-             On this card only, a PR and a split are allowed together — do **not** open a second PR. \
-             If sibling Tasks with the same titles already exist under the Project, still write \
-             split.json; the board will reuse them instead of duplicating. \
-             Do **not** finish with `report.json` — split is the finish for Initial plan.\n\
-             Children must stay on-theme for this Project. Do not invent work for another Project — escalate instead.\n\
-             If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` with \
-             options (at least two) and a recommended index, then exit.\n\
-             \nTreat the Project Plan (and this card's contract above) as your primary input. \
-             `bd` in the sandbox is a **read snapshot** of the host graph — use `bd prime` / \
-             `bd show <id>` for Project/deps context. Do not rely on `bd remember` or \
-             `bd dep add` here for durable state; the host writes beads after split/report. \
-             Do not nest tasks under tasks.\n",
+            "\nThis is the Project's **Initial plan** card. Produce a Plan (flat sibling Tasks \
+             with deps and mechanically checkable DoDs). Open **one** plan/docs PR against the \
+             upstream base, then finish with `/sandbox/.honr/report.json` (and `pr_url`). \
+             The card goes to Review — a human Approves the PR. Sibling Tasks land via \
+             **Approve Plan** in the cockpit (propose_breakdown), not via split.json.\n\
+             Do **not** write `/sandbox/.honr/split.json` on this card.\n\
+             If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` \
+             with options (at least two) and a recommended index, then exit.\n\
+             \n`bd` in the sandbox is a **read snapshot** — use `bd prime` / `bd show <id>` for \
+             context. Do not rely on `bd remember` or `bd dep add` for durable state.\n",
         );
+        b.push_str(&format!(
+            "\nPublish: commit on `{branch}`, push to `origin`, open **one** PR against \
+             `{upstream}` base `{base}` (or update that PR). Then write report.json and exit. \
+             Leave `{base}` alone.\n",
+            branch = branch_name,
+            upstream = upstream,
+            base = base,
+        ));
     } else {
         b.push_str(
             "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
              Write `/sandbox/.honr/escalate.json` with your question, options, \
              and recommended choice index, then exit. Options must supply at least two concrete choices.\n\
              \nIf work is discovered to be bigger than one card, do not overrun. \
-             Write `/sandbox/.honr/split.json` with an array of `children` \
-             (each having `title`, `intent`, and optional `definition_of_done`), then exit. \
-             Those become **sibling Tasks under the same Project** — never nested under this card. \
+             Write `/sandbox/.honr/split.json` with `children` each having `title`, `intent`, \
+             optional `definition_of_done`, optional `key`, and optional `blocked_by_keys` \
+             (Plan-style deps), then exit. Those become **sibling Tasks under the same Project**. \
              Splits may only carve this card's definition of done into smaller slices of the same outcome. \
              Do not invent work that belongs to another Project — escalate instead. \
-             If a PR already exists for the card, do not split — finish via report or request human guidance. \
+             If a PR already exists for the card, do not split — finish via report. \
              Split and publish are mutually exclusive for one run.\n\
-             \nTreat the Project Plan (and this card's contract above) as your primary input. \
-             `bd` in the sandbox is a **read snapshot** of the host graph — use `bd prime` / \
-             `bd show <id>` for Project/deps context. Do not rely on `bd remember` or \
-             `bd dep add` here for durable state; the host writes beads after split/report. \
-             Do not nest tasks under tasks.\n",
+             \n`bd` in the sandbox is a **read snapshot** — use `bd prime` / `bd show <id>` for \
+             context. Do not rely on `bd remember` or `bd dep add` for durable state.\n",
         );
 
         b.push_str(&format!(
@@ -1926,18 +1958,6 @@ fn briefing(
              optional `gates` passed, and `pr_url`.\n",
             base = base,
         ));
-    }
-
-    if is_initial_plan {
-        b.push_str(&format!(
-            "\nOptional plan artifact: commit on `{branch}`, push to `origin`, and open **at most one** \
-             PR against `{upstream}` base `{base}` (or update that existing PR — never a second one). \
-             Then write `/sandbox/.honr/split.json` and exit. Leave `{base}` alone.\n",
-            branch = branch_name,
-            upstream = upstream,
-            base = base,
-        ));
-    } else {
         b.push_str(&format!(
             "\nRun the project's own checks before you finish — `cargo test --offline --locked` and \
              `cargo clippy --offline -- -D warnings`. Both work with no network; if either needs to \
@@ -2592,8 +2612,18 @@ mod tests {
             title: "t".into(),
             definition_of_done: None,
             beads_id: Some("honr-test7".into()),
-            ancestry: vec![],
-            constraints: vec![],
+            project_title: Some("Test Project".into()),
+            project_prompt: Some("Follow the Plan.".into()),
+            plan_summary: Some("Do the thing.".into()),
+            plan_tasks: vec![crate::model::PlanTaskBrief {
+                key: "t1".into(),
+                title: "t".into(),
+                intent: "why".into(),
+                definition_of_done: "done".into(),
+                blocked_by_keys: vec![],
+                current: true,
+            }],
+            plan_task_key: Some("t1".into()),
             notes: vec![],
             lease_expires_at: chrono::Utc::now(),
             budget_remaining_cents: None,
@@ -2696,26 +2726,27 @@ mod tests {
     }
 
     #[test]
-    fn briefing_initial_plan_allows_pr_then_split() {
+    fn briefing_initial_plan_requires_report_not_split() {
         let mut g = grant();
         g.title = crate::model::INITIAL_PLAN_TITLE.into();
         let b = briefing(&g, BranchState::Fresh, "honr/card-92", "shanemcd/honr", "main");
         assert!(b.contains("Initial plan"), "briefing must identify Initial plan: {b}");
         assert!(
-            b.contains("PR and a split are allowed together")
-                || b.contains("a PR and a split are allowed together"),
-            "briefing must allow PR+split on Initial plan: {b}"
+            b.contains("report.json"),
+            "briefing must require report.json for Initial plan: {b}"
+        );
+        assert!(
+            b.contains("Do **not** write `/sandbox/.honr/split.json`")
+                || b.contains("not via split.json"),
+            "briefing must forbid split on Initial plan: {b}"
+        );
+        assert!(
+            b.contains("Approve Plan"),
+            "briefing must point siblings to Approve Plan: {b}"
         );
         assert!(
             !b.contains("Split and publish are mutually exclusive"),
             "Initial plan briefing must not use the implementation exclusivity rule: {b}"
-        );
-        assert!(
-            b.contains("Do **not** finish with `report.json`")
-                || b.contains("Do not finish with `report.json`")
-                || b.contains("do **not** finish with `report.json`")
-                || b.contains("split is the finish"),
-            "briefing must forbid report finish for Initial plan: {b}"
         );
     }
 

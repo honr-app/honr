@@ -255,6 +255,74 @@ impl PlanArtifact {
 /// Title of the seed Task created with every Project.
 pub const INITIAL_PLAN_TITLE: &str = "Initial plan";
 
+/// Default standing instructions seeded on every new Project (`project_prompt`).
+/// Replaces the old pin soup for policy the agent must always see.
+pub const DEFAULT_PROJECT_PROMPT: &str = "\
+Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
+Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/policy.yaml; escalate instead.\n\
+Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
+Finish via /sandbox/.honr/report.json with a real PR (implementation and Initial plan).\n\
+If the work is bigger than one card, write /sandbox/.honr/split.json with sibling Tasks (key + blocked_by_keys); never nest under a Task.\n\
+";
+
+/// One Task row as shown to an agent from the Project Plan.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PlanTaskBrief {
+    pub key: String,
+    pub title: String,
+    pub intent: String,
+    pub definition_of_done: String,
+    #[serde(default)]
+    pub blocked_by_keys: Vec<String>,
+    /// True when this row is the card being claimed.
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// Child spec for `Board::split` / `split.json` (deps match PlanTaskSpec).
+#[derive(Debug, Clone)]
+pub struct SplitChildSpec {
+    pub title: String,
+    pub intent: String,
+    pub definition_of_done: String,
+    pub key: Option<String>,
+    pub blocked_by_keys: Vec<String>,
+}
+
+impl SplitChildSpec {
+    pub fn new(
+        title: impl Into<String>,
+        intent: impl Into<String>,
+        definition_of_done: impl Into<String>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            intent: intent.into(),
+            definition_of_done: definition_of_done.into(),
+            key: None,
+            blocked_by_keys: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    #[allow(dead_code)] // used from unit tests; production builds via SplitChildSpec fields
+    pub fn with_deps(
+        mut self,
+        key: impl Into<String>,
+        blocked_by_keys: Vec<String>,
+    ) -> Self {
+        self.key = Some(key.into());
+        self.blocked_by_keys = blocked_by_keys;
+        self
+    }
+}
+
+impl From<(String, String, String)> for SplitChildSpec {
+    fn from((title, intent, definition_of_done): (String, String, String)) -> Self {
+        Self::new(title, intent, definition_of_done)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItem {
     pub id: ItemId,
@@ -324,10 +392,11 @@ pub struct WorkItem {
 
     #[serde(default)]
     pub notes: Vec<Note>,
-    /// Pinned constraints bind every descendant, forever. "We use Decimal for
-    /// money, never float" said once should not need saying twice.
+
+    /// Standing agent instructions for this Project (Tasks inherit via claim).
+    /// Null on Tasks. Seeded from [`DEFAULT_PROJECT_PROMPT`] on Project create.
     #[serde(default)]
-    pub pinned: Vec<String>,
+    pub project_prompt: Option<String>,
 
     /// The bounce reason if this card was returned to Backlog due to an infra or execution bounce.
     #[serde(default)]
@@ -404,7 +473,7 @@ impl WorkItem {
             diff_added: 0,
             diff_removed: 0,
             notes: Vec::new(),
-            pinned: Vec::new(),
+            project_prompt: None,
             last_bounce_reason: None,
             release_target: None,
             environment: None,

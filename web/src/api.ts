@@ -21,10 +21,6 @@ export const api = {
   // The human verbs. Each costs the system something different.
   steer: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/steer`, { text }),
-  pin: (id: number, text: string): Promise<WorkItem> =>
-    post(`/items/${id}/pin`, { text }),
-  unpin: (id: number, index: number): Promise<WorkItem> =>
-    post(`/items/${id}/unpin`, { index }),
   /** Write / revise Plan artifact (does not materialize Tasks). */
   savePlan: (
     id: number,
@@ -57,8 +53,16 @@ export const api = {
     post(`/items/${id}/request-changes`, { text }),
   transition: (id: number, to: string, reason?: string): Promise<WorkItem> =>
     post(`/items/${id}/transition`, { to, reason }),
-  update: (id: number, fields: { title?: string; intent?: string; definition_of_done?: string; engine?: string }): Promise<WorkItem> =>
-    post(`/items/${id}/update`, fields),
+  update: (
+    id: number,
+    fields: {
+      title?: string;
+      intent?: string;
+      definition_of_done?: string;
+      engine?: string;
+      project_prompt?: string;
+    },
+  ): Promise<WorkItem> => post(`/items/${id}/update`, fields),
   cut: (id: number, reason?: string): Promise<number[]> =>
     post(`/items/${id}/cut`, { reason }),
   deleteItem: (id: number): Promise<void> =>

@@ -96,7 +96,7 @@ export interface WorkItem {
   diff_added: number;
   diff_removed: number;
   notes: Note[];
-  pinned: string[];
+  project_prompt?: string | null;
   last_bounce_reason?: string | null;
   release_target: string | null;
   environment: string | null;
