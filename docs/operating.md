@@ -80,12 +80,21 @@ Ready), not dispatch.
 | You want to | Do this |
 |---|---|
 | Send a reviewed card back with instructions | **Request changes** in the drawer. The note reaches the next run's briefing. |
-| Answer a blocked agent | **Home** — Needs you section, pick an option. Resets the card's retry budget. |
-| Anything requiring a reason | Tell the cockpit. Steer, pin, halt and cut live there. |
+| Answer a blocked agent | **Needs you** — pick an option. Resets the card's retry budget. |
+| Stop a wedged run but keep context | **Park** — stops the agent, keeps sandbox + agy conversation, and **holds** the card until **Resume session** / `unpark`. |
+| Resume a parked card | **Resume session** / `unpark` — clears the hold; next claim uses `--conversation` when an id is still on the card. |
+| Throw away the LLM session | **Halt** — stops the agent and clears `conversation_id`; sandbox may still be reused for caches. |
+| Anything requiring a reason | Tell the cockpit. Steer, pin, park, halt and cut live there. |
 
-`steer` on a *running* card does nothing today: the briefing is built once at
-claim time and `claude -p` has no injection channel. The note is stored and
-seen by the next run.
+`steer` on a *running* card does not inject mid-turn today: the note is stored
+and seen on the next claim (or on resume after park). Prefer **park** when the
+agent is stuck and you want the same conversation to continue.
+
+Park + resume (agy only): the supervisor persists `conversation_id` from
+stream-json. Park leaves it on the card and sets `parked` so dispatch will not
+reclaim until `unpark`. After resume, the next claim in a live sandbox runs
+`agy --conversation <id>` with a short resume prompt. Halt clears the id so the
+next claim starts fresh.
 
 Re-running a card resumes its existing branch and rebases onto **upstream**,
 not the fork's base — a fork's base freezes the moment it's created, and drifted

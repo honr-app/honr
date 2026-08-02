@@ -48,6 +48,9 @@ export const api = {
       cancel_keys?: string[];
     },
   ): Promise<import("./types").PlanArtifact> => post(`/items/${id}/plan`, body),
+  park: (id: number, reason?: string): Promise<WorkItem> =>
+    post(`/items/${id}/park`, { reason }),
+  unpark: (id: number): Promise<WorkItem> => post(`/items/${id}/unpark`),
   halt: (id: number, reason?: string): Promise<WorkItem> =>
     post(`/items/${id}/halt`, { reason }),
   answer: (id: number, choice: string): Promise<WorkItem> =>

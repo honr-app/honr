@@ -80,6 +80,8 @@ pub enum TransitionError {
     Blocked { id: u64, blockers: Vec<u64> },
     #[error("no work item #{0}")]
     NoSuchItem(u64),
+    #[error("#{id} is parked; resume before claiming")]
+    Parked { id: u64 },
 }
 
 /// States in which an agent is actively holding the card.

@@ -97,6 +97,10 @@ export interface WorkItem {
   last_bounce_reason?: string | null;
   release_target: string | null;
   environment: string | null;
+  /** agy conversation id; park keeps it for resume, halt clears it. */
+  conversation_id?: string | null;
+  /** Park hold: Ready but not claimable until unpark. */
+  parked?: boolean;
   engine?: string | null;
   beads_id?: string | null;
   github_issue_url?: string | null;

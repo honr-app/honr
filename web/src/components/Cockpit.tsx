@@ -102,7 +102,6 @@ export function Cockpit(props: CockpitProps) {
     ready: totals.ready,
     done: totals.done,
     totalTasks: totals.total,
-    dispatchPaused: props.dispatchPaused,
   });
 
   if (!activeGoals.length) {
@@ -224,7 +223,6 @@ function modeCopy({
   ready,
   done,
   totalTasks,
-  dispatchPaused,
 }: {
   needsYou: number;
   running: number;
@@ -232,25 +230,12 @@ function modeCopy({
   ready: number;
   done: number;
   totalTasks: number;
-  dispatchPaused: boolean;
 }): { title: string; lede: string } {
+  // Global pause is owned by the banner — mode only reports what work is doing.
   if (needsYou > 0) {
-    const n = `${needsYou} decision${needsYou === 1 ? "" : "s"} waiting on you`;
-    if (dispatchPaused) {
-      return {
-        title: n,
-        lede: "Resolve the decision below to unblock that card. Nothing new will claim until you Resume all (or resume one project).",
-      };
-    }
     return {
-      title: n,
-      lede: "Answer below and work unblocks. Everything else can wait.",
-    };
-  }
-  if (dispatchPaused) {
-    return {
-      title: "Dispatch paused",
-      lede: "Running cards keep going. Resume all, or resume one project in its swimlane, before anything new claims.",
+      title: `${needsYou} decision${needsYou === 1 ? "" : "s"} waiting on you`,
+      lede: "Resolve the decision below to unblock that card. Everything else can wait.",
     };
   }
   if (running > 0) {
