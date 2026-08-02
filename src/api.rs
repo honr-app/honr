@@ -45,6 +45,8 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/items/{id}/unpin", post(unpin))
         .route("/items/{id}/plan", post(save_plan))
         .route("/items/{id}/halt", post(halt))
+        .route("/items/{id}/park", post(park))
+        .route("/items/{id}/unpark", post(unpark))
         .route("/items/{id}/answer", post(answer))
         .route("/items/{id}/approve", post(approve))
         .route("/items/{id}/approve-plan", post(approve_plan))
@@ -341,6 +343,21 @@ async fn halt(
     Json(req): Json<ReasonReq>,
 ) -> ApiResult<WorkItem> {
     Ok(Json(b.halt(id, req.reason).map_err(ApiError)?))
+}
+
+async fn park(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+    Json(req): Json<ReasonReq>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(b.park(id, req.reason).map_err(ApiError)?))
+}
+
+async fn unpark(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(b.unpark(id).map_err(ApiError)?))
 }
 
 #[derive(Deserialize)]

@@ -334,6 +334,14 @@ pub struct WorkItem {
     /// again instead of orphaning them.
     #[serde(default)]
     pub environment: Option<String>,
+    /// agy conversation id for the current sandbox session. Park keeps it so
+    /// the next claim can `--conversation` resume; halt clears it.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// Set by park: card is Ready but must not be claimed until the human
+    /// explicitly resumes. Without this, park immediately re-dispatches.
+    #[serde(default)]
+    pub parked: bool,
     /// Beads issue hash ID (e.g. `bd-a1b2`).
     #[serde(default)]
     pub beads_id: Option<String>,
@@ -394,6 +402,8 @@ impl WorkItem {
             last_bounce_reason: None,
             release_target: None,
             environment: None,
+            conversation_id: None,
+            parked: false,
             beads_id: None,
             github_issue_url: None,
             pr_url: None,

@@ -1278,14 +1278,36 @@ export function DetailDrawer({
       {["running", "claimed", "verifying"].includes(d.state) && (
         <Section title="Interrupt Active Run">
           <p className="dim" style={{ marginBottom: 8 }}>
-            Halt the container immediately and return this card to Ready.
+            Park stops the agent, keeps the sandbox and conversation, and holds the
+            card until you Resume. Halt discards the LLM session.
           </p>
           <div className="btns">
+            <button
+              className="primary"
+              onClick={() => act(api.park(d.id, "parked by human"))}
+            >
+              Park (keep session)
+            </button>
             <button
               style={{ background: "#7f1d1d", color: "#fca5a5", borderColor: "#991b1b" }}
               onClick={() => act(api.halt(d.id, "halted by human"))}
             >
-              🛑 Halt & Cancel Sandbox Run
+              Halt (discard session)
+            </button>
+          </div>
+        </Section>
+      )}
+
+      {d.state === "ready" && d.parked && (
+        <Section title="Parked session">
+          <p className="dim" style={{ marginBottom: 8 }}>
+            Agent is stopped. Sandbox
+            {d.environment ? ` ${d.environment}` : ""} and conversation are kept.
+            Resume when you want it claimed again.
+          </p>
+          <div className="btns">
+            <button className="primary" onClick={() => act(api.unpark(d.id))}>
+              Resume session
             </button>
           </div>
         </Section>

@@ -629,6 +629,9 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
                 }
             }
             ensure_board_owns_run(board, id)?;
+            // Fresh sandbox ⇒ fresh conversation. Resume only applies when we
+            // reuse the box that held the previous agy session.
+            board.set_conversation_id(id, None);
             board.set_environment(id, Some(new_name.clone()));
             (new_name, false)
         }
@@ -903,15 +906,39 @@ async fn run_inside(
 
     // ---- the agent -------------------------------------------------------
 
-    let briefing_text = briefing(grant, branch_state, branch, &cfg.repo.upstream, &cfg.repo.base);
     let engine = grant.engine.as_deref().unwrap_or(&cfg.engine);
+    let conversation_id = board.get(id).and_then(|i| i.conversation_id.clone());
+    let resume = is_reused && engine == "agy" && conversation_id.is_some();
+    let briefing_text = if resume {
+        resume_briefing(grant)
+    } else {
+        briefing(grant, branch_state, branch, &cfg.repo.upstream, &cfg.repo.base)
+    };
+    if resume {
+        board.story(
+            id,
+            format!(
+                "resuming agy conversation {}",
+                conversation_id.as_deref().unwrap_or("?")
+            ),
+        );
+    }
     if engine == "agy" {
         with_board_cancel(board, id, setup_agy_auth(os, name, &cfg.vertex.project)).await?;
     }
     let start = with_board_cancel(board, id, async {
-        os.exec(name, &start_script(cfg, &briefing_text, engine), short)
-            .await
-            .map_err(Into::into)
+        os.exec(
+            name,
+            &start_script(
+                cfg,
+                &briefing_text,
+                engine,
+                conversation_id.as_deref().filter(|_| resume),
+            ),
+            short,
+        )
+        .await
+        .map_err(Into::into)
     })
     .await?;
     anyhow::ensure!(start.ok(), "agent did not start: {}", outerr(&start));
@@ -979,10 +1006,14 @@ async fn watch_agent(
             SPENT_TODAY.fetch_add(delta, Ordering::Relaxed);
         }
 
+        if let Some(cid) = parse_conversation_id(line) {
+            board2.set_conversation_id(id, Some(cid));
+        }
+
         // Buffer live agent output lines for UI stream view.
         board2.append_agent_log(id, line.to_string());
 
-        // Do not renew a lease the board has already ended (Halt / sweep).
+        // Do not renew a lease the board has already ended (Halt / park / sweep).
         if board2
             .get(id)
             .is_some_and(|i| board_still_owns_run(i.state))
@@ -1404,18 +1435,34 @@ async fn finish(
 ///   already single-quoted for the outer shell, and quoting it a second time
 ///   for the inner `bash -c` is exactly the sort of thing that works until a
 ///   card description contains an apostrophe.
-fn start_script(cfg: &AgentConfig, briefing: &str, engine: &str) -> String {
+fn start_script(
+    cfg: &AgentConfig,
+    briefing: &str,
+    engine: &str,
+    conversation_id: Option<&str>,
+) -> String {
     let secs = cfg.agent_timeout_secs;
-    let cmd = match engine {
-        "agy" => "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\"".to_string(),
-        _ => "claude -p \"$HONR_BRIEFING\" --output-format stream-json --verbose --permission-mode bypassPermissions".to_string(),
+    let cmd = match (engine, conversation_id) {
+        ("agy", Some(_)) => {
+            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json --conversation \"$HONR_CONVERSATION\" -p \"$HONR_BRIEFING\""
+                .to_string()
+        }
+        ("agy", None) => {
+            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\""
+                .to_string()
+        }
+        _ => "claude -p \"$HONR_BRIEFING\" --output-format stream-json --verbose --permission-mode bypassPermissions"
+            .to_string(),
     };
+    let conv_export = conversation_id
+        .map(|c| format!("export HONR_CONVERSATION={}\n", shell_quote(c)))
+        .unwrap_or_default();
     format!(
         r#"set -e
 rm -f {AGENT_PID} {AGENT_STATUS}
 : > {AGENT_LOG}
 export HONR_BRIEFING={brief}
-# Reused sandboxes keep create-time env; force the writable beads path every run.
+{conv_export}# Reused sandboxes keep create-time env; force the writable beads path every run.
 export BEADS_DIR={BEADS_SANDBOX_DIR}
 setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} {cmd} >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
 for i in $(seq 1 40); do
@@ -1737,6 +1784,42 @@ fn branch_state_of(stdout: &str) -> BranchState {
     }
 }
 
+/// Short prompt for an agy `--conversation` resume after park.
+///
+/// The model already has the cold briefing in session memory; re-dumping it
+/// would burn tokens and invite the agent to restart the card from scratch.
+fn resume_briefing(grant: &ClaimGrant) -> String {
+    let mut b = String::new();
+    b.push_str(
+        "You were parked mid-run. The agent process was stopped; any in-flight tools \
+         may have been killed. Inspect the repo state and continue this card — do not \
+         start over unless the notes below say so.\n\n",
+    );
+    b.push_str(&format!("Your card: {}\n", grant.title));
+    if let Some(bid) = &grant.beads_id {
+        if crate::beads::BeadsClient::is_real_id(bid) {
+            b.push_str(&format!("Beads id: {bid} (use `bd show {bid}`)\n"));
+        }
+    }
+    if let Some(dod) = &grant.definition_of_done {
+        b.push_str(&format!("Definition of done: {dod}\n"));
+    }
+    if !grant.notes.is_empty() {
+        b.push_str(
+            "\nNotes from the human steering this (BINDING — if these conflict with \
+             earlier instructions, follow the notes):\n",
+        );
+        for n in &grant.notes {
+            b.push_str(&format!("  - {n}\n"));
+        }
+    }
+    b.push_str(
+        "\nWhen the work is done, write `/sandbox/.honr/report.json` (or escalate/split \
+         as before) and publish the PR on this card's branch.\n",
+    );
+    b
+}
+
 /// The intent chain is the highest-leverage payload in the system, and a fresh
 /// `claude -p` in an empty container has none of it.
 fn briefing(
@@ -1905,6 +1988,28 @@ fn parse_cost_cents(line: &str) -> Option<u64> {
     Some((usd * 100.0).round().max(0.0) as u64)
 }
 
+/// Pull an agy `conversation_id` out of a stream-json line, if present.
+///
+/// Tolerant like cost parsing: walk a few known shapes and ignore the rest.
+fn parse_conversation_id(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    const KEYS: &[&str] = &[
+        "/conversation_id",
+        "/step_update/conversation_id",
+        "/result/conversation_id",
+        "/message/conversation_id",
+    ];
+    for key in KEYS {
+        if let Some(s) = v.pointer(key).and_then(|x| x.as_str()) {
+            let t = s.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Both streams. git writes its actual error to stderr, so reporting only
 /// stdout produced `push failed:` with nothing after the colon — a failure
 /// message that says less than no message at all.
@@ -1935,8 +2040,10 @@ mod tests {
     #[test]
     fn watch_liveness_outpaces_the_default_lease() {
         // Timer heartbeats must renew well before the sweeper can requeue.
-        assert!(WATCH_HEARTBEAT_SECS < 600 / 4);
-        assert!(WATCH_BOARD_POLL_SECS < WATCH_HEARTBEAT_SECS);
+        const {
+            assert!(WATCH_HEARTBEAT_SECS < 600 / 4);
+            assert!(WATCH_BOARD_POLL_SECS < WATCH_HEARTBEAT_SECS);
+        }
     }
 
     #[test]
@@ -2009,6 +2116,53 @@ mod tests {
             "expected supervisor cancel, got {err}"
         );
         assert_eq!(board.get(id).unwrap().state, State::Ready);
+    }
+
+    #[tokio::test]
+    async fn setup_await_cancels_when_card_is_parked() {
+        let board = test_board();
+        let project = board
+            .create(None, "project", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Ready, "test", None);
+        let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
+        board.set_conversation_id(task.id, Some("conv-keep".into()));
+        board.set_environment(task.id, Some("honr-card-park-a1".into()));
+
+        let board_park = board.clone();
+        let id = task.id;
+        let park = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            board_park
+                .park(id, Some("test park".into()))
+                .expect("park");
+        });
+
+        let err = with_board_cancel(&board, id, async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .expect_err("must cancel when parked");
+        park.await.expect("park task");
+
+        assert!(is_supervisor_cancel(&err.to_string()), "got {err}");
+        let it = board.get(id).unwrap();
+        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.conversation_id.as_deref(), Some("conv-keep"));
+        assert_eq!(it.environment.as_deref(), Some("honr-card-park-a1"));
     }
 
     #[tokio::test]
@@ -2190,7 +2344,7 @@ mod tests {
     /// and left deleting the sandbox as the only honest option.
     #[test]
     fn the_agent_outlives_the_exec_that_starts_it() {
-        let s = start_script(&repo_cfg(), "do the thing", "claude");
+        let s = start_script(&repo_cfg(), "do the thing", "claude", None);
         assert!(s.contains("setsid nohup"), "must be detached: {s}");
         assert!(s.trim_end().contains("&\n") || s.contains("2>&1 &"), "must background it: {s}");
         // The three files are the whole contract with whoever watches next.
@@ -2210,7 +2364,7 @@ mod tests {
     fn the_agent_carries_its_own_deadline() {
         let mut cfg = repo_cfg();
         cfg.agent_timeout_secs = 900;
-        let s = start_script(&cfg, "b", "claude");
+        let s = start_script(&cfg, "b", "claude", None);
         assert!(s.contains("timeout --foreground 900 claude"), "{s}");
     }
 
@@ -2220,9 +2374,52 @@ mod tests {
     /// apostrophe in it — which is most of them.
     #[test]
     fn the_briefing_crosses_the_inner_shell_intact() {
-        let s = start_script(&repo_cfg(), "it's a card; rm -rf /", "claude");
+        let s = start_script(&repo_cfg(), "it's a card; rm -rf /", "claude", None);
         assert!(s.contains(r"it'\''s a card; rm -rf /"), "must be escaped once: {s}");
         assert!(s.contains(r#"$HONR_BRIEFING"#), "inner shell reads the var: {s}");
+    }
+
+    #[test]
+    fn agy_resume_passes_conversation_flag() {
+        let s = start_script(
+            &repo_cfg(),
+            "continue",
+            "agy",
+            Some("8f9c6cee-964a-44ce-8698-c92a4ea473ef"),
+        );
+        assert!(s.contains("--conversation \"$HONR_CONVERSATION\""), "{s}");
+        assert!(s.contains("HONR_CONVERSATION='8f9c6cee-964a-44ce-8698-c92a4ea473ef'"), "{s}");
+        let fresh = start_script(&repo_cfg(), "start", "agy", None);
+        assert!(!fresh.contains("--conversation"), "{fresh}");
+        assert!(!fresh.contains("HONR_CONVERSATION="), "{fresh}");
+    }
+
+    #[test]
+    fn parse_conversation_id_from_stream_shapes() {
+        assert_eq!(
+            parse_conversation_id(
+                r#"{"event":"step_update","step_update":{"conversation_id":"abc-123","step_index":1}}"#
+            )
+            .as_deref(),
+            Some("abc-123")
+        );
+        assert_eq!(
+            parse_conversation_id(r#"{"conversation_id":"top-level"}"#).as_deref(),
+            Some("top-level")
+        );
+        assert_eq!(parse_conversation_id(r#"{"type":"assistant"}"#), None);
+        assert_eq!(parse_conversation_id("not json"), None);
+    }
+
+    #[test]
+    fn resume_briefing_is_short_and_carries_notes() {
+        let mut g = grant();
+        g.notes = vec!["Parked: cargo test deadlocked on Board RwLock.".into()];
+        let b = resume_briefing(&g);
+        assert!(b.contains("parked mid-run"), "{b}");
+        assert!(b.contains("Board RwLock"), "{b}");
+        assert!(b.contains("BINDING"), "{b}");
+        assert!(!b.contains("Standing constraints"), "must not dump the cold briefing: {b}");
     }
 
     /// Following is a *reader*. It can start part-way through, which is what

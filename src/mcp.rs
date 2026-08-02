@@ -596,13 +596,36 @@ impl Cockpit {
     }
 
     #[tool(
+        name = "park",
+        description = "Stop the agent and return the card to Ready, keep the sandbox and agy \
+                       conversation, and hold the card until unpark — it will not auto-reclaim. \
+                       Prefer this when a run is wedged. Optional reason becomes a binding note \
+                       on resume."
+    )]
+    fn park(&self, Parameters(a): Parameters<ReasonArg>) -> Out<Ack> {
+        self.board.park(a.id, a.reason).map_err(bad)?;
+        self.ack(a.id, "agent parked; held until unpark")
+    }
+
+    #[tool(
+        name = "unpark",
+        description = "Clear a park hold so the Ready card may be claimed again. If a conversation \
+                       id is still on the card, the next claim resumes that agy session."
+    )]
+    fn unpark(&self, Parameters(a): Parameters<IdArg>) -> Out<Ack> {
+        self.board.unpark(a.id).map_err(bad)?;
+        self.ack(a.id, "park cleared; eligible to claim")
+    }
+
+    #[tool(
         name = "halt",
-        description = "Kill the agent and return the card to Ready. This loses in-flight work — \
-                       prefer steer unless the approach itself is wrong."
+        description = "Kill the agent, discard the LLM session, and return the card to Ready. \
+                       Prefer park when you want to resume the same conversation; prefer steer \
+                       for a soft note that can wait until the next turn."
     )]
     fn halt(&self, Parameters(a): Parameters<ReasonArg>) -> Out<Ack> {
         self.board.halt(a.id, a.reason).map_err(bad)?;
-        self.ack(a.id, "agent released, card requeued")
+        self.ack(a.id, "agent released, session discarded, card requeued")
     }
 
     #[tool(
@@ -786,11 +809,12 @@ impl ServerHandler for Cockpit {
                  Interrupt the human for four things only: irreversible actions, budget breach, \
                  an ambiguity blocking several items, and repeated failure on the same card. \
                  Otherwise summarise and let them walk away.\n\n\
-                 Prefer steer over halt — halt loses in-flight work. When you correct something \
-                 that could recur, pin_constraint so it binds every descendant instead of being \
-                 a one-off. Read item_detail's intent chain before approving or answering; a \
-                 card that passes its gates can still be building the wrong thing, because \
-                 coherence is not a property of any single card.",
+                 Prefer park over halt when a run is wedged — park keeps the sandbox and agy \
+                 session for resume; halt discards the conversation. Prefer steer for a soft note \
+                 that can wait. When you correct something that could recur, pin_constraint so it \
+                 binds every descendant instead of being a one-off. Read item_detail's intent \
+                 chain before approving or answering; a card that passes its gates can still be \
+                 building the wrong thing, because coherence is not a property of any single card.",
         )
     }
 }
@@ -1092,7 +1116,7 @@ mod tests {
         let c2 = board.create(Some(goal_id), "Card 2", "Blocked", Some("DoD".into()), Origin::Human, false, None).expect("c2");
         let _ = board.transition(c2.id, State::Shaping, "test", None);
         let _ = board.transition(c2.id, State::Ready, "test", None);
-        let _ = board.set_blocked_by(c2.id, vec![c1.id]);
+        board.set_blocked_by(c2.id, vec![c1.id]);
 
         // Bounce Card 1 through claim and release so its entered_state_at is NEWER than Card 2
         let _ = board.claim(c1.id, "agent-1", None, 60).expect("claim");

@@ -321,6 +321,9 @@ impl Board {
     /// Project) are blocked only while the global flag is set.
     pub fn may_claim(&self, id: ItemId) -> bool {
         let s = self.state.read().unwrap();
+        if s.items.get(&id).is_some_and(|it| it.parked) {
+            return false;
+        }
         let mut cur = Some(id);
         while let Some(cid) = cur {
             let Some(it) = s.items.get(&cid) else {
@@ -538,6 +541,11 @@ impl Board {
                 item.escalation = None;
                 item.last_bounce_reason = None;
             }
+        }
+        // Terminal cards discard the LLM session; the sandbox is reaped separately.
+        if to.is_terminal() {
+            item.conversation_id = None;
+            item.parked = false;
         }
         let mut item_out = item.clone();
         Self::populate_blockers(s, &mut item_out);
@@ -1278,6 +1286,20 @@ impl Board {
         self.emit(&item);
     }
 
+    /// Persist (or clear) the agy conversation id for park/resume.
+    pub fn set_conversation_id(&self, id: ItemId, conversation_id: Option<String>) {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let Some(it) = s.items.get_mut(&id) else { return };
+            if it.conversation_id == conversation_id {
+                return;
+            }
+            it.conversation_id = conversation_id;
+            it.clone()
+        };
+        self.emit(&item);
+    }
+
     /// The PR an agent opened. Set before `report`, so the card arrives in
     /// Review with somewhere to go.
     pub fn set_pr_url(&self, id: ItemId, url: Option<String>) {
@@ -1437,8 +1459,12 @@ impl Board {
 
         let item = {
             let mut s = self.state.write().unwrap();
+            if s.items.get(&id).is_some_and(|it| it.parked) {
+                return Err(TransitionError::Parked { id });
+            }
             Self::transition_locked(&mut s, id, State::Claimed, agent_id, None)?;
             let it = s.items.get_mut(&id).unwrap();
+            it.parked = false;
             it.lease = Some(Lease {
                 agent_id: agent_id.to_string(),
                 granted_at: now,
@@ -2006,10 +2032,101 @@ fn check_split_relatedness(
         Ok(item)
     }
 
-    /// Halt — kill the agent, return the card to Ready. Loses in-flight work.
+    /// Park — stop the agent, return the card to Ready, keep sandbox + conversation,
+    /// and hold the card until [`Self::unpark`]. Prefer this over halt when the
+    /// run is wedged or needs a human nudge without amnesia.
+    pub fn park(&self, id: ItemId, reason: Option<String>) -> Result<WorkItem, String> {
+        let reason = reason.filter(|r| !r.trim().is_empty());
+        let title = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or("no such item")?;
+            if let Some(ref r) = reason {
+                it.notes.push(Note {
+                    at: Utc::now(),
+                    author: "human".into(),
+                    text: format!("Parked: {r}"),
+                });
+            }
+            it.title.clone()
+        };
+        self.transition(
+            id,
+            State::Ready,
+            "human",
+            Some(reason.clone().unwrap_or_else(|| "parked".into())),
+        )
+        .map_err(|e| e.to_string())?;
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or("no such item")?;
+            it.parked = true;
+            it.clone()
+        };
+        self.emit(&item);
+        let session = item
+            .conversation_id
+            .as_deref()
+            .map(|c| format!(" session {c} kept"))
+            .unwrap_or_default();
+        self.story(
+            id,
+            format!(
+                "{title}: parked — agent stopped, sandbox kept;{session} \
+                 will not reclaim until you resume."
+            ),
+        );
+        Ok(item)
+    }
+
+    /// Clear the park hold so the supervisor may claim this Ready card again
+    /// (resuming the kept agy conversation when present).
+    pub fn unpark(&self, id: ItemId) -> Result<WorkItem, String> {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or("no such item")?;
+            if it.state != State::Ready {
+                return Err("only a Ready card can be resumed from park".into());
+            }
+            if !it.parked {
+                return Err("that card is not parked".into());
+            }
+            it.parked = false;
+            it.clone()
+        };
+        self.emit(&item);
+        self.story(
+            id,
+            format!(
+                "{}: resumed from park — eligible to claim{}.",
+                item.title,
+                if item.conversation_id.is_some() {
+                    " (same conversation)"
+                } else {
+                    ""
+                }
+            ),
+        );
+        Ok(item)
+    }
+
+    /// Halt — kill the agent, return the card to Ready, discard the LLM session.
+    /// Sandbox may still be kept for caches/inspection; the conversation is not.
     pub fn halt(&self, id: ItemId, reason: Option<String>) -> Result<WorkItem, String> {
-        self.transition(id, State::Ready, "human", reason.or(Some("halted".into())))
-            .map_err(|e| e.to_string())
+        {
+            let mut s = self.state.write().unwrap();
+            if let Some(it) = s.items.get_mut(&id) {
+                it.conversation_id = None;
+                it.parked = false;
+            }
+        }
+        let item = self
+            .transition(id, State::Ready, "human", reason.or(Some("halted".into())))
+            .map_err(|e| e.to_string())?;
+        self.story(
+            item.id,
+            format!("{}: halted — session discarded; next claim starts a new conversation.", item.title),
+        );
+        Ok(item)
     }
 
     /// Cut scope — the subtree is retired, not deleted. Archived Projects drop
@@ -2443,6 +2560,39 @@ mod tests {
         let _ = b.transition(leaf.id, State::Ready, "t", None);
         b.claim(leaf.id, "agent", None, 45).expect("claim");
         (b, leaf.id)
+    }
+
+    #[test]
+    fn park_keeps_conversation_and_environment() {
+        let (b, id) = claimed_leaf();
+        b.set_environment(id, Some("honr-card-1-a1".into()));
+        b.set_conversation_id(id, Some("conv-xyz".into()));
+        let it = b.park(id, Some("wedged on cargo".into())).expect("park");
+        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.environment.as_deref(), Some("honr-card-1-a1"));
+        assert_eq!(it.conversation_id.as_deref(), Some("conv-xyz"));
+        assert!(it.parked, "park must hold the card from reclaim");
+        assert!(!b.may_claim(id), "parked card must not be claimable");
+        assert!(
+            it.notes.iter().any(|n| n.text.contains("Parked: wedged on cargo")),
+            "park reason must become a resume note: {:?}",
+            it.notes
+        );
+        let resumed = b.unpark(id).expect("unpark");
+        assert!(!resumed.parked);
+        assert!(b.may_claim(id), "unpark restores claimability");
+    }
+
+    #[test]
+    fn halt_clears_conversation_keeps_environment() {
+        let (b, id) = claimed_leaf();
+        b.set_environment(id, Some("honr-card-1-a1".into()));
+        b.set_conversation_id(id, Some("conv-xyz".into()));
+        let it = b.halt(id, Some("start over".into())).expect("halt");
+        assert_eq!(it.state, State::Ready);
+        assert_eq!(it.environment.as_deref(), Some("honr-card-1-a1"));
+        assert!(it.conversation_id.is_none(), "halt discards the LLM session");
+        assert!(!it.parked);
     }
 
     /// Failures under the cap requeue, so a transient problem self-heals.
