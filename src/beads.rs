@@ -6,7 +6,31 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::Notify;
+
+/// Coalesce Dolt remote pushes after Issue-sync mutations so create storms
+/// don't N× `bd dolt push` the whole DB.
+const DOLT_PUSH_DEBOUNCE: Duration = Duration::from_secs(30);
+
+struct DoltPushDebouncer {
+    pending: AtomicBool,
+    worker_started: AtomicBool,
+    notify: Notify,
+}
+
+impl Default for DoltPushDebouncer {
+    fn default() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            worker_started: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeadsIssue {
@@ -66,9 +90,18 @@ impl BeadsIssue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BeadsClient {
     pub beads_dir: PathBuf,
+    dolt_push: Arc<DoltPushDebouncer>,
+}
+
+impl std::fmt::Debug for BeadsClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BeadsClient")
+            .field("beads_dir", &self.beads_dir)
+            .finish()
+    }
 }
 
 #[allow(dead_code)] // Plan A API surface — not every verb is on the hot path yet.
@@ -76,6 +109,7 @@ impl BeadsClient {
     pub fn new(beads_dir: impl Into<PathBuf>) -> Self {
         Self {
             beads_dir: beads_dir.into(),
+            dolt_push: Arc::new(DoltPushDebouncer::default()),
         }
     }
 
@@ -83,8 +117,13 @@ impl BeadsClient {
         let mut c = Command::new("bd");
         c.env("BEADS_DIR", &self.beads_dir);
         // Prevent `bd` from walking up into a parent workspace's `.beads`.
+        // Relative beads dirs like `.beads` have an empty Path parent (`""`);
+        // setting that as current_dir makes the spawn fail with ENOENT even
+        // when `bd` is on PATH — which blocked every github sync mirror.
         if let Some(parent) = self.beads_dir.parent() {
-            c.current_dir(parent);
+            if !parent.as_os_str().is_empty() {
+                c.current_dir(parent);
+            }
         }
         c
     }
@@ -92,6 +131,77 @@ impl BeadsClient {
     /// True when `id` looks like a real beads hash, not a local placeholder.
     pub fn is_real_id(id: &str) -> bool {
         !id.is_empty() && !id.starts_with("bd-honr-")
+    }
+
+    fn db_ready(&self) -> bool {
+        self.beads_dir.join("metadata.json").exists()
+            || self.beads_dir.join("embeddeddolt").exists()
+    }
+
+    /// Apply GitHub auth env so `git+https://` Dolt remotes can push `refs/dolt/data`.
+    fn apply_github_git_auth(cmd: &mut Command) {
+        let token = Self::resolve_github_token().unwrap_or_default();
+        if token.is_empty() {
+            return;
+        }
+        cmd.env("GITHUB_TOKEN", &token);
+        // Prefer `gh` on PATH as the credential helper (no hardcoded brew path).
+        let gh_ok = std::process::Command::new("gh")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if gh_ok {
+            cmd.env("GIT_CONFIG_COUNT", "1");
+            cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
+            cmd.env("GIT_CONFIG_VALUE_0", "!gh auth git-credential");
+        }
+    }
+
+    /// Request a debounced `bd dolt push origin` (publishes `refs/dolt/data`).
+    ///
+    /// Safe to call from many mutation paths; overlapping requests coalesce.
+    /// Never blocks the caller; failures are logged by the background worker.
+    pub fn schedule_dolt_push(&self) {
+        if !self.db_ready() {
+            return;
+        }
+        self.dolt_push.pending.store(true, Ordering::SeqCst);
+        self.ensure_dolt_push_worker();
+        self.dolt_push.notify.notify_one();
+    }
+
+    fn ensure_dolt_push_worker(&self) {
+        if self
+            .dolt_push
+            .worker_started
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // No runtime (e.g. sync test context) — leave pending; next schedule
+            // under a runtime will start the worker.
+            self.dolt_push.worker_started.store(false, Ordering::SeqCst);
+            return;
+        };
+        let client = self.clone();
+        handle.spawn(async move {
+            loop {
+                client.dolt_push.notify.notified().await;
+                // Trailing debounce: wait so create storms collapse to one push.
+                tokio::time::sleep(DOLT_PUSH_DEBOUNCE).await;
+                if !client.dolt_push.pending.swap(false, Ordering::SeqCst) {
+                    continue;
+                }
+                match client.sync_remote(Some("origin")).await {
+                    Ok(()) => tracing::info!("beads dolt push to origin ok"),
+                    Err(e) => tracing::warn!(error = %e, "beads dolt push to origin failed"),
+                }
+            }
+        });
     }
 
     /// Run `bd init --quiet --stealth` in the target directory.
@@ -261,13 +371,12 @@ impl BeadsClient {
         }
     }
 
-    /// Resolve GitHub token from GITHUB_TOKEN env var, falling back to `gh auth token`
-    /// via `gh` and `/opt/homebrew/bin/gh` when PATH is thin.
+    /// Resolve GitHub token from `GITHUB_TOKEN`, else `gh auth token` on PATH.
     pub fn resolve_github_token() -> Option<String> {
         Self::resolve_github_token_with(
             || std::env::var("GITHUB_TOKEN").ok(),
-            |cmd_path| {
-                std::process::Command::new(cmd_path)
+            || {
+                std::process::Command::new("gh")
                     .args(["auth", "token"])
                     .output()
                     .ok()
@@ -287,32 +396,58 @@ impl BeadsClient {
         )
     }
 
-    fn resolve_github_token_with<E, C>(get_env: E, run_cmd: C) -> Option<String>
+    fn resolve_github_token_with<E, C>(get_env: E, run_gh: C) -> Option<String>
     where
         E: Fn() -> Option<String>,
-        C: FnMut(&str) -> Option<String>,
+        C: FnOnce() -> Option<String>,
     {
         if let Some(token) = get_env().filter(|t| !t.trim().is_empty()) {
             return Some(token.trim().to_string());
         }
-
-        let mut run_cmd = run_cmd;
-        if let Some(token) = run_cmd("gh") {
-            return Some(token);
-        }
-
-        if let Some(token) = run_cmd("/opt/homebrew/bin/gh") {
-            return Some(token);
-        }
-
-        None
+        run_gh()
     }
 
-    /// Run `bd github sync` to sync beads issues with GitHub Issues.
+    /// Push specific beads to GitHub (`bd github push <ids…>`).
+    ///
+    /// Prefer this over a full `github sync --push-only`: the beads docs make
+    /// `push` / `sync --issues` the selective path. A whole-graph sync after
+    /// every card create is what made Issue creation crawl.
+    pub async fn github_push(&self, ids: &[String]) -> Result<(), String> {
+        let ids: Vec<&str> = ids
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|id| Self::is_real_id(id))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if !self.db_ready() {
+            return Ok(());
+        }
+        let token = Self::resolve_github_token().unwrap_or_default();
+
+        let mut cmd = self.cmd();
+        cmd.arg("github").arg("push");
+        for id in &ids {
+            cmd.arg(id);
+        }
+
+        if !token.is_empty() {
+            cmd.env("GITHUB_TOKEN", token);
+        }
+
+        let out = cmd.output().await.map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(format!("bd github push failed: {err}"))
+        }
+    }
+
+    /// Full-graph push (`bd github sync --push-only`). Prefer [`Self::github_push`].
     pub async fn github_sync(&self) -> Result<(), String> {
-        if !self.beads_dir.join("metadata.json").exists()
-            && !self.beads_dir.join("embeddeddolt").exists()
-        {
+        if !self.db_ready() {
             return Ok(());
         }
 
@@ -447,12 +582,17 @@ impl BeadsClient {
         }
     }
 
-    /// Run `bd dolt push origin` to push Dolt database state to refs/dolt/data.
+    /// Run `bd dolt push <remote>` to publish Dolt state to `refs/dolt/data`.
     pub async fn sync_remote(&self, remote: Option<&str>) -> Result<(), String> {
+        if !self.db_ready() {
+            return Ok(());
+        }
         let target_remote = remote.unwrap_or("origin");
-        let out = self
-            .cmd()
-            .args(["dolt", "push", target_remote])
+        let mut cmd = self.cmd();
+        cmd.args(["dolt", "push", target_remote]);
+        Self::apply_github_git_auth(&mut cmd);
+
+        let out = cmd
             .output()
             .await
             .map_err(|e| format!("failed to execute bd dolt push: {e}"))?;
@@ -524,73 +664,43 @@ mod tests {
 
     #[test]
     fn test_token_env_wins() {
-        let mut cmd_calls = Vec::new();
+        let mut gh_called = false;
         let token = BeadsClient::resolve_github_token_with(
             || Some("env_token_secret".to_string()),
-            |cmd| {
-                cmd_calls.push(cmd.to_string());
+            || {
+                gh_called = true;
                 Some("gh_token".to_string())
             },
         );
         assert_eq!(token, Some("env_token_secret".to_string()));
         assert!(
-            cmd_calls.is_empty(),
+            !gh_called,
             "gh command should not be executed when GITHUB_TOKEN env is set"
         );
     }
 
     #[test]
     fn test_gh_auth_token_fallback() {
-        let mut cmd_calls = Vec::new();
-        let token = BeadsClient::resolve_github_token_with(
-            || None,
-            |cmd| {
-                cmd_calls.push(cmd.to_string());
-                if cmd == "gh" {
-                    Some("gh_token_123".to_string())
-                } else {
-                    None
-                }
-            },
-        );
+        let token =
+            BeadsClient::resolve_github_token_with(|| None, || Some("gh_token_123".to_string()));
         assert_eq!(token, Some("gh_token_123".to_string()));
-        assert_eq!(cmd_calls, vec!["gh"]);
-    }
-
-    #[test]
-    fn test_homebrew_gh_path_fallback_when_bare_gh_missing() {
-        let mut cmd_calls = Vec::new();
-        let token = BeadsClient::resolve_github_token_with(
-            || None,
-            |cmd| {
-                cmd_calls.push(cmd.to_string());
-                if cmd == "/opt/homebrew/bin/gh" {
-                    Some("homebrew_token_456".to_string())
-                } else {
-                    None
-                }
-            },
-        );
-        assert_eq!(token, Some("homebrew_token_456".to_string()));
-        assert_eq!(
-            cmd_calls,
-            vec!["gh", "/opt/homebrew/bin/gh"],
-            "/opt/homebrew/bin/gh should be tried when bare gh fails/missing"
-        );
     }
 
     #[test]
     fn test_token_resolution_returns_none_when_all_fail() {
-        let mut cmd_calls = Vec::new();
-        let token = BeadsClient::resolve_github_token_with(
-            || None,
-            |cmd| {
-                cmd_calls.push(cmd.to_string());
-                None
-            },
-        );
+        let token = BeadsClient::resolve_github_token_with(|| None, || None);
         assert_eq!(token, None);
-        assert_eq!(cmd_calls, vec!["gh", "/opt/homebrew/bin/gh"]);
+    }
+
+    #[test]
+    fn relative_beads_dir_parent_is_empty_so_cmd_must_skip_chdir() {
+        // Rust Path: parent of `.beads` is `""`. chdir("") ⇒ ENOENT on spawn.
+        let parent = std::path::Path::new(".beads").parent().expect("parent");
+        assert!(parent.as_os_str().is_empty());
+        let client = BeadsClient::new(".beads");
+        // Constructing the command must not panic; spawn is covered by integration
+        // once honr resolves an absolute beads_dir from the board path.
+        let _ = client.cmd();
     }
 
     #[tokio::test]
@@ -602,6 +712,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&test_dir);
         let client = BeadsClient::new(&test_dir);
         assert!(client.github_sync().await.is_ok());
+        assert!(client.github_push(&["honr-abc".into()]).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_github_push_skips_placeholder_ids() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-push-skip-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        // Even with a fake beads dir present, placeholders must not invoke `bd`.
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(test_dir.join("metadata.json"), "{}").unwrap();
+        let client = BeadsClient::new(&test_dir);
+        assert!(client.github_push(&["bd-honr-1".into()]).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_sync_remote_skips_when_no_beads_dir() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-dolt-skip-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let client = BeadsClient::new(&test_dir);
+        assert!(client.sync_remote(Some("origin")).await.is_ok());
+        // No DB → schedule is a no-op (must not start a worker that pushes).
+        client.schedule_dolt_push();
+        assert!(!client.dolt_push.pending.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_schedule_dolt_push_marks_pending_when_db_ready() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-dolt-sched-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(test_dir.join("metadata.json"), "{}").unwrap();
+        let client = BeadsClient::new(&test_dir);
+        client.schedule_dolt_push();
+        assert!(client.dolt_push.pending.load(Ordering::SeqCst));
+        // Don't await the 30s debounce / real push in unit tests.
     }
 
     #[test]

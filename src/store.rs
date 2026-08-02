@@ -169,11 +169,22 @@ pub type SharedBoard = Arc<Board>;
 impl Board {
     pub fn new(schema: Schema, path: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(1024);
-        // Co-locate beads with the board file when possible.
-        let beads_dir = path
-            .parent()
-            .map(|p| p.join(".beads"))
-            .unwrap_or_else(|| PathBuf::from(".beads"));
+        // Co-locate beads with the board file when possible. Prefer an absolute
+        // beads dir so `bd`'s current_dir is never the empty relative parent of
+        // `.beads` (that used to make every `bd` spawn fail with ENOENT).
+        let beads_dir = {
+            let raw = path
+                .parent()
+                .map(|p| p.join(".beads"))
+                .unwrap_or_else(|| PathBuf::from(".beads"));
+            if raw.is_absolute() {
+                raw
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&raw))
+                    .unwrap_or(raw)
+            }
+        };
         let beads = Some(crate::beads::BeadsClient::new(beads_dir));
         Self {
             state: RwLock::new(BoardState { next_id: 1, ..Default::default() }),
@@ -559,7 +570,8 @@ impl Board {
                     if let (Some(b), Some(bid)) = (beads, beads_id) {
                         if crate::beads::BeadsClient::is_real_id(&bid) {
                             let _ = b.close(&bid, Some(&reason_str)).await;
-                            let _ = b.github_sync().await;
+                            let _ = b.github_push(&[bid]).await;
+                            b.schedule_dolt_push();
                         }
                     }
                 });
@@ -909,13 +921,46 @@ impl Board {
     }
 
     /// Dual-write a single board item into beads (Project→epic, Task→task with `--parent`).
-    /// If successful, stores the real hash id, triggers `beads.github_sync()`, and sets `github_issue_url`.
+    /// If successful, stores the real hash id, then pushes **that** bead to GitHub
+    /// (`bd github push <id>`) without blocking other mirrors on the push.
     pub async fn mirror_beads_item(self: &Arc<Self>, id: ItemId) {
-        let Some(item) = self.get(id) else { return };
-        if item.state == State::Retired {
+        let Some(beads_id) = self.mirror_beads_item_local(id).await else {
+            return;
+        };
+        let needs_url = self
+            .get(id)
+            .map(|i| i.github_issue_url.is_none())
+            .unwrap_or(true);
+        if !needs_url {
             return;
         }
-        let Some(beads) = self.beads.clone() else { return };
+        let board = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Some(beads) = board.beads.clone() {
+                if let Err(e) = beads.github_push(std::slice::from_ref(&beads_id)).await {
+                    tracing::warn!(id, error = %e, "beads github push after mirror create failed");
+                }
+                beads.schedule_dolt_push();
+            }
+            board.refresh_github_issue_url(id, &beads_id).await;
+        });
+    }
+
+    /// Create/link the beads issue and store `beads_id`, without talking to GitHub.
+    /// No-ops (returns existing id) when the card already has a real beads id.
+    async fn mirror_beads_item_local(self: &Arc<Self>, id: ItemId) -> Option<String> {
+        let item = self.get(id)?;
+        if item.state == State::Retired {
+            return None;
+        }
+        if let Some(bid) = item
+            .beads_id
+            .as_deref()
+            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+        {
+            return Some(bid.to_string());
+        }
+        let beads = self.beads.clone()?;
         let title = item.title.clone();
         let intent = item.intent.clone();
         let is_project = item.parent.is_none();
@@ -940,19 +985,42 @@ impl Board {
             Ok(issue) => {
                 self.set_beads_id(id, &issue.id);
                 if crate::beads::BeadsClient::is_real_id(&issue.id) {
-                    if let Err(e) = beads.github_sync().await {
-                        tracing::warn!(id, error = %e, "beads github sync after mirror create failed");
-                    }
-                    if let Ok(show_issue) = beads.show(&issue.id).await {
-                        if let Some(url) = show_issue.github_issue_url() {
-                            self.set_github_issue_url(id, &url);
-                        }
-                    } else if let Some(url) = issue.github_issue_url() {
-                        self.set_github_issue_url(id, &url);
-                    }
+                    Some(issue.id)
+                } else {
+                    None
                 }
             }
-            Err(e) => tracing::warn!(id, error = %e, "beads mirror create failed"),
+            Err(e) => {
+                tracing::warn!(id, error = %e, "beads mirror create failed");
+                None
+            }
+        }
+    }
+
+    /// Copy `external_ref` / issue URL from beads onto the board card.
+    /// Returns true when `github_issue_url` was set.
+    async fn refresh_github_issue_url(self: &Arc<Self>, id: ItemId, beads_id: &str) -> bool {
+        let Some(beads) = self.beads.clone() else {
+            return false;
+        };
+        match beads.show(beads_id).await {
+            Ok(show_issue) => {
+                if let Some(url) = show_issue.github_issue_url() {
+                    self.set_github_issue_url(id, &url);
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    id,
+                    beads_id,
+                    error = %e,
+                    "beads show for github_issue_url failed"
+                );
+                false
+            }
         }
     }
 
@@ -967,8 +1035,70 @@ impl Board {
         }
     }
 
+    /// For non-retired cards that already have a real beads id but no
+    /// `github_issue_url`, copy the URL from beads (push first if needed).
+    ///
+    /// Covers the gap heal used to leave: beads_id assigned without URL, then
+    /// skipped forever because it was no longer a placeholder.
+    pub async fn backfill_missing_github_issue_urls(self: &Arc<Self>) -> usize {
+        let missing: Vec<(ItemId, String)> = {
+            let s = self.state.read().unwrap();
+            let mut missing = Vec::new();
+            for (id, item) in s.items.iter() {
+                if item.state == State::Retired {
+                    continue;
+                }
+                if item.github_issue_url.is_some() {
+                    continue;
+                }
+                if let Some(bid) = item
+                    .beads_id
+                    .as_deref()
+                    .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+                {
+                    missing.push((*id, bid.to_string()));
+                }
+            }
+            missing.sort_by_key(|(id, _)| *id);
+            missing
+        };
+        if missing.is_empty() {
+            return 0;
+        }
+        let Some(beads) = self.beads.clone() else {
+            return 0;
+        };
+
+        let mut need_push: Vec<(ItemId, String)> = Vec::new();
+        let mut filled = 0usize;
+        for (id, beads_id) in &missing {
+            if self.refresh_github_issue_url(*id, beads_id).await {
+                filled += 1;
+            } else {
+                need_push.push((*id, beads_id.clone()));
+            }
+        }
+        if !need_push.is_empty() {
+            let ids: Vec<String> = need_push.iter().map(|(_, bid)| bid.clone()).collect();
+            if let Err(e) = beads.github_push(&ids).await {
+                tracing::warn!(error = %e, "beads github push during url backfill failed");
+            }
+            beads.schedule_dolt_push();
+            for (id, beads_id) in &need_push {
+                if self.refresh_github_issue_url(*id, beads_id).await {
+                    filled += 1;
+                }
+            }
+        }
+        if filled > 0 {
+            tracing::info!("backfilled {filled} missing github_issue_url(s)");
+        }
+        filled
+    }
+
     /// Re-run the create+sync mirror for open (non-retired) cards carrying placeholder beads_ids.
     /// Projects are mirrored before Tasks so children receive real parent beads_ids.
+    /// Also backfills missing `github_issue_url` on cards that already have real beads ids.
     pub async fn heal_placeholder_beads_ids(self: &Arc<Self>) -> usize {
         let (projects, tasks) = {
             let s = self.state.read().unwrap();
@@ -995,35 +1125,32 @@ impl Board {
             (projects, tasks)
         };
 
-        let mut healed = 0usize;
-        for id in projects {
-            self.mirror_beads_item(id).await;
-            if let Some(item) = self.get(id) {
-                if item
-                    .beads_id
-                    .as_deref()
-                    .is_some_and(crate::beads::BeadsClient::is_real_id)
-                {
-                    healed += 1;
-                }
+        // Local creates first (projects before tasks), then one selective GitHub
+        // push for the whole batch — not a full-graph sync per card.
+        let mut created: Vec<(ItemId, String)> = Vec::new();
+        for id in projects.into_iter().chain(tasks) {
+            if let Some(beads_id) = self.mirror_beads_item_local(id).await {
+                created.push((id, beads_id));
             }
         }
-        for id in tasks {
-            self.mirror_beads_item(id).await;
-            if let Some(item) = self.get(id) {
-                if item
-                    .beads_id
-                    .as_deref()
-                    .is_some_and(crate::beads::BeadsClient::is_real_id)
-                {
-                    healed += 1;
+        if !created.is_empty() {
+            if let Some(beads) = self.beads.clone() {
+                let ids: Vec<String> = created.iter().map(|(_, bid)| bid.clone()).collect();
+                if let Err(e) = beads.github_push(&ids).await {
+                    tracing::warn!(error = %e, "beads github push after heal batch failed");
+                }
+                beads.schedule_dolt_push();
+                for (id, beads_id) in &created {
+                    self.refresh_github_issue_url(*id, beads_id).await;
                 }
             }
-        }
-        if healed > 0 {
+            let healed = created.len();
             tracing::info!("healed {healed} placeholder beads_id(s) with real beads IDs");
         }
-        healed
+
+        // Always run: real beads_id + missing URL is a separate failure mode from placeholders.
+        self.backfill_missing_github_issue_urls().await;
+        created.len()
     }
 
     pub fn set_beads_id(&self, id: ItemId, beads_id: &str) {
@@ -1933,7 +2060,8 @@ fn check_split_relatedness(
                         if let (Some(b), Some(bid)) = (beads, beads_id) {
                             if crate::beads::BeadsClient::is_real_id(&bid) {
                                 let _ = b.close(&bid, Some("Deleted from honr board")).await;
-                                let _ = b.github_sync().await;
+                                let _ = b.github_push(&[bid]).await;
+                                b.schedule_dolt_push();
                             }
                         }
                     });
@@ -3059,7 +3187,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_schedule_beads_mirror_invokes_github_sync_on_create_and_split() {
+    async fn test_schedule_beads_mirror_invokes_github_push_on_create_and_split() {
         let test_dir = std::env::temp_dir().join(format!(
             "honr-store-beads-mirror-test-{}",
             std::process::id()
@@ -3091,7 +3219,7 @@ mod tests {
         // Schedule beads mirror on create
         board.schedule_beads_mirror(project.id);
 
-        // Wait for spawned async task in schedule_beads_mirror to assign real beads_id and run github_sync
+        // Wait for spawned async task in schedule_beads_mirror to assign real beads_id
         let mut real_project_id = None;
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3150,7 +3278,7 @@ mod tests {
             board.schedule_beads_mirror(m.id);
         }
 
-        // Wait for spawned async tasks on split siblings to assign real beads_ids and invoke github_sync
+        // Wait for spawned async tasks on split siblings to assign real beads_ids
         for m in &made {
             let mut sibling_real_id = None;
             for _ in 0..50 {
@@ -3441,6 +3569,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_heal_backfills_github_issue_url_for_real_beads_id() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-store-url-backfill-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        let project = board
+            .create(
+                None,
+                "URL Backfill Project",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .expect("create project");
+
+        // Simulate the #59 gap: real beads_id on the card, no github_issue_url.
+        let issue = beads_client
+            .create_linked(
+                "URL Backfill Project",
+                2,
+                "epic",
+                Some("intent"),
+                None,
+                &[],
+            )
+            .await
+            .expect("create bead");
+        board.set_beads_id(project.id, &issue.id);
+        assert!(board.get(project.id).unwrap().github_issue_url.is_none());
+
+        let expected_url = "https://github.com/shanemcd/honr/issues/759";
+        let out = beads_client
+            .cmd()
+            .args(["update", &issue.id, "--external-ref", expected_url])
+            .output()
+            .await
+            .expect("update external ref");
+        assert!(out.status.success(), "bd update --external-ref failed");
+
+        // Project already has a real beads_id (the #59 gap). Heal may still
+        // create beads for the seeded Initial Plan task; the important part is
+        // backfilling this project's missing github_issue_url.
+        let _ = board.heal_placeholder_beads_ids().await;
+
+        let after = board.get(project.id).unwrap();
+        assert_eq!(after.beads_id.as_deref(), Some(issue.id.as_str()));
+        assert_eq!(after.github_issue_url.as_deref(), Some(expected_url));
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[tokio::test]
     #[ignore]
     async fn test_live_e2e_beads_github_auto_sync() {
         let test_dir = std::env::temp_dir().join(format!(
@@ -3471,8 +3665,6 @@ mod tests {
             .output()
             .await;
 
-
-
         let mut board_raw = Board::new(Schema::default(), board_file);
         board_raw.beads = Some(beads_client.clone());
         let board = Arc::new(board_raw);
@@ -3497,14 +3689,23 @@ mod tests {
             .output()
             .await
             .unwrap();
-        println!("Project sync stdout = {}", String::from_utf8_lossy(&sync_p.stdout));
-        println!("Project sync stderr = {}", String::from_utf8_lossy(&sync_p.stderr));
+        println!(
+            "Project sync stdout = {}",
+            String::from_utf8_lossy(&sync_p.stdout)
+        );
+        println!(
+            "Project sync stderr = {}",
+            String::from_utf8_lossy(&sync_p.stderr)
+        );
 
         let project_bid = board.get(project.id).unwrap().beads_id.unwrap();
         println!("Project real beads_id = {project_bid}");
         let project_show = beads_client.show(&project_bid).await.expect("project show");
         println!("Project show = {project_show:?}");
-        println!("Project github_issue_url() = {:?}", project_show.github_issue_url());
+        println!(
+            "Project github_issue_url() = {:?}",
+            project_show.github_issue_url()
+        );
 
         // 2. Create a child Task under the Project
         let task = board
@@ -3527,8 +3728,14 @@ mod tests {
             .output()
             .await
             .unwrap();
-        println!("Task sync stdout = {}", String::from_utf8_lossy(&sync_t.stdout));
-        println!("Task sync stderr = {}", String::from_utf8_lossy(&sync_t.stderr));
+        println!(
+            "Task sync stdout = {}",
+            String::from_utf8_lossy(&sync_t.stdout)
+        );
+        println!(
+            "Task sync stderr = {}",
+            String::from_utf8_lossy(&sync_t.stderr)
+        );
 
         let task_item_before = board.get(task.id).expect("task item");
         let child_beads_id = task_item_before.beads_id.expect("task beads id");
@@ -3539,12 +3746,13 @@ mod tests {
 
         let task_show = beads_client.show(&child_beads_id).await.expect("task show");
         println!("Task show = {task_show:?}");
-        println!("Task github_issue_url() = {:?}", task_show.github_issue_url());
+        println!(
+            "Task github_issue_url() = {:?}",
+            task_show.github_issue_url()
+        );
 
         let task_item = board.get(task.id).expect("task item");
         let child_github_url = task_item.github_issue_url.expect("task github issue url");
-
-
 
         println!("E2E EVIDENCE 1: child card beads_id = {child_beads_id}");
         println!("E2E EVIDENCE 2: github_issue_url = {child_github_url}");
@@ -3556,7 +3764,9 @@ mod tests {
         let _ = board.transition(task.id, State::Done, "E2E verification completed", None);
 
         // Await beads close + github_sync directly to ensure sync finishes before checking
-        let _ = beads_client.close(&child_beads_id, Some("E2E verification completed")).await;
+        let _ = beads_client
+            .close(&child_beads_id, Some("E2E verification completed"))
+            .await;
         let sync_res = beads_client.github_sync().await;
         println!("E2E EVIDENCE 3: github_sync after Done result: {sync_res:?}");
 
