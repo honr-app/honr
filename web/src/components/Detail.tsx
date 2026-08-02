@@ -15,28 +15,229 @@ type EditPlanTask = {
   title: string;
   intent: string;
   definition_of_done: string;
-  blocked_by: string; // comma-separated keys for simple editing
+  blocked_by_keys: string[];
 };
 
-function planTasksFromArtifact(tasks: PlanTaskSpec[] | undefined): EditPlanTask[] {
+export function planTasksFromArtifact(tasks: PlanTaskSpec[] | undefined): EditPlanTask[] {
   if (!tasks?.length) return [];
   return tasks.map((t) => ({
     key: t.key,
     title: t.title,
     intent: t.intent,
     definition_of_done: t.definition_of_done,
-    blocked_by: t.blocked_by_keys.join(", "),
+    blocked_by_keys: Array.isArray(t.blocked_by_keys) ? [...t.blocked_by_keys] : [],
   }));
 }
 
-function emptyPlanTask(n: number): EditPlanTask {
+export function emptyPlanTask(n: number): EditPlanTask {
   return {
     key: `t${n}`,
     title: "",
     intent: "",
     definition_of_done: "",
-    blocked_by: "",
+    blocked_by_keys: [],
   };
+}
+
+export function PlanEditor({
+  planTasks,
+  setPlanTasks,
+}: {
+  planTasks: EditPlanTask[];
+  setPlanTasks: (tasks: EditPlanTask[]) => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+      {planTasks.map((t, idx) => (
+        <div
+          key={idx}
+          style={{
+            border: "1px solid #1e293b",
+            borderRadius: 6,
+            padding: 8,
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}
+        >
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              className="search-input"
+              style={{ width: 72 }}
+              placeholder="key"
+              value={t.key}
+              onChange={(e) => {
+                const oldKey = t.key;
+                const newKey = e.target.value;
+                const next = planTasks.map((pt, i) => {
+                  if (i === idx) {
+                    return { ...pt, key: newKey };
+                  }
+                  if (oldKey && oldKey !== newKey && pt.blocked_by_keys.includes(oldKey)) {
+                    return {
+                      ...pt,
+                      blocked_by_keys: pt.blocked_by_keys.map((k) => (k === oldKey ? newKey : k)),
+                    };
+                  }
+                  return pt;
+                });
+                setPlanTasks(next);
+              }}
+            />
+            <input
+              className="search-input"
+              style={{ flex: 1 }}
+              placeholder="Title"
+              value={t.title}
+              onChange={(e) => {
+                const next = [...planTasks];
+                next[idx] = { ...t, title: e.target.value };
+                setPlanTasks(next);
+              }}
+            />
+            <button
+              type="button"
+              className="dim"
+              style={{ fontSize: 11, padding: "2px 8px" }}
+              onClick={() => {
+                const removedKey = planTasks[idx].key;
+                setPlanTasks(
+                  planTasks
+                    .filter((_, i) => i !== idx)
+                    .map((pt) => ({
+                      ...pt,
+                      blocked_by_keys: pt.blocked_by_keys.filter((k) => k !== removedKey),
+                    }))
+                );
+              }}
+            >
+              Remove
+            </button>
+          </div>
+          <textarea
+            rows={2}
+            placeholder="Why this task exists"
+            value={t.intent}
+            onChange={(e) => {
+              const next = [...planTasks];
+              next[idx] = { ...t, intent: e.target.value };
+              setPlanTasks(next);
+            }}
+          />
+          <textarea
+            rows={2}
+            placeholder="Definition of done (mechanically checkable)"
+            value={t.definition_of_done}
+            onChange={(e) => {
+              const next = [...planTasks];
+              next[idx] = { ...t, definition_of_done: e.target.value };
+              setPlanTasks(next);
+            }}
+          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 2 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--dim)" }}>
+              Blocked by tasks:
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+              {t.blocked_by_keys.length === 0 ? (
+                <span className="dim" style={{ fontSize: 11 }}>None</span>
+              ) : (
+                t.blocked_by_keys.map((bKey) => {
+                  const target = planTasks.find((other) => other.key === bKey);
+                  const title = target?.title?.trim() ? target.title.trim() : undefined;
+                  return (
+                    <span
+                      key={bKey}
+                      className="blocker-chip"
+                      style={{ fontSize: 11, cursor: "default" }}
+                    >
+                      <span className="blocker-id">{bKey}</span>
+                      {title && <span className="blocker-title">{title}</span>}
+                      <button
+                        type="button"
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "var(--dim)",
+                          cursor: "pointer",
+                          padding: "0 2px",
+                          marginLeft: 2,
+                          fontSize: 12,
+                          lineHeight: 1,
+                        }}
+                        title={`Remove ${bKey} blocker`}
+                        onClick={() => {
+                          const next = [...planTasks];
+                          next[idx] = {
+                            ...t,
+                            blocked_by_keys: t.blocked_by_keys.filter((k) => k !== bKey),
+                          };
+                          setPlanTasks(next);
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  );
+                })
+              )}
+
+              {(() => {
+                const siblingOptions = planTasks.filter(
+                  (other, i) => i !== idx && other.key.trim() !== ""
+                );
+                return (
+                  <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                    <select
+                      className="search-input"
+                      style={{ fontSize: 11, padding: "2px 6px", height: 26 }}
+                      value=""
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (!val) return;
+                        if (!t.blocked_by_keys.includes(val)) {
+                          const next = [...planTasks];
+                          next[idx] = {
+                            ...t,
+                            blocked_by_keys: [...t.blocked_by_keys, val],
+                          };
+                          setPlanTasks(next);
+                        }
+                      }}
+                    >
+                      <option value="">+ Select blocker task...</option>
+                      {siblingOptions.length === 0 ? (
+                        <option value="" disabled>No sibling tasks available</option>
+                      ) : (
+                        siblingOptions.map((sibling) => {
+                          const isAdded = t.blocked_by_keys.includes(sibling.key);
+                          const label = sibling.title?.trim()
+                            ? `${sibling.key} — ${sibling.title.trim()}`
+                            : sibling.key;
+                          return (
+                            <option
+                              key={sibling.key}
+                              value={sibling.key}
+                              disabled={isAdded}
+                            >
+                              {label} {isAdded ? "(already added)" : ""}
+                            </option>
+                          );
+                        })
+                      )}
+                    </select>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      ))}
+      {planTasks.length === 0 && (
+        <p className="dim">No tasks in the Plan yet. Add one, or wait for Initial plan.</p>
+      )}
+    </div>
+  );
 }
 
 function formatToolTarget(name: string, input: any): string {
@@ -855,88 +1056,7 @@ export function DetailDrawer({
               </p>
             )}
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
-              {planTasks.map((t, idx) => (
-                <div
-                  key={idx}
-                  style={{
-                    border: "1px solid #1e293b",
-                    borderRadius: 6,
-                    padding: 8,
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 6,
-                  }}
-                >
-                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                    <input
-                      className="search-input"
-                      style={{ width: 72 }}
-                      placeholder="key"
-                      value={t.key}
-                      onChange={(e) => {
-                        const next = [...planTasks];
-                        next[idx] = { ...t, key: e.target.value };
-                        setPlanTasks(next);
-                      }}
-                    />
-                    <input
-                      className="search-input"
-                      style={{ flex: 1 }}
-                      placeholder="Title"
-                      value={t.title}
-                      onChange={(e) => {
-                        const next = [...planTasks];
-                        next[idx] = { ...t, title: e.target.value };
-                        setPlanTasks(next);
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="dim"
-                      style={{ fontSize: 11, padding: "2px 8px" }}
-                      onClick={() => setPlanTasks(planTasks.filter((_, i) => i !== idx))}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                  <textarea
-                    rows={2}
-                    placeholder="Why this task exists"
-                    value={t.intent}
-                    onChange={(e) => {
-                      const next = [...planTasks];
-                      next[idx] = { ...t, intent: e.target.value };
-                      setPlanTasks(next);
-                    }}
-                  />
-                  <textarea
-                    rows={2}
-                    placeholder="Definition of done (mechanically checkable)"
-                    value={t.definition_of_done}
-                    onChange={(e) => {
-                      const next = [...planTasks];
-                      next[idx] = { ...t, definition_of_done: e.target.value };
-                      setPlanTasks(next);
-                    }}
-                  />
-                  <input
-                    className="search-input"
-                    style={{ width: "100%" }}
-                    placeholder="Blocked by keys (comma-separated), e.g. t1, t2"
-                    value={t.blocked_by}
-                    onChange={(e) => {
-                      const next = [...planTasks];
-                      next[idx] = { ...t, blocked_by: e.target.value };
-                      setPlanTasks(next);
-                    }}
-                  />
-                </div>
-              ))}
-              {planTasks.length === 0 && (
-                <p className="dim">No tasks in the Plan yet. Add one, or wait for Initial plan.</p>
-              )}
-            </div>
+            <PlanEditor planTasks={planTasks} setPlanTasks={setPlanTasks} />
 
             <div className="btns" style={{ marginBottom: 8 }}>
               <button
@@ -964,8 +1084,7 @@ export function DetailDrawer({
                       title: t.title.trim(),
                       intent: t.intent.trim() || t.title.trim(),
                       definition_of_done: t.definition_of_done.trim(),
-                      blocked_by_keys: t.blocked_by
-                        .split(",")
+                      blocked_by_keys: t.blocked_by_keys
                         .map((s) => s.trim())
                         .filter(Boolean),
                     })),

@@ -215,7 +215,7 @@ impl BeadsClient {
             .map_err(|e| format!("mkdir beads dir: {e}"))?;
         let status = self
             .cmd()
-            .args(["init", "--quiet", "--stealth"])
+            .args(["init", "--quiet", "--stealth", "--prefix", "honr", "--remote", ""])
             .status()
             .await
             .map_err(|e| format!("failed to execute bd init: {e}"))?;

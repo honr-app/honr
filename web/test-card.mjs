@@ -295,4 +295,28 @@ console.log("\nDetail Head HTML:\n", headHtml);
 assert(headHtml.includes("📦 Archive"), "Detail Head should offer Archive action button");
 assert(headHtml.includes("🗑 Delete"), "Detail Head should offer Delete action button");
 
+// Test 10: Detail Plan editor renders plan task blocker selection UI
+import { PlanEditor, planTasksFromArtifact } from "./dist-test/components/Detail.js";
+
+const samplePlanTasksSpec = [
+  { key: "t1", title: "Setup Database", intent: "Setup DB intent", definition_of_done: "DB ready", blocked_by_keys: [] },
+  { key: "t2", title: "Build API", intent: "Build API intent", definition_of_done: "API ready", blocked_by_keys: ["t1"] },
+];
+
+const editPlanTasks = planTasksFromArtifact(samplePlanTasksSpec);
+
+const planEditorHtml = renderToString(
+  React.createElement(PlanEditor, {
+    planTasks: editPlanTasks,
+    setPlanTasks: () => {},
+  })
+);
+
+console.log("\nPlan Editor HTML:\n", planEditorHtml);
+assert(planEditorHtml.includes("Blocked by tasks:"), "Plan editor should render 'Blocked by tasks:' label");
+assert(planEditorHtml.includes("Setup Database"), "Blocker chip for t1 should display human readable sibling task title");
+assert(planEditorHtml.includes("+ Select blocker task..."), "Plan editor should offer '+ Select blocker task...' dropdown to select sibling tasks");
+
 console.log("\n✅ All Card, Board, Home, and Detail component assertions passed!");
+
+
