@@ -126,27 +126,13 @@ export function Card({ item, column, now, heartbeatExpect, defaultEngine, defaul
         </>
       )}
 
-      {column === "verify" && (
-        <>
-          <div className="row">
-            <span className="tag">
-              ⚙ {item.gates.find((g) => g.status !== "passed")?.name ?? "gates"}
-            </span>
-            <span className="dim">{since(item.entered_state_at, now)}</span>
-          </div>
-          {item.gate_failures > 0 && (
-            <div className="row warn">✗ failed {item.gate_failures}× before</div>
-          )}
-        </>
-      )}
-
       {column === "review" && (
         <>
           <div className="row">
-            <span className="tag ok">✓ gates</span>
             <span className="diff">
               +{item.diff_added} −{item.diff_removed}
             </span>
+            <span className="dim">{since(item.entered_state_at, now)}</span>
           </div>
           {/* Review *is* the PR. Without a way to reach it the column asks a
               question you cannot answer from the board. */}

@@ -23,7 +23,11 @@ pub enum State {
     Running,
     Splitting,
     NeedsHuman,
-    Verifying,
+    /// Human review of the PR. Mechanical checks belong in CI, not a board column.
+    ///
+    /// `alias = "verifying"` loads legacy history/boards that used the removed
+    /// Verifying state (honr never ran real gates there).
+    #[serde(alias = "verifying")]
     Review,
     Done,
     /// Cut scope. Retired, not deleted — "we chose not to" is a fact you will
@@ -41,7 +45,6 @@ impl State {
             State::Ready => Column::Ready,
             State::Claimed | State::Running | State::Splitting => Column::Running,
             State::NeedsHuman => Column::NeedsYou,
-            State::Verifying => Column::Verify,
             State::Review => Column::Review,
             State::Done => Column::Done,
             State::Retired => Column::Retired,
@@ -61,7 +64,6 @@ pub enum Column {
     Ready,
     Running,
     NeedsYou,
-    Verify,
     Review,
     Done,
     Retired,

@@ -25,10 +25,9 @@ with instructions — which is the intended division of labour.
 
 ## What is not proven
 
-**Nothing verifies an agent's work.** Gates are recorded as
-`agent-reported`; the supervisor never runs `cargo test`. A card reaches Review
-on the agent's own claim, so the real gate is a human reading the diff. This is
-the highest-value gap on the board.
+**CI is the mechanical gate, not a board column.** A card reaches Review when
+the agent opens a PR; GitHub Actions (or equivalent) is what must pass. The old
+Verify column is gone — it never ran real checks.
 
 **One card, one success.** The loop has run cleanly end to end exactly once.
 Treat operational confidence accordingly.
@@ -60,8 +59,6 @@ Phase 2 — real agents                                   (Project + Plan)
   done   Open the sandbox policy for the toolchain      (Task)
   done   First self-hosted card: GET /api/version       (Task) ← merged
          Re-adopt live sandboxes on restart
-         Supervisor runs the gates                      ← highest value
-         Verify from a clean checkout
          Verdict file protocol
          Split from inside the sandbox                  → sibling Tasks, not nest
          Sandbox name and PR link on the card
@@ -80,14 +77,7 @@ Constraints pinned on the Project, inherited by every Task:
   or `sandbox/policy.yaml`. If a card seems to require it, escalate instead.
 - Everything in the sandbox stack fails as a hang, not an error. Every exec
   needs a deadline; treat silence as failure.
-- Gates run with `--offline`. A cache miss must fail loudly rather than reach
-  the network.
-
 ## Known gaps, roughly by value
-
-**Gates are self-reported** (#10, #11). Until the supervisor runs the checks
-itself from a checkout the agent cannot influence, Review means "an agent says
-it's fine."
 
 **Capability routing is dead.** `dispatch_loop` hardcodes `["any"]`, so a card
 tagged `writer` is silently never claimed. It just sits in Ready looking
