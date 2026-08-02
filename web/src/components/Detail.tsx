@@ -500,7 +500,7 @@ export function DetailDrawer({
             📦 Archive #{d.id} "{d.title}"?
           </div>
           <div style={{ color: "#a5b4fc", fontSize: "11px" }}>
-            This item and its subtree will be retired, not deleted. Archived Projects leave the board (and Home); history stays in state.
+            This item and its subtree will be retired, not deleted. Archived Projects leave the cockpit; history stays in state.
           </div>
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
             <button

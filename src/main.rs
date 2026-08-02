@@ -23,6 +23,11 @@ use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
+/// How long graceful shutdown waits for open connections (SSE, MCP streams)
+/// before we drop them. Without a ceiling, a single Chrome EventSource holds
+/// the process forever — Ctrl-C logs "shutting down" and the shell never returns.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -79,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(|| async { "ok" }));
 
     // The cockpit's door. Same process, same port, same state.
-    app = app.nest_service("/mcp", mcp::service(board.clone()));
+    app = app.nest("/mcp", mcp::router(board.clone()));
 
     if web_dist.exists() {
         app = app.fallback_service(
@@ -101,18 +106,47 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("honr listening on http://{addr}  (MCP at /mcp)");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown(persist.clone()))
-        .await?;
+    // Graceful shutdown stops accepting, then waits for in-flight connections.
+    // Board SSE and MCP streams never close on their own, so we race the drain
+    // against a deadline (and a second interrupt) and drop whatever remains.
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutting_down = persist.clone();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        wait_interrupt().await;
+        tracing::info!("shutting down");
+        shutting_down.flush();
+        // Returning starts the drain. Signal the watchdog so the deadline
+        // starts now, not before the interrupt.
+        let _ = drain_tx.send(());
+    });
+
+    tokio::select! {
+        result = server => result?,
+        _ = async {
+            let _ = drain_rx.await;
+            tokio::select! {
+                _ = tokio::time::sleep(SHUTDOWN_DRAIN) => {
+                    tracing::warn!(
+                        "shutdown drain timed out after {}s; dropping remaining connections",
+                        SHUTDOWN_DRAIN.as_secs()
+                    );
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::warn!("second interrupt; dropping remaining connections");
+                }
+            }
+        } => {}
+    }
 
     // The interval flusher can be up to its own period behind. Without this,
     // whatever happened in the last half-second is simply lost on exit.
+    // (Also covers the force-drop path, where serve never returned cleanly.)
     persist.flush();
     tracing::info!("board flushed; bye");
     Ok(())
 }
 
-async fn shutdown(board: SharedBoard) {
+async fn wait_interrupt() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
@@ -125,7 +159,4 @@ async fn shutdown(board: SharedBoard) {
     }
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
-
-    tracing::info!("shutting down");
-    board.flush();
 }

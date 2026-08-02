@@ -2,9 +2,8 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
-import { Home } from "./dist-test/components/Home.js";
-import { isBlocked, sortFor } from "./dist-test/components/Board.js";
-import { Head } from "./dist-test/components/Detail.js";
+import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
+import { Head, PlanEditor, planTasksFromArtifact } from "./dist-test/components/Detail.js";
 
 const now = Math.floor(Date.now() / 1000);
 
@@ -195,7 +194,7 @@ readyCards.sort(sortFor("ready"));
 
 assert.strictEqual(readyCards[0].id, 1, "After claim-release bounce, unblocked card #1 must STILL sort first");
 
-// Test 7: Home Issues rows show a friendly waiting-on line when blocked_by is non-empty
+// Test 7: Cockpit surfaces Needs you action cards with humanized copy
 const projectItem = {
   id: 100,
   parent: null,
@@ -229,59 +228,69 @@ const projectItem = {
   history: [],
 };
 
-const blockedHomeItem = {
+const needsYouItem = {
   ...blockedItem,
+  id: 9,
   parent: 100,
+  state: "needs_human",
+  blocked_by: [],
+  blockers: [],
+  escalation: {
+    question:
+      "Task failed to run 3 times. Last failure: clone failed: fatal: unable to access 'https://example.com/x.git/': CONNECT tunnel failed, response 403",
+    options: [
+      { label: "Investigate the environment", detail: "infra" },
+      { label: "Cut scope", detail: "drop" },
+    ],
+    recommended: 0,
+    blocked_since: new Date(Date.now() - 3600_000).toISOString(),
+    answer: null,
+  },
 };
 
-const unblockedHomeItem = {
-  ...unblockedItem,
-  parent: 100,
-};
-
-const homeItemsMap = new Map([
-  [100, projectItem],
-  [7, blockedHomeItem],
-  [8, unblockedHomeItem],
-]);
-
-const homeHtml = renderToString(
-  React.createElement(Home, {
-    items: homeItemsMap,
-    goals: [],
+const cockpitHtml = renderToString(
+  React.createElement(Cockpit, {
+    items: new Map([
+      [100, projectItem],
+      [9, needsYouItem],
+    ]),
+    goals: [
+      {
+        id: 100,
+        title: "Test Project",
+        intent: "Test",
+        progress: 0,
+        leaves_done: 0,
+        leaves_total: 1,
+        spend_cents: 0,
+        budget_cents: null,
+        agents_live: 0,
+        needs_you: 1,
+        plan_status: "approved_v1",
+        columns: [],
+        story: [],
+      },
+    ],
+    stories: new Map(),
+    goalOf: () => 100,
+    breadcrumbOf: () => "Test Project",
     now,
+    heartbeatExpect: 600,
+    dispatchPaused: false,
     onOpen: () => {},
-    onOpenBoard: () => {},
     onChanged: () => {},
   })
 );
 
-console.log("\nHome HTML:\n", homeHtml);
-
-assert(homeHtml.includes('class="owaiting blocker-chips"') || homeHtml.includes('blocker-chips'), "Home should contain blocker-chips line");
-assert(homeHtml.includes('⊘ waiting on'), "Home should contain waiting on label");
-assert(homeHtml.includes('Supervisor runs the gates'), "Home row should display human-readable blocker title");
-
-// Test 8: Home with only unblocked items renders no waiting-on line
-const unblockedHomeItemsMap = new Map([
-  [100, projectItem],
-  [8, unblockedHomeItem],
-]);
-const cleanHomeHtml = renderToString(
-  React.createElement(Home, {
-    items: unblockedHomeItemsMap,
-    goals: [],
-    now,
-    onOpen: () => {},
-    onOpenBoard: () => {},
-    onChanged: () => {},
-  })
+console.log("\nCockpit HTML:\n", cockpitHtml.slice(0, 800));
+assert(cockpitHtml.includes("cockpit-needs"), "Cockpit should show Needs you section");
+assert(
+  cockpitHtml.includes("Sandbox couldn") && cockpitHtml.includes("clone"),
+  "Cockpit Needs you should humanize clone failures",
 );
+assert(cockpitHtml.includes("Investigate the environment"), "Cockpit should offer answer options");
 
-assert(!cleanHomeHtml.includes("owaiting"), "Home with unblocked items should stay clean");
-assert(!cleanHomeHtml.includes("waiting on"), "Home with unblocked items should not show waiting on");
-
-// Test 9: Detail Head renders Archive and Delete actions
+// Test 8: Detail Head renders Archive and Delete actions
 const headHtml = renderToString(
   React.createElement(Head, {
     title: "#100 Test Project",
@@ -295,9 +304,7 @@ console.log("\nDetail Head HTML:\n", headHtml);
 assert(headHtml.includes("📦 Archive"), "Detail Head should offer Archive action button");
 assert(headHtml.includes("🗑 Delete"), "Detail Head should offer Delete action button");
 
-// Test 10: Detail Plan editor renders plan task blocker selection UI
-import { PlanEditor, planTasksFromArtifact } from "./dist-test/components/Detail.js";
-
+// Test 9: Detail Plan editor renders plan task blocker selection UI
 const samplePlanTasksSpec = [
   { key: "t1", title: "Setup Database", intent: "Setup DB intent", definition_of_done: "DB ready", blocked_by_keys: [] },
   { key: "t2", title: "Build API", intent: "Build API intent", definition_of_done: "API ready", blocked_by_keys: ["t1"] },
@@ -317,6 +324,4 @@ assert(planEditorHtml.includes("Blocked by tasks:"), "Plan editor should render 
 assert(planEditorHtml.includes("Setup Database"), "Blocker chip for t1 should display human readable sibling task title");
 assert(planEditorHtml.includes("+ Select blocker task..."), "Plan editor should offer '+ Select blocker task...' dropdown to select sibling tasks");
 
-console.log("\n✅ All Card, Board, Home, and Detail component assertions passed!");
-
-
+console.log("\n✅ All Card, Cockpit, and Detail component assertions passed!");

@@ -1,17 +1,13 @@
 import { useMemo, useState } from "react";
-import { Board } from "./components/Board";
+import { Cockpit } from "./components/Cockpit";
 import { DetailDrawer } from "./components/Detail";
-import { Home } from "./components/Home";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
 import { api, money } from "./api";
 import type { WorkItem } from "./types";
 
-type Tab = "home" | "board";
-
 export default function App() {
   const b = useBoard();
   const now = useNow();
-  const [tab, setTab] = useState<Tab>("home");
   const [open, setOpen] = useState<number | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
 
@@ -43,20 +39,10 @@ export default function App() {
   return (
     <div className="app">
       <header className="top">
-        <div className="brand">honr</div>
-        <nav>
-          {(
-            [
-              ["home", "Home"],
-              ["board", "Board"],
-            ] as [Tab, string][]
-          ).map(([t, label]) => (
-            <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-              {label}
-              {t === "home" && totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
-            </button>
-          ))}
-        </nav>
+        <div className="brand">
+          honr
+          {totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
+        </div>
         <div className="stats">
           <span className="dim">spent</span>
           <span>
@@ -68,33 +54,45 @@ export default function App() {
           <span className={b.connected ? "conn ok" : "conn off"}>
             {b.connected ? "live" : "reconnecting…"}
           </span>
-          <button
-            type="button"
-            className={b.dispatchPaused ? "dispatch-toggle paused" : "dispatch-toggle"}
-            disabled={pauseBusy || !b.loaded}
-            onClick={toggleDispatch}
-            title={
-              b.dispatchPaused
-                ? "Resume all projects — clear every project pause"
-                : "Pause all projects — then Resume individual ones as exceptions"
-            }
-          >
-            {b.dispatchPaused ? "Resume all" : "Pause all"}
-          </button>
+          {!b.dispatchPaused && (
+            <button
+              type="button"
+              className="dispatch-toggle"
+              disabled={pauseBusy || !b.loaded}
+              onClick={toggleDispatch}
+              title="Pause all projects — then Resume individual ones as exceptions"
+            >
+              Pause all
+            </button>
+          )}
         </div>
       </header>
 
       {b.dispatchPaused && (
-        <div className="info banner">
-          All projects paused — running cards continue. Resume a project below to
-          let only that subtree claim again, or Resume all in the header.
+        <div className="info banner pause-banner" role="status">
+          <p className="banner-text">
+            <strong>All projects paused.</strong>{" "}
+            Running cards keep going. Resume all, or resume one project in its
+            swimlane to let only that subtree claim.
+          </p>
+          <button
+            type="button"
+            className="banner-action"
+            disabled={pauseBusy || !b.loaded}
+            onClick={toggleDispatch}
+            title="Resume all projects — clear every project pause"
+          >
+            Resume all
+          </button>
         </div>
       )}
       {staleFor !== null && (
         <div className="err banner">
           ⚠ NOT LIVE — showing state from {Math.round(staleFor / 1000)}s ago.
           honr is unreachable; nothing here is current.
-          <button className="link" onClick={b.refresh}>retry now</button>
+          <button className="link" onClick={b.refresh}>
+            retry now
+          </button>
         </div>
       )}
       {b.error && staleFor === null && <div className="err banner">{b.error}</div>}
@@ -102,8 +100,8 @@ export default function App() {
       <main className={open ? "with-drawer" : ""}>
         {!b.loaded ? (
           <div className="dim pad">loading…</div>
-        ) : tab === "board" ? (
-          <Board
+        ) : (
+          <Cockpit
             goals={b.goals}
             items={b.items}
             stories={b.stories}
@@ -111,24 +109,23 @@ export default function App() {
             breadcrumbOf={breadcrumbOf}
             now={now}
             heartbeatExpect={b.heartbeatExpect}
+            dispatchPaused={b.dispatchPaused}
             defaultEngine={b.defaultEngine}
             defaultModel={b.defaultModel}
             onOpen={setOpen}
             onChanged={b.refresh}
           />
-        ) : (
-          <Home
-            items={b.items}
-            goals={b.goals}
-            now={now}
-            onOpen={setOpen}
-            onOpenBoard={() => setTab("board")}
-            onChanged={b.refresh}
-          />
         )}
 
         {open != null && (
-          <DetailDrawer id={open} now={now} defaultEngine={b.defaultEngine} defaultModel={b.defaultModel} onClose={() => setOpen(null)} onChanged={b.refresh} />
+          <DetailDrawer
+            id={open}
+            now={now}
+            defaultEngine={b.defaultEngine}
+            defaultModel={b.defaultModel}
+            onClose={() => setOpen(null)}
+            onChanged={b.refresh}
+          />
         )}
       </main>
     </div>

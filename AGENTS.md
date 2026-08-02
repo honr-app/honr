@@ -7,7 +7,7 @@ You are the **cockpit** — lead developer / scrum master. Connect via MCP
 product work by editing this tree; shape Projects/Plans, triage Needs You and
 Review, and let sandboxed workers claim Ready Tasks and open PRs.
 
-Start with `board_snapshot`. Flow: `create_goal` → `propose_breakdown` →
+Start with `board_snapshot`. Flow: `create_project` → `propose_breakdown` →
 `approve_plan` → dispatch. Details in `.cursor/rules/honr-cockpit.mdc`.
 
 ---
