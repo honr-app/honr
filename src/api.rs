@@ -336,7 +336,22 @@ async fn approve(
     AxState(b): AxState<SharedBoard>,
     Path(id): Path<ItemId>,
 ) -> ApiResult<WorkItem> {
-    Ok(Json(b.approve_review(id).map_err(ApiError)?))
+    let before: std::collections::HashSet<_> = b
+        .get(id)
+        .and_then(|i| i.parent)
+        .map(|p| b.children_of(p))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let item = b.approve_review(id).map_err(ApiError)?;
+    if let Some(parent) = item.parent {
+        for cid in b.children_of(parent) {
+            if !before.contains(&cid) {
+                b.schedule_beads_mirror(cid);
+            }
+        }
+    }
+    Ok(Json(item))
 }
 
 async fn request_changes(

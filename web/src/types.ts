@@ -72,6 +72,12 @@ export interface PlanArtifact {
   approved_revision: number | null;
 }
 
+/** Proposed sibling Tasks on a card (Initial plan or impl split) awaiting Approve. */
+export interface TaskProposal {
+  summary: string;
+  tasks: PlanTaskSpec[];
+}
+
 export interface WorkItem {
   id: number;
   parent: number | null;
@@ -111,6 +117,7 @@ export interface WorkItem {
   github_issue_url?: string | null;
   pr_url: string | null;
   plan?: PlanArtifact | null;
+  proposal?: TaskProposal | null;
   created_at: string;
   entered_state_at: string;
   history: Transition[];

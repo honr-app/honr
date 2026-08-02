@@ -445,8 +445,8 @@ impl Cockpit {
     #[tool(
         name = "create_project",
         description = "Create a Project (top-level container). Seeds an Initial plan Task in \
-                       Backlog — dispatch it to open a plan/docs PR (Review). Sibling Tasks land \
-                       via propose_breakdown + Approve Plan. Optional project_prompt overrides \
+                       Backlog — dispatch it; the agent writes plan.json + a plan/docs PR \
+                       (Review). Approve creates sibling Tasks. Optional project_prompt overrides \
                        the default standing instructions."
     )]
     fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
@@ -554,10 +554,11 @@ impl Cockpit {
 
     #[tool(
         name = "approve_plan",
-        description = "Approve a Project's Plan artifact: materialize flat Tasks + deps and \
-                       publish them to Backlog. Never moves the Project itself to Backlog. \
-                       Does not start runs — dispatch each Task (or Initial plan) explicitly. \
-                       Only call this once the human has actually seen and approved the shape."
+        description = "Approve a Project's Plan artifact: materialize flat Tasks + deps, \
+                       publish them to Backlog, and finish any open Initial plan card \
+                       (including Review). Same gate as approve_review on Initial plan. \
+                       Never moves the Project itself to Backlog. Does not start runs — \
+                       dispatch each Task explicitly."
     )]
     fn approve_plan(&self, Parameters(a): Parameters<IdArg>) -> Out<ApprovePlanOut> {
         let published = self.board.approve_plan(a.id).map_err(bad)?;
@@ -651,13 +652,28 @@ impl Cockpit {
 
     #[tool(
         name = "approve_review",
-        description = "Merge a card that has passed its gates. Sort your way through Review by \
-                       blast radius and novelty, not arrival order — a 400-line change to \
-                       payment calculation and a README typo are not the same review."
+        description = "Approve a Review card (surfaces the PR; honr never merges). If the card \
+                       has a Task proposal (Initial plan or split), creates those sibling Tasks. \
+                       Sort Review by blast radius and novelty, not arrival order."
     )]
     fn approve_review(&self, Parameters(a): Parameters<IdArg>) -> Out<Ack> {
-        self.board.approve_review(a.id).map_err(bad)?;
-        self.ack(a.id, "merged")
+        let before: std::collections::HashSet<_> = self
+            .board
+            .get(a.id)
+            .and_then(|i| i.parent)
+            .map(|p| self.board.children_of(p))
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let item = self.board.approve_review(a.id).map_err(bad)?;
+        if let Some(parent) = item.parent {
+            for cid in self.board.children_of(parent) {
+                if !before.contains(&cid) {
+                    self.board.schedule_beads_mirror(cid);
+                }
+            }
+        }
+        self.ack(a.id, "approved")
     }
 
     #[tool(
@@ -721,10 +737,10 @@ impl Cockpit {
 
     #[tool(
         name = "split",
-        description = "WORKER VERB. The work is bigger than this card: create children rather \
-                       than heroically overrunning. The parent becomes a container and your \
-                       children fan into Backlog. Needs two or more children; if it is really one \
-                       card, just report."
+        description = "WORKER VERB. The work is bigger than this card: propose sibling Tasks \
+                       (Review). Human Approve creates them under the Project — nothing is \
+                       created until then. Needs two or more children; if it is really one card, \
+                       just report. Mutually exclusive with opening a PR."
     )]
     fn split(&self, Parameters(a): Parameters<SplitArg>) -> Out<SplitOut> {
         let children = a
@@ -738,12 +754,13 @@ impl Cockpit {
                 spec
             })
             .collect();
-        let made = self.board.split(a.item_id, &a.agent_id, children, 5).map_err(bad)?;
-        for m in &made {
-            self.board.schedule_beads_mirror(m.id);
-        }
+        let card = self
+            .board
+            .propose_split(a.item_id, &a.agent_id, children, 5)
+            .map_err(bad)?;
         Ok(ToolJson(SplitOut {
-            items: made.into_iter().map(|i| i.id).collect(),
+            // Proposal card id — siblings do not exist until Approve.
+            items: vec![card.id],
         }))
     }
 
@@ -829,10 +846,11 @@ impl ServerHandler for Cockpit {
                  without reclaim — dispatch again. Prefer park over halt when a run is wedged — \
                  park keeps the sandbox and agy session; unpark then dispatch to resume. Prefer \
                  steer for a soft note that can wait. Standing policy belongs in the Project \
-                 project_prompt (edit via update); task inputs are the Plan. Initial plan finishes \
-                 via plan/docs PR → Review; siblings via Approve Plan. Read item_detail's Plan \
-                 before approving or answering; a card that passes its gates can still be building \
-                 the wrong thing, because coherence is not a property of any single card.",
+                 project_prompt (edit via update); task inputs are the Plan. Initial plan and \
+                 impl splits write a proposal on the card → Review; Approve creates sibling \
+                 Tasks. Read item_detail's proposal/Plan before approving; a card that passes \
+                 its gates can still be building the wrong thing, because coherence is not a \
+                 property of any single card.",
         )
     }
 }

@@ -236,9 +236,50 @@ impl Board {
                             healed += 1;
                         }
                     }
+                    // Initial plan in Review with empty proposal but parent Plan
+                    // awaiting: copy Tasks onto the card so Approve / drawer work.
+                    let mut proposal_healed = 0usize;
+                    let awaiting_by_project: HashMap<ItemId, TaskProposal> = state
+                        .items
+                        .values()
+                        .filter(|p| p.is_project())
+                        .filter_map(|p| {
+                            let plan = p.plan.as_ref()?;
+                            if plan.status == PlanStatus::AwaitingApproval && !plan.tasks.is_empty()
+                            {
+                                Some((
+                                    p.id,
+                                    TaskProposal {
+                                        summary: plan.summary.clone(),
+                                        tasks: plan.tasks.clone(),
+                                    },
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    for item in state.items.values_mut() {
+                        if !item.is_initial_plan_task() || item.state != State::Review {
+                            continue;
+                        }
+                        if item.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty()) {
+                            continue;
+                        }
+                        let Some(parent) = item.parent else { continue };
+                        if let Some(prop) = awaiting_by_project.get(&parent) {
+                            item.proposal = Some(prop.clone());
+                            proposal_healed += 1;
+                        }
+                    }
                     tracing::info!(items = state.items.len(), "restored board from {path:?}");
                     if healed > 0 {
                         tracing::info!("healed {healed} Initial plan Task(s) Shaping → Backlog");
+                    }
+                    if proposal_healed > 0 {
+                        tracing::info!(
+                            "healed {proposal_healed} Initial plan proposal(s) from Project Plan"
+                        );
                     }
                     *board.state.write().unwrap() = state;
                 }
@@ -666,12 +707,12 @@ impl Board {
             Some(project_id),
             INITIAL_PLAN_TITLE,
             format!(
-                "Produce a Plan for «{project_title}» — flat sibling Tasks with deps and \
-                 mechanically checkable DoDs. Open one plan/docs PR, then finish with \
-                 report.json (Review). Sibling Tasks land via Approve Plan in the cockpit — \
-                 do not write split.json on this card."
+                "Propose sibling Tasks for «{project_title}» (plan.json: keys, deps, \
+                 mechanically checkable DoDs). Open one plan/docs PR, then finish with \
+                 report.json (Review). Human Approve creates those Tasks — do not write \
+                 split.json on this card."
             ),
-            Some("Plan/docs PR approved in Review; Tasks via Approve Plan.".into()),
+            Some("plan.json + docs PR in Review; Approve materializes Tasks.".into()),
             Origin::Planner,
             false,
             None,
@@ -904,14 +945,12 @@ impl Board {
             if !child.is_initial_plan_task() || child.state.is_terminal() {
                 continue;
             }
-            // Initial plan in Review finishes only via approve_review (plan PR).
-            if child.state == State::Review {
-                continue;
-            }
-            // Prefer Done from shaping/ready/running paths the machine allows.
+            // One gate: Approve Plan (or approve_review that delegates here) finishes
+            // Initial plan even when it is sitting in Review with the docs PR.
             if child.state == State::Backlog
                 || child.state == State::Shaping
                 || child.state == State::NeedsHuman
+                || child.state == State::Review
             {
                 let _ = self.transition(
                     cid,
@@ -1852,32 +1891,32 @@ fn check_split_relatedness(
     Ok(())
 }
 
-    /// `split` — self-orchestration. Creates **sibling** Tasks under the same
-    /// Project (flat model); the original card is Done, not nested into.
+    /// Validate children and park them on the card as a proposal in Review.
+    /// Does **not** create sibling Tasks — Approve materializes them.
     ///
-    /// PR and split are mutually exclusive. Sibling titles already present under
-    /// the Project are reused (idempotent). Optional `key` / `blocked_by_keys`
-    /// wire the same DAG shape as Approve Plan.
-    pub fn split(
+    /// PR and proposal are mutually exclusive. Optional `key` / `blocked_by_keys`
+    /// match the Plan task shape.
+    pub fn propose_split(
         &self,
         id: ItemId,
         agent_id: &str,
         children: Vec<crate::model::SplitChildSpec>,
         max_children: usize,
-    ) -> Result<Vec<WorkItem>, String> {
+    ) -> Result<WorkItem, String> {
         let card = self.get(id).ok_or("no such item")?;
 
         if card.is_initial_plan_task() {
             return Err(
-                "Initial plan cannot split; finish with report.json + plan/docs PR (Review), \
-                 then Approve Plan for sibling Tasks"
+                "Initial plan cannot use split.json; finish with plan.json + report.json + \
+                 plan/docs PR (Review); Approve materializes sibling Tasks"
                     .into(),
             );
         }
 
         if let Some(ref pr_url) = card.pr_url.as_ref().filter(|s| !s.trim().is_empty()) {
             let msg = format!(
-                "cannot split card #{id}: a PR already exists ({pr_url}); split and publish are mutually exclusive"
+                "cannot propose split on card #{id}: a PR already exists ({pr_url}); \
+                 split and publish are mutually exclusive"
             );
             let _ = self.escalate(
                 id,
@@ -1923,35 +1962,109 @@ fn check_split_relatedness(
 
         Self::check_split_relatedness(&card, &project, &children)?;
 
-        // Dedupe titles within the request (first wins); assign stable keys.
         let mut seen_req = HashSet::new();
-        let mut unique_children = Vec::new();
-        for (idx, mut child) in children.into_iter().enumerate() {
+        let mut specs = Vec::new();
+        for (idx, child) in children.into_iter().enumerate() {
             let title_key = Self::normalize_title(&child.title);
             if title_key.is_empty() || !seen_req.insert(title_key) {
                 continue;
             }
-            if child
+            let key = child
                 .key
-                .as_ref()
-                .map(|k| k.trim().is_empty())
-                .unwrap_or(true)
-            {
-                child.key = Some(format!("s{}", idx + 1));
-            }
-            unique_children.push(child);
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .unwrap_or_else(|| format!("s{}", idx + 1));
+            specs.push(PlanTaskSpec {
+                key,
+                title: child.title,
+                intent: child.intent,
+                definition_of_done: child.definition_of_done,
+                blocked_by_keys: child.blocked_by_keys,
+                capability: None,
+                item_id: None,
+            });
         }
-        if unique_children.len() < 2 {
+        if specs.len() < 2 {
             return Err(
                 "a split needs at least two distinct sibling titles; use report if the work is one card"
                     .into(),
             );
         }
 
-        self.transition(id, State::Splitting, agent_id, Some("agent requested split".into()))
+        let summary = format!("Split of «{}»", card.title);
+        self.set_proposal(
+            id,
+            TaskProposal {
+                summary,
+                tasks: specs.clone(),
+            },
+        )?;
+
+        let item = self
+            .transition(
+                id,
+                State::Review,
+                agent_id,
+                Some("proposed sibling Tasks — awaiting Approve".into()),
+            )
             .map_err(|e| e.to_string())?;
 
-        // Existing non-retired siblings under the Project, keyed by normalized title.
+        self.story(
+            project_id,
+            format!(
+                "{} proposed {} sibling Tasks — Approve to create them: {}.",
+                card.title,
+                specs.len(),
+                specs.iter().map(|t| t.title.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        );
+        Ok(item)
+    }
+
+    /// Store a TaskProposal on a card (Initial plan or impl split). Does not transition.
+    pub fn set_proposal(&self, id: ItemId, proposal: TaskProposal) -> Result<WorkItem, String> {
+        if proposal.tasks.is_empty() {
+            return Err("proposal needs at least one task".into());
+        }
+        for t in &proposal.tasks {
+            if t.key.trim().is_empty() {
+                return Err(format!("proposal task '{}' needs a key", t.title));
+            }
+            if t.definition_of_done.trim().is_empty() {
+                return Err(format!("proposal task '{}' needs a definition of done", t.title));
+            }
+        }
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let it = s
+                .items
+                .get_mut(&id)
+                .ok_or_else(|| format!("no work item #{id}"))?;
+            it.proposal = Some(proposal);
+            it.clone()
+        };
+        self.emit(&item);
+        Ok(item)
+    }
+
+    /// Materialize `item.proposal` into sibling Tasks under the parent Project.
+    /// Clears the proposal. Does not transition the parent card.
+    fn materialize_proposal(
+        &self,
+        id: ItemId,
+        by: &str,
+        origin: Origin,
+    ) -> Result<Vec<WorkItem>, String> {
+        let card = self.get(id).ok_or("no such item")?;
+        let proposal = card
+            .proposal
+            .clone()
+            .filter(|p| !p.tasks.is_empty())
+            .ok_or_else(|| format!("card #{id} has no proposal to materialize"))?;
+        let project_id = card.parent.ok_or_else(|| {
+            "cannot materialize proposal on a Project root".to_string()
+        })?;
+
         let existing_by_title: HashMap<String, WorkItem> = {
             let s = self.state.read().unwrap();
             s.items
@@ -1965,41 +2078,35 @@ fn check_split_relatedness(
         };
 
         let mut made = Vec::new();
-        let mut created = 0usize;
-        let mut reused = 0usize;
         let mut key_to_id: BTreeMap<String, ItemId> = BTreeMap::new();
-        for child in &unique_children {
-            let title_key = Self::normalize_title(&child.title);
-            let plan_key = child.key.clone().unwrap_or_else(|| title_key.clone());
+        for spec in &proposal.tasks {
+            let title_key = Self::normalize_title(&spec.title);
             if let Some(existing) = existing_by_title.get(&title_key) {
-                reused += 1;
-                key_to_id.insert(plan_key, existing.id);
+                key_to_id.insert(spec.key.clone(), existing.id);
                 made.push(existing.clone());
                 continue;
             }
             let sibling = self.create(
                 Some(project_id),
-                child.title.clone(),
-                child.intent.clone(),
-                Some(child.definition_of_done.clone()),
-                Origin::Split { from: id },
+                spec.title.clone(),
+                spec.intent.clone(),
+                Some(spec.definition_of_done.clone()),
+                origin.clone(),
                 false,
-                card.capability.clone(),
+                spec.capability.clone().or_else(|| card.capability.clone()),
             )?;
-            self.transition(sibling.id, State::Shaping, agent_id, None)
+            self.transition(sibling.id, State::Shaping, by, Some("from proposal".into()))
                 .map_err(|e| e.to_string())?;
             let sibling = self
-                .transition(sibling.id, State::Backlog, agent_id, None)
+                .transition(sibling.id, State::Backlog, by, Some("from proposal".into()))
                 .map_err(|e| e.to_string())?;
-            key_to_id.insert(plan_key, sibling.id);
-            created += 1;
+            key_to_id.insert(spec.key.clone(), sibling.id);
             made.push(sibling);
         }
 
-        for child in &unique_children {
-            let Some(plan_key) = child.key.as_ref() else { continue };
-            let Some(&sid) = key_to_id.get(plan_key) else { continue };
-            let blockers: Vec<ItemId> = child
+        for spec in &proposal.tasks {
+            let Some(&sid) = key_to_id.get(&spec.key) else { continue };
+            let blockers: Vec<ItemId> = spec
                 .blocked_by_keys
                 .iter()
                 .filter_map(|k| key_to_id.get(k).copied())
@@ -2009,25 +2116,16 @@ fn check_split_relatedness(
             }
         }
 
-        self.transition(
-            id,
-            State::Done,
-            agent_id,
-            Some("split into sibling tasks under the Project".into()),
-        )
-        .map_err(|e| e.to_string())?;
+        {
+            let mut s = self.state.write().unwrap();
+            if let Some(it) = s.items.get_mut(&id) {
+                it.proposal = None;
+                let snap = it.clone();
+                drop(s);
+                self.emit(&snap);
+            }
+        }
 
-        self.story(
-            project_id,
-            format!(
-                "{} turned out bigger than one card — {} siblings ({} created, {} reused): {}.",
-                card.title,
-                made.len(),
-                created,
-                reused,
-                made.iter().map(|c| c.title.as_str()).collect::<Vec<_>>().join(", ")
-            ),
-        );
         Ok(made)
     }
 
@@ -2379,17 +2477,140 @@ fn check_split_relatedness(
 
     pub fn approve_review(&self, id: ItemId) -> Result<WorkItem, String> {
         let item = self
+            .get(id)
+            .ok_or_else(|| format!("no work item #{id}"))?;
+
+        let has_proposal = item
+            .proposal
+            .as_ref()
+            .is_some_and(|p| !p.tasks.is_empty());
+
+        if has_proposal {
+            let is_initial = item.is_initial_plan_task();
+            let proposal = item.proposal.clone().unwrap();
+            let parent = item.parent;
+
+            let origin = if is_initial {
+                Origin::Planner
+            } else {
+                Origin::Split { from: id }
+            };
+            let made = self.materialize_proposal(id, "human", origin)?;
+
+            // Initial plan: sync approved Plan onto the Project for later briefings.
+            if is_initial {
+                if let Some(project_id) = parent {
+                    let _ = self.propose_plan(
+                        project_id,
+                        proposal.summary.clone(),
+                        proposal.tasks.clone(),
+                        vec![],
+                    );
+                    // Mark approved without re-creating (materialize already did).
+                    // approve_plan would try to materialize again — instead stamp status.
+                    {
+                        let mut s = self.state.write().unwrap();
+                        if let Some(p) = s.items.get_mut(&project_id) {
+                            if let Some(plan) = p.plan.as_mut() {
+                                // Link item_ids from just-created siblings by key/title.
+                                let by_title: HashMap<String, ItemId> = made
+                                    .iter()
+                                    .map(|m| (Self::normalize_title(&m.title), m.id))
+                                    .collect();
+                                for t in plan.tasks.iter_mut() {
+                                    if t.item_id.is_none() {
+                                        t.item_id = by_title
+                                            .get(&Self::normalize_title(&t.title))
+                                            .copied();
+                                    }
+                                }
+                                plan.status = PlanStatus::Approved;
+                                plan.approved_revision = Some(plan.revision);
+                                let snap = p.clone();
+                                drop(s);
+                                self.emit(&snap);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let done = self
+                .transition(id, State::Done, "human", Some("proposal approved".into()))
+                .map_err(|e| e.to_string())?;
+            self.story(
+                id,
+                format!(
+                    "{} approved — {} Tasks created{}.",
+                    done.title,
+                    made.len(),
+                    if done.pr_url.is_some() {
+                        "; PR surfaced (honr never merges)"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+            return Ok(done);
+        }
+
+        // Legacy: Initial plan with Project Plan awaiting but no card proposal.
+        if item.is_initial_plan_task() {
+            if let Some(parent) = item.parent {
+                if let Some(project) = self.get(parent) {
+                    let awaiting = project.plan.as_ref().is_some_and(|p| {
+                        p.status == PlanStatus::AwaitingApproval && !p.tasks.is_empty()
+                    });
+                    if awaiting {
+                        self.approve_plan(parent)?;
+                        let done = self
+                            .get(id)
+                            .ok_or_else(|| format!("no work item #{id}"))?;
+                        if done.state == State::Done {
+                            self.story(
+                                id,
+                                format!(
+                                    "{} approved — Plan materialized; PR surfaced (honr never merges).",
+                                    done.title
+                                ),
+                            );
+                            return Ok(done);
+                        }
+                        let done = self
+                            .transition(id, State::Done, "human", Some("approved".into()))
+                            .map_err(|e| e.to_string())?;
+                        self.story(
+                            id,
+                            format!(
+                                "{} approved — Plan materialized; PR surfaced (honr never merges).",
+                                done.title
+                            ),
+                        );
+                        return Ok(done);
+                    }
+                }
+            }
+        }
+
+        let item = self
             .transition(id, State::Done, "human", Some("approved".into()))
             .map_err(|e| e.to_string())?;
-        self.story(id, format!("{} approved and merged.", item.title));
+        self.story(id, format!("{} approved — PR surfaced (honr never merges).", item.title));
         Ok(item)
     }
 
     pub fn request_changes(&self, id: ItemId, note: String) -> Result<WorkItem, String> {
         self.steer(id, format!("Changes requested: {note}"))?;
+        {
+            let mut s = self.state.write().unwrap();
+            if let Some(it) = s.items.get_mut(&id) {
+                it.proposal = None;
+            }
+        }
         let item = self
             .transition(id, State::Backlog, "human", Some(format!("changes requested: {note}")))
             .map_err(|e| e.to_string())?;
+        self.emit(&item);
         self.story(id, format!("{}: changes requested — {note}", item.title));
         Ok(item)
     }
@@ -2913,7 +3134,7 @@ mod tests {
     }
 
     #[test]
-    fn split_creates_siblings_under_project() {
+    fn propose_split_goes_to_review_approve_creates_siblings() {
         let (b, id) = claimed_leaf();
         let project_id = b.get(id).unwrap().parent.expect("task under project");
         let _ = b.transition(id, State::Running, "agent", None);
@@ -2921,19 +3142,36 @@ mod tests {
             SplitChildSpec::new("Leaf part 1", "Do leaf part 1", "Leaf part 1 done"),
             SplitChildSpec::new("Leaf part 2", "Do leaf part 2", "Leaf part 2 done"),
         ];
-        let made = b.split(id, "agent", children, 5).expect("split should succeed");
-        assert_eq!(made.len(), 2);
-        assert_eq!(made[0].parent, Some(project_id));
-        assert_eq!(made[0].state, State::Backlog);
-        assert_eq!(made[1].parent, Some(project_id));
-        assert_eq!(made[1].state, State::Backlog);
+        let card = b
+            .propose_split(id, "agent", children, 5)
+            .expect("propose_split should succeed");
+        assert_eq!(card.state, State::Review);
+        assert_eq!(card.proposal.as_ref().unwrap().tasks.len(), 2);
+        assert_eq!(
+            b.children_of(project_id)
+                .into_iter()
+                .filter(|&cid| cid != id)
+                .filter(|&cid| !b.get(cid).unwrap().is_initial_plan_task())
+                .count(),
+            0,
+            "no siblings before Approve"
+        );
 
-        let original = b.get(id).expect("original exists");
-        assert_eq!(original.state, State::Done);
+        let done = b.approve_review(id).expect("approve");
+        assert_eq!(done.state, State::Done);
+        assert!(done.proposal.is_none());
+        let siblings: Vec<_> = b
+            .children_of(project_id)
+            .into_iter()
+            .filter_map(|cid| b.get(cid))
+            .filter(|i| !i.is_initial_plan_task() && i.id != id)
+            .collect();
+        assert_eq!(siblings.len(), 2);
+        assert!(siblings.iter().all(|s| s.state == State::Backlog));
     }
 
     #[test]
-    fn split_accepts_on_theme_children() {
+    fn propose_split_accepts_on_theme_children() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-theme-accept.json"));
         let project = b
             .create(None, "User Authentication System", "Manage user logins and tokens", None, Origin::Human, true, None)
@@ -2960,13 +3198,15 @@ mod tests {
             SplitChildSpec::new("GitHub OAuth token exchange", "Exchange code for github access token", "GitHub auth done"),
         ];
 
-        let made = b.split(task.id, "agent", children, 5).expect("on-theme split should succeed");
-        assert_eq!(made.len(), 2);
-        assert_eq!(b.get(task.id).unwrap().state, State::Done);
+        let card = b
+            .propose_split(task.id, "agent", children, 5)
+            .expect("on-theme propose_split should succeed");
+        assert_eq!(card.state, State::Review);
+        assert_eq!(card.proposal.as_ref().unwrap().tasks.len(), 2);
     }
 
     #[test]
-    fn split_rejects_off_theme_children() {
+    fn propose_split_rejects_off_theme_children() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-theme-reject.json"));
         let project = b
             .create(None, "User Authentication System", "Manage user logins and tokens", None, Origin::Human, true, None)
@@ -2993,42 +3233,40 @@ mod tests {
             SplitChildSpec::new("Database connection pool", "Optimize postgres max connection limit", "DB config done"),
         ];
 
-        let err = b.split(task.id, "agent", children, 5).unwrap_err();
+        let err = b.propose_split(task.id, "agent", children, 5).unwrap_err();
         assert!(err.contains("does not relate to parent card or project theme"), "got error: {err}");
-        assert_ne!(b.get(task.id).unwrap().state, State::Done);
+        assert_eq!(b.get(task.id).unwrap().state, State::Running);
     }
 
     #[test]
-    fn split_refused_below_minimum_siblings() {
+    fn propose_split_refused_below_minimum_siblings() {
         let (b, id) = claimed_leaf();
         let _ = b.transition(id, State::Running, "agent", None);
         let children = vec![SplitChildSpec::new("Single", "Only one", "Done")];
-        let err = b.split(id, "agent", children, 5).unwrap_err();
+        let err = b.propose_split(id, "agent", children, 5).unwrap_err();
         assert!(err.contains("at least two siblings"), "got error: {err}");
     }
 
     #[test]
-    fn split_refused_exceeding_fanout_governor() {
+    fn propose_split_refused_exceeding_fanout_governor() {
         let (b, id) = claimed_leaf();
         let _ = b.transition(id, State::Running, "agent", None);
         let children: Vec<_> = (1..=6)
             .map(|i| SplitChildSpec::new(format!("Child {i}"), format!("Intent {i}"), format!("DoD {i}")))
             .collect();
-        let err = b.split(id, "agent", children, 5).unwrap_err();
+        let err = b.propose_split(id, "agent", children, 5).unwrap_err();
         assert!(err.contains("exceeds max_children_per_split=5"), "got error: {err}");
     }
 
     #[test]
-    fn split_refused_on_project_root() {
+    fn propose_split_refused_on_project_root() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-root.json"));
         let project = b
             .create(None, "proj", "why", None, Origin::Human, true, None)
             .expect("project");
         let _ = b.transition(project.id, State::Shaping, "t", None);
-        // Put project in a claimable path only to exercise the guard — claim a fake run.
-        // Projects aren't Backlog-claimable; call split directly after forcing Splitting-capable state.
         let err = b
-            .split(
+            .propose_split(
                 project.id,
                 "agent",
                 vec![
@@ -3042,14 +3280,14 @@ mod tests {
     }
 
     #[test]
-    fn split_refused_when_pr_exists() {
+    fn propose_split_refused_when_pr_exists() {
         let (b, id) = claimed_leaf();
         b.set_pr_url(id, Some("https://github.com/shanemcd/honr/pull/42".to_string()));
         let children = vec![
             SplitChildSpec::new("Part 1", "Do part 1", "Part 1 done"),
             SplitChildSpec::new("Part 2", "Do part 2", "Part 2 done"),
         ];
-        let err = b.split(id, "agent", children, 5).unwrap_err();
+        let err = b.propose_split(id, "agent", children, 5).unwrap_err();
         assert!(err.contains("a PR already exists"), "got error: {err}");
 
         let item = b.get(id).expect("item exists");
@@ -3061,7 +3299,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_plan_refuses_split() {
+    fn initial_plan_refuses_propose_split() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join("honr-test-initial-plan-no-split.json"),
@@ -3086,7 +3324,7 @@ mod tests {
         let _ = b.transition(seed_id, State::Running, "agent", None);
 
         let err = b
-            .split(
+            .propose_split(
                 seed_id,
                 "agent",
                 vec![
@@ -3104,12 +3342,15 @@ mod tests {
                 5,
             )
             .unwrap_err();
-        assert!(err.contains("Initial plan cannot split"), "got: {err}");
+        assert!(
+            err.contains("Initial plan cannot") || err.contains("plan.json"),
+            "got: {err}"
+        );
         assert_eq!(b.get(seed_id).unwrap().state, State::Running);
     }
 
     #[test]
-    fn split_wires_blocked_by_keys() {
+    fn approve_split_proposal_wires_blocked_by_keys() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join("honr-test-split-deps.json"),
@@ -3141,35 +3382,41 @@ mod tests {
         let _ = b.claim(task.id, "agent", None, 60).expect("claim");
         let _ = b.transition(task.id, State::Running, "agent", None);
 
-        let made = b
-            .split(
-                task.id,
-                "agent",
-                vec![
-                    SplitChildSpec::new(
-                        "API archive endpoint",
-                        "Expose archive for board cards",
-                        "Archive API works",
-                    )
-                    .with_deps("a", vec![]),
-                    SplitChildSpec::new(
-                        "UI archive controls",
-                        "Add archive actions in the board UI",
-                        "Archive UI works",
-                    )
-                    .with_deps("b", vec!["a".into()]),
-                ],
-                5,
-            )
-            .expect("split");
-        assert_eq!(made.len(), 2);
-        let a = made.iter().find(|m| m.title.contains("API")).unwrap();
-        let bb = made.iter().find(|m| m.title.contains("UI")).unwrap();
+        b.propose_split(
+            task.id,
+            "agent",
+            vec![
+                SplitChildSpec::new(
+                    "API archive endpoint",
+                    "Expose archive for board cards",
+                    "Archive API works",
+                )
+                .with_deps("a", vec![]),
+                SplitChildSpec::new(
+                    "UI archive controls",
+                    "Add archive actions in the board UI",
+                    "Archive UI works",
+                )
+                .with_deps("b", vec!["a".into()]),
+            ],
+            5,
+        )
+        .expect("propose");
+        b.approve_review(task.id).expect("approve");
+        let siblings: Vec<_> = b
+            .children_of(project.id)
+            .into_iter()
+            .filter_map(|cid| b.get(cid))
+            .filter(|i| !i.is_initial_plan_task() && i.id != task.id)
+            .collect();
+        assert_eq!(siblings.len(), 2);
+        let a = siblings.iter().find(|m| m.title.contains("API")).unwrap();
+        let bb = siblings.iter().find(|m| m.title.contains("UI")).unwrap();
         assert_eq!(b.get(bb.id).unwrap().blocked_by, vec![a.id]);
     }
 
     #[test]
-    fn split_reuses_existing_siblings_by_title() {
+    fn approve_split_reuses_existing_siblings_by_title() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join("honr-test-split-idempotent.json"),
@@ -3218,32 +3465,63 @@ mod tests {
         let before = b.children_of(project.id).len();
         let _ = b.claim(card.id, "agent", None, 60).expect("claim");
         let _ = b.transition(card.id, State::Running, "agent", None);
-        let made = b
-            .split(
-                card.id,
-                "agent",
-                vec![
-                    SplitChildSpec::new(
-                        "API archive endpoint",
-                        "Expose archive for board cards",
-                        "Archive API works",
-                    ),
-                    SplitChildSpec::new(
-                        "UI archive controls",
-                        "Add archive actions in the board UI",
-                        "Archive UI works",
-                    ),
-                ],
-                5,
-            )
-            .expect("split");
-        assert_eq!(made.len(), 2);
-        assert_eq!(made[0].id, preexisting.id, "matching title must be reused");
+        b.propose_split(
+            card.id,
+            "agent",
+            vec![
+                SplitChildSpec::new(
+                    "API archive endpoint",
+                    "Expose archive for board cards",
+                    "Archive API works",
+                ),
+                SplitChildSpec::new(
+                    "UI archive controls",
+                    "Add archive actions in the board UI",
+                    "Archive UI works",
+                ),
+            ],
+            5,
+        )
+        .expect("propose");
+        b.approve_review(card.id).expect("approve");
+        let siblings: Vec<_> = b
+            .children_of(project.id)
+            .into_iter()
+            .filter_map(|cid| b.get(cid))
+            .filter(|i| !i.is_initial_plan_task() && i.id != card.id)
+            .collect();
+        assert_eq!(siblings.len(), 2);
+        assert!(
+            siblings.iter().any(|s| s.id == preexisting.id),
+            "matching title must be reused"
+        );
         assert_eq!(
             b.children_of(project.id).len(),
             before + 1,
             "only the missing sibling should be created"
         );
+    }
+
+    #[test]
+    fn request_changes_clears_proposal() {
+        let (b, id) = claimed_leaf();
+        let _ = b.transition(id, State::Running, "agent", None);
+        b.propose_split(
+            id,
+            "agent",
+            vec![
+                SplitChildSpec::new("A", "a", "a done"),
+                SplitChildSpec::new("B", "b", "b done"),
+            ],
+            5,
+        )
+        .expect("propose");
+        assert!(b.get(id).unwrap().proposal.is_some());
+        let item = b
+            .request_changes(id, "narrow the split".into())
+            .expect("request_changes");
+        assert_eq!(item.state, State::Backlog);
+        assert!(item.proposal.is_none());
     }
 
     #[test]
@@ -3340,6 +3618,116 @@ mod tests {
             .into_iter()
             .find_map(|id| b.get(id).filter(|i| i.is_initial_plan_task()));
         assert!(seed.unwrap().state.is_terminal());
+    }
+
+    #[test]
+    fn approve_plan_closes_initial_plan_in_review() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-approve-closes-review.json"),
+        );
+        let project = b
+            .create(None, "Phase Review", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        let seed_id = b
+            .children_of(project.id)
+            .into_iter()
+            .find(|&id| b.get(id).is_some_and(|i| i.is_initial_plan_task()))
+            .expect("seed");
+        // Simulate finished Initial plan sitting in Review.
+        let _ = b.claim(seed_id, "agent-1", None, 60).unwrap();
+        let _ = b.transition(seed_id, State::Running, "agent-1", None);
+        b.set_pr_url(seed_id, Some("https://example.com/pr/1".into()));
+        let _ = b
+            .report(seed_id, "agent-1", 1, 0, vec!["docs".into()])
+            .expect("report");
+        assert_eq!(b.get(seed_id).unwrap().state, State::Review);
+
+        b.propose_plan(
+            project.id,
+            "from review",
+            vec![PlanTaskSpec {
+                key: "a".into(),
+                title: "Task A".into(),
+                intent: "do a".into(),
+                definition_of_done: "a done".into(),
+                blocked_by_keys: vec![],
+                capability: None,
+                item_id: None,
+            }],
+            vec![],
+        )
+        .expect("propose");
+
+        let published = b.approve_plan(project.id).expect("approve");
+        assert_eq!(published.len(), 1);
+        assert_eq!(b.get(seed_id).unwrap().state, State::Done);
+    }
+
+    #[test]
+    fn approve_review_on_initial_plan_materializes_awaiting_plan() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-approve-review-initial.json"),
+        );
+        let project = b
+            .create(None, "Phase AR", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        let seed_id = b
+            .children_of(project.id)
+            .into_iter()
+            .find(|&id| b.get(id).is_some_and(|i| i.is_initial_plan_task()))
+            .expect("seed");
+        let _ = b.claim(seed_id, "agent-1", None, 60).unwrap();
+        let _ = b.transition(seed_id, State::Running, "agent-1", None);
+        b.set_pr_url(seed_id, Some("https://example.com/pr/2".into()));
+        let _ = b
+            .report(seed_id, "agent-1", 1, 0, vec!["docs".into()])
+            .expect("report");
+
+        b.propose_plan(
+            project.id,
+            "awaiting",
+            vec![
+                PlanTaskSpec {
+                    key: "a".into(),
+                    title: "Task A".into(),
+                    intent: "do a".into(),
+                    definition_of_done: "a done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    item_id: None,
+                },
+                PlanTaskSpec {
+                    key: "b".into(),
+                    title: "Task B".into(),
+                    intent: "do b".into(),
+                    definition_of_done: "b done".into(),
+                    blocked_by_keys: vec!["a".into()],
+                    capability: None,
+                    item_id: None,
+                },
+            ],
+            vec![],
+        )
+        .expect("propose");
+
+        let done = b.approve_review(seed_id).expect("approve_review");
+        assert_eq!(done.state, State::Done);
+        assert_eq!(
+            b.get(project.id).unwrap().plan.as_ref().unwrap().status,
+            PlanStatus::Approved
+        );
+        let tasks: Vec<_> = b
+            .children_of(project.id)
+            .into_iter()
+            .filter_map(|id| b.get(id))
+            .filter(|i| !i.is_initial_plan_task())
+            .collect();
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().all(|t| t.state == State::Backlog));
     }
 
     #[test]
@@ -3663,7 +4051,7 @@ mod tests {
         );
         board.schedule_beads_mirror(task.id);
 
-        // 3. Transition task to Claimed and split into siblings
+        // 3. Propose split → Approve creates siblings (beads on materialize).
         let _ = board.transition(task.id, State::Shaping, "test", None);
         let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent", None, 45);
@@ -3672,7 +4060,16 @@ mod tests {
             SplitChildSpec::new("Sibling One", "intent 1", "dod 1"),
             SplitChildSpec::new("Sibling Two", "intent 2", "dod 2"),
         ];
-        let made = board.split(task.id, "agent", children, 5).expect("split");
+        board
+            .propose_split(task.id, "agent", children, 5)
+            .expect("propose_split");
+        board.approve_review(task.id).expect("approve");
+        let made: Vec<_> = board
+            .children_of(project.id)
+            .into_iter()
+            .filter_map(|cid| board.get(cid))
+            .filter(|i| !i.is_initial_plan_task() && i.id != task.id)
+            .collect();
         assert_eq!(made.len(), 2);
 
         for m in &made {

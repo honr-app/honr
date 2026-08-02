@@ -262,7 +262,8 @@ Merging is a human action — approving in honr surfaces the PR; it never merges
 Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/policy.yaml; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
 Finish via /sandbox/.honr/report.json with a real PR (implementation and Initial plan).\n\
-If the work is bigger than one card, write /sandbox/.honr/split.json with sibling Tasks (key + blocked_by_keys); never nest under a Task.\n\
+Initial plan: also write /sandbox/.honr/plan.json (proposed Tasks); human Approve creates them.\n\
+If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape); card goes to Review — Approve creates siblings. Never nest under a Task.\n\
 ";
 
 /// One Task row as shown to an agent from the Project Plan.
@@ -279,7 +280,15 @@ pub struct PlanTaskBrief {
     pub current: bool,
 }
 
-/// Child spec for `Board::split` / `split.json` (deps match PlanTaskSpec).
+/// Proposed sibling Tasks awaiting human Approve on a card (Initial plan or split).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TaskProposal {
+    #[serde(default)]
+    pub summary: String,
+    pub tasks: Vec<PlanTaskSpec>,
+}
+
+/// Child spec for `Board::propose_split` / `split.json` (deps match PlanTaskSpec).
 #[derive(Debug, Clone)]
 pub struct SplitChildSpec {
     pub title: String,
@@ -438,6 +447,11 @@ pub struct WorkItem {
     #[serde(default)]
     pub plan: Option<PlanArtifact>,
 
+    /// Proposed sibling Tasks on this card (Initial plan or impl split). Approve
+    /// materializes them; request_changes clears. Null when none.
+    #[serde(default)]
+    pub proposal: Option<TaskProposal>,
+
     pub created_at: DateTime<Utc>,
     pub entered_state_at: DateTime<Utc>,
     #[serde(default)]
@@ -484,6 +498,7 @@ impl WorkItem {
             github_issue_url: None,
             pr_url: None,
             plan: None,
+            proposal: None,
             created_at: now,
             entered_state_at: now,
             history: Vec::new(),
