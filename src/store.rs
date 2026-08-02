@@ -2260,10 +2260,31 @@ fn check_split_relatedness(
                     .collect();
                 let mut parts = vec![format!("{count} ready")];
                 if !blocked.is_empty() {
-                    let on: Vec<String> = blocked
+                    let mut blocker_ids: Vec<ItemId> = blocked
                         .iter()
                         .flat_map(|i| Self::unresolved_blockers(s, i))
-                        .map(|b| format!("#{b}"))
+                        .collect();
+                    blocker_ids.sort_unstable();
+                    blocker_ids.dedup();
+
+                    let on: Vec<String> = blocker_ids
+                        .into_iter()
+                        .map(|bid| {
+                            if let Some(b_item) = s.items.get(&bid) {
+                                let label = match &b_item.beads_id {
+                                    Some(b) if !b.starts_with("bd-honr-") => b.clone(),
+                                    _ => format!("#{bid}"),
+                                };
+                                let title = b_item.title.trim();
+                                if title.is_empty() {
+                                    label
+                                } else {
+                                    format!("{label}: {title}")
+                                }
+                            } else {
+                                format!("#{bid}")
+                            }
+                        })
                         .collect();
                     parts.push(format!("{} blocked on {}", blocked.len(), on.join(", ")));
                 }
@@ -3771,5 +3792,58 @@ mod tests {
         println!("E2E EVIDENCE 3: github_sync after Done result: {sync_res:?}");
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn ready_column_summary_mentions_blockers_in_plain_language() {
+        let b = Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join("honr-test-summary-blockers.json"),
+        );
+        let project = b
+            .create(None, "Test Project", "Goal", None, Origin::Human, true, None)
+            .unwrap();
+
+        // Project creation seeds 1 initial plan task in Ready.
+        let t1 = b
+            .create(Some(project.id), "Task One", "Unblocked", Some("DOD".into()), Origin::Human, false, None)
+            .unwrap();
+        let _ = b.transition(t1.id, State::Shaping, "human", None);
+        let _ = b.transition(t1.id, State::Ready, "human", None);
+
+        {
+            let s = b.state.read().unwrap();
+            let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
+            let ready_col = goal_view
+                .columns
+                .iter()
+                .find(|c| c.column == Column::Ready)
+                .expect("ready col");
+            assert!(ready_col.summary.text.contains("2 ready"));
+            assert!(!ready_col.summary.text.contains("blocked on"));
+        }
+
+        let t2 = b
+            .create(Some(project.id), "Task Two", "Blocked", Some("DOD".into()), Origin::Human, false, None)
+            .unwrap();
+        let _ = b.transition(t2.id, State::Shaping, "human", None);
+        let _ = b.transition(t2.id, State::Ready, "human", None);
+        b.set_blocked_by(t2.id, vec![t1.id]);
+
+        {
+            let s = b.state.read().unwrap();
+            let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
+            let ready_col = goal_view
+                .columns
+                .iter()
+                .find(|c| c.column == Column::Ready)
+                .expect("ready col");
+            assert!(ready_col.summary.text.contains("3 ready"));
+            assert!(
+                ready_col.summary.text.contains(&format!("1 blocked on #{}: Task One", t1.id)),
+                "Summary was: {}",
+                ready_col.summary.text
+            );
+        }
     }
 }
