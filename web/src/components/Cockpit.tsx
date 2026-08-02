@@ -42,6 +42,8 @@ export function Cockpit(props: CockpitProps) {
   const [filterQuery, setFilterQuery] = useState("");
   const [filterState, setFilterState] = useState<BoardFilter>("all");
   const [projectFilter, setProjectFilter] = useState<number | "all">("all");
+  /** Explicit open/closed overrides; missing keys use the lane's default. */
+  const [laneOpen, setLaneOpen] = useState<Record<number, boolean>>({});
 
   const activeGoals = props.goals.filter(
     (goal) => props.items.get(goal.id)?.state !== "retired",
@@ -87,13 +89,12 @@ export function Cockpit(props: CockpitProps) {
     return { needsYou, running, review, ready, done, total: tasks.length };
   }, [tasks]);
 
+  // Stable order from the board (id / creation). Activity shows on badges and
+  // lane styling — reordering swimlanes as work moves is disorienting.
   const sortedGoals = useMemo(() => {
-    const list =
-      projectFilter === "all"
-        ? activeGoals
-        : activeGoals.filter((g) => g.id === projectFilter);
-    return [...list].sort((a, b) => laneRank(a, props.items) - laneRank(b, props.items));
-  }, [activeGoals, props.items, projectFilter]);
+    if (projectFilter === "all") return activeGoals;
+    return activeGoals.filter((g) => g.id === projectFilter);
+  }, [activeGoals, projectFilter]);
 
   const mode = modeCopy({
     needsYou: totals.needsYou,
@@ -182,6 +183,32 @@ export function Cockpit(props: CockpitProps) {
             {label}
           </button>
         ))}
+        {sortedGoals.length > 0 && (
+          <span className="lane-expand-controls">
+            <button
+              type="button"
+              className="filter-btn"
+              onClick={() =>
+                setLaneOpen(
+                  Object.fromEntries(sortedGoals.map((g) => [g.id, true])),
+                )
+              }
+            >
+              Expand all
+            </button>
+            <button
+              type="button"
+              className="filter-btn"
+              onClick={() =>
+                setLaneOpen(
+                  Object.fromEntries(sortedGoals.map((g) => [g.id, false])),
+                )
+              }
+            >
+              Collapse all
+            </button>
+          </span>
+        )}
       </div>
 
       {showNeedsBlock && (
@@ -200,15 +227,24 @@ export function Cockpit(props: CockpitProps) {
       )}
 
       <div className="cockpit-lanes">
-        {sortedGoals.map((goal) => (
-          <Swimlane
-            key={goal.id}
-            goal={goal}
-            filterQuery={filterQuery}
-            filterState={filterState}
-            {...props}
-          />
-        ))}
+        {sortedGoals.map((goal) => {
+          const hot = laneRank(goal, props.items) < 3;
+          const defaultOpen = hot || filterState !== "all";
+          const open = laneOpen[goal.id] ?? defaultOpen;
+          return (
+            <Swimlane
+              key={goal.id}
+              goal={goal}
+              filterQuery={filterQuery}
+              filterState={filterState}
+              open={open}
+              onOpenChange={(next) =>
+                setLaneOpen((prev) => ({ ...prev, [goal.id]: next }))
+              }
+              {...props}
+            />
+          );
+        })}
       </div>
 
       <HowItWorks />
@@ -370,13 +406,22 @@ function Swimlane({
   goal,
   filterQuery,
   filterState,
+  open,
+  onOpenChange,
   ...p
-}: CockpitProps & { goal: GoalView; filterQuery: string; filterState: BoardFilter }) {
+}: CockpitProps & {
+  goal: GoalView;
+  filterQuery: string;
+  filterState: BoardFilter;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const hot = laneRank(goal, p.items) < 3;
   const urgent = goal.needs_you > 0;
-  const [open, setOpen] = useState(hot || filterState !== "all");
   const [viewMode, setViewMode] = useState<"columns" | "graph">("columns");
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [archiveBusy, setArchiveBusy] = useState(false);
   const story = p.stories.get(goal.id) ?? goal.story;
   const q = filterQuery.toLowerCase().trim();
   const projectPaused =
@@ -400,8 +445,8 @@ function Swimlane({
   });
 
   useEffect(() => {
-    if (filterState !== "all" && mine.length > 0) setOpen(true);
-  }, [filterState, mine.length]);
+    if (filterState !== "all" && mine.length > 0 && !open) onOpenChange(true);
+  }, [filterState, mine.length, open, onOpenChange]);
 
   const toggleProjectPause = async (e: MouseEvent) => {
     e.stopPropagation();
@@ -418,23 +463,48 @@ function Swimlane({
     }
   };
 
+  const archiveProject = async (e: MouseEvent) => {
+    e.stopPropagation();
+    if (archiveBusy) return;
+    setArchiveBusy(true);
+    try {
+      await api.cut(goal.id, "archived from cockpit");
+      setConfirmArchive(false);
+      p.onChanged?.();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setArchiveBusy(false);
+    }
+  };
+
   const planLabel = planStatusLabel(goal.plan_status, goal);
   const reviewCount =
     goal.columns.find((c) => c.column === "review")?.summary.count ??
     mine.filter((i) => i.state === "review").length;
 
-  const visibleCols = BOARD_COLUMNS.filter((col) => {
-    const n = mine.filter((i) => COLUMN_OF[i.state] === col.key).length;
-    return n > 0;
-  });
-
   return (
     <section
       className={`lane ${urgent ? "lane-hot" : hot ? "" : "lane-quiet"} ${open ? "open" : ""}`}
     >
-      <header className="lane-head" onClick={() => setOpen(!open)}>
+      <header
+        className="lane-head"
+        onClick={() => {
+          setConfirmArchive(false);
+          onOpenChange(!open);
+        }}
+      >
         <span className="chev">{open ? "▾" : "▸"}</span>
-        <h2>{goal.title}</h2>
+        <h2
+          className="lane-title"
+          title="Open project"
+          onClick={(e) => {
+            e.stopPropagation();
+            p.onOpen(goal.id);
+          }}
+        >
+          {goal.title}
+        </h2>
         {goal.needs_you > 0 && (
           <span className="alarm">⚠ {goal.needs_you} need you</span>
         )}
@@ -467,40 +537,73 @@ function Swimlane({
           </span>
         )}
 
-        <button
-          type="button"
-          className={projectPaused ? "dispatch-toggle paused" : "dispatch-toggle"}
-          disabled={pauseBusy}
-          onClick={toggleProjectPause}
-          title={
-            projectPaused
-              ? "Resume claiming under this Project (allowed even while Pause all is on)"
-              : "Pause claiming under this Project — running cards keep going"
-          }
-        >
-          {projectPaused ? "Resume" : "Pause"}
-        </button>
-        {open && (
-          <div className="lane-view-switcher" onClick={(e) => e.stopPropagation()}>
+        <div className="lane-actions" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className={projectPaused ? "dispatch-toggle paused" : "dispatch-toggle"}
+            disabled={pauseBusy}
+            onClick={toggleProjectPause}
+            title={
+              projectPaused
+                ? "Resume claiming under this Project (allowed even while Pause all is on)"
+                : "Pause claiming under this Project — running cards keep going"
+            }
+          >
+            {projectPaused ? "Resume" : "Pause"}
+          </button>
+          {!confirmArchive ? (
             <button
               type="button"
-              className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
-              onClick={() => setViewMode("columns")}
-              title="Kanban columns"
+              className="dispatch-toggle archive-toggle"
+              disabled={archiveBusy}
+              onClick={() => setConfirmArchive(true)}
+              title="Archive this Project and its subtree (retire, not delete)"
             >
-              Columns
+              Archive
             </button>
-            <button
-              type="button"
-              className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
-              onClick={() => setViewMode("graph")}
-              title="Dependency graph"
-              data-testid="toggle-graph-view"
-            >
-              Graph
-            </button>
-          </div>
-        )}
+          ) : (
+            <span className="lane-archive-confirm">
+              <span className="dim">Retire project?</span>
+              <button
+                type="button"
+                className="dispatch-toggle archive-confirm"
+                disabled={archiveBusy}
+                onClick={archiveProject}
+              >
+                Confirm
+              </button>
+              <button
+                type="button"
+                className="dispatch-toggle"
+                disabled={archiveBusy}
+                onClick={() => setConfirmArchive(false)}
+              >
+                Cancel
+              </button>
+            </span>
+          )}
+          {open && (
+            <div className="lane-view-switcher">
+              <button
+                type="button"
+                className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
+                onClick={() => setViewMode("columns")}
+                title="Kanban columns"
+              >
+                Columns
+              </button>
+              <button
+                type="button"
+                className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
+                onClick={() => setViewMode("graph")}
+                title="Dependency graph"
+                data-testid="toggle-graph-view"
+              >
+                Graph
+              </button>
+            </div>
+          )}
+        </div>
       </header>
 
       {open && (
@@ -526,18 +629,12 @@ function Swimlane({
 
           {viewMode === "graph" ? (
             <DependencyGraph items={mine} onOpen={p.onOpen} />
-          ) : visibleCols.length === 0 ? (
-            <div className="lane-empty dim">
-              {q || filterState !== "all"
-                ? "No cards match this filter."
-                : "No active cards in the board columns."}
-            </div>
           ) : (
             <div
-              className={`columns cols-${visibleCols.length}`}
-              style={{ ["--board-cols" as string]: String(visibleCols.length) }}
+              className={`columns cols-${BOARD_COLUMNS.length}`}
+              style={{ ["--board-cols" as string]: String(BOARD_COLUMNS.length) }}
             >
-              {visibleCols.map((col) => {
+              {BOARD_COLUMNS.map((col) => {
                 const cards = mine
                   .filter((i) => COLUMN_OF[i.state] === col.key)
                   .sort(sortFor(col.key));
