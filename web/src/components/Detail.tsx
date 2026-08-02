@@ -393,6 +393,7 @@ export function DetailDrawer({
   const [planTasks, setPlanTasks] = useState<EditPlanTask[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const [confirmHalt, setConfirmHalt] = useState(false);
   const [logs, setLogs] = useState<{ claude: string[]; openshell: string[] }>({
     claude: [],
     openshell: [],
@@ -449,6 +450,7 @@ export function DetailDrawer({
     setErr(null);
     setConfirmDelete(false);
     setConfirmArchive(false);
+    setConfirmHalt(false);
     setPlanTasks([]);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1281,20 +1283,54 @@ export function DetailDrawer({
             Park stops the agent, keeps the sandbox and conversation, and holds the
             card until you Resume. Halt discards the LLM session.
           </p>
-          <div className="btns">
-            <button
-              className="primary"
-              onClick={() => act(api.park(d.id, "parked by human"))}
+          {!confirmHalt ? (
+            <div className="btns">
+              <button
+                className="primary"
+                onClick={() => act(api.park(d.id, "parked by human"))}
+              >
+                Park (keep session)
+              </button>
+              <button
+                style={{ background: "#7f1d1d", color: "#fca5a5", borderColor: "#991b1b" }}
+                onClick={() => setConfirmHalt(true)}
+              >
+                Halt (discard session)
+              </button>
+            </div>
+          ) : (
+            <div
+              style={{
+                background: "#450a0a",
+                border: "1px solid #7f1d1d",
+                borderRadius: "6px",
+                padding: "10px 12px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px",
+              }}
             >
-              Park (keep session)
-            </button>
-            <button
-              style={{ background: "#7f1d1d", color: "#fca5a5", borderColor: "#991b1b" }}
-              onClick={() => act(api.halt(d.id, "halted by human"))}
-            >
-              Halt (discard session)
-            </button>
-          </div>
+              <div style={{ color: "#fca5a5", fontSize: "12px", fontWeight: 600 }}>
+                Halt #{d.id} and discard the session?
+              </div>
+              <div style={{ color: "#f87171", fontSize: "11px" }}>
+                The agent stops and the conversation is thrown away. The sandbox may
+                still be kept for caches. Prefer Park if you want to resume later.
+              </div>
+              <div className="btns">
+                <button
+                  style={{ background: "#7f1d1d", color: "#fca5a5", borderColor: "#991b1b" }}
+                  onClick={() => {
+                    setConfirmHalt(false);
+                    act(api.halt(d.id, "halted by human"));
+                  }}
+                >
+                  Confirm Halt
+                </button>
+                <button onClick={() => setConfirmHalt(false)}>Cancel</button>
+              </div>
+            </div>
+          )}
         </Section>
       )}
 
