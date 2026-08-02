@@ -65,16 +65,19 @@ graph TD
 
 ### Control plane (`BeadsClient`)
 
-- `create_linked` — Project as epic, Task as task with `--parent`
-- `dep_add` — `blocks` / `relates-to`
-- `list_ready` / `claim` / `close` / `set_status`
-- `schedule_beads_mirror` on Board after create / split
+- **Sync `create_linked`** on `Board::create` — Project as epic, Task as task
+  with `--parent`; real beads id before card emit (no new `bd-honr-*` placeholders)
+- `dep_add` / `--deps blocks:` — task↔task edges; board `blocked_by` projects them
+- `update_fields` / `claim` / `close` / `set_status` — write-through from the board
+- `honr` metadata — `{ "honr": { "item_id", "pr_url" } }` on create / PR update
+- `schedule_beads_mirror` — GitHub push (epic before task) + URL refresh; heal for leftovers
+- Naming — DB prefix stays `honr-`; Project scoping is parent-child only (no title mangling)
 
 ### Sandbox
 
 - `bd` baked into `sandbox/Containerfile`
-- Host `.beads` tarball uploaded; `BEADS_DIR=/work/.beads`
-- Briefing: sibling split only; `bd show` / `bd remember` / `bd dep add`
+- Host `.beads` tarball uploaded as a **read snapshot**; durable writes happen on the host
+- Briefing: Plan + task contract; `bd show` / `bd prime` for context (not durable remember/dep)
 
 ### UI
 
@@ -96,19 +99,19 @@ sequenceDiagram
   participant OS as Sandbox
 
   Human->>UI: Create Project
-  UI->>BD: bd create epic
-  Note over UI: Seed Initial plan Task Ready
+  UI->>BD: bd create epic (sync)
+  Note over UI: Seed Initial plan Task (sync child) → Backlog
   Human->>UI: propose_breakdown Plan artifact
   Note over UI: No board Tasks yet — artifact only
   Human->>UI: Approve Plan
-  UI->>BD: bd create task --parent + deps
+  UI->>BD: bd create task --parent + deps (sync)
   loop Dispatch
-    Sup->>UI: list_ready Tasks
+    Sup->>UI: dispatch Backlog Task
     Sup->>BD: bd update --claim
-    Sup->>OS: sandbox + beads tarball
-    OS->>BD: bd show / remember
+    Sup->>OS: sandbox + beads snapshot
+    OS->>BD: bd show (read-only snapshot)
     OS->>Sup: PR published
-    Sup->>BD: bd close
+    Sup->>BD: bd close + metadata pr_url
   end
 ```
 
@@ -121,10 +124,13 @@ Phase 1 eval and this model cutover are landed in-tree:
 - [x] Project + Task schema (`honr.yaml`)
 - [x] Flat create / sibling split / MCP breakdown
 - [x] Plan artifact + Initial plan seed Task + Approve Plan materialize
-- [x] `BeadsClient` + dual-write mirror
-- [x] Sandbox `BEADS_DIR` sync + briefing
+- [x] `BeadsClient` + **synchronous** dual-write on create
+- [x] Write-through title/deps/claim/close + honr metadata
+- [x] Sandbox `BEADS_DIR` snapshot + briefing (read-only durable policy)
 - [x] UI Home / Board swimlanes / beads id display
+- [x] Manual dispatch (Backlog + Start); Ready renamed Backlog
 
 Still open: full replacement of `honr.json` identity (integer `ItemId` remains
 the board key; beads hash is mirrored and shown). Supervisor-run gates (#10)
-unchanged and still highest value.
+unchanged and still highest value. Pins → Plan-as-sole-input and Settings UI
+are follow-ups.
