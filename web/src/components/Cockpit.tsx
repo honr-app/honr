@@ -125,8 +125,8 @@ export function Cockpit(props: CockpitProps) {
         <div className="cockpit-empty-card">
           <h2>No projects yet</h2>
           <p className="dim">
-            From a cockpit agent with the honr MCP: create_project →
-            propose_breakdown → approve_plan. Then dispatch Backlog tasks to start.
+            From a cockpit agent with the honr MCP: create_project → dispatch
+            Initial plan → Approve (creates Tasks). Then dispatch Backlog tasks.
           </p>
           {archivedGoals.length > 0 && (
             <p style={{ marginTop: 12 }}>
@@ -347,10 +347,10 @@ function HowItWorks() {
       <summary>How this works</summary>
       <ol className="cockpit-howto-steps">
         <li>
-          <strong>Project</strong> — a goal. An Initial plan task writes the Plan.
+          <strong>Project</strong> — a goal. Initial plan (or a split) proposes Tasks on the card.
         </li>
         <li>
-          <strong>Approve Plan</strong> — tasks land in Backlog; dispatch to start a run.
+          <strong>Approve</strong> — creates those Tasks in Backlog; dispatch to start a run.
         </li>
         <li>
           <strong>Needs you</strong> — an agent stopped; answer so it can continue.

@@ -27,6 +27,8 @@ pub fn allowed(from: State, to: State) -> bool {
         (Claimed, Running) => true,
         (Claimed, Splitting) => true,
         (Claimed, NeedsHuman) => true,
+        // Propose a split without running further — Review holds the proposal.
+        (Claimed, Review) => true,
         // Graceful release before any work happened.
         (Claimed, Backlog) => true,
 
@@ -37,7 +39,7 @@ pub fn allowed(from: State, to: State) -> bool {
         // Self-orchestration: the work was bigger than the card.
         (Running, Splitting) => true,
         (Running, NeedsHuman) => true,
-        // Agent opened a PR — mechanical checks are CI's job, not a board column.
+        // Agent opened a PR, or proposed a split/plan — Review holds the artifact.
         (Running, Review) => true,
 
         // Sibling tasks created under the Project; original may requeue or finish.
@@ -181,6 +183,7 @@ mod tests {
     #[test]
     fn claimed_can_split_or_escalate() {
         assert!(allowed(Claimed, Splitting));
+        assert!(allowed(Claimed, Review), "propose_split goes Claimed → Review");
         assert!(allowed(Claimed, NeedsHuman));
     }
 

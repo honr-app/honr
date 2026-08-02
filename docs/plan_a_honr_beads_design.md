@@ -29,11 +29,12 @@ graph TD
 | Initial plan Task | `issue_type: task`, `--parent=<project>` | Seeded Backlog Task; plan/docs PR → Review |
 | Task | `issue_type: task`, `--parent=<project>` | Only claimable Board unit |
 | Ordering | `bd dep add` (`blocks`, `relates-to`) | `blocked_by` projection + ready filter |
-| Split | Sibling tasks under same Project (`key` + `blocked_by_keys`) | Impl only; Original Task → Done |
+| Split / plan proposal | `WorkItem.proposal` then Approve | Same Review→Approve path as Initial plan |
 
-Lifecycle: create Project → seed Initial plan Task (Backlog) → dispatch → plan/docs
-PR → Review → Approve. `propose_breakdown` + **Approve Plan** materializes Tasks
-to Backlog (with deps). Agent inputs: Project `project_prompt` + Plan. The Project
+Lifecycle: create Project → seed Initial plan Task (Backlog) → dispatch →
+`plan.json` + plan/docs PR → Review → Approve (materializes Tasks with deps).
+Impl oversize: `split.json` → Review with proposal → Approve. `propose_breakdown`
+is manual replan only. Agent inputs: Project `project_prompt` + Plan. The Project
 itself never enters Backlog.
 
 ---

@@ -38,10 +38,12 @@ Treat operational confidence accordingly.
 
 Work is **Project + Plan artifact + flat Tasks**. Vision / Epic / Story are
 retired. A Project is the only container (Board swimlane, never a Backlog card).
-Creating a Project seeds an **Initial plan** Task. `propose_breakdown` writes a
-**Plan artifact** (task keys, deps, DoDs) on the Project; **Approve Plan**
-(`approve_plan`) materializes sibling Tasks onto the Board into **Backlog**.
-Nothing auto-starts — cockpit must **dispatch** (MCP or UI Start) each card.
+Creating a Project seeds an **Initial plan** Task. That agent writes `plan.json`
+(proposed Tasks on the card) plus a docs PR → **Review**; **Approve** creates
+sibling Tasks in **Backlog** and syncs the Project Plan. Impl cards that are too
+big write `split.json` the same way — proposal on the card → Review → Approve.
+`propose_breakdown` / Project Approve Plan remain for manual replan. Nothing
+auto-starts — cockpit must **dispatch** (MCP or UI Start) each card.
 Tasks relate by beads dependency edges (`blocks` / `relates-to`), not nested
 hierarchy. Upon Plan approval, tasks with dependency constraints materialize
 as a DAG (e.g. A→B, A→C, B+C→D). Friendly plain-language blocker chips appear on cards,
@@ -77,8 +79,9 @@ never moves to Backlog.
 see. Default prompt seeded on create covers former pin-style policy (human merges,
 no weaken invariants, hangs-as-failure, report/split protocols).
 
-Initial plan finishes like other cards: plan/docs PR + `report.json` → Review →
-Approve. Sibling Tasks land via **Approve Plan**, not agent `split.json`.
+Initial plan and impl **split** share one model: structured proposal on the card
+→ Review → Approve creates sibling Tasks. Initial plan still needs a docs PR;
+impl split does not. Cockpit `propose_breakdown` is for manual Project replan only.
 
 ## Known gaps, roughly by value
 

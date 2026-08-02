@@ -1118,6 +1118,164 @@ struct ReportFile {
     pr_url: Option<String>,
 }
 
+/// Sidecar written by Initial plan agents — becomes Project Plan awaiting approval.
+#[derive(Debug, serde::Deserialize)]
+struct PlanFile {
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default, alias = "children")]
+    tasks: Vec<RawPlanTask>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawPlanTask {
+    #[serde(default)]
+    key: Option<String>,
+    title: String,
+    intent: String,
+    #[serde(
+        default,
+        rename = "definition_of_done",
+        alias = "dod",
+        alias = "definitionOfDone"
+    )]
+    dod: Option<String>,
+    #[serde(default)]
+    blocked_by_keys: Vec<String>,
+    #[serde(default)]
+    capability: Option<String>,
+}
+
+fn plan_file_to_specs(plan: PlanFile) -> Result<(String, Vec<crate::model::PlanTaskSpec>), String> {
+    if plan.tasks.is_empty() {
+        return Err("plan.json has no tasks".into());
+    }
+    let summary = plan
+        .summary
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Initial plan".into());
+    let mut specs = Vec::with_capacity(plan.tasks.len());
+    for (idx, t) in plan.tasks.into_iter().enumerate() {
+        let key = t
+            .key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| format!("t{}", idx + 1));
+        let dod = t
+            .dod
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| format!("{} completed.", t.title));
+        specs.push(crate::model::PlanTaskSpec {
+            key,
+            title: t.title,
+            intent: t.intent,
+            definition_of_done: dod,
+            blocked_by_keys: t.blocked_by_keys,
+            capability: t.capability,
+            item_id: None,
+        });
+    }
+    Ok((summary, specs))
+}
+
+/// Download `/sandbox/.honr/plan.json` (same directory as report) and propose it
+/// on the parent Project. Returns `Ok(true)` if the card was escalated instead.
+async fn apply_initial_plan_sidecar(
+    board: &SharedBoard,
+    os: &OpenShell,
+    agent_id: &str,
+    id: ItemId,
+    name: &str,
+    report_remote_path: &str,
+) -> anyhow::Result<bool> {
+    let plan_remote = {
+        let p = std::path::Path::new(report_remote_path);
+        p.parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("plan.json")
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let escalate_missing = |detail: String| -> anyhow::Result<bool> {
+        board
+            .escalate(
+                id,
+                agent_id,
+                detail,
+                vec![
+                    crate::model::EscalationOption {
+                        label: "Write plan.json and report".into(),
+                        detail: format!(
+                            "Write {VERDICT_DIR}/plan.json (tasks with key, intent, DoD, \
+                             blocked_by_keys) plus report.json, then exit."
+                        ),
+                    },
+                    crate::model::EscalationOption {
+                        label: "Propose Plan in cockpit".into(),
+                        detail: "Use propose_breakdown on the Project, then Approve.".into(),
+                    },
+                ],
+                0,
+            )
+            .map_err(|e| anyhow::anyhow!("initial-plan plan.json escalate: {e}"))?;
+        Ok(true)
+    };
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "honr-plan-{}-{}",
+        id,
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let local_plan = tmp_dir.join("plan.json");
+    let local_plan_str = local_plan.to_string_lossy().to_string();
+
+    if let Err(e) = os.download(name, &plan_remote, &local_plan_str).await {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        tracing::warn!("#{id}: Initial plan missing plan.json ({e})");
+        return escalate_missing(format!(
+            "Initial plan must write {VERDICT_DIR}/plan.json (proposed Tasks) before \
+             report.json. Approve creates those Tasks — do not finish with an empty Plan."
+        ));
+    }
+
+    let content = match std::fs::read_to_string(&local_plan) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return escalate_missing(format!("could not read downloaded plan.json: {e}"));
+        }
+    };
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let plan: PlanFile = match serde_json::from_str(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            return escalate_missing(format!("invalid plan.json: {e}"));
+        }
+    };
+    let (summary, specs) = match plan_file_to_specs(plan) {
+        Ok(v) => v,
+        Err(e) => return escalate_missing(e),
+    };
+
+    match board.set_proposal(
+        id,
+        crate::model::TaskProposal {
+            summary,
+            tasks: specs,
+        },
+    ) {
+        Ok(item) => {
+            let n = item.proposal.as_ref().map(|p| p.tasks.len()).unwrap_or(0);
+            tracing::info!("#{id}: stored TaskProposal on Initial plan ({n} tasks)");
+            Ok(false)
+        }
+        Err(e) => escalate_missing(format!("set_proposal refused: {e}")),
+    }
+}
+
 fn probe_verdict_script() -> String {
     // Prefer /sandbox/.honr (writable HOME). Keep /work and /tmp as legacy
     // fallbacks; /tmp often cannot be downloaded by OpenShell.
@@ -1205,18 +1363,20 @@ async fn process_verdict(
                         id,
                         agent_id,
                         format!(
-                            "Initial plan must finish with {VERDICT_DIR}/report.json and a \
-                             plan/docs PR (Review). Sibling Tasks land via Approve Plan — \
-                             not split.json."
+                            "Initial plan must finish with {VERDICT_DIR}/plan.json + \
+                             report.json and a plan/docs PR (Review). Approve materializes \
+                             sibling Tasks — not split.json."
                         ),
                         vec![
                             crate::model::EscalationOption {
-                                label: "Resume and report".into(),
-                                detail: "Open the plan PR and write report.json.".into(),
+                                label: "Write plan.json and report".into(),
+                                detail: format!(
+                                    "Write {VERDICT_DIR}/plan.json and report.json with the docs PR."
+                                ),
                             },
                             crate::model::EscalationOption {
-                                label: "Approve Plan in cockpit".into(),
-                                detail: "Use propose_breakdown + Approve Plan for siblings.".into(),
+                                label: "Propose Plan in cockpit".into(),
+                                detail: "Use propose_breakdown on the Project, then Approve.".into(),
                             },
                         ],
                         0,
@@ -1263,16 +1423,14 @@ async fn process_verdict(
                     spec
                 })
                 .collect();
-            match board.split(id, agent_id, children, 5) {
-                Ok(made) => {
-                    for m in &made {
-                        board.schedule_beads_mirror(m.id);
-                    }
-                    tracing::info!("#{id}: agent split into {} sibling tasks", made.len());
+            match board.propose_split(id, agent_id, children, 5) {
+                Ok(card) => {
+                    let n = card.proposal.as_ref().map(|p| p.tasks.len()).unwrap_or(0);
+                    tracing::info!("#{id}: agent proposed {n} sibling Tasks — Review");
                     Ok(true)
                 }
                 Err(e) => {
-                    tracing::warn!("#{id}: split refused: {e}");
+                    tracing::warn!("#{id}: propose_split refused: {e}");
                     let state = board.get(id).map(|i| i.state);
                     if state != Some(State::NeedsHuman) {
                         board
@@ -1301,7 +1459,54 @@ async fn process_verdict(
         "report" => {
             let rep: ReportFile = serde_json::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("invalid report.json: {e}"))?;
-            let pr_url = if let Some(url) = rep.pr_url.filter(|s| !s.trim().is_empty()) {
+
+            // Stash PR early so an escalate on missing plan.json still surfaces it.
+            if let Some(url) = rep.pr_url.clone().filter(|s| !s.trim().is_empty()) {
+                board.set_pr_url(id, Some(url));
+            }
+
+            let is_initial = board.get(id).is_some_and(|i| i.is_initial_plan_task());
+            // Impl cards: proposal and publish are mutually exclusive.
+            if !is_initial
+                && board.get(id).is_some_and(|i| {
+                    i.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty())
+                })
+            {
+                board
+                    .escalate(
+                        id,
+                        agent_id,
+                        "This card already has a Task proposal in Review. Finish via Approve \
+                         (creates siblings) or request_changes — do not also report a PR."
+                            .into(),
+                        vec![
+                            crate::model::EscalationOption {
+                                label: "Approve the proposal".into(),
+                                detail: "Human Approve creates the sibling Tasks.".into(),
+                            },
+                            crate::model::EscalationOption {
+                                label: "Request changes".into(),
+                                detail: "Clear the proposal and return the card to Backlog.".into(),
+                            },
+                        ],
+                        0,
+                    )
+                    .map_err(|e| anyhow::anyhow!("proposal/report exclusivity: {e}"))?;
+                return Ok(true);
+            }
+            if is_initial
+                && apply_initial_plan_sidecar(board, os, agent_id, id, name, remote_path).await?
+            {
+                return Ok(true);
+            }
+
+            let pr_url = if let Some(url) = board
+                .get(id)
+                .and_then(|i| i.pr_url)
+                .filter(|s| !s.trim().is_empty())
+            {
+                url
+            } else if let Some(url) = rep.pr_url.filter(|s| !s.trim().is_empty()) {
                 url
             } else {
                 let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
@@ -1916,11 +2121,12 @@ fn briefing(
 
     if is_initial_plan {
         b.push_str(
-            "\nThis is the Project's **Initial plan** card. Produce a Plan (flat sibling Tasks \
-             with deps and mechanically checkable DoDs). Open **one** plan/docs PR against the \
-             upstream base, then finish with `/sandbox/.honr/report.json` (and `pr_url`). \
-             The card goes to Review — a human Approves the PR. Sibling Tasks land via \
-             **Approve Plan** in the cockpit (propose_breakdown), not via split.json.\n\
+            "\nThis is the Project's **Initial plan** card. Propose the sibling Tasks that \
+             should be created: write `/sandbox/.honr/plan.json` with a `summary` and `tasks` \
+             (each: `key`, `title`, `intent`, `definition_of_done`, optional `blocked_by_keys`). \
+             Open **one** plan/docs PR against the upstream base as written rationale, then \
+             finish with `/sandbox/.honr/report.json` (and `pr_url`). The card goes to Review — \
+             a human **Approve** creates those Tasks from your plan.json (not via split.json).\n\
              Do **not** write `/sandbox/.honr/split.json` on this card.\n\
              If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` \
              with options (at least two) and a recommended index, then exit.\n\
@@ -1929,8 +2135,8 @@ fn briefing(
         );
         b.push_str(&format!(
             "\nPublish: commit on `{branch}`, push to `origin`, open **one** PR against \
-             `{upstream}` base `{base}` (or update that PR). Then write report.json and exit. \
-             Leave `{base}` alone.\n",
+             `{upstream}` base `{base}` (or update that PR). Write plan.json, then report.json, \
+             and exit. Leave `{base}` alone.\n",
             branch = branch_name,
             upstream = upstream,
             base = base,
@@ -1943,7 +2149,8 @@ fn briefing(
              \nIf work is discovered to be bigger than one card, do not overrun. \
              Write `/sandbox/.honr/split.json` with `children` each having `title`, `intent`, \
              optional `definition_of_done`, optional `key`, and optional `blocked_by_keys` \
-             (Plan-style deps), then exit. Those become **sibling Tasks under the same Project**. \
+             (Plan-style deps), then exit. The card goes to **Review** with that proposal — a human \
+             **Approve** creates the sibling Tasks under the same Project. \
              Splits may only carve this card's definition of done into smaller slices of the same outcome. \
              Do not invent work that belongs to another Project — escalate instead. \
              If a PR already exists for the card, do not split — finish via report. \
@@ -2716,6 +2923,10 @@ mod tests {
             "briefing must instruct slice-only splits: {b}"
         );
         assert!(
+            b.contains("Approve") && b.contains("creates the sibling"),
+            "briefing must say Approve creates siblings from split proposal: {b}"
+        );
+        assert!(
             b.contains("Do not invent work that belongs to another Project"),
             "briefing must prohibit inventing external work: {b}"
         );
@@ -2736,18 +2947,41 @@ mod tests {
             "briefing must require report.json for Initial plan: {b}"
         );
         assert!(
+            b.contains("plan.json"),
+            "briefing must require plan.json for Initial plan: {b}"
+        );
+        assert!(
             b.contains("Do **not** write `/sandbox/.honr/split.json`")
                 || b.contains("not via split.json"),
             "briefing must forbid split on Initial plan: {b}"
         );
         assert!(
-            b.contains("Approve Plan"),
-            "briefing must point siblings to Approve Plan: {b}"
+            b.contains("Approve") && b.contains("creates those Tasks"),
+            "briefing must say Approve creates Tasks from plan.json: {b}"
         );
         assert!(
             !b.contains("Split and publish are mutually exclusive"),
             "Initial plan briefing must not use the implementation exclusivity rule: {b}"
         );
+    }
+
+    #[test]
+    fn plan_file_to_specs_synthesizes_keys() {
+        let plan: PlanFile = serde_json::from_str(
+            r#"{
+                "summary": "cut",
+                "tasks": [
+                    {"title": "A", "intent": "do a", "definition_of_done": "a done"},
+                    {"key": "b", "title": "B", "intent": "do b", "dod": "b done", "blocked_by_keys": ["t1"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let (summary, specs) = plan_file_to_specs(plan).unwrap();
+        assert_eq!(summary, "cut");
+        assert_eq!(specs[0].key, "t1");
+        assert_eq!(specs[1].key, "b");
+        assert_eq!(specs[1].blocked_by_keys, vec!["t1".to_string()]);
     }
 
     #[test]
@@ -3069,6 +3303,176 @@ exit 1
         let esc = item.escalation.expect("escalation set");
         assert!(esc.question.contains("refused by governor"));
         assert!(esc.question.contains("does not relate to parent card or project theme"));
+    }
+
+    #[tokio::test]
+    async fn process_verdict_initial_plan_report_proposes_plan() {
+        let board = test_board();
+        let project = board
+            .create(None, "Proj", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let _ = board.transition(project.id, State::Shaping, "t", None);
+        let seed_id = board
+            .children_of(project.id)
+            .into_iter()
+            .find(|&id| board.get(id).is_some_and(|i| i.is_initial_plan_task()))
+            .expect("seeded Initial plan");
+        let _ = board.claim(seed_id, "agent-1", None, 60).unwrap();
+        let _ = board.transition(seed_id, State::Running, "agent-1", None);
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-initial-plan-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let report_path = dir.join("report.json");
+        let plan_path = dir.join("plan.json");
+        std::fs::write(
+            &report_path,
+            r#"{"added":3,"removed":0,"pr_url":"https://github.com/shanemcd/honr/pull/99"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &plan_path,
+            r#"{
+                "summary": "webhook cut",
+                "tasks": [
+                    {"key":"a","title":"Ingress","intent":"webhooks","definition_of_done":"tests pass"},
+                    {"key":"b","title":"Rebase","intent":"catch up","definition_of_done":"rebase queued","blocked_by_keys":["a"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mock_bin = dir.join("fake_openshell.sh");
+        let script_content = format!(
+            r#"#!/usr/bin/env bash
+if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
+    echo "report:{}"
+    exit 0
+elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
+    cp "$4" "$5"
+    exit 0
+fi
+exit 1
+"#,
+            report_path.display()
+        );
+        std::fs::write(&mock_bin, script_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let cfg = repo_cfg();
+        let handled =
+            process_verdict(&board, &os, &cfg, "agent-1", seed_id, "sandbox-1", "honr/card-ip")
+                .await
+                .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(handled);
+        let seed = board.get(seed_id).unwrap();
+        assert_eq!(seed.state, State::Review);
+        assert_eq!(
+            seed.pr_url.as_deref(),
+            Some("https://github.com/shanemcd/honr/pull/99")
+        );
+        let prop = seed.proposal.expect("proposal on Initial plan card");
+        assert_eq!(prop.tasks.len(), 2);
+        assert_eq!(prop.tasks[0].key, "a");
+        assert_eq!(prop.tasks[1].blocked_by_keys, vec!["a".to_string()]);
+        // Project Plan is synced on Approve, not at propose time.
+        assert_ne!(
+            board
+                .get(project.id)
+                .unwrap()
+                .plan
+                .as_ref()
+                .map(|p| p.status),
+            Some(crate::model::PlanStatus::AwaitingApproval)
+        );
+    }
+
+    #[tokio::test]
+    async fn process_verdict_initial_plan_report_without_plan_escalates() {
+        let board = test_board();
+        let project = board
+            .create(None, "Proj", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let _ = board.transition(project.id, State::Shaping, "t", None);
+        let seed_id = board
+            .children_of(project.id)
+            .into_iter()
+            .find(|&id| board.get(id).is_some_and(|i| i.is_initial_plan_task()))
+            .expect("seeded Initial plan");
+        let _ = board.claim(seed_id, "agent-1", None, 60).unwrap();
+        let _ = board.transition(seed_id, State::Running, "agent-1", None);
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-initial-plan-missing-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let report_path = dir.join("report.json");
+        std::fs::write(
+            &report_path,
+            r#"{"added":1,"removed":0,"pr_url":"https://github.com/shanemcd/honr/pull/98"}"#,
+        )
+        .unwrap();
+
+        let mock_bin = dir.join("fake_openshell.sh");
+        let script_content = format!(
+            r#"#!/usr/bin/env bash
+if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
+    echo "report:{}"
+    exit 0
+elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
+    case "$4" in
+      *plan.json) exit 1 ;;
+      *) cp "$4" "$5"; exit 0 ;;
+    esac
+fi
+exit 1
+"#,
+            report_path.display()
+        );
+        std::fs::write(&mock_bin, script_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let cfg = repo_cfg();
+        let handled =
+            process_verdict(&board, &os, &cfg, "agent-1", seed_id, "sandbox-1", "honr/card-ip2")
+                .await
+                .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(handled);
+        let seed = board.get(seed_id).unwrap();
+        assert_eq!(seed.state, State::NeedsHuman);
+        assert!(
+            seed.escalation
+                .as_ref()
+                .is_some_and(|e| e.question.contains("plan.json")),
+            "expected plan.json escalate, got {:?}",
+            seed.escalation
+        );
+        assert_ne!(
+            board
+                .get(project.id)
+                .unwrap()
+                .plan
+                .as_ref()
+                .map(|p| p.status),
+            Some(crate::model::PlanStatus::AwaitingApproval)
+        );
     }
 }
 

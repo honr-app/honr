@@ -977,8 +977,9 @@ export function DetailDrawer({
 
           <Section title="Plan">
             <p className="dim" style={{ marginBottom: 8 }}>
-              Task breakdown (keys, deps, DoDs). Save Plan, then Approve Plan to
-              materialize Backlog Tasks — this Project never becomes a Board card.
+              Task breakdown (keys, deps, DoDs). Initial plan agents propose this
+              via plan.json; Approve creates Backlog Tasks. Save Plan is for
+              manual replan — this Project never becomes a Board card.
             </p>
             {d.plan && (
               <p style={{ marginBottom: 8 }}>
@@ -1161,6 +1162,31 @@ export function DetailDrawer({
               <> · notes {d.gates.map((g) => g.name).join(", ")}</>
             )}
           </p>
+          {d.proposal && d.proposal.tasks.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <p className="dim" style={{ marginBottom: 6 }}>
+                {d.proposal.summary
+                  ? d.proposal.summary
+                  : "Proposed Tasks — Approve creates these under the Project."}
+              </p>
+              <ol style={{ margin: 0, paddingLeft: 18 }}>
+                {d.proposal.tasks.map((t) => (
+                  <li key={t.key} style={{ marginBottom: 8 }}>
+                    <strong>{t.key}</strong> {t.title}
+                    {t.blocked_by_keys?.length > 0 && (
+                      <span className="dim"> (after {t.blocked_by_keys.join(", ")})</span>
+                    )}
+                    <div className="dim" style={{ fontSize: "0.9em" }}>
+                      {t.intent}
+                    </div>
+                    <div className="dim" style={{ fontSize: "0.85em" }}>
+                      DoD: {t.definition_of_done}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
           {d.pr_url && (
             <p>
               <a className="pr-link" href={d.pr_url} target="_blank" rel="noreferrer">
@@ -1183,7 +1209,9 @@ export function DetailDrawer({
               style={{ background: "#15803d", borderColor: "#166534", fontWeight: 600 }}
               onClick={() => act(api.approve(d.id))}
             >
-              ✅ Approve & Move to Done
+              {d.proposal && d.proposal.tasks.length > 0
+                ? "✅ Approve — create Tasks"
+                : "✅ Approve & Move to Done"}
             </button>
             <button
               disabled={!text.trim()}
