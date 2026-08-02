@@ -1,10 +1,10 @@
 export type State =
   | "draft" | "shaping" | "ready" | "claimed" | "running" | "splitting"
-  | "needs_human" | "verifying" | "review" | "done" | "retired";
+  | "needs_human" | "review" | "done" | "retired";
 
 export type ColumnKey =
   | "intake" | "shaping" | "ready" | "running"
-  | "needs_you" | "verify" | "review" | "done" | "retired";
+  | "needs_you" | "review" | "done" | "retired";
 
 export interface Lease {
   agent_id: string;
@@ -174,18 +174,16 @@ export const COLUMN_OF: Record<State, ColumnKey> = {
   running: "running",
   splitting: "running",
   needs_human: "needs_you",
-  verifying: "verify",
   review: "review",
   done: "done",
   retired: "retired",
 };
 
-/** The six columns the board shows. Intake and Shaping live in the tree view. */
+/** Board columns. Intake and Shaping live off the kanban strip. */
 export const BOARD_COLUMNS: { key: ColumnKey; label: string; question: string }[] = [
   { key: "ready", label: "READY", question: "Is this actually ready?" },
   { key: "running", label: "RUNNING", question: "Is it alive, and is it worth it?" },
   { key: "needs_you", label: "⚠ NEEDS YOU", question: "How fast must I act?" },
-  { key: "verify", label: "VERIFY", question: "Will it pass?" },
   { key: "review", label: "REVIEW", question: "Can I approve this in 30 seconds?" },
   { key: "done", label: "DONE", question: "" },
 ];

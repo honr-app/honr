@@ -1325,9 +1325,6 @@ async fn process_verdict(
                 (rep.added, rep.removed)
             };
             board.report(id, agent_id, added, removed, gates)?;
-            board
-                .settle_gates(id, true, "agent-reported; supervisor-run gates not implemented yet")
-                .map_err(|e| anyhow::anyhow!("settle_gates: {e}"))?;
             tracing::info!("#{id}: agent reported via verdict file; pr={pr_url}");
             Ok(true)
         }
@@ -1394,21 +1391,12 @@ async fn finish(
         })?;
     board.set_pr_url(id, Some(url.clone()));
 
-    // Gates are the agent's own claim for now; a clean-checkout verifier the
-    // agent cannot influence is the next hardening step.
-    //
-    // `report` hands the card to the verifier, and with the simulated verifier
-    // deleted there is nothing else to settle it — a card would sit in Verify
-    // forever. Settling here keeps the lifecycle closed, and names the gate
-    // honestly so the board never implies more assurance than we have.
+    // Mechanical checks are CI on the PR. honr only records the PR + diffstat.
     let (added, removed) = match os.exec(name, &diffstat_script(cfg), short).await {
         Ok(out) if out.ok() => parse_diffstat(&out.stdout),
         _ => (0, 0),
     };
-    board.report(id, agent_id, added, removed, vec!["agent-reported".into()])?;
-    board
-        .settle_gates(id, true, "agent-reported; supervisor-run gates not implemented yet")
-        .map_err(|e| anyhow::anyhow!("settle_gates: {e}"))?;
+    board.report(id, agent_id, added, removed, vec!["ci-on-pr".into()])?;
     tracing::info!("#{id} reported; pr={url}");
     Ok(())
 }

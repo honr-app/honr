@@ -88,11 +88,11 @@ const task = (title, intent, extra = {}) =>
 
 // ---- Ready (Diamond DAG: A -> B, A -> C, B+C -> D) -------------------------
 
-const taskA = task("Supervisor runs the gates", "The agent's own claim of success is what reaches the board.", {
+const taskA = task("Surface PR checks on the Review card", "CI is the mechanical gate; the board should show it.", {
   since: 2400,
   beads_id: "honr-t10",
 });
-const taskB = task("Verify from a clean checkout", "Gates in the agent's sandbox can be influenced by the agent.", {
+const taskB = task("Fail closed when CI is red", "A Review card with failing checks should be obvious.", {
   blocked_by: [taskA],
   since: 2100,
   beads_id: "honr-t11",
@@ -210,26 +210,24 @@ item({
   },
 });
 
-// ---- Verify ---------------------------------------------------------------
+// ---- Review ---------------------------------------------------------------
 
 item({
   parent: project,
   title: "Attempt-scoped sandbox names",
   intent: "A retry must not collide with the sandbox kept for inspection.",
   definition_of_done: "A second attempt creates honr-card-N-a2.",
-  state: "verifying",
+  state: "review",
   level: "Task",
   capability: "any",
   progress: 1,
   cost_cents: 96,
   diff_added: 34,
   diff_removed: 8,
-  gates: [{ name: "cargo test", status: "running", detail: null }],
+  pr_url: "https://github.com/example/honr/pull/20",
   beads_id: "honr-t20",
   since: 45,
 });
-
-// ---- Review ---------------------------------------------------------------
 
 item({
   parent: project,

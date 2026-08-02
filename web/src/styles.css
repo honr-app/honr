@@ -466,7 +466,6 @@ main > :first-child { flex: 1; min-width: 0; }
 .card.col-ready { border-left-color: var(--ready); }
 .card.col-running { border-left-color: var(--accent); animation: pulse-subtle 3s infinite ease-in-out; }
 .card.col-needs_you { border-left-color: var(--needs-human); background: #2a1a1d; border-color: rgba(255, 107, 107, 0.3); }
-.card.col-verify { border-left-color: var(--warn); }
 .card.col-review { border-left-color: var(--review); background: #232219; }
 .card.col-done { border-left-color: var(--ok); opacity: 0.65; }
 
@@ -1096,7 +1095,6 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 .graph-node-card.state-ready { border-left-color: var(--ready); }
 .graph-node-card.state-running { border-left-color: var(--accent); }
 .graph-node-card.state-needs_human { border-left-color: var(--needs-human); background: #2a1a1d; }
-.graph-node-card.state-verifying { border-left-color: var(--warn); }
 .graph-node-card.state-review { border-left-color: var(--review); }
 .graph-node-card.state-done { border-left-color: var(--ok); opacity: 0.75; }
 
@@ -1130,7 +1128,6 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 .node-state-badge.state-ready { background: rgba(232, 244, 248, 0.15); color: var(--ready); }
 .node-state-badge.state-running { background: rgba(111, 168, 255, 0.15); color: var(--accent); }
 .node-state-badge.state-needs_human { background: rgba(255, 107, 107, 0.2); color: var(--needs-human); }
-.node-state-badge.state-verifying { background: rgba(255, 169, 77, 0.15); color: var(--warn); }
 .node-state-badge.state-review { background: rgba(255, 217, 61, 0.15); color: var(--review); }
 .node-state-badge.state-done { background: rgba(95, 211, 155, 0.15); color: var(--ok); }
 

@@ -37,7 +37,8 @@ pub fn allowed(from: State, to: State) -> bool {
         // Self-orchestration: the work was bigger than the card.
         (Running, Splitting) => true,
         (Running, NeedsHuman) => true,
-        (Running, Verifying) => true,
+        // Agent opened a PR — mechanical checks are CI's job, not a board column.
+        (Running, Review) => true,
 
         // Sibling tasks created under the Project; original may requeue or finish.
         (Splitting, Ready) => true,
@@ -50,18 +51,11 @@ pub fn allowed(from: State, to: State) -> bool {
         // Human reassigns.
         (NeedsHuman, Ready) => true,
 
-        (Verifying, Review) => true,
-        // Gates failed, retry budget left.
-        (Verifying, Ready) => true,
-        // Retry budget spent.
-        (Verifying, NeedsHuman) => true,
-
         (Review, Done) => true,
         (Shaping, Done) => true,
         (Ready, Done) => true,
         (NeedsHuman, Done) => true,
         (Running, Done) => true,
-        (Verifying, Done) => true,
         (Review, Ready) => true,
 
         _ => false,
@@ -86,7 +80,7 @@ pub enum TransitionError {
 
 /// States in which an agent is actively holding the card.
 fn requires_claimable(s: State) -> bool {
-    matches!(s, State::Claimed | State::Running | State::Splitting | State::Verifying)
+    matches!(s, State::Claimed | State::Running | State::Splitting)
 }
 
 /// The whole invariant: loose at the schema, strict at the node.
@@ -142,12 +136,18 @@ mod tests {
             (Shaping, Ready),
             (Ready, Claimed),
             (Claimed, Running),
-            (Running, Verifying),
-            (Verifying, Review),
+            (Running, Review),
             (Review, Done),
         ] {
             assert!(allowed(a, b), "{a:?} -> {b:?} should be legal");
         }
+    }
+
+    #[test]
+    fn verifying_is_not_a_lifecycle_state() {
+        // Mechanical checks are CI. Running goes straight to Review.
+        assert!(!allowed(Running, Shaping));
+        assert!(allowed(Running, Review));
     }
 
     #[test]

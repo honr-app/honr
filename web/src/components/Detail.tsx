@@ -725,7 +725,7 @@ export function DetailDrawer({
         </Section>
       )}
 
-      {(d.environment || ["running", "verifying", "claimed"].includes(d.state)) && (() => {
+      {(d.environment || ["running", "claimed"].includes(d.state)) && (() => {
         const parsedClaudeLogs = logs.claude
           .map((l) => parseClaudeLogLine(l))
           .filter((p): p is { text: string; type: "text" | "tool" | "result" | "system" | "error" } => p !== null);
@@ -1227,7 +1227,10 @@ export function DetailDrawer({
       {d.state === "review" && (
         <Section title="Review">
           <p className="dim">
-            +{d.diff_added} −{d.diff_removed} · gates {d.gates.map((g) => g.name).join(", ")}
+            +{d.diff_added} −{d.diff_removed}
+            {d.gates.length > 0 && (
+              <> · notes {d.gates.map((g) => g.name).join(", ")}</>
+            )}
           </p>
           {d.pr_url && (
             <p>
@@ -1277,7 +1280,7 @@ export function DetailDrawer({
         </Section>
       )}
 
-      {["running", "claimed", "verifying"].includes(d.state) && (
+      {["running", "claimed"].includes(d.state) && (
         <Section title="Interrupt Active Run">
           <p className="dim" style={{ marginBottom: 8 }}>
             Park stops the agent, keeps the sandbox and conversation, and holds the

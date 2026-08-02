@@ -1218,8 +1218,7 @@ impl Board {
     /// *early* — sandbox won't start, clone rejected — spends nothing, so
     /// nothing stops the sweeper requeueing it every lease period forever.
     /// Left alone overnight that is an infinite loop building and destroying
-    /// sandboxes. Mirrors the retry budget `settle_gates` already applies to
-    /// gate failures.
+    /// sandboxes. Same idea as a CI retry budget: fail a few times, then escalate.
     pub fn record_run_failure(
         &self,
         id: ItemId,
@@ -1840,7 +1839,10 @@ fn check_split_relatedness(
         Ok(item)
     }
 
-    /// `report` — agent says done; gates decide.
+    /// `report` — agent finished and opened a PR; card goes to Review.
+    ///
+    /// Mechanical checks are CI on the PR, not a honr Verify column. `gates` is
+    /// kept as optional agent-side notes only.
     pub fn report(
         &self,
         id: ItemId,
@@ -1857,11 +1859,15 @@ fn check_split_relatedness(
                 it.progress = 1.0;
                 it.gates = gates
                     .into_iter()
-                    .map(|name| GateRun { name, status: GateStatus::Pending, detail: None })
+                    .map(|name| GateRun {
+                        name,
+                        status: GateStatus::Passed,
+                        detail: Some("CI on the PR is the real gate".into()),
+                    })
                     .collect();
             }
         }
-        self.transition(id, State::Verifying, agent_id, None)
+        self.transition(id, State::Review, agent_id, None)
     }
 
     /// `release` — graceful surrender.
@@ -1894,56 +1900,6 @@ fn check_split_relatedness(
             self.story(id, format!("{}: released ({r})", item.title));
         }
         Ok(item)
-    }
-
-    // --------------------------------------------------------- the verifier
-
-    /// Unused until the supervisor runs honr's real gates (`cargo test`,
-    /// `clippy`, the web build) in the sandbox and reports the outcome.
-    #[allow(dead_code)]
-    pub fn settle_gates(&self, id: ItemId, passed: bool, detail: &str) -> Result<WorkItem, String> {
-        let (retries_left, title) = {
-            let mut s = self.state.write().unwrap();
-            let it = s.items.get_mut(&id).ok_or("no such item")?;
-            for g in it.gates.iter_mut() {
-                g.status = if passed { GateStatus::Passed } else { GateStatus::Failed };
-                g.detail = Some(detail.to_string());
-            }
-            if !passed {
-                it.gate_failures += 1;
-            }
-            (it.gate_failures < 3, it.title.clone())
-        };
-
-        if passed {
-            return self.transition(id, State::Review, "verifier", None).map_err(|e| e.to_string());
-        }
-        if retries_left {
-            let item = self
-                .transition(id, State::Ready, "verifier", Some(format!("gates failed: {detail}")))
-                .map_err(|e| e.to_string())?;
-            self.story(id, format!("{title} failed its gates ({detail}); back in the queue."));
-            Ok(item)
-        } else {
-            // Retry budget spent — this is now a human's problem.
-            let opts = vec![
-                EscalationOption {
-                    label: "Investigate the gate".into(),
-                    detail: "The gate may be flaky rather than the change being wrong.".into(),
-                },
-                EscalationOption {
-                    label: "Re-route to a stronger model".into(),
-                    detail: "Full re-run on a different model.".into(),
-                },
-            ];
-            self.escalate(
-                id,
-                "verifier",
-                format!("{title} has failed its gates three times ({detail}). How should this proceed?"),
-                opts,
-                0,
-            )
-        }
     }
 
     /// Dead agents need no cleanup job: the lease is what makes pull-based
@@ -2343,7 +2299,6 @@ fn check_split_relatedness(
             Column::Ready,
             Column::Running,
             Column::NeedsYou,
-            Column::Verify,
             Column::Review,
             Column::Done,
         ] {
@@ -2470,17 +2425,8 @@ fn check_split_relatedness(
                     .unwrap_or(0);
                 format!("{count} blocked on you · longest {}", humanize(Duration::seconds(longest)))
             }
-            Column::Verify => {
-                // Will it pass?
-                let retried = items.iter().filter(|i| i.gate_failures > 0).count();
-                if retried == 0 {
-                    format!("{count} in gates · none retried · oldest {}", humanize(oldest))
-                } else {
-                    format!("{count} in gates · {retried} previously failed")
-                }
-            }
             Column::Review => {
-                // Can I approve this in 30 seconds?
+                // Can I approve this in 30 seconds? CI is on the PR, not here.
                 let added: u32 = items.iter().map(|i| i.diff_added).sum();
                 let removed: u32 = items.iter().map(|i| i.diff_removed).sum();
                 format!("{count} awaiting review · +{added} −{removed} · oldest {}", humanize(oldest))
@@ -3647,7 +3593,7 @@ mod tests {
         // Wait for spawned async tasks on split siblings to assign real beads_ids
         for m in &made {
             let mut sibling_real_id = None;
-            for _ in 0..50 {
+            for _ in 0..100 {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 if let Some(item) = board.get(m.id) {
                     if let Some(ref bid) = item.beads_id {
@@ -4257,8 +4203,7 @@ mod tests {
         let _ = b.transition(t1.id, State::Ready, "human", None);
         let _ = b.transition(t1.id, State::Claimed, "human", None);
         let _ = b.transition(t1.id, State::Running, "agent", None);
-        let _ = b.transition(t1.id, State::Verifying, "agent", None);
-        let _ = b.transition(t1.id, State::Review, "verifier", None);
+        let _ = b.transition(t1.id, State::Review, "agent", None);
 
         assert_eq!(b.get(t1.id).unwrap().environment.as_deref(), Some("honr-card-1-a1"));
 
@@ -4266,8 +4211,15 @@ mod tests {
         let _ = b.transition(t1.id, State::Done, "human", None);
         assert_eq!(b.get(t1.id).unwrap().environment, None);
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
+        let mut log_content = String::new();
+        for _ in 0..40 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
+            if log_content.contains("sandbox delete honr-card-1-a1") {
+                break;
+            }
+        }
         assert!(
             log_content.contains("sandbox delete honr-card-1-a1"),
             "expected 'sandbox delete honr-card-1-a1' in log, got: {log_content}"
@@ -4281,7 +4233,15 @@ mod tests {
         let _ = b.transition(t2.id, State::Retired, "human", None);
         assert_eq!(b.get(t2.id).unwrap().environment, None);
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        log_content.clear();
+        for _ in 0..40 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
+            if log_content.contains("sandbox delete honr-card-2-a1") {
+                break;
+            }
+        }
         let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
         assert!(
             log_content.contains("sandbox delete honr-card-2-a1"),
