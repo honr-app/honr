@@ -164,12 +164,24 @@ pub struct Digest {
     pub goals: Vec<GoalDigest>,
 }
 
+pub const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 1000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CatchUpResult {
+    /// Replayed missed events in sequence order.
+    Events(Vec<BoardEvent>),
+    /// Lagged beyond buffer capacity or future sequence; client must reset state.
+    Reset { seq: u64 },
+}
+
 // ------------------------------------------------------------------ the board
 
 pub struct Board {
     state: RwLock<BoardState>,
     tx: broadcast::Sender<BoardEvent>,
     seq: AtomicU64,
+    event_buffer: RwLock<std::collections::VecDeque<BoardEvent>>,
+    buffer_capacity: usize,
     dirty: AtomicBool,
     pub schema: Schema,
     path: PathBuf,
@@ -217,6 +229,8 @@ impl Board {
             state: RwLock::new(BoardState { next_id: 1, ..Default::default() }),
             tx,
             seq: AtomicU64::new(0),
+            event_buffer: RwLock::new(std::collections::VecDeque::new()),
+            buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             dirty: AtomicBool::new(false),
             schema,
             path,
@@ -226,6 +240,12 @@ impl Board {
             in_flight_github_pushes: std::sync::Mutex::new(std::collections::HashMap::new()),
             pushed_beads_ids: std::sync::RwLock::new(std::collections::HashSet::new()),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.buffer_capacity = capacity;
+        self
     }
 
     /// Load a previously persisted board, or start empty.
@@ -301,13 +321,57 @@ impl Board {
         self.seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    pub fn current_seq(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed)
+    }
+
+    fn record_and_send(&self, event: BoardEvent) {
+        {
+            let mut buffer = self.event_buffer.write().unwrap();
+            if buffer.len() >= self.buffer_capacity {
+                buffer.pop_front();
+            }
+            buffer.push_back(event.clone());
+        }
+        let _ = self.tx.send(event);
+    }
+
+    pub fn catch_up(&self, last_seq: u64) -> CatchUpResult {
+        let current_seq = self.current_seq();
+        if last_seq > current_seq {
+            return CatchUpResult::Reset { seq: current_seq };
+        }
+        if last_seq == current_seq {
+            return CatchUpResult::Events(Vec::new());
+        }
+
+        let buffer = self.event_buffer.read().unwrap();
+        if buffer.is_empty() {
+            return CatchUpResult::Reset { seq: current_seq };
+        }
+
+        let oldest_seq = buffer.front().unwrap().seq();
+        let needed_seq = last_seq + 1;
+
+        if needed_seq < oldest_seq {
+            CatchUpResult::Reset { seq: current_seq }
+        } else {
+            let missed: Vec<BoardEvent> = buffer
+                .iter()
+                .filter(|ev| ev.seq() > last_seq)
+                .cloned()
+                .collect();
+            CatchUpResult::Events(missed)
+        }
+    }
+
     fn emit(&self, item: &WorkItem) {
         let mut item = item.clone();
         {
             let s = self.state.read().unwrap();
             Self::populate_blockers(&s, &mut item);
         }
-        let _ = self.tx.send(BoardEvent::Upsert {
+        self.record_and_send(BoardEvent::Upsert {
             seq: self.next_seq(),
             item: Box::new(item),
         });
@@ -2599,7 +2663,7 @@ fn check_split_relatedness(
         self.dirty.store(true, Ordering::Relaxed);
         self.flush();
 
-        let _ = self.tx.send(BoardEvent::Delete {
+        self.record_and_send(BoardEvent::Delete {
             seq: self.next_seq(),
             id,
         });
@@ -2728,7 +2792,7 @@ fn check_split_relatedness(
             (goal, line)
         };
         self.dirty.store(true, Ordering::Relaxed);
-        let _ = self.tx.send(BoardEvent::Story {
+        self.record_and_send(BoardEvent::Story {
             seq: self.next_seq(),
             goal,
             at: line.at.to_rfc3339(),
@@ -2739,7 +2803,7 @@ fn check_split_relatedness(
     /// Notify connected subscribers that the main branch advanced (via push or PR merge).
     pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
         tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
-        let _ = self.tx.send(BoardEvent::MainAdvanced {
+        self.record_and_send(BoardEvent::MainAdvanced {
             seq: self.next_seq(),
             ref_name: ref_name.to_string(),
             commit_sha,
@@ -5677,5 +5741,92 @@ mod tests {
                 .is_none(),
             "no match"
         );
+    }
+
+    #[test]
+    fn test_event_sequence_ordering_and_buffer_catchup() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-seq-catchup-{}.json",
+                std::process::id()
+            )),
+        )
+        .with_buffer_capacity(10);
+
+        assert_eq!(b.current_seq(), 0);
+
+        // 1. Create project emits Upsert for Project and Initial plan Task transitions + Story (5 events in total)
+        let p = b
+            .create(None, "Test Seq", "intent", None, Origin::Human, true, None)
+            .unwrap();
+
+        let initial_seq = b.current_seq();
+        assert_eq!(initial_seq, 5);
+
+        // 2. Story event (seq 6)
+        b.story(p.id, "Story line 1".to_string());
+        assert_eq!(b.current_seq(), 6);
+
+        // At seq 6 with capacity 10, event_buffer contains seq 1..6
+        match b.catch_up(0) {
+            CatchUpResult::Events(events) => {
+                assert_eq!(events.len(), 6);
+                for (i, ev) in events.iter().enumerate() {
+                    assert_eq!(ev.seq(), (i + 1) as u64);
+                }
+            }
+            CatchUpResult::Reset { .. } => panic!("expected events for last_seq 0"),
+        }
+
+        // Request catchup from seq 4 (should return seq 5 and 6)
+        match b.catch_up(4) {
+            CatchUpResult::Events(events) => {
+                assert_eq!(events.len(), 2);
+                assert_eq!(events[0].seq(), 5);
+                assert_eq!(events[1].seq(), 6);
+            }
+            CatchUpResult::Reset { .. } => panic!("expected events for last_seq 4"),
+        }
+
+        // Request catchup from current_seq (seq 6) (should return empty vec)
+        match b.catch_up(6) {
+            CatchUpResult::Events(events) => {
+                assert!(events.is_empty());
+            }
+            CatchUpResult::Reset { .. } => panic!("expected empty events for last_seq 6"),
+        }
+
+        // 3. Emit 5 more events to overflow buffer capacity 10 (total 11 events: seq 1..11, buffer holds seq 2..11)
+        for i in 0..5 {
+            b.story(p.id, format!("Story line extra {i}"));
+        }
+        assert_eq!(b.current_seq(), 11);
+
+        // Catchup from last_seq = 0 (needs seq 1, which was popped) -> should return Reset
+        match b.catch_up(0) {
+            CatchUpResult::Reset { seq } => {
+                assert_eq!(seq, 11);
+            }
+            CatchUpResult::Events(_) => panic!("expected Reset frame for lagged last_seq 0"),
+        }
+
+        // Catchup from last_seq = 1 (needs seq 2, which is still in buffer) -> should return seq 2..11
+        match b.catch_up(1) {
+            CatchUpResult::Events(events) => {
+                assert_eq!(events.len(), 10);
+                assert_eq!(events[0].seq(), 2);
+                assert_eq!(events.last().unwrap().seq(), 11);
+            }
+            CatchUpResult::Reset { .. } => panic!("expected events for last_seq 1"),
+        }
+
+        // Catchup from future seq (last_seq = 20 when current = 11) -> should return Reset
+        match b.catch_up(20) {
+            CatchUpResult::Reset { seq } => {
+                assert_eq!(seq, 11);
+            }
+            CatchUpResult::Events(_) => panic!("expected Reset for future last_seq 20"),
+        }
     }
 }

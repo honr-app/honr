@@ -21,6 +21,21 @@ pub enum BoardEvent {
         #[serde(default)]
         commit_sha: Option<String>,
     },
+    /// Catch-up failed due to buffer overflow or state gap. Client must reset state.
+    Reset { seq: u64 },
 }
+
+impl BoardEvent {
+    pub fn seq(&self) -> u64 {
+        match self {
+            BoardEvent::Upsert { seq, .. } => *seq,
+            BoardEvent::Story { seq, .. } => *seq,
+            BoardEvent::Delete { seq, .. } => *seq,
+            BoardEvent::MainAdvanced { seq, .. } => *seq,
+            BoardEvent::Reset { seq } => *seq,
+        }
+    }
+}
+
 
 
