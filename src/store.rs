@@ -643,19 +643,22 @@ impl Board {
                 .unwrap_or_else(|| format!("Marked {to:?}"));
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    if let (Some(b), Some(bid)) = (beads, beads_id) {
-                        if crate::beads::BeadsClient::is_real_id(&bid) {
-                            let _ = b.close(&bid, Some(&reason_str)).await;
+                    if let (Some(ref b), Some(ref bid)) = (&beads, &beads_id) {
+                        if crate::beads::BeadsClient::is_real_id(bid) {
+                            let _ = b.close(bid, Some(&reason_str)).await;
                             let has_beads_gh_url = if is_initial && !has_gh_url {
-                                b.show(&bid).await.ok().and_then(|s| s.github_issue_url()).is_some()
+                                b.show(bid).await.ok().and_then(|s| s.github_issue_url()).is_some()
                             } else {
                                 false
                             };
                             if !is_initial || has_gh_url || has_beads_gh_url {
-                                let _ = b.github_push(&[bid]).await;
+                                let _ = b.github_push(std::slice::from_ref(bid)).await;
                             }
                             b.schedule_dolt_push();
                         }
+                    }
+                    if let Some(ref b) = beads {
+                        let _ = b.close_completed_epics().await;
                     }
                 });
             }
@@ -1325,7 +1328,90 @@ impl Board {
 
         // Always run: real beads_id + missing URL is a separate failure mode from placeholders.
         self.backfill_missing_github_issue_urls().await;
+        let healed_epics = self.heal_completed_epics().await;
+        if healed_epics > 0 {
+            tracing::info!("healed {healed_epics} completed epic(s)");
+        }
         created.len()
+    }
+
+    /// Close open epics in beads whose children are all completed or superseded,
+    /// and transition matching board Project cards to Done.
+    pub async fn heal_completed_epics(self: &Arc<Self>) -> usize {
+        let mut healed = 0usize;
+
+        // 1. Heal beads graph
+        if let Some(ref beads) = self.beads {
+            if let Ok(closed_bids) = beads.close_completed_epics().await {
+                healed += closed_bids.len();
+                // Mark matching board Project cards as Done
+                for bid in &closed_bids {
+                    let matching_ids: Vec<(ItemId, State)> = {
+                        let s = self.state.read().unwrap();
+                        s.items
+                            .values()
+                            .filter(|i| {
+                                i.parent.is_none()
+                                    && i.state != State::Done
+                                    && i.state != State::Retired
+                                    && i.beads_id.as_deref() == Some(bid.as_str())
+                            })
+                            .map(|i| (i.id, i.state))
+                            .collect()
+                    };
+                    for (pid, state) in matching_ids {
+                        if state == State::Draft {
+                            let _ = self.transition(pid, State::Shaping, "beads-epic-hygiene", None);
+                        }
+                        let _ = self.transition(
+                            pid,
+                            State::Done,
+                            "beads-epic-hygiene",
+                            Some("All children completed or superseded".into()),
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2. Heal board projects whose child tasks on the board are all Done or Retired
+        let project_ids: Vec<(ItemId, State)> = {
+            let s = self.state.read().unwrap();
+            s.items
+                .values()
+                .filter(|i| i.parent.is_none() && i.state != State::Done && i.state != State::Retired)
+                .map(|i| (i.id, i.state))
+                .collect()
+        };
+
+        for (pid, state) in project_ids {
+            let (child_count, all_done) = {
+                let s = self.state.read().unwrap();
+                let children: Vec<&WorkItem> =
+                    s.items.values().filter(|i| i.parent == Some(pid)).collect();
+                let count = children.len();
+                let done = count > 0
+                    && children
+                        .iter()
+                        .all(|c| c.state == State::Done || c.state == State::Retired);
+                (count, done)
+            };
+
+            if child_count > 0 && all_done {
+                if state == State::Draft {
+                    let _ = self.transition(pid, State::Shaping, "epic-hygiene", None);
+                }
+                let _ = self.transition(
+                    pid,
+                    State::Done,
+                    "epic-hygiene",
+                    Some("All child tasks completed".into()),
+                );
+                healed += 1;
+            }
+        }
+
+        healed
     }
 
     pub fn set_beads_id(&self, id: ItemId, beads_id: &str) {
@@ -6008,5 +6094,47 @@ mod tests {
             "Expected story line referencing unblocked sibling #{}",
             t3.id
         );
+    }
+
+    #[tokio::test]
+    async fn test_heal_completed_epics_auto_closes_project_when_child_tasks_done() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-epic-hygiene-{}.json",
+            std::process::id()
+        ));
+        let b = Arc::new(Board::new(Schema::default(), path));
+        let p = b
+            .create(None, "Epic Hygiene Project", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(Some(p.id), "Child Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+        let t2 = b
+            .create(Some(p.id), "Child Task 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .unwrap();
+
+        // Project should be open
+        assert_ne!(b.get(p.id).unwrap().state, State::Done);
+
+        // Mark all child tasks (including seeded Initial plan task) as Done
+        let children: Vec<ItemId> = {
+            let s = b.state.read().unwrap();
+            s.items
+                .values()
+                .filter(|i| i.parent == Some(p.id))
+                .map(|i| i.id)
+                .collect()
+        };
+
+        for cid in children {
+            let _ = b.transition(cid, State::Shaping, "test", None);
+            let _ = b.transition(cid, State::Done, "test", None);
+        }
+
+        // Run heal_completed_epics
+        let healed = b.heal_completed_epics().await;
+        assert!(healed > 0, "expected at least 1 project healed");
+
+        assert_eq!(b.get(p.id).unwrap().state, State::Done);
     }
 }
