@@ -5,12 +5,13 @@ use crate::model::{ItemId, State, WorkItem};
 use crate::store::{AncestryLine, SharedBoard};
 
 use axum::extract::{Path, State as AxState};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug)]
 pub struct ApiError(String);
 
 impl IntoResponse for ApiError {
@@ -32,6 +33,7 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/version", get(version))
         .route("/board", get(board))
         .route("/digest", get(digest))
+        .route("/webhooks/github", post(github_webhook))
         .route("/items", post(create_item))
         .route("/items/{id}", get(item_detail).delete(delete_item))
         .route("/items/{id}/delete", post(delete_item))
@@ -379,6 +381,146 @@ async fn delete_item(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GithubWebhookPayload {
+    pub r#ref: Option<String>,
+    pub after: Option<String>,
+    #[serde(default)]
+    pub head_commit: Option<GithubCommit>,
+
+    pub action: Option<String>,
+    #[serde(default)]
+    pub pull_request: Option<GithubPullRequest>,
+
+    #[serde(default)]
+    pub repository: Option<GithubRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GithubCommit {
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GithubPullRequest {
+    pub merged: Option<bool>,
+    pub merge_commit_sha: Option<String>,
+    pub base: Option<GithubBranchRef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GithubBranchRef {
+    pub r#ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GithubRepository {
+    pub default_branch: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookResponse {
+    pub status: String,
+    pub main_advanced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+}
+
+async fn github_webhook(
+    AxState(b): AxState<SharedBoard>,
+    headers: HeaderMap,
+    Json(payload): Json<GithubWebhookPayload>,
+) -> ApiResult<WebhookResponse> {
+    let event_type = headers
+        .get("x-github-event")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+
+    if event_type == "ping" {
+        return Ok(Json(WebhookResponse {
+            status: "pong".into(),
+            main_advanced: false,
+            ref_name: None,
+            commit_sha: None,
+        }));
+    }
+
+    let default_branch = payload
+        .repository
+        .as_ref()
+        .and_then(|r| r.default_branch.as_deref())
+        .unwrap_or("main");
+
+    let is_main_ref = |r: &str| -> bool {
+        r == default_branch
+            || r == "main"
+            || r == format!("refs/heads/{default_branch}")
+            || r == "refs/heads/main"
+            || r.ends_with(&format!("/{default_branch}"))
+            || r.ends_with("/main")
+    };
+
+    let is_push_main = if let Some(ref_str) = &payload.r#ref {
+        is_main_ref(ref_str)
+    } else {
+        false
+    };
+
+    let is_pr_main_merge = if let Some(pr) = &payload.pull_request {
+        let is_closed_or_merged = payload.action.as_deref() == Some("closed") || pr.merged == Some(true);
+        let merged = pr.merged == Some(true);
+        let base_is_main = pr.base.as_ref().and_then(|b| b.r#ref.as_deref()).is_some_and(is_main_ref);
+        is_closed_or_merged && merged && base_is_main
+    } else {
+        false
+    };
+
+    if is_push_main || is_pr_main_merge {
+        let ref_name = payload
+            .r#ref
+            .clone()
+            .or_else(|| {
+                payload
+                    .pull_request
+                    .as_ref()
+                    .and_then(|pr| pr.base.as_ref())
+                    .and_then(|b| b.r#ref.clone())
+            })
+            .unwrap_or_else(|| format!("refs/heads/{default_branch}"));
+
+        let commit_sha = if is_push_main {
+            payload
+                .after
+                .clone()
+                .filter(|s| s != "0000000000000000000000000000000000000000")
+                .or_else(|| payload.head_commit.as_ref().and_then(|c| c.id.clone()))
+        } else {
+            payload
+                .pull_request
+                .as_ref()
+                .and_then(|pr| pr.merge_commit_sha.clone())
+        };
+
+        b.notify_main_advanced(&ref_name, commit_sha.clone());
+
+        Ok(Json(WebhookResponse {
+            status: "ok".into(),
+            main_advanced: true,
+            ref_name: Some(ref_name),
+            commit_sha,
+        }))
+    } else {
+        Ok(Json(WebhookResponse {
+            status: "ignored".into(),
+            main_advanced: false,
+            ref_name: None,
+            commit_sha: None,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +634,170 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn github_webhook_accepts_valid_payload_and_emits_main_advanced() {
+        use crate::events::BoardEvent;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join("honr-test-webhook.json"),
+        ));
+
+        let mut rx = b.subscribe();
+
+        // 1. Push to main branch
+        let push_payload = serde_json::json!({
+            "ref": "refs/heads/main",
+            "after": "1234567890abcdef1234567890abcdef12345678",
+            "repository": {
+                "default_branch": "main"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "push".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers.clone(),
+            Json(serde_json::from_value(push_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ok");
+        assert!(resp.main_advanced);
+        assert_eq!(resp.commit_sha.as_deref(), Some("1234567890abcdef1234567890abcdef12345678"));
+
+        let event = rx.try_recv().expect("event emitted");
+        match event {
+            BoardEvent::MainAdvanced { seq: _, ref_name, commit_sha } => {
+                assert_eq!(ref_name, "refs/heads/main");
+                assert_eq!(commit_sha.as_deref(), Some("1234567890abcdef1234567890abcdef12345678"));
+            }
+            other => panic!("expected MainAdvanced, got {other:?}"),
+        }
+
+        // 2. PR merged into main
+        let pr_payload = serde_json::json!({
+            "action": "closed",
+            "pull_request": {
+                "merged": true,
+                "merge_commit_sha": "fedcba0987654321fedcba0987654321fedcba09",
+                "base": {
+                    "ref": "main"
+                }
+            },
+            "repository": {
+                "default_branch": "main"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(pr_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ok");
+        assert!(resp.main_advanced);
+
+        let event = rx.try_recv().expect("event emitted");
+        match event {
+            BoardEvent::MainAdvanced { seq: _, ref_name, commit_sha } => {
+                assert_eq!(ref_name, "main");
+                assert_eq!(commit_sha.as_deref(), Some("fedcba0987654321fedcba0987654321fedcba09"));
+            }
+            other => panic!("expected MainAdvanced, got {other:?}"),
+        }
+
+        // 3. Push to feature branch (filtered out, no event emitted)
+        let feature_push = serde_json::json!({
+            "ref": "refs/heads/feature/my-branch",
+            "after": "9999999999999999999999999999999999999999",
+            "repository": {
+                "default_branch": "main"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "push".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(feature_push).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ignored");
+        assert!(!resp.main_advanced);
+        assert!(rx.try_recv().is_err(), "no event should be emitted for feature branch push");
+
+        // 4. Ping event (no event emitted)
+        let ping_payload = serde_json::json!({
+            "zen": "Non-blocking is better than blocking."
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "ping".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(ping_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "pong");
+        assert!(!resp.main_advanced);
+        assert!(rx.try_recv().is_err(), "no event should be emitted for ping");
+    }
+
+    #[tokio::test]
+    async fn github_webhook_endpoint_route_integration() {
+        use tower_service::Service;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join("honr-test-route.json"),
+        ));
+
+        let mut app = Router::new().nest("/api", routes()).with_state(b.clone());
+        let mut rx = b.subscribe();
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/webhooks/github")
+            .header("content-type", "application/json")
+            .header("x-github-event", "push")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "ref": "refs/heads/main",
+                    "after": "11223344556677889900aabbccddeeff11223344"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.call(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let event = rx.try_recv().expect("event emitted over route");
+        match event {
+            crate::events::BoardEvent::MainAdvanced { commit_sha, .. } => {
+                assert_eq!(commit_sha.as_deref(), Some("11223344556677889900aabbccddeeff11223344"));
+            }
+            other => panic!("expected MainAdvanced event, got {other:?}"),
+        }
     }
 }

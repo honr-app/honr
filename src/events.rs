@@ -2,9 +2,9 @@
 //! merges upserts, so one event shape covers create, transition and heartbeat.
 
 use crate::model::{ItemId, WorkItem};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BoardEvent {
     /// A work item was created or changed. Merge by `item.id`.
@@ -14,5 +14,13 @@ pub enum BoardEvent {
     Story { seq: u64, goal: ItemId, at: String, text: String },
     /// A work item was deleted. Remove by `id`.
     Delete { seq: u64, id: ItemId },
+    /// Default branch (e.g. main) has advanced via push or merged PR.
+    MainAdvanced {
+        seq: u64,
+        ref_name: String,
+        #[serde(default)]
+        commit_sha: Option<String>,
+    },
 }
+
 
