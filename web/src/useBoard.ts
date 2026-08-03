@@ -158,6 +158,7 @@ export function useBoard() {
 
   useEffect(() => {
     let alive = true;
+    let socket: WebSocket | EventSource | null = null;
 
     const load = () =>
       api
@@ -171,18 +172,63 @@ export function useBoard() {
 
     load();
 
-    let socket: WebSocket | EventSource | null = null;
+    const attachEventSource = () => {
+      const es = new EventSource("/api/events");
+      wsRef.current = es;
+      socket = es;
 
-    if (typeof WebSocket !== "undefined") {
-      const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = typeof window !== "undefined" ? window.location.host : "localhost:8080";
-      const wsUrl = `${protocol}//${host}/api/ws`;
+      es.onopen = () => {
+        if (!alive) {
+          es.close();
+          return;
+        }
+        dispatch({ type: "connected", ok: true });
+        if (wasConnectedRef.current) {
+          load();
+        }
+        wasConnectedRef.current = true;
+      };
+
+      es.onerror = () => {
+        if (!alive) return;
+        dispatch({ type: "connected", ok: false });
+      };
+
+      es.onmessage = (m) => {
+        if (!alive) return;
+        try {
+          const ev = JSON.parse(m.data) as BoardEvent;
+          if (ev && typeof ev.seq === "number") {
+            if (isSequenceGap(lastSeenSeqRef.current, ev.seq)) {
+              load();
+            }
+          }
+          if (ev && ev.type === "reset") {
+            load();
+          }
+          dispatch({ type: "event", ev });
+          emitBoardEvent(ev);
+        } catch {
+          /* keep-alive frames */
+        }
+      };
+    };
+
+    const attachWebSocket = () => {
+      // Dev: hit honr directly. Vite's `/api/ws` proxy is unreliable in Safari
+      // (failed upgrades show up as "closed before the connection is established").
+      const wsUrl = import.meta.env.DEV
+        ? "ws://127.0.0.1:8080/api/ws"
+        : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/ws`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
       socket = ws;
 
       ws.onopen = () => {
-        if (!alive) return;
+        if (!alive) {
+          ws.close();
+          return;
+        }
         dispatch({ type: "connected", ok: true });
         ws.send(JSON.stringify({ type: "subscribe", last_seq: lastSeenSeqRef.current || null }));
         if (wasConnectedRef.current) {
@@ -230,44 +276,20 @@ export function useBoard() {
           /* ignore non-json frames */
         }
       };
-    } else {
-      const es = new EventSource("/api/events");
-      wsRef.current = es;
-      socket = es;
+    };
 
-      es.onopen = () => {
-        if (!alive) return;
-        dispatch({ type: "connected", ok: true });
-        if (wasConnectedRef.current) {
-          load();
-        }
-        wasConnectedRef.current = true;
-      };
-
-      es.onerror = () => {
-        if (!alive) return;
-        dispatch({ type: "connected", ok: false });
-      };
-
-      es.onmessage = (m) => {
-        if (!alive) return;
-        try {
-          const ev = JSON.parse(m.data) as BoardEvent;
-          if (ev && typeof ev.seq === "number") {
-            if (isSequenceGap(lastSeenSeqRef.current, ev.seq)) {
-              load();
-            }
-          }
-          if (ev && ev.type === "reset") {
-            load();
-          }
-          dispatch({ type: "event", ev });
-          emitBoardEvent(ev);
-        } catch {
-          /* keep-alive frames */
-        }
-      };
-    }
+    // React Strict Mode (dev) runs effect → cleanup → effect. Opening a
+    // WebSocket synchronously means cleanup closes a CONNECTING socket, and
+    // Safari always logs that. Defer so the first pass cancels the timer and
+    // never constructs a socket.
+    const startTimer = window.setTimeout(() => {
+      if (!alive) return;
+      if (typeof WebSocket !== "undefined") {
+        attachWebSocket();
+      } else {
+        attachEventSource();
+      }
+    }, 0);
 
     // Rollups (progress, chunk summaries, spend) are derived server-side, so
     // re-pull them periodically. Card state itself arrives over WebSocket.
@@ -275,10 +297,17 @@ export function useBoard() {
 
     return () => {
       alive = false;
+      window.clearTimeout(startTimer);
       clearInterval(poll);
-      if (socket) {
-        socket.close();
+      if (!socket) return;
+      if (socket instanceof WebSocket) {
+        // Never close() while CONNECTING — Safari treats that as an error.
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+        return;
       }
+      socket.close();
     };
   }, []);
 
