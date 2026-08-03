@@ -13,7 +13,7 @@ use crate::schema::{AgentConfig, Level, RepoConfig, Schema};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -44,6 +44,14 @@ pub struct BoardState {
     pub openshell_bin: Option<String>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
+    /// Parent → child ids. Rebuilt after load; maintained on create/delete.
+    /// Avoids full `items` scans in `children_of` / `has_children` / snapshot members.
+    #[serde(skip)]
+    pub children_by_parent: BTreeMap<ItemId, BTreeSet<ItemId>>,
+    /// State → item ids. Rebuilt after load; maintained on create/delete/transition.
+    /// Avoids full `items` scans in list_backlog / list_awaiting_dispatch / sweep_leases.
+    #[serde(skip)]
+    pub ids_by_state: HashMap<State, BTreeSet<ItemId>>,
 }
 
 impl BoardState {
@@ -58,7 +66,106 @@ impl BoardState {
             workspace: self.workspace.clone(),
             openshell_bin: self.openshell_bin.clone(),
             agent_logs: BTreeMap::new(),
+            children_by_parent: BTreeMap::new(),
+            ids_by_state: HashMap::new(),
         }
+    }
+
+    /// Rebuild secondary indexes from `items`. Call after JSON/DB load.
+    pub fn rebuild_hot_indexes(&mut self) {
+        self.children_by_parent.clear();
+        self.ids_by_state.clear();
+        let snapshot: Vec<(ItemId, Option<ItemId>, State)> = self
+            .items
+            .values()
+            .map(|i| (i.id, i.parent, i.state))
+            .collect();
+        for (id, parent, state) in snapshot {
+            if let Some(p) = parent {
+                self.children_by_parent.entry(p).or_default().insert(id);
+            }
+            self.ids_by_state.entry(state).or_default().insert(id);
+        }
+    }
+
+    fn index_link_item(&mut self, item: &WorkItem) {
+        if let Some(p) = item.parent {
+            self.children_by_parent.entry(p).or_default().insert(item.id);
+        }
+        self.ids_by_state.entry(item.state).or_default().insert(item.id);
+    }
+
+    fn index_unlink_item(&mut self, item: &WorkItem) {
+        if let Some(p) = item.parent {
+            if let Some(set) = self.children_by_parent.get_mut(&p) {
+                set.remove(&item.id);
+                if set.is_empty() {
+                    self.children_by_parent.remove(&p);
+                }
+            }
+        }
+        if let Some(set) = self.ids_by_state.get_mut(&item.state) {
+            set.remove(&item.id);
+            if set.is_empty() {
+                self.ids_by_state.remove(&item.state);
+            }
+        }
+    }
+
+    fn index_set_state(&mut self, id: ItemId, from: State, to: State) {
+        if from == to {
+            return;
+        }
+        if let Some(set) = self.ids_by_state.get_mut(&from) {
+            set.remove(&id);
+            if set.is_empty() {
+                self.ids_by_state.remove(&from);
+            }
+        }
+        self.ids_by_state.entry(to).or_default().insert(id);
+    }
+
+    /// Insert a new item and update hot indexes.
+    pub fn insert_item(&mut self, item: WorkItem) {
+        self.index_link_item(&item);
+        self.items.insert(item.id, item);
+    }
+
+    /// Remove an item and update hot indexes.
+    pub fn remove_item(&mut self, id: ItemId) -> Option<WorkItem> {
+        let item = self.items.remove(&id)?;
+        self.index_unlink_item(&item);
+        Some(item)
+    }
+
+    /// Non-retired child count (denorm field mirrored into SQLite on flush).
+    pub fn non_retired_child_count(&self, id: ItemId) -> u32 {
+        self.children_by_parent
+            .get(&id)
+            .map(|kids| {
+                kids.iter()
+                    .filter(|cid| {
+                        self.items
+                            .get(cid)
+                            .map(|i| i.state != State::Retired)
+                            .unwrap_or(false)
+                    })
+                    .count() as u32
+            })
+            .unwrap_or(0)
+    }
+
+    /// Unresolved blocker count (denorm field mirrored into SQLite on flush).
+    pub fn open_blocker_count(&self, item: &WorkItem) -> u32 {
+        item.blocked_by
+            .iter()
+            .filter(|b| {
+                self.items
+                    .get(b)
+                    .map(|i| !i.state.is_terminal())
+                    .unwrap_or(false)
+            })
+            .count() as u32
     }
 }
 
@@ -391,6 +498,7 @@ impl Board {
                             "renamed {renamed} Initial plan Task(s) to include Project name"
                         );
                     }
+                    state.rebuild_hot_indexes();
                     *board.state.write().unwrap() = state;
                     let migrated = board.migrate_sandbox_policies_to_inline();
                     if healed > 0 || renamed > 0 || migrated > 0 {
@@ -434,6 +542,7 @@ impl Board {
         }
         let mut state = store.load_board_state().await?;
         let (healed, renamed) = Self::heal_loaded_state(&mut state);
+        state.rebuild_hot_indexes();
         if healed > 0 {
             tracing::info!("healed {healed} Initial plan Task(s) Shaping → Backlog");
         }
@@ -621,11 +730,19 @@ impl Board {
 
     pub fn children_of(&self, id: ItemId) -> Vec<ItemId> {
         let s = self.state.read().unwrap();
-        s.items.values().filter(|i| i.parent == Some(id)).map(|i| i.id).collect()
+        Self::children_of_indexed(&s, id)
+    }
+
+    /// Children via `children_by_parent` (not a full items scan).
+    fn children_of_indexed(s: &BoardState, id: ItemId) -> Vec<ItemId> {
+        s.children_by_parent
+            .get(&id)
+            .map(|kids| kids.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     fn has_children(s: &BoardState, id: ItemId) -> bool {
-        s.items.values().any(|i| i.parent == Some(id) && i.state != State::Retired)
+        s.non_retired_child_count(id) > 0
     }
 
     fn depth(s: &BoardState, id: ItemId) -> usize {
@@ -737,39 +854,45 @@ impl Board {
         machine::check(item, to, has_children, &blockers)?;
 
         let now = Utc::now();
-        let item = s.items.get_mut(&id).unwrap();
-        let from = item.state;
-        item.history.push(Transition { at: now, from, to, by: by.to_string(), reason });
-        item.state = to;
-        if from != to {
-            item.entered_state_at = now;
-        }
-
-        // States that imply no agent is holding the card.
-        if matches!(to, State::Backlog | State::NeedsHuman | State::Done | State::Retired | State::Shaping) {
-            item.lease = None;
-            item.run_deadline_at = None;
-        }
-        if to == State::Backlog {
-            item.progress = 0.0;
-            // Bounce / park / halt / deadline expiry all land here — never auto-start again.
-            item.awaiting_dispatch = false;
-            item.rebase_requested = false;
-            if by == "human" {
-                item.run_failures = 0;
-                item.escalation = None;
-                item.last_bounce_reason = None;
+        let from = {
+            let item = s.items.get_mut(&id).unwrap();
+            let from = item.state;
+            item.history.push(Transition { at: now, from, to, by: by.to_string(), reason });
+            item.state = to;
+            if from != to {
+                item.entered_state_at = now;
             }
+
+            // States that imply no agent is holding the card.
+            if matches!(to, State::Backlog | State::NeedsHuman | State::Done | State::Retired | State::Shaping) {
+                item.lease = None;
+                item.run_deadline_at = None;
+            }
+            if to == State::Backlog {
+                item.progress = 0.0;
+                // Bounce / park / halt / deadline expiry all land here — never auto-start again.
+                item.awaiting_dispatch = false;
+                item.rebase_requested = false;
+                if by == "human" {
+                    item.run_failures = 0;
+                    item.escalation = None;
+                    item.last_bounce_reason = None;
+                }
+            }
+            // Terminal cards discard the LLM session and sandbox environment.
+            if to.is_terminal() {
+                item.conversation_id = None;
+                item.parked = false;
+                item.awaiting_dispatch = false;
+                item.rebase_requested = false;
+                item.environment = None;
+            }
+            from
+        };
+        if from != to {
+            s.index_set_state(id, from, to);
         }
-        // Terminal cards discard the LLM session and sandbox environment.
-        if to.is_terminal() {
-            item.conversation_id = None;
-            item.parked = false;
-            item.awaiting_dispatch = false;
-            item.rebase_requested = false;
-            item.environment = None;
-        }
-        let mut item_out = item.clone();
+        let mut item_out = s.items.get(&id).unwrap().clone();
         Self::populate_blockers(s, &mut item_out);
         Ok(item_out)
     }
@@ -951,7 +1074,7 @@ impl Board {
                 item.plan = None;
                 item.project_prompt = Some(crate::model::DEFAULT_PROJECT_PROMPT.to_string());
             }
-            s.items.insert(id, item.clone());
+            s.insert_item(item.clone());
             let mut item_out = item;
             Self::populate_blockers(&s, &mut item_out);
             item_out
@@ -2365,11 +2488,15 @@ impl Board {
 
     /// Backlog leaves that are unblocked and match capabilities. Not a start
     /// queue — cockpit must `enqueue_dispatch` before the supervisor claims.
+    ///
+    /// Uses `ids_by_state` + denormalized leaf/blocker checks (not a full scan).
     pub fn list_backlog(&self, capabilities: &[String]) -> Vec<WorkItem> {
         let s = self.state.read().unwrap();
-        s.items
-            .values()
-            .filter(|i| i.state == State::Backlog)
+        let Some(ids) = s.ids_by_state.get(&State::Backlog) else {
+            return Vec::new();
+        };
+        ids.iter()
+            .filter_map(|id| s.items.get(id))
             .filter(|i| i.level.as_deref() != Some("Project"))
             .filter(|i| !Self::has_children(&s, i.id))
             .filter(|i| Self::unresolved_blockers(&s, i).is_empty())
@@ -2392,12 +2519,17 @@ impl Board {
     }
 
     /// Cards the cockpit asked to start, oldest first. Supervisor drains these.
+    ///
+    /// Uses `ids_by_state` + denormalized leaf/blocker checks (not a full scan).
     pub fn list_awaiting_dispatch(&self) -> Vec<WorkItem> {
         let s = self.state.read().unwrap();
-        let mut items: Vec<_> = s
-            .items
-            .values()
-            .filter(|i| i.state == State::Backlog && i.awaiting_dispatch && !i.parked)
+        let Some(ids) = s.ids_by_state.get(&State::Backlog) else {
+            return Vec::new();
+        };
+        let mut items: Vec<_> = ids
+            .iter()
+            .filter_map(|id| s.items.get(id))
+            .filter(|i| i.awaiting_dispatch && !i.parked)
             .filter(|i| i.level.as_deref() != Some("Project"))
             .filter(|i| !Self::has_children(&s, i.id))
             .filter(|i| Self::unresolved_blockers(&s, i).is_empty())
@@ -3215,21 +3347,32 @@ fn check_split_relatedness(
     }
 
     /// Requeue runs past their fixed `run_deadline_at` (agent timeout).
+    ///
+    /// Iterates only Claimed/Running via `ids_by_state` (not a full items scan).
     pub fn sweep_leases(&self) -> Vec<ItemId> {
         let now = Utc::now();
         let expired: Vec<ItemId> = {
             let s = self.state.read().unwrap();
-            s.items
-                .values()
-                .filter(|i| matches!(i.state, State::Claimed | State::Running))
-                .filter(|i| {
-                    i.run_deadline_at
+            let mut out = Vec::new();
+            for state in [State::Claimed, State::Running] {
+                let Some(ids) = s.ids_by_state.get(&state) else {
+                    continue;
+                };
+                for id in ids {
+                    let Some(i) = s.items.get(id) else {
+                        continue;
+                    };
+                    let expired = i
+                        .run_deadline_at
                         .map(|d| now > d)
                         .or_else(|| i.lease.as_ref().map(|l| l.is_expired(now)))
-                        .unwrap_or(false)
-                })
-                .map(|i| i.id)
-                .collect()
+                        .unwrap_or(false);
+                    if expired {
+                        out.push(*id);
+                    }
+                }
+            }
+            out
         };
         for id in &expired {
             let title = self.get(*id).map(|i| i.title).unwrap_or_default();
@@ -3443,15 +3586,17 @@ fn check_split_relatedness(
         let mut stack = vec![id];
         while let Some(cur) = stack.pop() {
             to_delete.push(cur);
-            for (cid, item) in &s.items {
-                if item.parent == Some(cur) && !to_delete.contains(cid) && !stack.contains(cid) {
-                    stack.push(*cid);
+            if let Some(kids) = s.children_by_parent.get(&cur) {
+                for &cid in kids {
+                    if !to_delete.contains(&cid) && !stack.contains(&cid) {
+                        stack.push(cid);
+                    }
                 }
             }
         }
 
         for del_id in &to_delete {
-            if let Some(it) = s.items.remove(del_id) {
+            if let Some(it) = s.remove_item(*del_id) {
                 let beads = self.beads.clone();
                 let beads_id = it.beads_id.clone();
                 let is_initial = it.is_initial_plan_task();
@@ -4030,10 +4175,14 @@ fn check_split_relatedness(
             })
             .collect();
 
-        let mut goal_ids: Vec<ItemId> =
-            items.iter().map(|i| Self::goal_of(&s, i.id)).collect();
+        // Project roots only (parent.is_none) — avoids goal_of over every item.
+        let mut goal_ids: Vec<ItemId> = s
+            .items
+            .values()
+            .filter(|i| i.parent.is_none())
+            .map(|i| i.id)
+            .collect();
         goal_ids.sort_unstable();
-        goal_ids.dedup();
 
         let goals = goal_ids
             .into_iter()
@@ -4056,13 +4205,17 @@ fn check_split_relatedness(
         let goal = s.items.get(&gid)?;
 
         // Only Project roots are swimlanes. Nested nodes never get their own.
-        if Self::depth(s, gid) != 0 {
+        if goal.parent.is_some() {
             return None;
         }
         let archived = goal.state == State::Retired;
 
-        // Tasks under this Project only — the Project itself is never a Board card.
-        let members: Vec<&WorkItem> = s.items.values().filter(|i| i.parent == Some(gid)).collect();
+        // Tasks under this Project — via children_by_parent (not a full scan).
+        let member_ids = Self::children_of_indexed(s, gid);
+        let members: Vec<&WorkItem> = member_ids
+            .iter()
+            .filter_map(|id| s.items.get(id))
+            .collect();
 
         // Active projects: retired leaves are out of scope (cut duplicates must
         // not inflate the bar). Archived projects: cut_scope retires the whole
@@ -4237,23 +4390,32 @@ fn check_split_relatedness(
     pub fn digest(&self) -> Digest {
         let s = self.state.read().unwrap();
         let now = Utc::now();
-        let mut goal_ids: Vec<ItemId> = s.items.values().map(|i| Self::goal_of(&s, i.id)).collect();
+        // Project roots only — avoids goal_of over every item.
+        let mut goal_ids: Vec<ItemId> = s
+            .items
+            .values()
+            .filter(|i| i.parent.is_none())
+            .map(|i| i.id)
+            .collect();
         goal_ids.sort_unstable();
-        goal_ids.dedup();
 
         let goals = goal_ids
             .into_iter()
             .filter_map(|gid| {
                 let goal = s.items.get(&gid)?;
-                // Only Project roots are digest lanes.
-                if Self::depth(&s, gid) != 0 {
+                if goal.parent.is_some() {
                     return None;
                 }
                 if goal.state == State::Retired {
                     return None;
                 }
-                let members: Vec<&WorkItem> =
-                    s.items.values().filter(|i| Self::goal_of(&s, i.id) == gid).collect();
+                // Flat Tasks under Project + the Project itself (legacy goal_of set).
+                let child_ids = Self::children_of_indexed(&s, gid);
+                let mut members: Vec<&WorkItem> = child_ids
+                    .iter()
+                    .filter_map(|id| s.items.get(id))
+                    .collect();
+                members.push(goal);
 
                 let needs_you = members
                     .iter()
@@ -4511,6 +4673,200 @@ mod tests {
             "halt bounce clears dispatch"
         );
         assert!(b.list_awaiting_dispatch().is_empty());
+    }
+
+    /// Filter semantics for hot paths that use denorm / secondary indexes.
+    #[test]
+    fn hot_path_filters_match_legacy_semantics() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-hot-filters.json"),
+        );
+        let project = b
+            .create(None, "Proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+
+        let leaf = b
+            .create(
+                Some(project.id),
+                "leaf",
+                "do",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                Some("rust".into()),
+            )
+            .expect("leaf");
+        let _ = b.transition(leaf.id, State::Shaping, "t", None);
+        let _ = b.transition(leaf.id, State::Backlog, "t", None);
+
+        let blocked = b
+            .create(
+                Some(project.id),
+                "blocked",
+                "wait",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("blocked");
+        let _ = b.transition(blocked.id, State::Shaping, "t", None);
+        let _ = b.transition(blocked.id, State::Backlog, "t", None);
+        b.set_blocked_by(blocked.id, vec![leaf.id]);
+
+        let container_child = b
+            .create(
+                Some(project.id),
+                "container-slot",
+                "placeholder",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("slot");
+        let _ = b.transition(container_child.id, State::Shaping, "t", None);
+        let _ = b.transition(container_child.id, State::Backlog, "t", None);
+        // Project has children → not claimable; leaf with wrong capability excluded.
+        let ready_rust = b.list_ready(&["rust".into()]);
+        let ready_ids: Vec<_> = ready_rust.iter().map(|i| i.id).collect();
+        assert!(
+            ready_ids.contains(&leaf.id),
+            "rust capability matches rust leaf: {ready_ids:?}"
+        );
+        assert!(
+            !ready_ids.contains(&blocked.id),
+            "blocked leaf must be excluded"
+        );
+        assert!(
+            !ready_ids.contains(&project.id),
+            "Project must be excluded"
+        );
+
+        let ready_python = b.list_ready(&["python".into()]);
+        assert!(
+            !ready_python.iter().any(|i| i.id == leaf.id),
+            "capability mismatch excludes leaf"
+        );
+
+        // Parent/child helpers use children_by_parent.
+        assert!(Board::has_children(
+            &b.state.read().unwrap(),
+            project.id
+        ));
+        assert!(!Board::has_children(
+            &b.state.read().unwrap(),
+            leaf.id
+        ));
+        let kids = b.children_of(project.id);
+        assert!(kids.contains(&leaf.id));
+        assert!(kids.contains(&blocked.id));
+        assert_eq!(
+            b.state.read().unwrap().non_retired_child_count(project.id) as usize,
+            kids.len()
+        );
+
+        // Dispatch queue: only unblocked leaf with flag.
+        assert!(b.list_awaiting_dispatch().is_empty());
+        b.enqueue_dispatch(leaf.id).expect("enqueue");
+        assert_eq!(
+            b.list_awaiting_dispatch()
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<_>>(),
+            vec![leaf.id]
+        );
+        assert!(
+            b.enqueue_dispatch(blocked.id).is_err(),
+            "blocked card cannot dispatch"
+        );
+
+        // Digest ready_to_dispatch excludes awaiting_dispatch and blocked.
+        let digest = b.digest();
+        let goal = digest
+            .goals
+            .iter()
+            .find(|g| g.goal_id == project.id)
+            .expect("goal");
+        assert!(
+            !goal.ready_to_dispatch.iter().any(|c| c.id == leaf.id),
+            "enqueued leaf not in ready_to_dispatch"
+        );
+        assert!(
+            !goal.ready_to_dispatch.iter().any(|c| c.id == blocked.id),
+            "blocked not ready"
+        );
+        assert!(
+            goal.ready_to_dispatch
+                .iter()
+                .any(|c| c.id == container_child.id),
+            "idle unblocked leaf is ready: {:?}",
+            goal.ready_to_dispatch
+        );
+
+        // Indexes stay consistent across transition + delete.
+        b.transition(leaf.id, State::Done, "t", Some("done".into()))
+            .expect("done");
+        assert!(
+            b.list_ready(&["rust".into(), "python".into(), "any".into()])
+                .iter()
+                .any(|i| i.id == blocked.id),
+            "completing blocker unblocks dependent"
+        );
+        let before = b.children_of(project.id).len();
+        b.delete_item(container_child.id).expect("delete");
+        assert_eq!(b.children_of(project.id).len(), before - 1);
+        assert_eq!(
+            b.state.read().unwrap().ids_by_state.get(&State::Backlog).map(|s| s.len()),
+            Some(
+                b.state
+                    .read()
+                    .unwrap()
+                    .items
+                    .values()
+                    .filter(|i| i.state == State::Backlog)
+                    .count()
+            )
+        );
+    }
+
+    #[test]
+    fn snapshot_uses_project_roots_and_child_index() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-snap-index.json"),
+        );
+        let p1 = b
+            .create(None, "A", "a", None, Origin::Human, true, None)
+            .unwrap();
+        let p2 = b
+            .create(None, "B", "b", None, Origin::Human, true, None)
+            .unwrap();
+        let _ = b.transition(p1.id, State::Shaping, "t", None);
+        let _ = b.transition(p2.id, State::Shaping, "t", None);
+        let t = b
+            .create(
+                Some(p1.id),
+                "task",
+                "x",
+                Some("d".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "t", None);
+        let _ = b.transition(t.id, State::Backlog, "t", None);
+
+        let snap = b.snapshot();
+        let goal_ids: Vec<_> = snap.goals.iter().map(|g| g.id).collect();
+        assert!(goal_ids.contains(&p1.id));
+        assert!(goal_ids.contains(&p2.id));
+        let g1 = snap.goals.iter().find(|g| g.id == p1.id).unwrap();
+        // Initial plan Task + our task = leaves under p1.
+        assert!(g1.leaves_total >= 1);
     }
 
     #[test]
