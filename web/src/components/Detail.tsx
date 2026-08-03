@@ -287,7 +287,7 @@ function cursorToolCallBody(
   };
 }
 
-function cursorToolResultText(name: string, result: any): string {
+function cursorToolResultText(_name: string, result: any): string {
   if (!result) return "";
   const success = result.success ?? result;
   if (typeof success === "string") return success;
