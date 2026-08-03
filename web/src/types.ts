@@ -66,6 +66,18 @@ export interface SandboxProfilesOut {
   default_sandbox_profile_id: string | null;
 }
 
+/** Per-install forge/repo binding (Settings → Workspace). */
+export interface WorkspaceBinding {
+  forge: string;
+  /** `owner/name` PRs target. */
+  upstream: string;
+  /** `owner/name` the agent clones and pushes to. */
+  fork: string;
+  base: string;
+  /** Beads ↔ GitHub Issues sync target; empty/null → use upstream. */
+  beads_sync_repo?: string | null;
+}
+
 export type PlanStatus = "empty" | "awaiting_approval" | "approved";
 
 export interface PlanTaskSpec {

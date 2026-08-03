@@ -1,7 +1,7 @@
 //! The human face. Thin: every handler here delegates straight to `Board`, so
 //! the pixels and the agent API can't drift apart.
 
-use crate::model::{ItemId, SandboxProfile, State, WorkItem};
+use crate::model::{ItemId, SandboxProfile, State, WorkItem, WorkspaceBinding};
 use crate::store::{AncestryLine, SharedBoard};
 
 use axum::extract::{Path, State as AxState};
@@ -71,6 +71,7 @@ pub fn routes() -> Router<SharedBoard> {
             "/sandbox-profiles/{id}/default",
             post(set_default_sandbox_profile),
         )
+        .route("/workspace", get(get_workspace).put(put_workspace))
 }
 
 #[derive(Serialize)]
@@ -425,6 +426,21 @@ async fn delete_item(
 ) -> ApiResult<serde_json::Value> {
     b.delete_item(id).map_err(ApiError)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------- workspace binding
+
+/// GET returns the durable binding, or an empty default when unbound (so
+/// Settings can render editors without a separate "missing" shape).
+async fn get_workspace(AxState(b): AxState<SharedBoard>) -> Json<WorkspaceBinding> {
+    Json(b.workspace_binding().unwrap_or_default())
+}
+
+async fn put_workspace(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<WorkspaceBinding>,
+) -> ApiResult<WorkspaceBinding> {
+    b.set_workspace_binding(req).map(Json).map_err(ApiError)
 }
 
 // ---------------------------------------------------------------- sandbox profiles
@@ -1487,5 +1503,78 @@ mod tests {
             panic!("create colliding name");
         };
         assert_eq!(second.id, "heavy-ci-2");
+    }
+
+    #[tokio::test]
+    async fn workspace_get_put_persists_and_drives_effective_repo() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-ws-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Empty yaml repo — Settings PUT must be enough (no yaml required).
+        let mut schema = crate::schema::Schema::default();
+        schema.execution.agents.repo.upstream.clear();
+        schema.execution.agents.repo.fork.clear();
+        let b = std::sync::Arc::new(crate::store::Board::new(schema, path));
+
+        let Json(empty) = get_workspace(AxState(b.clone())).await;
+        assert_eq!(empty.forge, "github");
+        assert!(empty.upstream.is_empty());
+        assert!(empty.fork.is_empty());
+
+        let Ok(Json(saved)) = put_workspace(
+            AxState(b.clone()),
+            Json(WorkspaceBinding {
+                forge: "github".into(),
+                upstream: "acme/widget".into(),
+                fork: "bot/widget".into(),
+                base: "develop".into(),
+                beads_sync_repo: Some("acme/widget-beads".into()),
+            }),
+        )
+        .await
+        else {
+            panic!("put workspace");
+        };
+        assert_eq!(saved.upstream, "acme/widget");
+        assert_eq!(saved.fork, "bot/widget");
+        assert_eq!(saved.base, "develop");
+        assert_eq!(
+            saved.beads_sync_repo.as_deref(),
+            Some("acme/widget-beads")
+        );
+
+        let Json(got) = get_workspace(AxState(b.clone())).await;
+        assert_eq!(got, saved);
+
+        let repo = b.effective_agent_repo().expect("complete binding");
+        assert_eq!(repo.upstream, "acme/widget");
+        assert_eq!(repo.fork, "bot/widget");
+        assert_eq!(repo.base, "develop");
+        assert_eq!(
+            b.workspace_binding()
+                .and_then(|w| w.beads_repo())
+                .as_deref(),
+            Some("acme/widget-beads")
+        );
+
+        // Unsupported forge is refused.
+        assert!(
+            put_workspace(
+                AxState(b.clone()),
+                Json(WorkspaceBinding {
+                    forge: "gitlab".into(),
+                    upstream: "x/y".into(),
+                    fork: "a/b".into(),
+                    base: "main".into(),
+                    beads_sync_repo: None,
+                }),
+            )
+            .await
+            .is_err()
+        );
     }
 }

@@ -1,7 +1,8 @@
 # Investigation: generalize honr beyond this stack
 
-**Status:** Task `workspace-binding` landed durable Board Workspace + kill
-Shane fallbacks. Remaining Tasks still implement Settings panels / second-repo
+**Status:** Tasks `workspace-binding` and `settings-workspace` landed: durable
+Board Workspace + Settings → Workspace panel (`GET`/`PUT /api/workspace`).
+Remaining: Agent runtime / OpenShell Settings, briefing agnosticism, second-repo
 proof. No GitLab.
 
 **Goal:** a fresh install can drive **any GitHub-hosted repo** with a configurable
@@ -44,7 +45,7 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 | Cross-fork head `owner:branch` | supervisor PR scripts / tests | Design invariant |
 | Webhook ingress | `POST /api/webhooks/github` in `src/api.rs` | Payload-driven; **no** repo allowlist; **no** signature verify |
 | PR complete on merge | `src/store.rs` `complete_for_merged_pr` / `normalize_pr_url` | Matches card `pr_url` |
-| Dev forwarder example | `docs/operating.md` | Hardcoded `--repo=shanemcd/honr` |
+| Dev forwarder example | `docs/operating.md` + Settings → Workspace hint | Placeholder / configured upstream (not Shane hardcode) |
 | PR label UI | `web/src/components/Card.tsx` `prLabel` | Generic `github.com/owner/repo/pull/N` |
 
 ### Repo identity
