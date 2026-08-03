@@ -946,14 +946,24 @@ impl Board {
     }
 
     fn initial_plan_of(&self, project_id: ItemId) -> Option<WorkItem> {
-        self.children_of(project_id)
-            .into_iter()
-            .find_map(|cid| self.get(cid).filter(|c| c.is_initial_plan_task()))
+        let s = self.state.read().unwrap();
+        Self::initial_plan_of_locked(&s, project_id)
+    }
+
+    fn initial_plan_of_locked(s: &BoardState, project_id: ItemId) -> Option<WorkItem> {
+        s.items
+            .values()
+            .find(|i| i.parent == Some(project_id) && i.is_initial_plan_task())
+            .cloned()
     }
 
     /// GoalView label from the Initial plan card (not Project.plan).
-    fn plan_status_label(&self, project_id: ItemId) -> String {
-        let Some(seed) = self.initial_plan_of(project_id) else {
+    ///
+    /// Takes `&BoardState` so callers that already hold `state` (e.g. snapshot)
+    /// do not re-enter `RwLock` — std's lock is not reentrant and that freezes
+    /// the whole process on `/api/board`.
+    fn plan_status_label(s: &BoardState, project_id: ItemId) -> String {
+        let Some(seed) = Self::initial_plan_of_locked(s, project_id) else {
             return "no_plan".into();
         };
         let has_proposal = seed
@@ -965,9 +975,10 @@ impl Board {
                 "approved".into()
             } else {
                 // Legacy boards: Tasks exist but proposal was cleared.
-                let has_impl = self.children_of(project_id).into_iter().any(|cid| {
-                    self.get(cid)
-                        .is_some_and(|c| !c.is_initial_plan_task() && c.state != State::Retired)
+                let has_impl = s.items.values().any(|c| {
+                    c.parent == Some(project_id)
+                        && !c.is_initial_plan_task()
+                        && c.state != State::Retired
                 });
                 if has_impl {
                     "approved".into()
@@ -3660,7 +3671,7 @@ fn check_split_relatedness(
             });
         }
 
-        let plan_status = self.plan_status_label(gid);
+        let plan_status = Self::plan_status_label(s, gid);
 
         Some(GoalView {
             id: gid,
@@ -5158,6 +5169,47 @@ mod tests {
             fetched.last_bounce_reason.as_deref(),
             Some(bounce_msg)
         );
+    }
+
+    #[test]
+    fn snapshot_plan_status_does_not_reenter_rwlock() {
+        // Regression: goal_view → plan_status_label used to call children_of while
+        // snapshot still held state.read(); std RwLock is not reentrant → freeze.
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-snapshot-reenter.json"),
+        );
+        let project = b
+            .create(None, "Reenter", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        let seed_id = b
+            .children_of(project.id)
+            .into_iter()
+            .find(|&id| b.get(id).is_some_and(|i| i.is_initial_plan_task()))
+            .expect("seed");
+        let _ = b.transition(seed_id, State::Done, "t", Some("legacy".into()));
+        // Clear proposal so plan_status walks the impl-children path.
+        {
+            let mut s = b.state.write().unwrap();
+            if let Some(seed) = s.items.get_mut(&seed_id) {
+                seed.proposal = None;
+            }
+        }
+        let _ = b
+            .create(
+                Some(project.id),
+                "Impl",
+                "do",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .expect("impl");
+        let snap = b.snapshot();
+        let g = snap.goals.iter().find(|g| g.id == project.id).expect("goal");
+        assert_eq!(g.plan_status, "approved");
     }
 
     #[test]
