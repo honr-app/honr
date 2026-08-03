@@ -507,6 +507,7 @@ impl Board {
         if to == State::Done || to == State::Retired {
             let beads = self.beads.clone();
             let beads_id = item.beads_id.clone();
+            let is_initial = item.is_initial_plan_task();
             let reason_str = item
                 .history
                 .last()
@@ -517,7 +518,9 @@ impl Board {
                     if let (Some(b), Some(bid)) = (beads, beads_id) {
                         if crate::beads::BeadsClient::is_real_id(&bid) {
                             let _ = b.close(&bid, Some(&reason_str)).await;
-                            let _ = b.github_push(&[bid]).await;
+                            if !is_initial {
+                                let _ = b.github_push(&[bid]).await;
+                            }
                             b.schedule_dolt_push();
                         }
                     }
@@ -898,6 +901,11 @@ impl Board {
         if !crate::beads::BeadsClient::is_real_id(beads_id) {
             return;
         }
+        if let Some(item) = self.get(id) {
+            if item.is_initial_plan_task() {
+                return;
+            }
+        }
         let Some(beads) = self.beads.clone() else {
             return;
         };
@@ -1082,7 +1090,7 @@ impl Board {
             let s = self.state.read().unwrap();
             let mut missing = Vec::new();
             for (id, item) in s.items.iter() {
-                if item.state == State::Retired {
+                if item.state == State::Retired || item.is_initial_plan_task() {
                     continue;
                 }
                 if item.github_issue_url.is_some() {
@@ -2422,6 +2430,7 @@ fn check_split_relatedness(
             if let Some(it) = s.items.remove(del_id) {
                 let beads = self.beads.clone();
                 let beads_id = it.beads_id.clone();
+                let is_initial = it.is_initial_plan_task();
                 let env = it.environment.clone();
                 let os = self.openshell.clone().unwrap_or_default();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -2432,7 +2441,9 @@ fn check_split_relatedness(
                         if let (Some(b), Some(bid)) = (beads, beads_id) {
                             if crate::beads::BeadsClient::is_real_id(&bid) {
                                 let _ = b.close(&bid, Some("Deleted from honr board")).await;
-                                let _ = b.github_push(&[bid]).await;
+                                if !is_initial {
+                                    let _ = b.github_push(&[bid]).await;
+                                }
                                 b.schedule_dolt_push();
                             }
                         }
@@ -4563,8 +4574,8 @@ mod tests {
 
         assert_eq!(
             seed_pushes.len(),
-            1,
-            "expected at most 1 push for seed task {seed_beads_id}, got {:?}",
+            0,
+            "expected 0 pushes for seed task {seed_beads_id}, got {:?}",
             seed_pushes
         );
 
@@ -4577,11 +4588,98 @@ mod tests {
         );
 
         let seed_item = board.get(seed_id).unwrap();
-        let seed_show = beads_client.show(&seed_beads_id).await.unwrap();
         assert_eq!(
-            seed_item.github_issue_url,
-            seed_show.github_issue_url(),
-            "seed board github_issue_url matches beads external_ref"
+            seed_item.github_issue_url, None,
+            "seed board github_issue_url should be None"
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[tokio::test]
+    async fn test_skip_initial_plan_github_push() {
+        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-skip-initial-plan-gh-test-{}-{}",
+            std::process::id(),
+            tid
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let remote_cap = crate::beads::RemoteCapture::new();
+        let beads_client = crate::beads::BeadsClient::with_remotes(
+            &beads_dir,
+            crate::beads::Remotes::Capture(remote_cap.clone()),
+        );
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        // 1. Create Project (seeds Initial plan)
+        let project = board
+            .create(None, "New Project", "intent", None, Origin::Human, true, None)
+            .expect("create project");
+        let children = board.children_of(project.id);
+        assert!(!children.is_empty(), "expected seeded initial plan task");
+        let seed_id = children[0];
+
+        board.mirror_beads_item(project.id).await;
+        board.mirror_beads_item(seed_id).await;
+
+        let seed_item = board.get(seed_id).unwrap();
+        assert!(
+            seed_item.beads_id.is_some(),
+            "Initial plan should have beads_id"
+        );
+        assert_eq!(
+            seed_item.github_issue_url, None,
+            "Initial plan github_issue_url should be None"
+        );
+
+        let seed_beads_id = seed_item.beads_id.unwrap();
+        let ops = remote_cap.ops();
+        let seed_pushes: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&seed_beads_id) => {
+                    Some(ids.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            seed_pushes.len(),
+            0,
+            "no GH issue created/pushed for Initial plan seed"
+        );
+
+        // 2. Materialized / subsequent non-Initial plan task gets an Issue
+        let task = board
+            .create(
+                Some(project.id),
+                "Real Feature Task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("create task");
+        board.mirror_beads_item(task.id).await;
+
+        let task_item = board.get(task.id).unwrap();
+        assert!(
+            task_item.beads_id.is_some(),
+            "Feature task should have beads_id"
+        );
+        assert!(
+            task_item.github_issue_url.is_some(),
+            "Feature task should get github_issue_url"
         );
 
         let _ = std::fs::remove_dir_all(&test_dir);
