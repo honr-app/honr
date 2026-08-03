@@ -1,11 +1,14 @@
 //! `BoardStore` — durable board rows behind the in-process `Board` facade.
 //!
 //! Mutations still go through `Board` / `machine.rs`; transports must not grow
-//! SQL. Hot list/snapshot/lease indexed queries land in a later Task.
+//! SQL. Hot list/snapshot/lease paths use indexed SQL and denormalized columns
+//! (`non_retired_child_count`, `open_blocker_count`) plus in-process secondary
+//! indexes on `BoardState`.
 
 use crate::model::{ItemId, WorkItem};
 use crate::store::StoryLine;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 
 use super::config::DatabaseBackend;
@@ -55,4 +58,19 @@ pub trait BoardStore: Send + Sync {
     ) -> Result<(), StoreError>;
     async fn load_stories(&self, goal_id: ItemId) -> Result<Vec<StoryLine>, StoreError>;
     async fn load_all_stories(&self) -> Result<BTreeMap<ItemId, Vec<StoryLine>>, StoreError>;
+
+    /// Indexed backlog leaves matching capabilities (same filters as `Board::list_backlog`).
+    async fn query_backlog(&self, capabilities: &[String]) -> Result<Vec<WorkItem>, StoreError>;
+
+    /// Indexed awaiting-dispatch queue, oldest `entered_state_at` first.
+    async fn query_awaiting_dispatch(&self) -> Result<Vec<WorkItem>, StoreError>;
+
+    /// Indexed lease sweep: Claimed/Running past `run_deadline_at` (or legacy lease expiry).
+    async fn query_expired_leases(&self, now: DateTime<Utc>) -> Result<Vec<ItemId>, StoreError>;
+
+    /// Children of `id` via `parent_id` index.
+    async fn query_children_of(&self, id: ItemId) -> Result<Vec<ItemId>, StoreError>;
+
+    /// True when a non-retired child exists (`non_retired_child_count > 0`).
+    async fn query_has_non_retired_children(&self, id: ItemId) -> Result<bool, StoreError>;
 }

@@ -10,7 +10,7 @@ use super::{connect_sqlite_migrated, parse_database_url};
 use crate::model::{ItemId, SandboxProfile, WorkItem, WorkspaceBinding};
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Sqlite, Transaction};
 use std::collections::BTreeMap;
@@ -59,7 +59,7 @@ impl SqliteBoardStore {
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
         let openshell_bin = self.load_openshell_bin().await?;
-        Ok(BoardState {
+        let mut state = BoardState {
             next_id,
             items,
             stories,
@@ -68,7 +68,10 @@ impl SqliteBoardStore {
             workspace,
             openshell_bin,
             agent_logs: BTreeMap::new(),
-        })
+            ..Default::default()
+        };
+        state.rebuild_hot_indexes();
+        Ok(state)
     }
 
     /// Replace durable rows with the in-memory snapshot (agent_logs stay in-process).
@@ -97,7 +100,9 @@ impl SqliteBoardStore {
         // pass as rows trips SQLite FOREIGN KEY (787).
         let items: Vec<WorkItem> = state.items.values().cloned().collect();
         for item in parent_first(&items) {
-            upsert_item_tx(&mut tx, item).await?;
+            let nrc = state.non_retired_child_count(item.id) as i64;
+            let obc = state.open_blocker_count(item) as i64;
+            upsert_item_tx(&mut tx, item, nrc, obc).await?;
         }
         for item in &items {
             replace_blockers_tx(&mut tx, item.id, &item.blocked_by).await?;
@@ -229,8 +234,10 @@ async fn set_meta_tx(
 async fn upsert_item_tx(
     tx: &mut Transaction<'_, Sqlite>,
     item: &WorkItem,
+    non_retired_child_count: i64,
+    open_blocker_count: i64,
 ) -> Result<(), StoreError> {
-    let row = item_to_row(item)?;
+    let row = item_to_row(item, non_retired_child_count, open_blocker_count)?;
     sqlx::query(
         r#"
         INSERT INTO items (
@@ -238,13 +245,15 @@ async fn upsert_item_tx(
             above_line, capability, run_deadline_at, parked, awaiting_dispatch,
             rebase_requested, entered_state_at, created_at,
             origin_json, lease_json, escalation_json, gates_json, notes_json,
-            history_json, plan_json, proposal_json, extras_json
+            history_json, plan_json, proposal_json, extras_json,
+            non_retired_child_count, open_blocker_count
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?
+            ?, ?, ?, ?,
+            ?, ?
         )
         ON CONFLICT(id) DO UPDATE SET
             parent_id = excluded.parent_id,
@@ -269,7 +278,9 @@ async fn upsert_item_tx(
             history_json = excluded.history_json,
             plan_json = excluded.plan_json,
             proposal_json = excluded.proposal_json,
-            extras_json = excluded.extras_json
+            extras_json = excluded.extras_json,
+            non_retired_child_count = excluded.non_retired_child_count,
+            open_blocker_count = excluded.open_blocker_count
         "#,
     )
     .bind(row.id as i64)
@@ -296,6 +307,62 @@ async fn upsert_item_tx(
     .bind(row.plan_json.as_deref())
     .bind(row.proposal_json.as_deref())
     .bind(&row.extras_json)
+    .bind(row.non_retired_child_count)
+    .bind(row.open_blocker_count)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| StoreError::Query(e.to_string()))?;
+    Ok(())
+}
+
+/// Recompute denorm columns for one item + its parent after a single-row upsert.
+async fn refresh_denorm_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    item: &WorkItem,
+) -> Result<(), StoreError> {
+    // open_blocker_count from edge table + blocker state.
+    sqlx::query(
+        r#"
+        UPDATE items SET open_blocker_count = (
+            SELECT COUNT(*) FROM item_blockers ib
+            JOIN items b ON b.id = ib.blocker_id
+            WHERE ib.item_id = items.id
+              AND b.state NOT IN ('done', 'retired')
+        )
+        WHERE id = ?
+        "#,
+    )
+    .bind(item.id as i64)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| StoreError::Query(e.to_string()))?;
+
+    if let Some(parent) = item.parent {
+        sqlx::query(
+            r#"
+            UPDATE items SET non_retired_child_count = (
+                SELECT COUNT(*) FROM items c
+                WHERE c.parent_id = items.id AND c.state != 'retired'
+            )
+            WHERE id = ?
+            "#,
+        )
+        .bind(parent as i64)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE items SET non_retired_child_count = (
+            SELECT COUNT(*) FROM items c
+            WHERE c.parent_id = items.id AND c.state != 'retired'
+        )
+        WHERE id = ?
+        "#,
+    )
+    .bind(item.id as i64)
     .execute(&mut **tx)
     .await
     .map_err(|e| StoreError::Query(e.to_string()))?;
@@ -406,8 +473,10 @@ impl BoardStore for SqliteBoardStore {
             .begin()
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
-        upsert_item_tx(&mut tx, item).await?;
+        // Denorm refreshed after blockers land.
+        upsert_item_tx(&mut tx, item, 0, 0).await?;
         replace_blockers_tx(&mut tx, item.id, &item.blocked_by).await?;
+        refresh_denorm_tx(&mut tx, item).await?;
         tx.commit()
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
@@ -547,6 +616,132 @@ impl BoardStore for SqliteBoardStore {
                 .push(StoryLine { at, text });
         }
         Ok(map)
+    }
+
+    async fn query_backlog(&self, capabilities: &[String]) -> Result<Vec<WorkItem>, StoreError> {
+        // Uses idx_items_backlog_ready + denorm columns (not a full BTreeMap load).
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM items
+            WHERE state = 'backlog'
+              AND (level IS NULL OR level != 'Project')
+              AND non_retired_child_count = 0
+              AND open_blocker_count = 0
+            ORDER BY id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let mut item = item_from_row(&row)?;
+            let cap_ok = match &item.capability {
+                None => true,
+                Some(c) if c == "any" => true,
+                Some(c) => capabilities.iter().any(|have| have == c),
+            };
+            if !cap_ok {
+                continue;
+            }
+            item.blocked_by = self.load_blockers(item.id).await?;
+            out.push(item);
+        }
+        Ok(out)
+    }
+
+    async fn query_awaiting_dispatch(&self) -> Result<Vec<WorkItem>, StoreError> {
+        // Uses idx_items_dispatch_queue + denorm leaf/blocker columns.
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM items
+            WHERE state = 'backlog'
+              AND awaiting_dispatch = 1
+              AND parked = 0
+              AND (level IS NULL OR level != 'Project')
+              AND non_retired_child_count = 0
+              AND open_blocker_count = 0
+            ORDER BY entered_state_at
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut item = item_from_row(&row)?;
+            item.blocked_by = self.load_blockers(item.id).await?;
+            out.push(item);
+        }
+        Ok(out)
+    }
+
+    async fn query_expired_leases(&self, now: DateTime<Utc>) -> Result<Vec<ItemId>, StoreError> {
+        // Primary filter uses idx_items_lease_sweep (state + run_deadline_at).
+        // Legacy rows without run_deadline_at fall back to lease_json expiry.
+        let now_s = now.to_rfc3339();
+        let rows: Vec<(i64, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT id, run_deadline_at, lease_json FROM items
+            WHERE state IN ('claimed', 'running')
+              AND (
+                (run_deadline_at IS NOT NULL AND run_deadline_at != '' AND run_deadline_at < ?)
+                OR (
+                  (run_deadline_at IS NULL OR run_deadline_at = '')
+                  AND lease_json IS NOT NULL AND lease_json != ''
+                )
+              )
+            "#,
+        )
+        .bind(&now_s)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for (id, deadline, lease_json) in rows {
+            let expired = if let Some(d) = deadline.as_deref().filter(|s| !s.is_empty()) {
+                match DateTime::parse_from_rfc3339(d) {
+                    Ok(dt) => now > dt.with_timezone(&Utc),
+                    Err(_) => false,
+                }
+            } else if let Some(raw) = lease_json.as_deref().filter(|s| !s.is_empty()) {
+                match serde_json::from_str::<crate::model::Lease>(raw) {
+                    Ok(lease) => lease.is_expired(now),
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+            if expired {
+                out.push(id as ItemId);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn query_children_of(&self, id: ItemId) -> Result<Vec<ItemId>, StoreError> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT id FROM items WHERE parent_id = ? ORDER BY id",
+        )
+        .bind(id as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+        Ok(rows.into_iter().map(|(i,)| i as ItemId).collect())
+    }
+
+    async fn query_has_non_retired_children(&self, id: ItemId) -> Result<bool, StoreError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT non_retired_child_count FROM items WHERE id = ?",
+        )
+        .bind(id as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+        Ok(row.map(|(c,)| c > 0).unwrap_or(false))
     }
 }
 
@@ -812,5 +1007,95 @@ mod tests {
         assert!(!json_path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn indexed_queries_match_board_filter_semantics() {
+        let store = mem_store().await;
+        let mut project = WorkItem::new(1, "Proj", "why");
+        project.level = Some("Project".into());
+        project.state = State::Backlog;
+
+        let mut leaf = WorkItem::new(2, "leaf", "do");
+        leaf.parent = Some(1);
+        leaf.level = Some("Task".into());
+        leaf.state = State::Backlog;
+        leaf.capability = Some("rust".into());
+        leaf.definition_of_done = Some("ship".into());
+
+        let mut blocked = WorkItem::new(3, "blocked", "wait");
+        blocked.parent = Some(1);
+        blocked.level = Some("Task".into());
+        blocked.state = State::Backlog;
+        blocked.blocked_by = vec![2];
+        blocked.definition_of_done = Some("ship".into());
+
+        let mut claimed = WorkItem::new(4, "running-card", "go");
+        claimed.parent = Some(1);
+        claimed.level = Some("Task".into());
+        claimed.state = State::Running;
+        claimed.run_deadline_at = Some(Utc::now() - chrono::Duration::seconds(30));
+        claimed.definition_of_done = Some("ship".into());
+
+        let mut dispatch = WorkItem::new(5, "dispatch-me", "start");
+        dispatch.parent = Some(1);
+        dispatch.level = Some("Task".into());
+        dispatch.state = State::Backlog;
+        dispatch.awaiting_dispatch = true;
+        dispatch.definition_of_done = Some("ship".into());
+
+        let mut items = BTreeMap::new();
+        items.insert(1, project);
+        items.insert(2, leaf);
+        items.insert(3, blocked);
+        items.insert(4, claimed);
+        items.insert(5, dispatch);
+        let mut state = BoardState {
+            next_id: 6,
+            items,
+            ..Default::default()
+        };
+        state.rebuild_hot_indexes();
+        store.save_board_state(&state).await.expect("save");
+
+        // Denorm columns persisted.
+        let nrc: (i64,) = sqlx::query_as(
+            "SELECT non_retired_child_count FROM items WHERE id = 1",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(nrc.0, 4);
+        let obc: (i64,) = sqlx::query_as(
+            "SELECT open_blocker_count FROM items WHERE id = 3",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(obc.0, 1);
+
+        let backlog = store
+            .query_backlog(&["rust".into()])
+            .await
+            .expect("backlog");
+        let ids: Vec<_> = backlog.iter().map(|i| i.id).collect();
+        assert!(ids.contains(&2), "rust leaf: {ids:?}");
+        assert!(!ids.contains(&3), "blocked excluded");
+        assert!(!ids.contains(&1), "project excluded");
+        assert!(ids.contains(&5), "dispatch leaf still backlog");
+
+        let q = store.query_awaiting_dispatch().await.expect("dispatch");
+        assert_eq!(q.iter().map(|i| i.id).collect::<Vec<_>>(), vec![5]);
+
+        let kids = store.query_children_of(1).await.expect("children");
+        assert_eq!(kids.len(), 4);
+        assert!(store.query_has_non_retired_children(1).await.unwrap());
+        assert!(!store.query_has_non_retired_children(2).await.unwrap());
+
+        let expired = store
+            .query_expired_leases(Utc::now())
+            .await
+            .expect("leases");
+        assert_eq!(expired, vec![4]);
     }
 }

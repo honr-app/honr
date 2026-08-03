@@ -2,8 +2,9 @@
 //!
 //! Persistence cutover: `Board` boots from SQLite via [`SqliteBoardStore`] and
 //! flushes row updates. `honr.json` is a one-shot import source when the DB is
-//! empty. Indexed query paths land in a later Task; agent engines and beads
-//! dual-write stay unchanged.
+//! empty. Hot list/snapshot/lease paths use denormalized columns and indexed
+//! SQL (`query_*` on [`BoardStore`]); agent engines and beads dual-write stay
+//! unchanged.
 
 #![allow(dead_code)]
 
@@ -97,6 +98,29 @@ mod tests {
         .await
         .expect("index query");
         assert!(idx.is_some(), "dispatch queue index missing");
+
+        // t3 denorm indexes.
+        for name in ["idx_items_backlog_ready", "idx_items_lease_sweep"] {
+            let idx = sqlx::query(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+            )
+            .bind(name)
+            .fetch_optional(&pool)
+            .await
+            .expect("index query");
+            assert!(idx.is_some(), "{name} missing");
+        }
+
+        // Denorm columns exist.
+        let cols: Vec<String> = sqlx::query("PRAGMA table_info(items)")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(cols.iter().any(|c| c == "non_retired_child_count"));
+        assert!(cols.iter().any(|c| c == "open_blocker_count"));
 
         // Round-trip a meta key to prove the schema is writable.
         sqlx::query("INSERT INTO meta (key, value) VALUES (?, ?)")
