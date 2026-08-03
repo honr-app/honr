@@ -29,6 +29,9 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 thiserror = "2"
 async-trait = "0.1"
+# Faster locks than std; deadlock_detection dumps holders when we freeze
+# (std RwLock just hangs — see snapshot/agent_runtime reentrancy).
+parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"

@@ -15,8 +15,9 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------- persistence
@@ -342,10 +343,10 @@ pub struct Board {
     started_at: DateTime<Utc>,
     pub beads: Option<crate::beads::BeadsClient>,
     pub openshell: Option<crate::openshell::OpenShell>,
-    in_flight_github_pushes: std::sync::Mutex<
+    in_flight_github_pushes: Mutex<
         std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     >,
-    pushed_beads_ids: std::sync::RwLock<std::collections::HashSet<String>>,
+    pushed_beads_ids: RwLock<std::collections::HashSet<String>>,
 }
 
 pub type SharedBoard = Arc<Board>;
@@ -440,8 +441,8 @@ impl Board {
             started_at: Utc::now(),
             beads,
             openshell: Some(crate::openshell::OpenShell::default()),
-            in_flight_github_pushes: std::sync::Mutex::new(std::collections::HashMap::new()),
-            pushed_beads_ids: std::sync::RwLock::new(std::collections::HashSet::new()),
+            in_flight_github_pushes: Mutex::new(std::collections::HashMap::new()),
+            pushed_beads_ids: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -506,7 +507,7 @@ impl Board {
                         );
                     }
                     state.rebuild_hot_indexes();
-                    *board.state.write().unwrap() = state;
+                    *board.state.write() = state;
                     let migrated = board.migrate_sandbox_policies_to_inline();
                     if healed > 0 || renamed > 0 || migrated > 0 {
                         if migrated > 0 {
@@ -567,7 +568,7 @@ impl Board {
         );
         let mut board = Self::new(schema, json_path);
         board.store = Some(store);
-        *board.state.write().unwrap() = state;
+        *board.state.write() = state;
         let migrated = board.migrate_sandbox_policies_to_inline();
         if healed > 0 || renamed > 0 || migrated > 0 {
             if migrated > 0 {
@@ -603,7 +604,7 @@ impl Board {
     /// Parked cards are never claimable until unparked (which also queues
     /// dispatch — Resume is Start).
     pub fn may_claim(&self, id: ItemId) -> bool {
-        !self.state.read().unwrap().items.get(&id).is_some_and(|it| it.parked)
+        !self.state.read().items.get(&id).is_some_and(|it| it.parked)
     }
 
     fn next_seq(&self) -> u64 {
@@ -616,7 +617,7 @@ impl Board {
 
     fn record_and_send(&self, event: BoardEvent) {
         {
-            let mut buffer = self.event_buffer.write().unwrap();
+            let mut buffer = self.event_buffer.write();
             if buffer.len() >= self.buffer_capacity {
                 buffer.pop_front();
             }
@@ -634,7 +635,7 @@ impl Board {
             return CatchUpResult::Events(Vec::new());
         }
 
-        let buffer = self.event_buffer.read().unwrap();
+        let buffer = self.event_buffer.read();
         if buffer.is_empty() {
             return CatchUpResult::Reset { seq: current_seq };
         }
@@ -657,7 +658,7 @@ impl Board {
     fn emit(&self, item: &WorkItem) {
         let mut item = item.clone();
         {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             Self::populate_blockers(&s, &mut item);
         }
         self.record_and_send(BoardEvent::Upsert {
@@ -677,7 +678,7 @@ impl Board {
             return;
         }
         if let Some(store) = &self.store {
-            let snapshot = self.state.read().unwrap().clone_for_persist();
+            let snapshot = self.state.read().clone_for_persist();
             let result = match tokio::runtime::Handle::try_current() {
                 Ok(handle)
                     if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
@@ -711,7 +712,7 @@ impl Board {
             }
             return;
         }
-        let json = { serde_json::to_string_pretty(&*self.state.read().unwrap()) };
+        let json = { serde_json::to_string_pretty(&*self.state.read()) };
         let Ok(json) = json else { return };
         let tmp = self.path.with_extension("json.tmp");
         if std::fs::write(&tmp, json).is_ok() {
@@ -736,7 +737,7 @@ impl Board {
     // ------------------------------------------------------------ tree reads
 
     pub fn get(&self, id: ItemId) -> Option<WorkItem> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         s.items.get(&id).map(|i| {
             let mut item = i.clone();
             Self::populate_blockers(&s, &mut item);
@@ -745,7 +746,7 @@ impl Board {
     }
 
     pub fn children_of(&self, id: ItemId) -> Vec<ItemId> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         Self::children_of_indexed(&s, id)
     }
 
@@ -808,12 +809,12 @@ impl Board {
 
     /// Which goal swimlane a card belongs to.
     pub fn goal_for(&self, id: ItemId) -> ItemId {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         Self::goal_of(&s, id)
     }
 
     pub fn ancestry(&self, id: ItemId) -> Vec<AncestryLine> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         Self::chain(&s, id)
             .into_iter()
             .filter_map(|cid| {
@@ -827,7 +828,7 @@ impl Board {
     }
 
     pub fn append_agent_log(&self, id: ItemId, line: impl Into<String>) {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         let logs = s.agent_logs.entry(id).or_default();
         if logs.len() >= 300 {
             logs.pop_front();
@@ -836,12 +837,12 @@ impl Board {
     }
 
     pub fn get_agent_logs(&self, id: ItemId) -> Vec<String> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         s.agent_logs.get(&id).map(|l| l.iter().cloned().collect()).unwrap_or_default()
     }
 
     pub fn clear_agent_logs(&self, id: ItemId) {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         s.agent_logs.remove(&id);
     }
 
@@ -921,7 +922,7 @@ impl Board {
         reason: Option<String>,
     ) -> Result<WorkItem, TransitionError> {
         let (item, env_to_delete) = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let prev_env = s.items.get(&id).and_then(|i| i.environment.clone());
             let item = Self::transition_locked(&mut s, id, to, by, reason)?;
             let env_to_delete = if to.is_terminal() { prev_env } else { None };
@@ -1047,7 +1048,7 @@ impl Board {
         capability: Option<String>,
     ) -> Result<WorkItem, String> {
         if let Some(pid) = parent {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             let Some(p) = s.items.get(&pid) else {
                 return Err(format!("no parent #{pid}"));
             };
@@ -1062,7 +1063,7 @@ impl Board {
         }
 
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let id = s.next_id;
             s.next_id += 1;
 
@@ -1152,7 +1153,7 @@ impl Board {
     }
 
     fn initial_plan_of(&self, project_id: ItemId) -> Option<WorkItem> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         Self::initial_plan_of_locked(&s, project_id)
     }
 
@@ -1279,7 +1280,7 @@ impl Board {
                             },
                         )?;
                         {
-                            let mut s = self.state.write().unwrap();
+                            let mut s = self.state.write();
                             if let Some(p) = s.items.get_mut(&project_id) {
                                 p.plan = None;
                                 let snap = p.clone();
@@ -1319,18 +1320,17 @@ impl Board {
     }
 
     pub fn is_beads_id_pushed(&self, beads_id: &str) -> bool {
-        self.pushed_beads_ids.read().unwrap().contains(beads_id)
+        self.pushed_beads_ids.read().contains(beads_id)
     }
 
     pub fn mark_beads_id_pushed(&self, beads_id: &str) {
         self.pushed_beads_ids
             .write()
-            .unwrap()
             .insert(beads_id.to_string());
     }
 
     fn cleanup_in_flight_lock(&self, beads_id: &str, lock: &Arc<tokio::sync::Mutex<()>>) {
-        let mut map = self.in_flight_github_pushes.lock().unwrap();
+        let mut map = self.in_flight_github_pushes.lock();
         if Arc::strong_count(lock) <= 2 {
             map.remove(beads_id);
         }
@@ -1365,7 +1365,7 @@ impl Board {
         }
 
         let lock = {
-            let mut map = self.in_flight_github_pushes.lock().unwrap();
+            let mut map = self.in_flight_github_pushes.lock();
             map.entry(beads_id.to_string()).or_default().clone()
         };
 
@@ -1594,7 +1594,7 @@ impl Board {
     /// skipped forever because it was no longer a placeholder.
     pub async fn backfill_missing_github_issue_urls(self: &Arc<Self>) -> usize {
         let missing: Vec<(ItemId, String)> = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             let mut missing = Vec::new();
             for (id, item) in s.items.iter() {
                 if item.state == State::Retired || item.is_initial_plan_task() {
@@ -1649,7 +1649,7 @@ impl Board {
     /// Also backfills missing `github_issue_url` on cards that already have real beads ids.
     pub async fn heal_placeholder_beads_ids(self: &Arc<Self>) -> usize {
         let (projects, tasks) = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             let mut projects = Vec::new();
             let mut tasks = Vec::new();
             for (id, item) in s.items.iter() {
@@ -1713,7 +1713,7 @@ impl Board {
                 // Mark matching board Project cards as Done
                 for bid in &closed_bids {
                     let matching_ids: Vec<(ItemId, State)> = {
-                        let s = self.state.read().unwrap();
+                        let s = self.state.read();
                         s.items
                             .values()
                             .filter(|i| {
@@ -1742,7 +1742,7 @@ impl Board {
 
         // 2. Heal board projects whose child tasks on the board are all Done or Retired
         let project_ids: Vec<(ItemId, State)> = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             s.items
                 .values()
                 .filter(|i| i.parent.is_none() && i.state != State::Done && i.state != State::Retired)
@@ -1752,7 +1752,7 @@ impl Board {
 
         for (pid, state) in project_ids {
             let (child_count, all_done) = {
-                let s = self.state.read().unwrap();
+                let s = self.state.read();
                 let children: Vec<&WorkItem> =
                     s.items.values().filter(|i| i.parent == Some(pid)).collect();
                 let count = children.len();
@@ -1782,7 +1782,7 @@ impl Board {
 
     pub fn set_beads_id(&self, id: ItemId, beads_id: &str) {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else { return };
             it.beads_id = Some(beads_id.to_string());
             it.clone()
@@ -1792,7 +1792,7 @@ impl Board {
 
     pub fn set_github_issue_url(&self, id: ItemId, url: &str) {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else { return };
             it.github_issue_url = Some(url.to_string());
             it.clone()
@@ -1804,7 +1804,7 @@ impl Board {
     #[allow(dead_code)]
     pub fn set_budget(&self, id: ItemId, cents: u64) {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else { return };
             it.budget_cents = Some(cents);
             it.clone()
@@ -1827,7 +1827,7 @@ impl Board {
         max_attempts: u32,
     ) -> Result<WorkItem, String> {
         let (failures, title, state) = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             it.run_failures += 1;
             (it.run_failures, it.title.clone(), it.state)
@@ -1881,7 +1881,7 @@ impl Board {
     /// that failed twice long ago would escalate on its next single failure.
     pub fn clear_run_failures(&self, id: ItemId) {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else { return };
             if it.run_failures == 0 {
                 return;
@@ -1907,7 +1907,7 @@ impl Board {
         let now = Utc::now();
         let deadline = now + Duration::seconds(timeout_secs.max(1));
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let parked = s.items.get(&id).is_some_and(|it| it.parked);
             if parked {
                 return Err(format!("#{id} is parked"));
@@ -1943,7 +1943,7 @@ impl Board {
     /// so a honr that dies mid-run can still find the sandbox on restart.
     pub fn set_environment(&self, id: ItemId, sandbox: Option<String>) {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else { return };
             it.environment = sandbox;
             it.clone()
@@ -1954,7 +1954,7 @@ impl Board {
     /// Persist (or clear) the agy conversation id for park/resume.
     pub fn set_conversation_id(&self, id: ItemId, conversation_id: Option<String>) {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else { return };
             if it.conversation_id == conversation_id {
                 return;
@@ -1968,7 +1968,7 @@ impl Board {
     /// Replace the card's [`crate::model::PullRequest`] (url + optional base/head).
     pub fn set_pull_request(&self, id: ItemId, pr: Option<crate::model::PullRequest>) {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else {
                 return;
             };
@@ -2014,7 +2014,7 @@ impl Board {
 
     pub fn set_blocked_by(&self, id: ItemId, blockers: Vec<ItemId>) {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else { return };
             it.blocked_by = blockers;
             it.clone()
@@ -2056,7 +2056,7 @@ impl Board {
         project_prompt: Option<String>,
     ) -> Result<WorkItem, String> {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
             if let Some(t) = title {
                 if !t.trim().is_empty() {
@@ -2128,7 +2128,7 @@ impl Board {
     /// Same as [`Self::seed_sandbox_profiles_if_empty`] but with an explicit
     /// AgentConfig (tests and callers that don't want schema.agents).
     pub fn seed_sandbox_profiles_from(&self, agents: &AgentConfig) -> bool {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         if !s.sandbox_profiles.is_empty() {
             return false;
         }
@@ -2160,7 +2160,7 @@ impl Board {
 
     /// Same as [`Self::seed_workspace_binding_if_empty`] with an explicit AgentConfig.
     pub fn seed_workspace_binding_from(&self, agents: &AgentConfig) -> bool {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         if s.workspace.as_ref().is_some_and(|w| w.has_beads_sync()) {
             return false;
         }
@@ -2187,7 +2187,7 @@ impl Board {
     }
 
     pub fn workspace_binding(&self) -> Option<WorkspaceBinding> {
-        self.state.read().unwrap().workspace.clone()
+        self.state.read().workspace.clone()
     }
 
     /// Replace the durable Forge binding (provider + beads sync). REST:
@@ -2210,7 +2210,7 @@ impl Board {
                 .filter(|s| !s.is_empty()),
         };
         {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             s.workspace = Some(stored.clone());
         }
         self.dirty.store(true, Ordering::Relaxed);
@@ -2224,7 +2224,6 @@ impl Board {
     pub fn openshell_bin(&self) -> String {
         self.state
             .read()
-            .unwrap()
             .openshell_bin
             .as_ref()
             .map(|s| s.trim().to_string())
@@ -2236,7 +2235,6 @@ impl Board {
     pub fn openshell_bin_override(&self) -> Option<String> {
         self.state
             .read()
-            .unwrap()
             .openshell_bin
             .as_ref()
             .map(|s| s.trim().to_string())
@@ -2249,7 +2247,7 @@ impl Board {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             s.openshell_bin = stored.clone();
         }
         self.dirty.store(true, Ordering::Relaxed);
@@ -2273,7 +2271,7 @@ impl Board {
 
     /// Same as [`Self::seed_agent_runtime_if_empty`] with an explicit AgentConfig.
     pub fn seed_agent_runtime_from(&self, agents: &AgentConfig) -> bool {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         if s.agent_runtime.is_some() {
             return false;
         }
@@ -2301,14 +2299,14 @@ impl Board {
 
     /// Durable Agent runtime (None until seeded or set via Settings).
     pub fn agent_runtime(&self) -> Option<AgentRuntimeConfig> {
-        self.state.read().unwrap().agent_runtime.clone()
+        self.state.read().agent_runtime.clone()
     }
 
     /// Persist Agent runtime from Settings. Board is SoT after save.
     pub fn set_agent_runtime(&self, runtime: AgentRuntimeConfig) -> AgentRuntimeConfig {
         let stored = runtime.normalized();
         {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             s.agent_runtime = Some(stored.clone());
         }
         self.dirty.store(true, Ordering::Relaxed);
@@ -2359,17 +2357,27 @@ impl Board {
     /// AgentConfig from yaml with durable Settings → Agent runtime overlay.
     /// Remotes for a run still come from [`Self::resolve_card_repo`].
     pub fn agents_with_workspace(&self, yaml_agents: &AgentConfig) -> AgentConfig {
+        let rt = self.agent_runtime();
+        Self::overlay_agent_runtime(yaml_agents, rt.as_ref())
+    }
+
+    /// Pure overlay — safe to call while already holding `state` (RwLock is
+    /// not reentrant; [`Self::snapshot`] must not call [`Self::agent_runtime`]).
+    fn overlay_agent_runtime(
+        yaml_agents: &AgentConfig,
+        rt: Option<&AgentRuntimeConfig>,
+    ) -> AgentConfig {
         let mut cfg = yaml_agents.clone();
-        let Some(rt) = self.agent_runtime() else {
+        let Some(rt) = rt else {
             return cfg;
         };
         cfg.enabled = rt.enabled;
-        cfg.engine = rt.engine;
-        cfg.providers = rt.providers;
+        cfg.engine = rt.engine.clone();
+        cfg.providers = rt.providers.clone();
         cfg.vertex = crate::schema::VertexConfig {
-            project: rt.vertex.project,
-            location: rt.vertex.location,
-            model: rt.vertex.model,
+            project: rt.vertex.project.clone(),
+            location: rt.vertex.location.clone(),
+            model: rt.vertex.model.clone(),
         };
         cfg.max_concurrent = rt.max_concurrent;
         cfg.per_card_budget_cents = rt.per_card_budget_cents;
@@ -2420,7 +2428,7 @@ impl Board {
     /// Upgrade catalog entries that still store a host path as `policy`.
     /// Returns how many profiles were rewritten.
     pub fn migrate_sandbox_policies_to_inline(&self) -> usize {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         let mut n = 0usize;
         for profile in s.sandbox_profiles.values_mut() {
             if let Some(content) = migrate_profile_policy_to_inline(&profile.policy) {
@@ -2436,16 +2444,16 @@ impl Board {
     }
 
     pub fn list_sandbox_profiles(&self) -> Vec<SandboxProfile> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         s.sandbox_profiles.values().cloned().collect()
     }
 
     pub fn default_sandbox_profile_id(&self) -> Option<String> {
-        self.state.read().unwrap().default_sandbox_profile_id.clone()
+        self.state.read().default_sandbox_profile_id.clone()
     }
 
     pub fn get_sandbox_profile(&self, id: &str) -> Option<SandboxProfile> {
-        self.state.read().unwrap().sandbox_profiles.get(id).cloned()
+        self.state.read().sandbox_profiles.get(id).cloned()
     }
 
     /// Insert or replace a profile. Empty `id` means create: derive a slug from
@@ -2472,7 +2480,7 @@ impl Board {
         let policy = profile.policy;
         let cpu = profile.cpu.filter(|c| !c.trim().is_empty());
         let memory = profile.memory.filter(|m| !m.trim().is_empty());
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         let id = {
             let trimmed = profile.id.trim();
             if trimmed.is_empty() {
@@ -2497,7 +2505,7 @@ impl Board {
     }
 
     pub fn set_default_sandbox_profile(&self, id: &str) -> Result<(), String> {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         if !s.sandbox_profiles.contains_key(id) {
             return Err(format!("no sandbox profile `{id}`"));
         }
@@ -2514,7 +2522,7 @@ impl Board {
         profile_id: Option<String>,
     ) -> Result<WorkItem, String> {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s
                 .items
                 .get(&project_id)
@@ -2547,7 +2555,7 @@ impl Board {
     /// Delete a profile. Refused while it is the global default or assigned to
     /// any Project — reassign / clear those first.
     pub fn delete_sandbox_profile(&self, id: &str) -> Result<(), String> {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         if !s.sandbox_profiles.contains_key(id) {
             return Err(format!("no sandbox profile `{id}`"));
         }
@@ -2593,7 +2601,7 @@ impl Board {
         };
         let override_id = project.as_ref().and_then(|p| p.sandbox_profile_id.clone());
 
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         if let Some(ref oid) = override_id {
             if let Some(p) = s.sandbox_profiles.get(oid) {
                 return ResolvedSandboxCreate::from_profile(p);
@@ -2615,7 +2623,7 @@ impl Board {
     /// constantly while honr is what's being built, and sandboxes outlive it.
     #[allow(dead_code)]
     pub fn leased_to(&self, agent_id: &str) -> Option<ItemId> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         s.items
             .values()
             .find(|i| {
@@ -2630,7 +2638,7 @@ impl Board {
     ///
     /// Uses `ids_by_state` + denormalized leaf/blocker checks (not a full scan).
     pub fn list_backlog(&self, capabilities: &[String]) -> Vec<WorkItem> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let Some(ids) = s.ids_by_state.get(&State::Backlog) else {
             return Vec::new();
         };
@@ -2661,7 +2669,7 @@ impl Board {
     ///
     /// Uses `ids_by_state` + denormalized leaf/blocker checks (not a full scan).
     pub fn list_awaiting_dispatch(&self) -> Vec<WorkItem> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let Some(ids) = s.ids_by_state.get(&State::Backlog) else {
             return Vec::new();
         };
@@ -2684,7 +2692,7 @@ impl Board {
             return Err("card is parked; unpark before dispatch".into());
         }
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let has_children = Self::has_children(&s, id);
             let (state, parked, is_project, dod_missing, blockers) = {
                 let it = s.items.get(&id).ok_or("no such item")?;
@@ -2729,7 +2737,7 @@ impl Board {
     #[allow(dead_code)]
     pub fn clear_dispatch(&self, id: ItemId) -> Result<WorkItem, String> {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             it.awaiting_dispatch = false;
             it.rebase_requested = false;
@@ -2743,7 +2751,7 @@ impl Board {
     /// Off: clear `awaiting_dispatch` on still-Backlog leaves (does not halt runners).
     pub fn set_auto_dispatch(&self, id: ItemId, enabled: bool) -> Result<WorkItem, String> {
         let (title, changed, item) = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             if it.level.as_deref() != Some("Project") && !it.is_project() {
                 return Err("auto mode is only for Projects".into());
@@ -2783,7 +2791,7 @@ impl Board {
     /// Clear `awaiting_dispatch` on Backlog leaves under a Project. Returns count cleared.
     fn clear_awaiting_under_project(&self, project_id: ItemId) -> usize {
         let ids: Vec<ItemId> = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             s.items
                 .values()
                 .filter(|i| i.parent == Some(project_id))
@@ -2801,7 +2809,7 @@ impl Board {
     /// Called each supervisor tick — skips cards already awaiting.
     pub fn auto_enqueue_all(&self) {
         let project_ids: Vec<ItemId> = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             s.items
                 .values()
                 .filter(|i| i.auto_dispatch && i.state != State::Retired)
@@ -2817,7 +2825,7 @@ impl Board {
     /// Enqueue claimable Backlog leaves under one Project (already-queued skipped).
     pub fn auto_enqueue_project(&self, project_id: ItemId) {
         let candidates: Vec<ItemId> = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             let Some(project) = s.items.get(&project_id) else {
                 return;
             };
@@ -2872,7 +2880,7 @@ impl Board {
         let deadline = now + Duration::seconds(timeout_secs.max(1));
 
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             if s.items.get(&id).is_some_and(|it| it.parked) {
                 return Err(TransitionError::Parked { id });
             }
@@ -2996,7 +3004,7 @@ impl Board {
         _lease_secs: i64,
     ) -> Result<WorkItem, TransitionError> {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             // First heartbeat promotes Claimed -> Running.
             if s.items.get(&id).map(|i| i.state) == Some(State::Claimed) {
                 Self::transition_locked(&mut s, id, State::Running, agent_id, None)?;
@@ -3202,7 +3210,7 @@ fn check_split_relatedness(
         let project = self.get(project_id).ok_or_else(|| "project not found".to_string())?;
 
         {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             if s.items.get(&project_id).and_then(|p| p.parent).is_some() {
                 return Err("split target is not under a Project root".into());
             }
@@ -3284,7 +3292,7 @@ fn check_split_relatedness(
             }
         }
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s
                 .items
                 .get_mut(&id)
@@ -3320,7 +3328,7 @@ fn check_split_relatedness(
         })?;
 
         let existing_by_title: HashMap<String, WorkItem> = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             s.items
                 .values()
                 .filter(|i| i.parent == Some(project_id))
@@ -3371,7 +3379,7 @@ fn check_split_relatedness(
         }
 
         {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             if let Some(it) = s.items.get_mut(&id) {
                 if keep_proposal {
                     if let Some(prop) = it.proposal.as_mut() {
@@ -3425,7 +3433,7 @@ fn check_split_relatedness(
 
         if card.is_initial_plan_task() {
             if let Some(project_id) = card.parent {
-                let mut s = self.state.write().unwrap();
+                let mut s = self.state.write();
                 if let Some(p) = s.items.get_mut(&project_id) {
                     if p.plan.is_some() {
                         p.plan = None;
@@ -3498,7 +3506,7 @@ fn check_split_relatedness(
         }
 
         {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             it.escalation = Some(Escalation {
                 question: question.clone(),
@@ -3534,7 +3542,7 @@ fn check_split_relatedness(
         gates: Vec<String>,
     ) -> Result<WorkItem, TransitionError> {
         {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             if let Some(it) = s.items.get_mut(&id) {
                 it.diff_added = added;
                 it.diff_removed = removed;
@@ -3571,7 +3579,7 @@ fn check_split_relatedness(
             .unwrap_or_else(|| "released by agent".to_string());
 
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             if let Some(r) = reason {
                 if let Some(it) = s.items.get_mut(&id) {
                     it.last_bounce_reason = Some(r.to_string());
@@ -3592,7 +3600,7 @@ fn check_split_relatedness(
     pub fn sweep_leases(&self) -> Vec<ItemId> {
         let now = Utc::now();
         let expired: Vec<ItemId> = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             let mut out = Vec::new();
             for state in [State::Claimed, State::Running] {
                 let Some(ids) = s.ids_by_state.get(&state) else {
@@ -3636,7 +3644,7 @@ fn check_split_relatedness(
     /// correct a slightly-off agent is to kill it, which makes people hover.
     pub fn steer(&self, id: ItemId, text: String) -> Result<WorkItem, String> {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             it.notes.push(Note { at: Utc::now(), author: "human".into(), text });
             it.run_failures = 0;
@@ -3649,7 +3657,7 @@ fn check_split_relatedness(
 
     pub fn answer_escalation(&self, id: ItemId, choice: String) -> Result<WorkItem, String> {
         let title = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             if it.escalation.is_none() {
                 return Err("that item is not waiting on anyone".into());
@@ -3687,7 +3695,7 @@ fn check_split_relatedness(
     pub fn park(&self, id: ItemId, reason: Option<String>) -> Result<WorkItem, String> {
         let reason = reason.filter(|r| !r.trim().is_empty());
         let title = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             if let Some(ref r) = reason {
                 it.notes.push(Note {
@@ -3706,7 +3714,7 @@ fn check_split_relatedness(
         )
         .map_err(|e| e.to_string())?;
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             it.parked = true;
             it.clone()
@@ -3732,7 +3740,7 @@ fn check_split_relatedness(
     /// after Resume is just ceremony.
     pub fn unpark(&self, id: ItemId) -> Result<WorkItem, String> {
         {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             if it.state != State::Backlog {
                 return Err("only a Backlog card can be resumed from park".into());
@@ -3762,7 +3770,7 @@ fn check_split_relatedness(
     /// and delete the sandbox. Park is the keep-context path; halt starts clean.
     pub fn halt(&self, id: ItemId, reason: Option<String>) -> Result<WorkItem, String> {
         let env_to_delete = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             if let Some(it) = s.items.get_mut(&id) {
                 it.conversation_id = None;
                 it.parked = false;
@@ -3817,7 +3825,7 @@ fn check_split_relatedness(
 
     /// Delete item — removes the item (and its subtree) permanently from the board.
     pub fn delete_item(&self, id: ItemId) -> Result<(), String> {
-        let mut s = self.state.write().unwrap();
+        let mut s = self.state.write();
         if !s.items.contains_key(&id) {
             return Err(format!("item #{id} not found"));
         }
@@ -3952,7 +3960,7 @@ fn check_split_relatedness(
     pub fn request_changes(&self, id: ItemId, note: String) -> Result<WorkItem, String> {
         self.steer(id, format!("Changes requested: {note}"))?;
         {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             if let Some(it) = s.items.get_mut(&id) {
                 it.proposal = None;
             }
@@ -3969,7 +3977,7 @@ fn check_split_relatedness(
 
     pub fn story(&self, near: ItemId, text: String) {
         let (goal, line) = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let goal = Self::goal_of(&s, near);
             let line = StoryLine { at: Utc::now(), text };
             let entries = s.stories.entry(goal).or_default();
@@ -3992,7 +4000,7 @@ fn check_split_relatedness(
 
     #[allow(dead_code)]
     pub fn stories_for(&self, near: ItemId) -> Vec<StoryLine> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let goal = Self::goal_of(&s, near);
         s.stories.get(&goal).cloned().unwrap_or_default()
     }
@@ -4036,7 +4044,7 @@ fn check_split_relatedness(
     /// Each card gets a note using **its** resolved upstream/base.
     fn steer_live_cards_on_main_advanced(&self, ref_name: &str, commit_sha: Option<&str>) {
         let live_ids: Vec<ItemId> = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             s.items
                 .values()
                 .filter(|i| matches!(i.state, State::Claimed | State::Running))
@@ -4057,7 +4065,7 @@ fn check_split_relatedness(
             // Skip park/unpark for cards already parked — steer may have been a
             // no-op on a weird state, and a second park would be wrong.
             let already_parked = {
-                let s = self.state.read().unwrap();
+                let s = self.state.read();
                 s.items.get(&id).is_some_and(|i| i.parked)
             };
             if already_parked {
@@ -4075,7 +4083,7 @@ fn check_split_relatedness(
 
     /// Identify open sibling PRs in Review that are behind main for a given item's parent.
     pub fn identify_behind_sibling_prs(&self, near_id: ItemId) -> Vec<WorkItem> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let mut results = Vec::new();
         if let Some(item) = s.items.get(&near_id) {
             let parent_id = item.parent.unwrap_or(item.id);
@@ -4096,7 +4104,7 @@ fn check_split_relatedness(
 
     /// Identify all open sibling PRs in Review that are behind main across the entire board.
     pub fn identify_all_behind_sibling_prs(&self) -> Vec<WorkItem> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let mut results = Vec::new();
         let parents_with_done: std::collections::HashSet<ItemId> = s
             .items
@@ -4122,7 +4130,7 @@ fn check_split_relatedness(
     /// Dispatch/queue a rebase request for a card in Review whose branch is behind main.
     pub fn dispatch_rebase(&self, id: ItemId) -> Result<WorkItem, String> {
         let item = {
-            let mut s = self.state.write().unwrap();
+            let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item {id}"))?;
             if it.state != State::Review {
                 return Err(format!(
@@ -4174,7 +4182,7 @@ fn check_split_relatedness(
     /// List all cards in Review that have a pending rebase request.
     #[allow(dead_code)]
     pub fn list_awaiting_rebase(&self) -> Vec<WorkItem> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let mut items: Vec<_> = s
             .items
             .values()
@@ -4196,7 +4204,7 @@ fn check_split_relatedness(
     /// the failure reason and conflicting file details, and `rebase_requested` & `awaiting_dispatch` are cleared.
     pub fn record_rebase_outcome(&self, id: ItemId, outcome: RebaseOutcome) -> Result<WorkItem, String> {
         let (title, previous_files) = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             let it = s.items.get(&id).ok_or_else(|| format!("no such item #{id}"))?;
             if it.state != State::Review {
                 return Err(format!("only Review cards can record rebase outcome, #{id} is in {:?}", it.state));
@@ -4207,7 +4215,7 @@ fn check_split_relatedness(
         match outcome {
             RebaseOutcome::Clean => {
                 let item = {
-                    let mut s = self.state.write().unwrap();
+                    let mut s = self.state.write();
                     let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
                     it.rebase_requested = false;
                     it.awaiting_dispatch = false;
@@ -4242,7 +4250,7 @@ fn check_split_relatedness(
                     );
 
                     {
-                        let mut s = self.state.write().unwrap();
+                        let mut s = self.state.write();
                         if let Some(it) = s.items.get_mut(&id) {
                             it.last_bounce_reason = Some(bounce_reason.clone());
                             it.last_conflict_files = curr_files;
@@ -4284,7 +4292,7 @@ fn check_split_relatedness(
                     };
 
                     let item = {
-                        let mut s = self.state.write().unwrap();
+                        let mut s = self.state.write();
                         if let Some(it) = s.items.get_mut(&id) {
                             it.last_bounce_reason = Some(bounce_reason.clone());
                             it.last_conflict_files = curr_files;
@@ -4352,7 +4360,7 @@ fn check_split_relatedness(
         }
 
         let id = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             s.items
                 .values()
                 .find(|i| {
@@ -4385,7 +4393,7 @@ fn check_split_relatedness(
     /// Returns active (non-terminal) siblings of `id` (sharing the same parent)
     /// that were blocked by `id` and have now become unblocked (0 unresolved blockers).
     pub fn newly_unblocked_siblings(&self, id: ItemId) -> Vec<WorkItem> {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let Some(item) = s.items.get(&id) else {
             return vec![];
         };
@@ -4403,7 +4411,7 @@ fn check_split_relatedness(
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let now = Utc::now();
         let items: Vec<WorkItem> = s
             .items
@@ -4429,15 +4437,20 @@ fn check_split_relatedness(
             .filter_map(|gid| self.goal_view(&s, gid, now))
             .collect();
 
+        // Overlay from `s` — do not call effective_agents()/agent_runtime()
+        // while this read guard is held (RwLock is not reentrant; that freeze
+        // made the UI show NOT LIVE after Agent runtime landed).
+        let agents =
+            Self::overlay_agent_runtime(&self.schema.execution.agents, s.agent_runtime.as_ref());
         Snapshot {
             items,
             levels: self.schema.levels.clone(),
             goals,
             server_time: now,
-            agent_timeout_secs: self.effective_agents().agent_timeout_secs,
+            agent_timeout_secs: agents.agent_timeout_secs,
             seq: self.seq.load(Ordering::Relaxed),
-            default_engine: self.effective_agents().engine.clone(),
-            default_model: self.effective_agents().vertex.model.clone(),
+            default_engine: agents.engine,
+            default_model: agents.vertex.model,
         }
     }
 
@@ -4629,7 +4642,7 @@ fn check_split_relatedness(
     /// blockers from a phone is the actual product; the board is where you go
     /// when something has gone wrong.
     pub fn digest(&self) -> Digest {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let now = Utc::now();
         // Project roots only — avoids goal_of over every item.
         let mut goal_ids: Vec<ItemId> = s
@@ -4841,7 +4854,7 @@ mod tests {
     fn sweep_requeues_past_run_deadline() {
         let (b, id) = claimed_leaf();
         {
-            let mut s = b.state.write().unwrap();
+            let mut s = b.state.write();
             let it = s.items.get_mut(&id).unwrap();
             it.run_deadline_at = Some(Utc::now() - Duration::seconds(1));
             if let Some(l) = it.lease.as_mut() {
@@ -4994,18 +5007,18 @@ mod tests {
 
         // Parent/child helpers use children_by_parent.
         assert!(Board::has_children(
-            &b.state.read().unwrap(),
+            &b.state.read(),
             project.id
         ));
         assert!(!Board::has_children(
-            &b.state.read().unwrap(),
+            &b.state.read(),
             leaf.id
         ));
         let kids = b.children_of(project.id);
         assert!(kids.contains(&leaf.id));
         assert!(kids.contains(&blocked.id));
         assert_eq!(
-            b.state.read().unwrap().non_retired_child_count(project.id) as usize,
+            b.state.read().non_retired_child_count(project.id) as usize,
             kids.len()
         );
 
@@ -5060,11 +5073,10 @@ mod tests {
         b.delete_item(container_child.id).expect("delete");
         assert_eq!(b.children_of(project.id).len(), before - 1);
         assert_eq!(
-            b.state.read().unwrap().ids_by_state.get(&State::Backlog).map(|s| s.len()),
+            b.state.read().ids_by_state.get(&State::Backlog).map(|s| s.len()),
             Some(
                 b.state
                     .read()
-                    .unwrap()
                     .items
                     .values()
                     .filter(|i| i.state == State::Backlog)
@@ -5159,7 +5171,7 @@ mod tests {
         }
         b.set_blocked_by(blocked.id, vec![ready.id]);
         {
-            let mut s = b.state.write().unwrap();
+            let mut s = b.state.write();
             s.items.get_mut(&parked.id).unwrap().parked = true;
         }
 
@@ -6239,7 +6251,7 @@ mod tests {
         assert_eq!(item_d.blocked_by, vec![id_b, id_c]);
 
         // Verify Backlog column summary lists plain language blockers
-        let s = b.state.read().unwrap();
+        let s = b.state.read();
         let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
         let ready_col = goal_view
             .columns
@@ -6320,6 +6332,20 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_effective_agents_does_not_reenter_rwlock() {
+        // Regression: Agent runtime made snapshot call effective_agents() →
+        // agent_runtime() while still holding state.read(); freeze → NOT LIVE.
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-snapshot-agents-reenter.json"),
+        );
+        assert!(b.seed_agent_runtime_if_empty());
+        let snap = b.snapshot();
+        assert!(!snap.default_engine.is_empty());
+        assert!(snap.agent_timeout_secs > 0);
+    }
+
+    #[test]
     fn snapshot_plan_status_does_not_reenter_rwlock() {
         // Regression: goal_view → plan_status_label used to call children_of while
         // snapshot still held state.read(); std RwLock is not reentrant → freeze.
@@ -6339,7 +6365,7 @@ mod tests {
         let _ = b.transition(seed_id, State::Done, "t", Some("legacy".into()));
         // Clear proposal so plan_status walks the impl-children path.
         {
-            let mut s = b.state.write().unwrap();
+            let mut s = b.state.write();
             if let Some(seed) = s.items.get_mut(&seed_id) {
                 seed.proposal = None;
             }
@@ -7459,7 +7485,7 @@ mod tests {
         let _ = b.transition(t1.id, State::Backlog, "human", None);
 
         {
-            let s = b.state.read().unwrap();
+            let s = b.state.read();
             let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
             let ready_col = goal_view
                 .columns
@@ -7478,7 +7504,7 @@ mod tests {
         b.set_blocked_by(t2.id, vec![t1.id]);
 
         {
-            let s = b.state.read().unwrap();
+            let s = b.state.read();
             let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
             let ready_col = goal_view
                 .columns
@@ -8137,7 +8163,7 @@ mod tests {
 
         // Mark all child tasks (including seeded Initial plan task) as Done
         let children: Vec<ItemId> = {
-            let s = b.state.read().unwrap();
+            let s = b.state.read();
             s.items
                 .values()
                 .filter(|i| i.parent == Some(p.id))
@@ -8429,7 +8455,7 @@ mod tests {
         assert!(item.rebase_requested);
 
         {
-            let mut s = b.state.write().unwrap();
+            let mut s = b.state.write();
             let it = s.items.get_mut(&t1.id).unwrap();
             it.last_bounce_reason = Some("prior conflict bounce".into());
             it.last_conflict_files = vec!["src/stale.rs".into()];
@@ -8515,7 +8541,7 @@ mod tests {
         b.transition(t1.id, State::Running, "agent", None).unwrap();
 
         {
-            let mut s = b.state.write().unwrap();
+            let mut s = b.state.write();
             let it = s.items.get_mut(&t1.id).unwrap();
             it.last_bounce_reason = Some("stale bounce".into());
             it.last_conflict_files = vec!["src/old.rs".into()];
