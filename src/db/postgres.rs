@@ -1,4 +1,4 @@
-//! SQLite `BoardStore` — row-level board persistence and one-shot JSON import.
+//! Postgres `BoardStore` — row-level board persistence and one-shot JSON import.
 
 use super::codec::{
     item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME, META_DEFAULT_SANDBOX_PROFILE_ID,
@@ -7,40 +7,35 @@ use super::codec::{
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
-use super::{connect_sqlite_migrated, parse_database_url};
+use super::{connect_postgres_migrated, parse_database_url};
 use crate::model::{ItemId, SandboxProfile, WorkItem, WorkspaceBinding};
 use crate::model::AgentRuntimeConfig;
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::SqlitePool;
-use sqlx::{Sqlite, Transaction};
+use sqlx::postgres::PgPool;
+use sqlx::{Postgres, Transaction};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub struct SqliteBoardStore {
-    pool: SqlitePool,
+pub struct PostgresBoardStore {
+    pool: PgPool,
 }
 
-impl SqliteBoardStore {
+impl PostgresBoardStore {
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         let parsed = parse_database_url(url)?;
-        if parsed.backend() != DatabaseBackend::Sqlite {
+        if parsed.backend() != DatabaseBackend::Postgres {
             return Err(StoreError::WrongBackend {
-                expected: DatabaseBackend::Sqlite,
+                expected: DatabaseBackend::Postgres,
                 got: parsed.backend(),
             });
         }
-        let pool = connect_sqlite_migrated(parsed.as_str()).await?;
-        // Schema uses FKs; SQLite leaves them off unless asked.
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await
-            .map_err(|e| StoreError::Connect(e.to_string()))?;
+        let pool = connect_postgres_migrated(parsed.as_str()).await?;
         Ok(Self { pool })
     }
 
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
@@ -101,7 +96,7 @@ impl SqliteBoardStore {
 
         // Items first, blockers second: `blocked_by` can point at a sibling
         // with a higher id (or any non-ancestor), so writing edges in the same
-        // pass as rows trips SQLite FOREIGN KEY (787).
+        // pass as rows trips FOREIGN KEY.
         let items: Vec<WorkItem> = state.items.values().cloned().collect();
         for item in parent_first(&items) {
             let nrc = state.non_retired_child_count(item.id) as i64;
@@ -114,7 +109,7 @@ impl SqliteBoardStore {
 
         for (&goal_id, lines) in &state.stories {
             // Drop story lines whose Project was deleted — otherwise INSERT
-            // trips FOREIGN KEY (787) and the whole board fails to boot.
+            // trips FOREIGN KEY and the whole board fails to boot.
             if !state.items.contains_key(&goal_id) {
                 tracing::warn!(
                     goal_id,
@@ -232,13 +227,13 @@ impl SqliteBoardStore {
 }
 
 async fn set_meta_tx(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut Transaction<'_, Postgres>,
     key: &str,
     value: &str,
 ) -> Result<(), StoreError> {
     sqlx::query(
         r#"
-        INSERT INTO meta (key, value) VALUES (?, ?)
+        INSERT INTO meta (key, value) VALUES ($1, $2)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         "#,
     )
@@ -251,7 +246,7 @@ async fn set_meta_tx(
 }
 
 async fn upsert_item_tx(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut Transaction<'_, Postgres>,
     item: &WorkItem,
     non_retired_child_count: i64,
     open_blocker_count: i64,
@@ -267,12 +262,12 @@ async fn upsert_item_tx(
             history_json, plan_json, proposal_json, extras_json,
             non_retired_child_count, open_blocker_count
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?,
-            ?, ?, ?,
-            ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12,
+            $13, $14, $15,
+            $16, $17, $18, $19, $20,
+            $21, $22, $23, $24,
+            $25, $26
         )
         ON CONFLICT(id) DO UPDATE SET
             parent_id = excluded.parent_id,
@@ -336,7 +331,7 @@ async fn upsert_item_tx(
 
 /// Recompute denorm columns for one item + its parent after a single-row upsert.
 async fn refresh_denorm_tx(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut Transaction<'_, Postgres>,
     item: &WorkItem,
 ) -> Result<(), StoreError> {
     // open_blocker_count from edge table + blocker state.
@@ -348,7 +343,7 @@ async fn refresh_denorm_tx(
             WHERE ib.item_id = items.id
               AND b.state NOT IN ('done', 'retired')
         )
-        WHERE id = ?
+        WHERE id = $1
         "#,
     )
     .bind(item.id as i64)
@@ -360,10 +355,10 @@ async fn refresh_denorm_tx(
         sqlx::query(
             r#"
             UPDATE items SET non_retired_child_count = (
-                SELECT COUNT(*) FROM items c
+                SELECT COUNT(*)::bigint FROM items c
                 WHERE c.parent_id = items.id AND c.state != 'retired'
             )
-            WHERE id = ?
+            WHERE id = $1
             "#,
         )
         .bind(parent as i64)
@@ -375,10 +370,10 @@ async fn refresh_denorm_tx(
     sqlx::query(
         r#"
         UPDATE items SET non_retired_child_count = (
-            SELECT COUNT(*) FROM items c
+            SELECT COUNT(*)::bigint FROM items c
             WHERE c.parent_id = items.id AND c.state != 'retired'
         )
-        WHERE id = ?
+        WHERE id = $1
         "#,
     )
     .bind(item.id as i64)
@@ -389,18 +384,18 @@ async fn refresh_denorm_tx(
 }
 
 async fn replace_blockers_tx(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut Transaction<'_, Postgres>,
     item_id: ItemId,
     blocker_ids: &[ItemId],
 ) -> Result<(), StoreError> {
-    sqlx::query("DELETE FROM item_blockers WHERE item_id = ?")
+    sqlx::query("DELETE FROM item_blockers WHERE item_id = $1")
         .bind(item_id as i64)
         .execute(&mut **tx)
         .await
         .map_err(|e| StoreError::Query(e.to_string()))?;
     for &bid in blocker_ids {
         sqlx::query(
-            "INSERT INTO item_blockers (item_id, blocker_id) VALUES (?, ?)",
+            "INSERT INTO item_blockers (item_id, blocker_id) VALUES ($1, $2)",
         )
         .bind(item_id as i64)
         .bind(bid as i64)
@@ -412,18 +407,18 @@ async fn replace_blockers_tx(
 }
 
 async fn replace_stories_tx(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut Transaction<'_, Postgres>,
     goal_id: ItemId,
     lines: &[StoryLine],
 ) -> Result<(), StoreError> {
-    sqlx::query("DELETE FROM stories WHERE goal_id = ?")
+    sqlx::query("DELETE FROM stories WHERE goal_id = $1")
         .bind(goal_id as i64)
         .execute(&mut **tx)
         .await
         .map_err(|e| StoreError::Query(e.to_string()))?;
     for (pos, line) in lines.iter().enumerate() {
         sqlx::query(
-            "INSERT INTO stories (goal_id, position, at, text) VALUES (?, ?, ?, ?)",
+            "INSERT INTO stories (goal_id, position, at, text) VALUES ($1, $2, $3, $4)",
         )
         .bind(goal_id as i64)
         .bind(pos as i64)
@@ -437,9 +432,9 @@ async fn replace_stories_tx(
 }
 
 #[async_trait]
-impl BoardStore for SqliteBoardStore {
+impl BoardStore for PostgresBoardStore {
     async fn meta_get(&self, key: &str) -> Result<Option<String>, StoreError> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM meta WHERE key = ?")
+        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM meta WHERE key = $1")
             .bind(key)
             .fetch_optional(&self.pool)
             .await
@@ -450,7 +445,7 @@ impl BoardStore for SqliteBoardStore {
     async fn meta_set(&self, key: &str, value: &str) -> Result<(), StoreError> {
         sqlx::query(
             r#"
-            INSERT INTO meta (key, value) VALUES (?, ?)
+            INSERT INTO meta (key, value) VALUES ($1, $2)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             "#,
         )
@@ -479,7 +474,7 @@ impl BoardStore for SqliteBoardStore {
         if self.meta_get(META_JSON_IMPORTED).await?.is_some() {
             return Ok(false);
         }
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items")
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM items")
             .fetch_one(&self.pool)
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
@@ -508,18 +503,18 @@ impl BoardStore for SqliteBoardStore {
             .begin()
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
-        sqlx::query("DELETE FROM item_blockers WHERE item_id = ? OR blocker_id = ?")
+        sqlx::query("DELETE FROM item_blockers WHERE item_id = $1 OR blocker_id = $2")
             .bind(id as i64)
             .bind(id as i64)
             .execute(&mut *tx)
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
-        sqlx::query("DELETE FROM stories WHERE goal_id = ?")
+        sqlx::query("DELETE FROM stories WHERE goal_id = $1")
             .bind(id as i64)
             .execute(&mut *tx)
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
-        sqlx::query("DELETE FROM items WHERE id = ?")
+        sqlx::query("DELETE FROM items WHERE id = $1")
             .bind(id as i64)
             .execute(&mut *tx)
             .await
@@ -531,7 +526,7 @@ impl BoardStore for SqliteBoardStore {
     }
 
     async fn get_item(&self, id: ItemId) -> Result<Option<WorkItem>, StoreError> {
-        let row = sqlx::query("SELECT * FROM items WHERE id = ?")
+        let row = sqlx::query("SELECT * FROM items WHERE id = $1")
             .bind(id as i64)
             .fetch_optional(&self.pool)
             .await
@@ -575,7 +570,7 @@ impl BoardStore for SqliteBoardStore {
 
     async fn load_blockers(&self, item_id: ItemId) -> Result<Vec<ItemId>, StoreError> {
         let rows: Vec<(i64,)> =
-            sqlx::query_as("SELECT blocker_id FROM item_blockers WHERE item_id = ? ORDER BY blocker_id")
+            sqlx::query_as("SELECT blocker_id::bigint FROM item_blockers WHERE item_id = $1 ORDER BY blocker_id")
                 .bind(item_id as i64)
                 .fetch_all(&self.pool)
                 .await
@@ -602,7 +597,7 @@ impl BoardStore for SqliteBoardStore {
 
     async fn load_stories(&self, goal_id: ItemId) -> Result<Vec<StoryLine>, StoreError> {
         let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT at, text FROM stories WHERE goal_id = ? ORDER BY position",
+            "SELECT at, text FROM stories WHERE goal_id = $1 ORDER BY position",
         )
         .bind(goal_id as i64)
         .fetch_all(&self.pool)
@@ -620,7 +615,7 @@ impl BoardStore for SqliteBoardStore {
 
     async fn load_all_stories(&self) -> Result<BTreeMap<ItemId, Vec<StoryLine>>, StoreError> {
         let rows: Vec<(i64, i64, String, String)> = sqlx::query_as(
-            "SELECT goal_id, position, at, text FROM stories ORDER BY goal_id, position",
+            "SELECT goal_id::bigint, position::bigint, at, text FROM stories ORDER BY goal_id, position",
         )
         .fetch_all(&self.pool)
         .await
@@ -703,10 +698,10 @@ impl BoardStore for SqliteBoardStore {
         let now_s = now.to_rfc3339();
         let rows: Vec<(i64, Option<String>, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT id, run_deadline_at, lease_json FROM items
+            SELECT id::bigint, run_deadline_at, lease_json FROM items
             WHERE state IN ('claimed', 'running')
               AND (
-                (run_deadline_at IS NOT NULL AND run_deadline_at != '' AND run_deadline_at < ?)
+                (run_deadline_at IS NOT NULL AND run_deadline_at != '' AND run_deadline_at < $1)
                 OR (
                   (run_deadline_at IS NULL OR run_deadline_at = '')
                   AND lease_json IS NOT NULL AND lease_json != ''
@@ -743,7 +738,7 @@ impl BoardStore for SqliteBoardStore {
 
     async fn query_children_of(&self, id: ItemId) -> Result<Vec<ItemId>, StoreError> {
         let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT id FROM items WHERE parent_id = ? ORDER BY id",
+            "SELECT id::bigint FROM items WHERE parent_id = $1 ORDER BY id",
         )
         .bind(id as i64)
         .fetch_all(&self.pool)
@@ -754,7 +749,7 @@ impl BoardStore for SqliteBoardStore {
 
     async fn query_has_non_retired_children(&self, id: ItemId) -> Result<bool, StoreError> {
         let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT non_retired_child_count FROM items WHERE id = ?",
+            "SELECT non_retired_child_count::bigint FROM items WHERE id = $1",
         )
         .bind(id as i64)
         .fetch_optional(&self.pool)
@@ -764,382 +759,3 @@ impl BoardStore for SqliteBoardStore {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db::BoardStore;
-    use crate::model::{Origin, State};
-    use chrono::Utc;
-    use std::sync::Arc;
-
-    async fn mem_store() -> SqliteBoardStore {
-        SqliteBoardStore::connect("sqlite::memory:")
-            .await
-            .expect("connect")
-    }
-
-    #[tokio::test]
-    async fn round_trip_item_blockers_and_stories() {
-        let store = mem_store().await;
-        let mut parent = WorkItem::new(1, "Project", "why");
-        parent.level = Some("Project".into());
-        parent.state = State::Backlog;
-        parent.project_prompt = Some("standing".into());
-        parent.beads_id = Some("honr-abc".into());
-        parent.sandbox_profile_id = Some("default".into());
-
-        let mut child = WorkItem::new(2, "Task", "do it");
-        child.parent = Some(1);
-        child.level = Some("Task".into());
-        child.state = State::Backlog;
-        child.blocked_by = vec![1];
-        child.awaiting_dispatch = true;
-        child.definition_of_done = Some("shipped".into());
-
-        store.upsert_item(&parent).await.expect("parent");
-        store.upsert_item(&child).await.expect("child");
-        store.set_next_id(3).await.expect("next_id");
-
-        let line = StoryLine {
-            at: Utc::now(),
-            text: "kicked off".into(),
-        };
-        store
-            .replace_stories(1, std::slice::from_ref(&line))
-            .await
-            .expect("stories");
-
-        let loaded = store.get_item(2).await.expect("get").expect("exists");
-        assert_eq!(loaded.title, "Task");
-        assert_eq!(loaded.parent, Some(1));
-        assert_eq!(loaded.blocked_by, vec![1]);
-        assert!(loaded.awaiting_dispatch);
-        assert_eq!(loaded.definition_of_done.as_deref(), Some("shipped"));
-
-        let p = store.get_item(1).await.expect("get p").expect("p");
-        assert_eq!(p.project_prompt.as_deref(), Some("standing"));
-        assert_eq!(p.beads_id.as_deref(), Some("honr-abc"));
-        assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
-
-        let stories = store.load_stories(1).await.expect("stories");
-        assert_eq!(stories.len(), 1);
-        assert_eq!(stories[0].text, "kicked off");
-        assert_eq!(store.get_next_id().await.unwrap(), 3);
-
-        // Full snapshot round-trip including sandbox profile catalog.
-        let mut state = store.load_board_state().await.expect("load state");
-        assert_eq!(state.items.len(), 2);
-        assert_eq!(state.next_id, 3);
-        state.sandbox_profiles.insert(
-            "default".into(),
-            SandboxProfile {
-                id: "default".into(),
-                name: "Default".into(),
-                image: "img:1".into(),
-                policy: "version: 1\n# sqlite-roundtrip\n".into(),
-                cpu: Some("2".into()),
-                memory: None,
-            },
-        );
-        state.default_sandbox_profile_id = Some("default".into());
-        state.workspace = Some(crate::model::WorkspaceBinding {
-            forge: "github".into(),
-            beads_sync_repo: Some("acme/beads-mirror".into()),
-        });
-        store.save_board_state(&state).await.expect("save");
-        let again = store.load_board_state().await.expect("reload");
-        assert_eq!(again.items.get(&2).unwrap().blocked_by, vec![1]);
-        assert_eq!(again.stories.get(&1).unwrap()[0].text, "kicked off");
-        assert_eq!(
-            again.items.get(&1).unwrap().sandbox_profile_id.as_deref(),
-            Some("default")
-        );
-        assert_eq!(again.default_sandbox_profile_id.as_deref(), Some("default"));
-        assert_eq!(again.sandbox_profiles.get("default").unwrap().image, "img:1");
-        assert!(
-            again
-                .sandbox_profiles
-                .get("default")
-                .unwrap()
-                .policy
-                .contains("sqlite-roundtrip"),
-            "policy YAML must round-trip"
-        );
-        let ws = again.workspace.as_ref().expect("workspace round-trip");
-        assert_eq!(ws.forge, "github");
-        assert_eq!(ws.beads_sync_repo.as_deref(), Some("acme/beads-mirror"));
-
-        // Round-trip Agent runtime meta.
-        let mut with_rt = again;
-        with_rt.agent_runtime = Some(crate::model::AgentRuntimeConfig {
-            enabled: true,
-            engine: "agy".into(),
-            providers: vec!["vertex".into(), "gh".into()],
-            vertex: crate::model::AgentRuntimeVertex {
-                project: "demo-proj".into(),
-                location: "us-east5".into(),
-                model: "claude-opus-5".into(),
-            },
-            max_concurrent: 1,
-            per_card_budget_cents: Some(200),
-            daily_budget_cents: None,
-            agent_timeout_secs: 900,
-            max_attempts: 3,
-        });
-        store.save_board_state(&with_rt).await.expect("save runtime");
-        let rt_again = store.load_board_state().await.expect("reload runtime");
-        let rt = rt_again.agent_runtime.expect("agent_runtime round-trip");
-        assert!(rt.enabled);
-        assert_eq!(rt.engine, "agy");
-        assert_eq!(rt.vertex.location, "us-east5");
-        assert_eq!(rt.providers, vec!["vertex".to_string(), "gh".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn save_board_state_allows_sibling_blocker_with_higher_id() {
-        let store = mem_store().await;
-        let mut parent = WorkItem::new(1, "Project", "why");
-        parent.level = Some("Project".into());
-        parent.state = State::Backlog;
-
-        let mut early = WorkItem::new(2, "Early", "waits on later sibling");
-        early.parent = Some(1);
-        early.level = Some("Task".into());
-        early.state = State::Backlog;
-        early.blocked_by = vec![3];
-
-        let mut later = WorkItem::new(3, "Later", "the blocker");
-        later.parent = Some(1);
-        later.level = Some("Task".into());
-        later.state = State::Backlog;
-
-        let mut items = BTreeMap::new();
-        items.insert(1, parent);
-        items.insert(2, early);
-        items.insert(3, later);
-        let state = BoardState {
-            next_id: 4,
-            items,
-            ..Default::default()
-        };
-        store.save_board_state(&state).await.expect("save");
-        let loaded = store.load_board_state().await.expect("load");
-        assert_eq!(loaded.items.get(&2).unwrap().blocked_by, vec![3]);
-    }
-
-    #[tokio::test]
-    async fn one_shot_json_import_and_no_repeat() {
-        let dir = std::env::temp_dir().join(format!(
-            "honr-import-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let json_path = dir.join("honr.json");
-
-        let mut state = BoardState {
-            next_id: 5,
-            ..Default::default()
-        };
-        let mut item = WorkItem::new(4, "Imported", "from json");
-        item.origin = Origin::Human;
-        item.state = State::Backlog;
-        state.items.insert(4, item);
-        state.stories.insert(
-            4,
-            vec![StoryLine {
-                at: Utc::now(),
-                text: "hello".into(),
-            }],
-        );
-        std::fs::write(&json_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
-
-        let store = mem_store().await;
-        assert!(store.is_empty().await.unwrap());
-        assert!(store
-            .import_json_if_empty(&json_path)
-            .await
-            .expect("import"));
-        assert!(!store.is_empty().await.unwrap());
-
-        let loaded = store.load_board_state().await.expect("load");
-        assert_eq!(loaded.next_id, 5);
-        assert_eq!(loaded.items.get(&4).unwrap().title, "Imported");
-        assert_eq!(loaded.stories.get(&4).unwrap()[0].text, "hello");
-
-        // Second boot: stamp present — no re-import even if we wipe items in JSON.
-        std::fs::write(&json_path, "{}").unwrap();
-        assert!(!store
-            .import_json_if_empty(&json_path)
-            .await
-            .expect("skip"));
-        assert_eq!(
-            store.get_item(4).await.unwrap().unwrap().title,
-            "Imported"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn board_survives_restart_via_db() {
-        let dir = std::env::temp_dir().join(format!(
-            "honr-board-db-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("honr.db");
-        let json_path = dir.join("honr.json");
-        let url = format!("sqlite:{}", db_path.display());
-
-        let store = Arc::new(
-            crate::db::DurableBoardStore::connect(&url)
-                .await
-                .expect("connect file db"),
-        );
-        let schema = crate::schema::Schema::default();
-        let board = crate::store::Board::load_with_store(
-            schema.clone(),
-            json_path.clone(),
-            store.clone(),
-        )
-        .await
-        .expect("open empty");
-
-        let project = board
-            .create(
-                None,
-                "DB Project",
-                "persist me",
-                None,
-                Origin::Human,
-                true,
-                None,
-            )
-            .expect("create project");
-        board
-            .transition(project.id, State::Backlog, "test", None)
-            .ok();
-        board.story(project.id, "noted".into());
-        board.flush();
-
-        // Drop in-memory board; reopen from the same DB file.
-        drop(board);
-        let store2 = Arc::new(
-            crate::db::DurableBoardStore::connect(&url)
-                .await
-                .expect("reconnect"),
-        );
-        let board2 = crate::store::Board::load_with_store(
-            schema,
-            json_path.clone(),
-            store2,
-        )
-        .await
-        .expect("reopen");
-        let restored = board2.get(project.id).expect("item survives");
-        assert_eq!(restored.title, "DB Project");
-        let stories = board2.stories_for(project.id);
-        assert!(stories.iter().any(|s| s.text == "noted"));
-
-        // Flush with a store attached must not create/rewrite honr.json.
-        assert!(!json_path.exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn indexed_queries_match_board_filter_semantics() {
-        let store = mem_store().await;
-        let mut project = WorkItem::new(1, "Proj", "why");
-        project.level = Some("Project".into());
-        project.state = State::Backlog;
-
-        let mut leaf = WorkItem::new(2, "leaf", "do");
-        leaf.parent = Some(1);
-        leaf.level = Some("Task".into());
-        leaf.state = State::Backlog;
-        leaf.capability = Some("rust".into());
-        leaf.definition_of_done = Some("ship".into());
-
-        let mut blocked = WorkItem::new(3, "blocked", "wait");
-        blocked.parent = Some(1);
-        blocked.level = Some("Task".into());
-        blocked.state = State::Backlog;
-        blocked.blocked_by = vec![2];
-        blocked.definition_of_done = Some("ship".into());
-
-        let mut claimed = WorkItem::new(4, "running-card", "go");
-        claimed.parent = Some(1);
-        claimed.level = Some("Task".into());
-        claimed.state = State::Running;
-        claimed.run_deadline_at = Some(Utc::now() - chrono::Duration::seconds(30));
-        claimed.definition_of_done = Some("ship".into());
-
-        let mut dispatch = WorkItem::new(5, "dispatch-me", "start");
-        dispatch.parent = Some(1);
-        dispatch.level = Some("Task".into());
-        dispatch.state = State::Backlog;
-        dispatch.awaiting_dispatch = true;
-        dispatch.definition_of_done = Some("ship".into());
-
-        let mut items = BTreeMap::new();
-        items.insert(1, project);
-        items.insert(2, leaf);
-        items.insert(3, blocked);
-        items.insert(4, claimed);
-        items.insert(5, dispatch);
-        let mut state = BoardState {
-            next_id: 6,
-            items,
-            ..Default::default()
-        };
-        state.rebuild_hot_indexes();
-        store.save_board_state(&state).await.expect("save");
-
-        // Denorm columns persisted.
-        let nrc: (i64,) = sqlx::query_as(
-            "SELECT non_retired_child_count FROM items WHERE id = 1",
-        )
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(nrc.0, 4);
-        let obc: (i64,) = sqlx::query_as(
-            "SELECT open_blocker_count FROM items WHERE id = 3",
-        )
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(obc.0, 1);
-
-        let backlog = store
-            .query_backlog(&["rust".into()])
-            .await
-            .expect("backlog");
-        let ids: Vec<_> = backlog.iter().map(|i| i.id).collect();
-        assert!(ids.contains(&2), "rust leaf: {ids:?}");
-        assert!(!ids.contains(&3), "blocked excluded");
-        assert!(!ids.contains(&1), "project excluded");
-        assert!(ids.contains(&5), "dispatch leaf still backlog");
-
-        let q = store.query_awaiting_dispatch().await.expect("dispatch");
-        assert_eq!(q.iter().map(|i| i.id).collect::<Vec<_>>(), vec![5]);
-
-        let kids = store.query_children_of(1).await.expect("children");
-        assert_eq!(kids.len(), 4);
-        assert!(store.query_has_non_retired_children(1).await.unwrap());
-        assert!(!store.query_has_non_retired_children(2).await.unwrap());
-
-        let expired = store
-            .query_expired_leases(Utc::now())
-            .await
-            .expect("leases");
-        assert_eq!(expired, vec![4]);
-    }
-}

@@ -46,10 +46,10 @@ async fn main() -> anyhow::Result<()> {
     db::apply_database_url_override(&mut schema.board.database);
     let json_path = PathBuf::from("honr.json");
     let board: SharedBoard = match schema.board.database.parsed() {
-        Ok(url) if url.backend() == db::DatabaseBackend::Sqlite => {
+        Ok(url) => {
             tracing::info!(%url, backend = %url.backend(), "board database configured");
             let store = Arc::new(
-                db::SqliteBoardStore::connect(url.as_str())
+                db::DurableBoardStore::connect(url.as_str())
                     .await
                     .map_err(|e| anyhow::anyhow!("board database open/migrate: {e}"))?,
             );
@@ -58,14 +58,6 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .map_err(|e| anyhow::anyhow!("board load from database: {e}"))?,
             )
-        }
-        Ok(url) => {
-            // Postgres cutover is a later Task — keep JSON until then.
-            tracing::warn!(
-                %url,
-                "board database backend not yet wired for boot; using honr.json"
-            );
-            Arc::new(Board::load_or_new(schema.clone(), json_path))
         }
         Err(e) => {
             tracing::warn!("board.database.url invalid ({e}); using honr.json");
