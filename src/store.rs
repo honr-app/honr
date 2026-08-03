@@ -235,6 +235,24 @@ impl Board {
             match serde_json::from_str::<BoardState>(&raw) {
                 Ok(mut state) => {
                     let mut healed = 0usize;
+                    let mut renamed = 0usize;
+                    // Collect legacy renames before mutably walking (need parent titles).
+                    let rename_to: Vec<(ItemId, String)> = state
+                        .items
+                        .values()
+                        .filter(|i| i.title == crate::model::INITIAL_PLAN_TITLE_LEGACY)
+                        .filter_map(|i| {
+                            let parent = i.parent?;
+                            let pname = state.items.get(&parent)?.title.clone();
+                            Some((i.id, crate::model::initial_plan_title(&pname)))
+                        })
+                        .collect();
+                    for (id, title) in rename_to {
+                        if let Some(item) = state.items.get_mut(&id) {
+                            item.title = title;
+                            renamed += 1;
+                        }
+                    }
                     for (id, item) in state.items.iter_mut() {
                         if item.beads_id.is_none() {
                             item.beads_id = Some(format!("bd-honr-{id}"));
@@ -250,7 +268,16 @@ impl Board {
                     if healed > 0 {
                         tracing::info!("healed {healed} Initial plan Task(s) Shaping → Backlog");
                     }
+                    if renamed > 0 {
+                        tracing::info!(
+                            "renamed {renamed} Initial plan Task(s) to include Project name"
+                        );
+                    }
                     *board.state.write().unwrap() = state;
+                    if healed > 0 || renamed > 0 {
+                        board.dirty.store(true, Ordering::Relaxed);
+                        board.flush();
+                    }
                 }
                 Err(e) => tracing::warn!("ignoring unreadable {path:?}: {e}"),
             }
@@ -677,9 +704,10 @@ impl Board {
     }
 
     fn seed_initial_plan_task(&self, project_id: ItemId, project_title: &str) -> Result<WorkItem, String> {
+        let title = crate::model::initial_plan_title(project_title);
         let seed = self.create(
             Some(project_id),
-            INITIAL_PLAN_TITLE,
+            title.clone(),
             format!(
                 "Propose sibling Tasks for «{project_title}» (plan.json: keys, deps, \
                  mechanically checkable DoDs). Open one plan/docs PR, then finish with \
@@ -697,7 +725,7 @@ impl Board {
             .map_err(|e| e.to_string())?;
         self.story(
             project_id,
-            format!("Seeded {INITIAL_PLAN_TITLE} Task #{}.", seed.id),
+            format!("Seeded {title} Task #{}.", seed.id),
         );
         Ok(seed)
     }
@@ -3580,7 +3608,7 @@ mod tests {
         let kids = b.children_of(project.id);
         assert_eq!(kids.len(), 1, "exactly one seed Task");
         let seed = b.get(kids[0]).unwrap();
-        assert_eq!(seed.title, INITIAL_PLAN_TITLE);
+        assert_eq!(seed.title, initial_plan_title("Phase X"));
         assert_eq!(seed.state, State::Backlog, "Initial plan is dispatchable planning work");
         assert!(seed.is_initial_plan_task());
         assert!(b.may_claim(seed.id));

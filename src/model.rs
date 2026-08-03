@@ -253,8 +253,38 @@ impl PlanArtifact {
     }
 }
 
-/// Title of the seed Task created with every Project.
-pub const INITIAL_PLAN_TITLE: &str = "Initial plan";
+/// Legacy exact title (pre–project-name seed). Still recognized by
+/// [`title_is_initial_plan`].
+pub const INITIAL_PLAN_TITLE_LEGACY: &str = "Initial plan";
+
+/// Prefix for seed Task titles: `Initial Plan for <Project name>`.
+pub const INITIAL_PLAN_TITLE_PREFIX: &str = "Initial Plan for ";
+
+/// Title for a Project's Initial plan seed Task.
+pub fn initial_plan_title(project_title: &str) -> String {
+    format!("{INITIAL_PLAN_TITLE_PREFIX}{project_title}")
+}
+
+/// Whether a card title identifies an Initial plan Task.
+pub fn title_is_initial_plan(title: &str) -> bool {
+    title == INITIAL_PLAN_TITLE_LEGACY || title.starts_with(INITIAL_PLAN_TITLE_PREFIX)
+}
+
+#[cfg(test)]
+mod initial_plan_title_tests {
+    use super::*;
+
+    #[test]
+    fn title_includes_project_name() {
+        assert_eq!(
+            initial_plan_title("Webhook rebase"),
+            "Initial Plan for Webhook rebase"
+        );
+        assert!(title_is_initial_plan("Initial Plan for Webhook rebase"));
+        assert!(title_is_initial_plan(INITIAL_PLAN_TITLE_LEGACY));
+        assert!(!title_is_initial_plan("Implement webhook handler"));
+    }
+}
 
 /// Default standing instructions seeded on every new Project (`project_prompt`).
 /// Replaces the old pin soup for policy the agent must always see.
@@ -516,7 +546,7 @@ impl WorkItem {
     }
 
     pub fn is_initial_plan_task(&self) -> bool {
-        self.title == INITIAL_PLAN_TITLE
+        title_is_initial_plan(&self.title)
             || self
                 .definition_of_done
                 .as_deref()

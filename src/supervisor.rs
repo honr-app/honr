@@ -2089,7 +2089,7 @@ fn briefing(
         }
     });
 
-    let is_initial_plan = grant.title == crate::model::INITIAL_PLAN_TITLE;
+    let is_initial_plan = crate::model::title_is_initial_plan(&grant.title);
 
     if is_initial_plan {
         b.push_str(
@@ -2911,7 +2911,7 @@ mod tests {
     #[test]
     fn briefing_initial_plan_requires_report_not_split() {
         let mut g = grant();
-        g.title = crate::model::INITIAL_PLAN_TITLE.into();
+        g.title = crate::model::initial_plan_title("Test Project");
         let b = briefing(&g, BranchState::Fresh, "honr/card-92", "shanemcd/honr", "main");
         assert!(b.contains("Initial plan"), "briefing must identify Initial plan: {b}");
         assert!(
