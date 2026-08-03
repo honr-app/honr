@@ -175,9 +175,7 @@ async fn approve_plan(
     Path(id): Path<ItemId>,
 ) -> ApiResult<Vec<ItemId>> {
     let published = b.approve_plan(id).map_err(ApiError)?;
-    for cid in &published {
-        b.schedule_beads_mirror(*cid);
-    }
+    b.schedule_beads_mirror_batch(&published);
     Ok(Json(published))
 }
 
@@ -341,11 +339,13 @@ async fn materialize_proposal_heal(
         .collect();
     let made = b.materialize_pending_proposal(id).map_err(ApiError)?;
     if let Some(parent) = b.get(id).and_then(|i| i.parent) {
+        let mut new_ids = Vec::new();
         for cid in b.children_of(parent) {
             if !before.contains(&cid) {
-                b.schedule_beads_mirror(cid);
+                new_ids.push(cid);
             }
         }
+        b.schedule_beads_mirror_batch(&new_ids);
     }
     Ok(Json(made.into_iter().map(|i| i.id).collect()))
 }
@@ -376,11 +376,13 @@ async fn approve(
         .collect();
     let item = b.approve_review(id).map_err(ApiError)?;
     if let Some(parent) = item.parent {
+        let mut new_ids = Vec::new();
         for cid in b.children_of(parent) {
             if !before.contains(&cid) {
-                b.schedule_beads_mirror(cid);
+                new_ids.push(cid);
             }
         }
+        b.schedule_beads_mirror_batch(&new_ids);
     }
     Ok(Json(item))
 }
@@ -542,13 +544,15 @@ async fn github_webhook(
                 completed_item_ids.push(id);
                 // Done materializes Initial plan / split proposals — push new cards.
                 if let Some(parent) = b.get(id).and_then(|i| i.parent) {
+                    let mut new_ids = Vec::new();
                     for cid in b.children_of(parent) {
                         if b.get(cid).is_some_and(|c| {
                             !c.is_initial_plan_task() && c.github_issue_url.is_none()
                         }) {
-                            b.schedule_beads_mirror(cid);
+                            new_ids.push(cid);
                         }
                     }
+                    b.schedule_beads_mirror_batch(&new_ids);
                 }
             }
         }
