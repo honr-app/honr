@@ -179,6 +179,7 @@ pub struct Board {
     in_flight_github_pushes: std::sync::Mutex<
         std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     >,
+    pushed_beads_ids: std::sync::RwLock<std::collections::HashSet<String>>,
 }
 
 pub type SharedBoard = Arc<Board>;
@@ -199,6 +200,7 @@ impl Board {
             let beads_dir = {
                 let raw = path
                     .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
                     .map(|p| p.join(".beads"))
                     .unwrap_or_else(|| PathBuf::from(".beads"));
                 if raw.is_absolute() {
@@ -222,6 +224,7 @@ impl Board {
             beads,
             openshell: Some(crate::openshell::OpenShell::default()),
             in_flight_github_pushes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pushed_beads_ids: std::sync::RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -870,9 +873,27 @@ impl Board {
         Ok(published)
     }
 
+    pub fn is_beads_id_pushed(&self, beads_id: &str) -> bool {
+        self.pushed_beads_ids.read().unwrap().contains(beads_id)
+    }
+
+    pub fn mark_beads_id_pushed(&self, beads_id: &str) {
+        self.pushed_beads_ids
+            .write()
+            .unwrap()
+            .insert(beads_id.to_string());
+    }
+
+    fn cleanup_in_flight_lock(&self, beads_id: &str, lock: &Arc<tokio::sync::Mutex<()>>) {
+        let mut map = self.in_flight_github_pushes.lock().unwrap();
+        if Arc::strong_count(lock) <= 2 {
+            map.remove(beads_id);
+        }
+    }
+
     /// Push a single beads item to GitHub, single-flighted per `beads_id`.
     /// Concurrent callers for the same `beads_id` await the in-flight push,
-    /// and no-op if `github_issue_url` was successfully set by the first caller.
+    /// and no-op once the push has completed or `github_issue_url` exists.
     pub async fn push_beads_item_single_flight(self: &Arc<Self>, id: ItemId, beads_id: &str) {
         if !crate::beads::BeadsClient::is_real_id(beads_id) {
             return;
@@ -881,10 +902,15 @@ impl Board {
             return;
         };
 
+        if self.is_beads_id_pushed(beads_id) {
+            return;
+        }
         if self.get(id).and_then(|i| i.github_issue_url.clone()).is_some() {
+            self.mark_beads_id_pushed(beads_id);
             return;
         }
         if self.refresh_github_issue_url(id, beads_id).await {
+            self.mark_beads_id_pushed(beads_id);
             return;
         }
 
@@ -895,18 +921,33 @@ impl Board {
 
         let _guard = lock.lock().await;
 
+        if self.is_beads_id_pushed(beads_id) {
+            self.cleanup_in_flight_lock(beads_id, &lock);
+            return;
+        }
         if self.get(id).and_then(|i| i.github_issue_url.clone()).is_some() {
+            self.mark_beads_id_pushed(beads_id);
+            self.cleanup_in_flight_lock(beads_id, &lock);
             return;
         }
         if self.refresh_github_issue_url(id, beads_id).await {
+            self.mark_beads_id_pushed(beads_id);
+            self.cleanup_in_flight_lock(beads_id, &lock);
             return;
         }
 
-        if let Err(e) = beads.github_push(std::slice::from_ref(&beads_id.to_string())).await {
-            tracing::warn!(id, beads_id, error = %e, "beads github push failed in single_flight");
+        match beads.github_push(std::slice::from_ref(&beads_id.to_string())).await {
+            Ok(()) => {
+                self.mark_beads_id_pushed(beads_id);
+                beads.schedule_dolt_push();
+                self.refresh_github_issue_url(id, beads_id).await;
+            }
+            Err(e) => {
+                tracing::warn!(id, beads_id, error = %e, "beads github push failed in single_flight");
+            }
         }
-        beads.schedule_dolt_push();
-        self.refresh_github_issue_url(id, beads_id).await;
+
+        self.cleanup_in_flight_lock(beads_id, &lock);
     }
 
     /// Dual-write a single board item into beads (Project→epic, Task→task with `--parent`).
@@ -4359,11 +4400,15 @@ mod tests {
         assert_eq!(item.github_issue_url.as_deref(), Some(expected_url));
     }
 
+    static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
     #[tokio::test]
     async fn test_single_flight_github_push_prevents_duplicate_pushes() {
+        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let test_dir = std::env::temp_dir().join(format!(
-            "honr-single-flight-test-{}",
-            std::process::id()
+            "honr-single-flight-test-{}-{}",
+            std::process::id(),
+            tid
         ));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).unwrap();
@@ -4436,9 +4481,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_project_with_seeded_initial_plan_results_in_at_most_one_github_issue_per_beads_id() {
+        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let test_dir = std::env::temp_dir().join(format!(
-            "honr-project-seed-single-flight-test-{}",
-            std::process::id()
+            "honr-project-seed-single-flight-test-{}-{}",
+            std::process::id(),
+            tid
         ));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).unwrap();
