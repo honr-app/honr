@@ -387,17 +387,19 @@ fn adoptable<'a>(item: Option<&'a WorkItem>, sandbox: &str) -> Option<&'a WorkIt
 
 /// Should reconcile keep this sandbox?
 ///
-/// Keep every non-terminal card's `honr-card-{id}-*` sandboxes. Matching only
-/// `card.environment` raced create: the sweeper reaped a sandbox mid-setup
-/// (and deleted Needs You inspection sandboxes) within a single sweep.
-/// Previous attempts are removed explicitly when a new attempt name is chosen.
+/// When the card has an `environment`, keep that name and any `honr-card-{id}-*`
+/// sibling (mid-create races / prior attempts). Matching only `environment`
+/// reaped sandboxes mid-setup. Halt clears `environment` so nothing is kept —
+/// park / Review / request-changes leave it set so caches survive.
 fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str) -> bool {
     let Some(i) = item else { return false };
     if i.state.is_terminal() {
         return false;
     }
-    i.environment.as_deref() == Some(sandbox)
-        || sandbox.starts_with(&format!("honr-card-{}-", i.id))
+    let Some(env) = i.environment.as_deref() else {
+        return false;
+    };
+    env == sandbox || sandbox.starts_with(&format!("honr-card-{}-", i.id))
 }
 
 /// How long startup waits for the gateway before giving up on reconciling.
@@ -2409,8 +2411,16 @@ fn branch_state_of(stdout: &str) -> BranchState {
 /// hollow resume walks past CONFLICTS and reports into Review again.
 fn remotes_briefing_lines(repo: &crate::schema::RepoConfig) -> String {
     if !repo.is_complete() {
-        return "\nNo card pull_request yet (first run). Clone into `/sandbox/repo` per the \
-Project prompt, open the PR, then finish with `/sandbox/.honr/report.json` including \
+        // Unbound cards used to say "clone per the Project prompt", and agents
+        // invented owner/name from ambient context (this product's own repo).
+        // Needs You is the correct outcome when the clone target is not named.
+        return "\nNo card pull_request yet (first run). Do **not** guess which repository \
+to clone — never invent an `owner/name` (including this product's own repo) from \
+context, history, or the card title. Clone into `/sandbox/repo` **only** when the \
+Project prompt names an exact clone target (`owner/name` or git URL). If it does \
+not, write `/sandbox/.honr/escalate.json` with a short question, at least two \
+concrete options, and a recommended index, then exit — do not clone and do not \
+open a PR. When you do clone and finish, write `/sandbox/.honr/report.json` with \
 `url`, `base`, and `head` (schema: `/sandbox/.honr/report.schema.json`).\n"
             .into();
     }
@@ -2569,8 +2579,8 @@ fn briefing(
                 );
             } else {
                 b.push_str(
-                    "\nFirst run: `/sandbox/repo` is empty. Clone the product repo per the Project \
-prompt, create the card branch, and do the work.\n",
+                    "\nFirst run: `/sandbox/repo` is empty. Clone only if the Project prompt names \
+an exact product repo; otherwise escalate (see Remotes) — do not guess.\n",
                 );
             }
         }
@@ -2620,8 +2630,9 @@ prompt, create the card branch, and do the work.\n",
             ));
         } else {
             b.push_str(
-                "\nPublish: after you clone, commit on the card branch, push, open one PR, write \
-plan.json then report.json with url/base/head, and exit.\n",
+                "\nPublish: only after a named clone — commit on the card branch, push, open one \
+PR, write plan.json then report.json with url/base/head, and exit. If the Project prompt \
+does not name a clone target, escalate instead (see Remotes).\n",
             );
         }
     } else {
@@ -3285,6 +3296,12 @@ mod tests {
         // cannot race reconcile; run_card deletes the previous name explicitly.
         assert!(should_keep_sandbox(Some(&item), "honr-card-9-a1"));
 
+        // Halt clears environment — sweeper must not preserve the box.
+        item.environment = None;
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1"));
+        item.environment = Some("honr-card-9-a2".into());
+
         item.state = State::NeedsHuman;
         assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
         assert!(should_keep_sandbox(Some(&item), "honr-card-9-a3"));
@@ -3580,6 +3597,32 @@ mod tests {
         let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", &cross_fork_repo());
         assert!(b.contains("/sandbox/.honr/escalate.json"), "briefing must mention /sandbox/.honr/escalate.json: {b}");
         assert!(!b.contains("`.honr/escalate.json`"), "briefing must omit WORKDIR .honr/escalate.json: {b}");
+    }
+
+    /// Unbound first runs used to say "clone per the Project prompt" with no
+    /// guard — agents invented shanemcd/honr from ambient context. Needs You.
+    #[test]
+    fn unbound_briefing_forbids_guessing_the_repo() {
+        let unbound = crate::schema::RepoConfig::default();
+        assert!(!unbound.is_complete());
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-172", &unbound);
+        assert!(
+            b.contains("Do **not** guess") || b.contains("do not guess"),
+            "must forbid guessing: {b}"
+        );
+        assert!(
+            b.contains("/sandbox/.honr/escalate.json"),
+            "must send unbound ambiguity to escalate: {b}"
+        );
+        assert!(
+            b.contains("only if the Project prompt names")
+                || b.contains("only when the Project prompt names"),
+            "must gate clone on an explicit name: {b}"
+        );
+        assert!(
+            !b.contains("Clone into `/sandbox/repo` per the Project prompt"),
+            "old invite-to-guess wording must be gone: {b}"
+        );
     }
 
     #[test]

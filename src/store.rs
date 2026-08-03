@@ -3375,22 +3375,38 @@ fn check_split_relatedness(
         Ok(item)
     }
 
-    /// Halt — kill the agent, return the card to Backlog, discard the LLM session.
-    /// Sandbox may still be kept for caches/inspection; the conversation is not.
+    /// Halt — kill the agent, return the card to Backlog, discard the LLM session
+    /// and delete the sandbox. Park is the keep-context path; halt starts clean.
     pub fn halt(&self, id: ItemId, reason: Option<String>) -> Result<WorkItem, String> {
-        {
+        let env_to_delete = {
             let mut s = self.state.write().unwrap();
             if let Some(it) = s.items.get_mut(&id) {
                 it.conversation_id = None;
                 it.parked = false;
+                // Cleared before Backlog transition so the sweeper will not
+                // preserve `honr-card-{id}-*` via the non-terminal prefix keep.
+                it.environment.take()
+            } else {
+                None
             }
-        }
+        };
         let item = self
             .transition(id, State::Backlog, "human", reason.or(Some("halted".into())))
             .map_err(|e| e.to_string())?;
+        if let Some(env) = env_to_delete {
+            let os = self.openshell.clone().unwrap_or_default();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = os.delete(&env).await;
+                });
+            }
+        }
         self.story(
             item.id,
-            format!("{}: halted — session discarded; next claim starts a new conversation.", item.title),
+            format!(
+                "{}: halted — session and sandbox discarded; next claim starts clean.",
+                item.title
+            ),
         );
         Ok(item)
     }
@@ -4498,13 +4514,13 @@ mod tests {
     }
 
     #[test]
-    fn halt_clears_conversation_keeps_environment() {
+    fn halt_clears_conversation_and_environment() {
         let (b, id) = claimed_leaf();
         b.set_environment(id, Some("honr-card-1-a1".into()));
         b.set_conversation_id(id, Some("conv-xyz".into()));
         let it = b.halt(id, Some("start over".into())).expect("halt");
         assert_eq!(it.state, State::Backlog);
-        assert_eq!(it.environment.as_deref(), Some("honr-card-1-a1"));
+        assert!(it.environment.is_none(), "halt deletes the sandbox binding");
         assert!(it.conversation_id.is_none(), "halt discards the LLM session");
         assert!(!it.parked);
     }
@@ -6878,6 +6894,29 @@ mod tests {
         assert!(
             log_content.contains("sandbox delete honr-card-3-a1"),
             "expected 'sandbox delete honr-card-3-a1' in log, got: {log_content}"
+        );
+
+        // 5. Halt clears environment and deletes the sandbox
+        let t4 = b
+            .create(Some(p.id), "Task 4", "intent", Some("DOD".into()), Origin::Human, false, None)
+            .unwrap();
+        let _ = b.transition(t4.id, State::Shaping, "human", None);
+        let _ = b.transition(t4.id, State::Backlog, "human", None);
+        let _ = b.transition(t4.id, State::Claimed, "human", None);
+        b.set_environment(t4.id, Some("honr-card-4-a1".into()));
+        b.halt(t4.id, Some("start over".into())).expect("halt");
+        assert_eq!(b.get(t4.id).unwrap().environment, None);
+
+        eventually(|| {
+            std::fs::read_to_string(&log_file)
+                .unwrap_or_default()
+                .contains("sandbox delete honr-card-4-a1")
+        })
+        .await;
+        let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
+        assert!(
+            log_content.contains("sandbox delete honr-card-4-a1"),
+            "expected 'sandbox delete honr-card-4-a1' in log, got: {log_content}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

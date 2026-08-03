@@ -705,14 +705,14 @@ impl Cockpit {
 
     #[tool(
         name = "halt",
-        description = "Kill the agent, discard the LLM session, and return the card to Backlog. \
-                       Does not auto-reclaim — dispatch again to restart. Prefer park when you \
-                       want to resume the same conversation; prefer steer for a soft note that \
-                       can wait until the next turn."
+        description = "Kill the agent, discard the LLM session, delete the sandbox, and return \
+                       the card to Backlog. Does not auto-reclaim — dispatch again to restart \
+                       clean. Prefer park when you want to keep the sandbox and resume the same \
+                       conversation; prefer steer for a soft note that can wait until the next turn."
     )]
     fn halt(&self, Parameters(a): Parameters<ReasonArg>) -> Out<Ack> {
         self.board.halt(a.id, a.reason).map_err(bad)?;
-        self.ack(a.id, "agent released, session discarded; dispatch to restart")
+        self.ack(a.id, "agent released; session and sandbox discarded; dispatch to restart")
     }
 
     #[tool(
@@ -961,7 +961,7 @@ impl ServerHandler for Cockpit {
                  Backlog cards do not auto-start. Use dispatch (or the UI Start button) when the \
                  human wants a run. Park/halt/lease expiry/request_changes all return to Backlog \
                  without reclaim — dispatch again.                  Prefer park over halt when a run is wedged — \
-                 park keeps the sandbox and agy session; unpark queues resume. Prefer \
+                 park keeps the sandbox and agy session; halt deletes the sandbox; unpark queues resume. Prefer \
                  steer for a soft note that can wait (steer alone does not inject \
                  mid-turn; MainAdvanced auto park+unparks live cards so a main-advance \
                  rebase note takes effect on resume). Standing policy belongs in the Project \

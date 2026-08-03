@@ -165,7 +165,7 @@ export interface WorkItem {
   last_conflict_files?: string[];
   release_target: string | null;
   environment: string | null;
-  /** agy conversation id; park keeps it for resume, halt clears it. */
+  /** agy conversation id; park keeps it for resume, halt clears it (and deletes the sandbox). */
   conversation_id?: string | null;
   /** Park hold: Backlog; unpark clears this and queues dispatch. */
   parked?: boolean;

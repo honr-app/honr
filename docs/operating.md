@@ -166,7 +166,7 @@ to Backlog. Approve Plan does not auto-dispatch.
 | Answer a blocked agent | **Needs you** — pick an option. Resets the card's retry budget. |
 | Stop a wedged run but keep context | **Park** — stops the agent, keeps sandbox + agy conversation, and **holds** the card until **Resume session** / `unpark`. |
 | Resume a parked card | **Resume** / `unpark` — clears the hold and queues the supervisor; next claim uses `--conversation` when an id is still on the card. |
-| Throw away the LLM session | **Halt** — stops the agent and clears `conversation_id`; sandbox may still be reused for caches. |
+| Throw away the run | **Halt** — stops the agent, clears `conversation_id`, and deletes the sandbox. Next dispatch starts clean. |
 | Anything requiring a reason | Tell the cockpit. Steer, pin, park, halt and cut live there. |
 
 Manual `steer` on a *running* card does not inject mid-turn: the note is stored
@@ -179,7 +179,7 @@ Park + resume (agy only): the supervisor persists `conversation_id` from
 stream-json. Park leaves it on the card and sets `parked` so the supervisor will
 not reclaim until `unpark`. Unpark queues dispatch; the next claim in a live
 sandbox runs `agy --conversation <id>` with a short resume prompt. Halt clears
-the id so the next claim starts fresh.
+the id and deletes the sandbox so the next claim starts clean.
 
 Re-running a card resumes its existing branch and rebases onto **upstream**,
 not the fork's base — a fork's base freezes the moment it's created, and drifted

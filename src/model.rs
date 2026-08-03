@@ -293,9 +293,11 @@ pub const DEFAULT_PROJECT_PROMPT: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
 Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/policy.yaml; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
-Name the product repo and branching model in this Project prompt (same-repo feature branch vs fork).\n\
-First run: clone into /sandbox/repo yourself, open the PR, finish via report.json including base/head \
-(see /sandbox/.honr/report.schema.json). Later runs reuse that card binding.\n\
+Name the product repo as an exact `owner/name` (or git URL) and the branching model \
+(same-repo feature branch vs fork) in this Project prompt — agents must not invent a repo.\n\
+First run (no card pull_request): if this prompt names a clone target, clone into /sandbox/repo, \
+open the PR, finish via report.json including base/head (see /sandbox/.honr/report.schema.json). \
+If it does not name one, escalate — do not guess. Later runs reuse that card binding.\n\
 Initial plan: also write /sandbox/.honr/plan.json (proposed Tasks); human Approve creates them.\n\
 If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape); card goes to Review — Approve creates siblings. Never nest under a Task.\n\
 ";
