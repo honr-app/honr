@@ -122,7 +122,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub memory: Option<String>,
     /// Sandboxes are heavy and this is alpha software. Do not start at seven.
-    /// Primary agent CLI engine (`claude` vs `agy`).
+    /// Primary agent CLI engine (`cursor`, `agy`, or `claude`).
     #[serde(default = "d_engine")]
     pub engine: String,
     #[serde(default = "d_concurrent")]
@@ -145,7 +145,7 @@ pub struct AgentConfig {
 
 fn d_image() -> String { "honr-sandbox:latest".into() }
 fn d_policy() -> String { "sandbox/policy.yaml".into() }
-fn d_engine() -> String { "agy".into() }
+fn d_engine() -> String { "cursor".into() }
 fn d_concurrent() -> usize { 2 }
 fn d_agent_timeout() -> u64 { 1800 }
 fn d_max_attempts() -> u32 { 3 }
