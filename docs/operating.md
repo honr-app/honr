@@ -38,14 +38,16 @@ not a wedged run.
 ```bash
 gh extension install cli/gh-webhook   # once
 
+# Use the Workspace upstream (Settings → Workspace), not a hardcoded repo:
 gh webhook forward \
-  --repo=shanemcd/honr \
+  --repo=<configured-upstream> \
   --events=pull_request,push \
   --url=http://127.0.0.1:8080/api/webhooks/github
 ```
 
 Leave that running while you merge a test PR. Only one forwarder per repo at a
-time. Dev-only — not for production delivery.
+time. Dev-only — not for production delivery. Settings → Workspace shows the
+same command with your configured upstream filled in.
 
 ## Running real agents
 

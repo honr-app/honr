@@ -5,7 +5,7 @@ import { Card } from "./dist-test/components/Card.js";
 import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -587,9 +587,36 @@ const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
 assert(settingsHtml.includes("Sandboxes"), "Settings should include Sandboxes section");
 assert(settingsHtml.includes("data-testid=\"sandboxes-panel\""), "Settings should show Sandboxes panel");
-assert(settingsHtml.includes("General"), "Settings should include at least one stub section");
-assert(settingsHtml.includes("data-testid=\"general-stub\"") || settingsHtml.includes("soon"),
-  "Settings stub section should be marked as placeholder");
+assert(settingsHtml.includes("Workspace"), "Settings should include Workspace section");
+assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Workspace");
+assert(!settingsHtml.includes("data-testid=\"general-stub\""), "General stub must be gone");
+assert(!settingsHtml.includes("settings-stub-tag"), "Workspace must not be a stub section");
+
+const workspaceHtml = renderToString(
+  React.createElement(WorkspacePanelView, {
+    draft: {
+      forge: "github",
+      upstream: "acme/widget",
+      fork: "bot/widget",
+      base: "main",
+      beads_sync_repo: "",
+    },
+    onDraftChange: () => {},
+    onSave: () => {},
+  }),
+);
+assert(workspaceHtml.includes("data-testid=\"workspace-panel\""), "Workspace panel should render");
+assert(workspaceHtml.includes("data-testid=\"workspace-form\""), "Workspace form should render");
+assert(workspaceHtml.includes("data-testid=\"workspace-field-upstream\""), "Upstream field");
+assert(workspaceHtml.includes("data-testid=\"workspace-field-fork\""), "Fork field");
+assert(workspaceHtml.includes("data-testid=\"workspace-field-base\""), "Base field");
+assert(workspaceHtml.includes("data-testid=\"workspace-field-beads\""), "Beads sync field");
+assert(workspaceHtml.includes("data-testid=\"workspace-field-forge\""), "Forge field");
+assert(workspaceHtml.includes("GitLab (future)"), "GitLab listed as future/disabled");
+assert(workspaceHtml.includes("data-testid=\"workspace-webhook-hint\""), "Webhook hint present");
+assert(workspaceHtml.includes("--repo=acme/widget"), "Webhook hint uses configured upstream");
+assert(!workspaceHtml.includes("shanemcd/honr"), "Webhook hint must not hardcode Shane repo");
+assert(workspaceHtml.includes("data-testid=\"workspace-save\""), "Workspace save control");
 
 const fixtureProfiles = [
   {

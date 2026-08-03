@@ -1958,8 +1958,7 @@ impl Board {
 
     /// Replace the durable Workspace binding. Empty upstream/fork are stored
     /// (so Settings can clear) but agents will fail closed until complete.
-    /// Wired to REST in the follow-on `settings-workspace` card.
-    #[allow(dead_code)]
+    /// REST: `GET`/`PUT /api/workspace` (Settings → Workspace).
     pub fn set_workspace_binding(&self, binding: WorkspaceBinding) -> Result<WorkspaceBinding, String> {
         let forge = binding.forge.trim();
         if forge.is_empty() {
