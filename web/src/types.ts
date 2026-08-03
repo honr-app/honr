@@ -98,6 +98,10 @@ export interface AgentRuntimeConfig {
   daily_budget_cents?: number | null;
   agent_timeout_secs: number;
   max_attempts: number;
+  /** Branch/sandbox stem (default honr → honr/card-N). */
+  branch_prefix: string;
+  /** Install-wide briefing quality gates (shell commands). Empty = none. */
+  quality_gates: string[];
 }
 
 /** GET /api/openshell/status — gateway health for Settings. */

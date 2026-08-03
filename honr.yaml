@@ -48,6 +48,15 @@ execution:
       fork: clankrshq/honr
       base: main
 
+    # Branch / sandbox name stem (default honr → honr/card-N / honr-card-N-a1).
+    # branch_prefix: honr
+
+    # Install-wide briefing quality gates. Empty → agents follow Project prompt
+    # only (no assumed cargo). Self-hosting honr keeps Rust gates here.
+    quality_gates:
+      - cargo test --offline --locked
+      - cargo clippy --offline -- -D warnings
+
     # us-east5 is quota-exhausted and us-central1 does not serve the model.
     vertex:
       project: shanemcd-rh

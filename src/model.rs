@@ -295,6 +295,8 @@ Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/p
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
 Name the product repo as an exact `owner/name` (or git URL) and the branching model \
 (same-repo feature branch vs fork) in this Project prompt — agents must not invent a repo.\n\
+Name this Project's quality gates (test/lint commands) here when agents should run them before \
+publish — do not assume cargo or any other toolchain unless named.\n\
 First run (no card pull_request): if this prompt names a clone target, clone into /sandbox/repo, \
 open the PR, finish via report.json including base/head (see /sandbox/.honr/report.schema.json). \
 If it does not name one, escalate — do not guess. Later runs reuse that card binding.\n\
@@ -456,6 +458,13 @@ pub struct AgentRuntimeConfig {
     pub agent_timeout_secs: u64,
     #[serde(default = "default_runtime_attempts")]
     pub max_attempts: u32,
+    /// Branch / sandbox name stem (default `honr` → `honr/card-N`).
+    #[serde(default = "default_runtime_branch_prefix")]
+    pub branch_prefix: String,
+    /// Install-wide briefing quality gates (shell commands). Empty = none.
+    /// Per-repo gates also belong in Project `project_prompt`.
+    #[serde(default)]
+    pub quality_gates: Vec<String>,
 }
 
 fn default_runtime_engine() -> String {
@@ -470,6 +479,9 @@ fn default_runtime_timeout() -> u64 {
 fn default_runtime_attempts() -> u32 {
     3
 }
+fn default_runtime_branch_prefix() -> String {
+    "honr".into()
+}
 
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
@@ -483,6 +495,8 @@ impl Default for AgentRuntimeConfig {
             daily_budget_cents: None,
             agent_timeout_secs: default_runtime_timeout(),
             max_attempts: default_runtime_attempts(),
+            branch_prefix: default_runtime_branch_prefix(),
+            quality_gates: Vec::new(),
         }
     }
 }
@@ -517,6 +531,13 @@ impl AgentRuntimeConfig {
                 m.to_string()
             }
         };
+        self.branch_prefix = crate::schema::normalize_branch_prefix(&self.branch_prefix);
+        self.quality_gates = self
+            .quality_gates
+            .into_iter()
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty())
+            .collect();
         if self.max_concurrent == 0 {
             self.max_concurrent = 1;
         }

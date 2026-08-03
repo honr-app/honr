@@ -138,10 +138,10 @@ async fn item_logs(
     let item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
     let claude = b.get_agent_logs(id);
 
-    let env_name = item
-        .environment
-        .clone()
-        .unwrap_or_else(|| format!("honr-card-{id}-a{}", item.run_failures + 1));
+    let env_name = item.environment.clone().unwrap_or_else(|| {
+        let prefix = b.effective_agents().branch_prefix;
+        crate::schema::card_sandbox_name(&prefix, id, item.run_failures + 1)
+    });
 
     let os = b.openshell_client();
     let openshell = if let Ok(logs) = os.logs(&env_name, 60).await {
@@ -502,6 +502,8 @@ fn runtime_from_yaml(agents: &crate::schema::AgentConfig) -> AgentRuntimeConfig 
         daily_budget_cents: agents.daily_budget_cents,
         agent_timeout_secs: agents.agent_timeout_secs,
         max_attempts: agents.max_attempts,
+        branch_prefix: agents.branch_prefix.clone(),
+        quality_gates: agents.quality_gates.clone(),
     }
 }
 
@@ -1811,6 +1813,7 @@ mod tests {
                 daily_budget_cents: Some(2000),
                 agent_timeout_secs: 600,
                 max_attempts: 2,
+                ..Default::default()
             }),
         )
         .await;

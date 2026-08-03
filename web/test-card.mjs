@@ -520,6 +520,8 @@ const agentRuntimeHtml = renderToString(
       daily_budget_cents: null,
       agent_timeout_secs: 1800,
       max_attempts: 3,
+      branch_prefix: "honr",
+      quality_gates: ["cargo test --offline --locked"],
     },
     onDraftChange: () => {},
     onSave: () => {},
@@ -530,6 +532,8 @@ assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-engine\""), 
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-providers\""), "Agent runtime providers field");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-vertex-location\""), "Agent runtime Vertex location");
 assert(agentRuntimeHtml.includes("us-east5"), "Agent runtime shows configured location");
+assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-branch-prefix\""), "Agent runtime branch prefix");
+assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-quality-gates\""), "Agent runtime quality gates");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-save\""), "Agent runtime save control");
 
 const openshellHtml = renderToString(
