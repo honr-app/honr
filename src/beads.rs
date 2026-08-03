@@ -28,6 +28,7 @@ pub enum RemoteOp {
 #[derive(Clone, Default)]
 pub struct RemoteCapture {
     ops: Arc<Mutex<Vec<RemoteOp>>>,
+    notify: Arc<Notify>,
 }
 
 impl std::fmt::Debug for RemoteCapture {
@@ -40,7 +41,10 @@ impl std::fmt::Debug for RemoteCapture {
 #[allow(dead_code)] // constructed from #[cfg(test)] seams; keep usable in dry-run later
 impl RemoteCapture {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            ops: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+        }
     }
 
     pub fn ops(&self) -> Vec<RemoteOp> {
@@ -53,6 +57,24 @@ impl RemoteCapture {
 
     fn record(&self, op: RemoteOp) {
         self.ops.lock().expect("remote capture lock").push(op);
+        self.notify.notify_waiters();
+    }
+
+    /// Wait until `pred` is true on the captured ops (no coarse sleep polling).
+    pub async fn wait_until(&self, mut pred: impl FnMut(&[RemoteOp]) -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if pred(&self.ops()) {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::select! {
+                _ = self.notify.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+            }
+        }
     }
 }
 
@@ -158,11 +180,47 @@ impl BeadsIssue {
     }
 }
 
+/// In-process beads graph for unit tests. Avoids `bd init` / Dolt / process
+/// spawn — the suite was spending ~45s wall clock on those alone.
+#[derive(Default)]
+struct MemoryBeads {
+    next: u64,
+    issues: std::collections::BTreeMap<String, BeadsIssue>,
+    /// `issue_id` → beads ids it is blocked by (`blocks:` deps).
+    blockers: std::collections::BTreeMap<String, Vec<String>>,
+    insights: Vec<String>,
+}
+
+impl MemoryBeads {
+    fn alloc_id(&mut self) -> String {
+        self.next += 1;
+        // Must pass [`BeadsClient::is_real_id`] (not `bd-honr-*` placeholders).
+        format!("honr-m{:x}", self.next)
+    }
+
+    fn to_issue(&self, id: &str) -> Option<BeadsIssue> {
+        self.issues.get(id).cloned()
+    }
+
+    fn list(&self) -> Vec<BeadsIssue> {
+        self.issues.values().cloned().collect()
+    }
+}
+
+#[derive(Clone)]
+enum BeadsBackend {
+    /// Shell out to the `bd` CLI (production).
+    Cli,
+    /// Deterministic in-memory graph (unit tests).
+    Memory(Arc<Mutex<MemoryBeads>>),
+}
+
 #[derive(Clone)]
 pub struct BeadsClient {
     pub beads_dir: PathBuf,
     remotes: Remotes,
     dolt_push: Arc<DoltPushDebouncer>,
+    backend: BeadsBackend,
 }
 
 impl std::fmt::Debug for BeadsClient {
@@ -170,22 +228,58 @@ impl std::fmt::Debug for BeadsClient {
         f.debug_struct("BeadsClient")
             .field("beads_dir", &self.beads_dir)
             .field("remotes", &self.remotes)
+            .field(
+                "backend",
+                &match self.backend {
+                    BeadsBackend::Cli => "cli",
+                    BeadsBackend::Memory(_) => "memory",
+                },
+            )
             .finish()
     }
 }
 
 #[allow(dead_code)] // Plan A API surface — not every verb is on the hot path yet.
 impl BeadsClient {
-    /// Production: live remotes. Under `cargo test`: capture (no network).
+    /// Production: live remotes. Under `cargo test`: capture (no network) +
+    /// in-memory backend (no Dolt).
     pub fn new(beads_dir: impl Into<PathBuf>) -> Self {
         Self::with_remotes(beads_dir, Self::default_remotes())
     }
 
     pub fn with_remotes(beads_dir: impl Into<PathBuf>, remotes: Remotes) -> Self {
+        // Unit tests never need a real Dolt DB — spawning `bd init` per test
+        // was ~20–45s each and dominated `cargo test`. Opt into the CLI with
+        // `BeadsClient::cli` when a test must exercise argv / real bd.
+        let backend = if cfg!(test) {
+            BeadsBackend::Memory(Arc::new(Mutex::new(MemoryBeads::default())))
+        } else {
+            BeadsBackend::Cli
+        };
         Self {
             beads_dir: beads_dir.into(),
             remotes,
             dolt_push: Arc::new(DoltPushDebouncer::default()),
+            backend,
+        }
+    }
+
+    /// Force the real `bd` CLI (slow). Only for tests that assert on process
+    /// behavior rather than board dual-write semantics.
+    #[cfg(test)]
+    pub fn cli(beads_dir: impl Into<PathBuf>, remotes: Remotes) -> Self {
+        Self {
+            beads_dir: beads_dir.into(),
+            remotes,
+            dolt_push: Arc::new(DoltPushDebouncer::default()),
+            backend: BeadsBackend::Cli,
+        }
+    }
+
+    fn memory(&self) -> Option<Arc<Mutex<MemoryBeads>>> {
+        match &self.backend {
+            BeadsBackend::Memory(m) => Some(m.clone()),
+            BeadsBackend::Cli => None,
         }
     }
 
@@ -264,6 +358,9 @@ impl BeadsClient {
     }
 
     fn db_ready(&self) -> bool {
+        if matches!(self.backend, BeadsBackend::Memory(_)) {
+            return true;
+        }
         self.beads_dir.join("metadata.json").exists()
             || self.beads_dir.join("embeddeddolt").exists()
     }
@@ -346,6 +443,9 @@ impl BeadsClient {
     }
 
     fn init_stealth_sync(&self) -> Result<(), String> {
+        if self.memory().is_some() {
+            return Ok(());
+        }
         if self.beads_dir.join("metadata.json").exists()
             || self.beads_dir.join("embeddeddolt").exists()
         {
@@ -368,6 +468,30 @@ impl BeadsClient {
 
     /// Run `bd ready --json --exclude-type=epic` (and optional `--parent=<epic>`) to fetch task-only ready work.
     pub async fn list_ready_focused(&self, parent: Option<&str>) -> Result<Vec<BeadsIssue>, String> {
+        if let Some(mem) = self.memory() {
+            let db = mem.lock().expect("memory beads");
+            let parent = parent.filter(|p| !p.trim().is_empty() && Self::is_real_id(p));
+            let items: Vec<BeadsIssue> = db
+                .list()
+                .into_iter()
+                .filter(|i| i.issue_type != "epic")
+                .filter(|i| i.status == "open" || i.status.is_empty())
+                .filter(|i| parent.is_none_or(|p| i.parent.as_deref() == Some(p)))
+                .filter(|i| {
+                    db.blockers
+                        .get(&i.id)
+                        .into_iter()
+                        .flatten()
+                        .all(|b| {
+                            db.issues
+                                .get(b)
+                                .map(|blk| blk.status == "closed" || blk.status == "superseded")
+                                .unwrap_or(true)
+                        })
+                })
+                .collect();
+            return Ok(items);
+        }
         let mut cmd = self.cmd();
         cmd.args(["ready", "--json", "--exclude-type=epic"]);
         if let Some(p) = parent.filter(|p| !p.trim().is_empty() && Self::is_real_id(p)) {
@@ -398,6 +522,9 @@ impl BeadsClient {
 
     /// List issues (`bd list --json --all -n 0`).
     pub async fn list_all(&self) -> Result<Vec<BeadsIssue>, String> {
+        if let Some(mem) = self.memory() {
+            return Ok(mem.lock().expect("memory beads").list());
+        }
         let out = self
             .cmd()
             .args(["list", "--json", "--all", "-n", "0"])
@@ -417,6 +544,13 @@ impl BeadsClient {
 
     /// `bd show <id> --json`
     pub async fn show(&self, id: &str) -> Result<BeadsIssue, String> {
+        if let Some(mem) = self.memory() {
+            return mem
+                .lock()
+                .expect("memory beads")
+                .to_issue(id)
+                .ok_or_else(|| format!("issue {id} not found"));
+        }
         let out = self
             .cmd()
             .args(["show", id, "--json"])
@@ -466,6 +600,18 @@ impl BeadsClient {
         blocked_by: &[String],
         metadata: Option<&str>,
     ) -> Result<BeadsIssue, String> {
+        // Memory path is sync and cheap — skip spawn_blocking.
+        if self.memory().is_some() {
+            return self.create_linked_sync(
+                title,
+                priority,
+                issue_type,
+                description,
+                parent,
+                blocked_by,
+                metadata,
+            );
+        }
         // Prefer the sync path so create/mirror share one argv shape; spawn_blocking
         // keeps the async runtime free while `bd` talks to Dolt.
         let this = self.clone();
@@ -502,6 +648,39 @@ impl BeadsClient {
         blocked_by: &[String],
         metadata: Option<&str>,
     ) -> Result<BeadsIssue, String> {
+        if let Some(mem) = self.memory() {
+            let _ = metadata; // board-side honr metadata; memory graph does not persist it.
+            let mut db = mem.lock().expect("memory beads");
+            let id = db.alloc_id();
+            let parent = parent.filter(|p| Self::is_real_id(p)).map(|p| p.to_string());
+            let blockers: Vec<String> = blocked_by
+                .iter()
+                .filter(|b| Self::is_real_id(b))
+                .cloned()
+                .collect();
+            let issue = BeadsIssue {
+                id: id.clone(),
+                title: title.to_string(),
+                description: description.map(|d| d.to_string()),
+                status: "open".into(),
+                priority,
+                issue_type: issue_type.to_string(),
+                owner: None,
+                created_at: None,
+                updated_at: None,
+                external_ref: None,
+                external_id: None,
+                issue_url: None,
+                url: None,
+                parent,
+            };
+            if !blockers.is_empty() {
+                db.blockers.insert(id.clone(), blockers);
+            }
+            db.issues.insert(id, issue.clone());
+            return Ok(issue);
+        }
+
         let _ = self.init_stealth_sync();
         let mut cmd = self.sync_cmd();
         cmd.arg("create")
@@ -554,6 +733,16 @@ impl BeadsClient {
         if !Self::is_real_id(issue_id) || !Self::is_real_id(depends_on) {
             return Ok(());
         }
+        if let Some(mem) = self.memory() {
+            let mut db = mem.lock().expect("memory beads");
+            if dep_type == "blocks" {
+                db.blockers
+                    .entry(issue_id.to_string())
+                    .or_default()
+                    .push(depends_on.to_string());
+            }
+            return Ok(());
+        }
         let out = self
             .sync_cmd()
             .args(["dep", "add", issue_id, depends_on, "-t", dep_type])
@@ -579,6 +768,20 @@ impl BeadsClient {
             return Ok(());
         }
         if title.is_none() && description.is_none() && metadata.is_none() {
+            return Ok(());
+        }
+        if let Some(mem) = self.memory() {
+            let mut db = mem.lock().expect("memory beads");
+            let Some(issue) = db.issues.get_mut(id) else {
+                return Err(format!("issue {id} not found"));
+            };
+            if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+                issue.title = t.to_string();
+            }
+            if let Some(d) = description {
+                issue.description = Some(d.to_string());
+            }
+            let _ = metadata;
             return Ok(());
         }
         let mut cmd = self.cmd();
@@ -609,6 +812,14 @@ impl BeadsClient {
         if !Self::is_real_id(id) {
             return Ok(());
         }
+        if let Some(mem) = self.memory() {
+            let mut db = mem.lock().expect("memory beads");
+            let Some(issue) = db.issues.get_mut(id) else {
+                return Err(format!("issue {id} not found"));
+            };
+            issue.status = status.to_string();
+            return Ok(());
+        }
         let out = self
             .cmd()
             .args(["update", id, "--status", status])
@@ -620,6 +831,33 @@ impl BeadsClient {
         } else {
             let err = String::from_utf8_lossy(&out.stderr);
             Err(format!("bd update status failed: {err}"))
+        }
+    }
+
+    /// Set `external_ref` (memory or `bd update --external-ref`).
+    pub async fn set_external_ref(&self, id: &str, url: &str) -> Result<(), String> {
+        if !Self::is_real_id(id) {
+            return Ok(());
+        }
+        if let Some(mem) = self.memory() {
+            let mut db = mem.lock().expect("memory beads");
+            let Some(issue) = db.issues.get_mut(id) else {
+                return Err(format!("issue {id} not found"));
+            };
+            issue.external_ref = Some(url.to_string());
+            return Ok(());
+        }
+        let out = self
+            .cmd()
+            .args(["update", id, "--external-ref", url])
+            .output()
+            .await
+            .map_err(|e| format!("failed to execute bd update: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(format!("bd update external-ref failed: {err}"))
         }
     }
 
@@ -681,16 +919,8 @@ impl BeadsClient {
                     let repo = std::env::var("GITHUB_REPOSITORY")
                         .unwrap_or_else(|_| "shanemcd/honr".to_string());
                     for id in &ids {
-                        let _ = self
-                            .cmd()
-                            .args([
-                                "update",
-                                id,
-                                "--external-ref",
-                                &format!("https://github.com/{repo}/issues/{id}"),
-                            ])
-                            .output()
-                            .await;
+                        let url = format!("https://github.com/{repo}/issues/{id}");
+                        let _ = self.set_external_ref(id, &url).await;
                     }
                 }
                 return Ok(());
@@ -761,6 +991,14 @@ impl BeadsClient {
         if !Self::is_real_id(id) {
             return Ok(());
         }
+        if let Some(mem) = self.memory() {
+            let mut db = mem.lock().expect("memory beads");
+            let Some(issue) = db.issues.get_mut(id) else {
+                return Err(format!("issue {id} not found"));
+            };
+            issue.status = "in_progress".into();
+            return Ok(());
+        }
         let out = self
             .cmd()
             .args(["update", id, "--claim"])
@@ -785,27 +1023,21 @@ impl BeadsClient {
         depends_on: &str,
         dep_type: &str,
     ) -> Result<(), String> {
-        if !Self::is_real_id(issue_id) || !Self::is_real_id(depends_on) {
-            return Ok(());
-        }
-        let out = self
-            .cmd()
-            .args(["dep", "add", issue_id, depends_on, "-t", dep_type])
-            .output()
-            .await
-            .map_err(|e| format!("failed to execute bd dep add: {e}"))?;
-
-        if out.status.success() {
-            Ok(())
-        } else {
-            let err = String::from_utf8_lossy(&out.stderr);
-            Err(format!("bd dep add failed: {err}"))
-        }
+        self.dep_add_sync(issue_id, depends_on, dep_type)
     }
 
     /// Run `bd close <id> --reason <reason>` to mark a task completed.
     pub async fn close(&self, id: &str, reason: Option<&str>) -> Result<(), String> {
         if !Self::is_real_id(id) {
+            return Ok(());
+        }
+        let _ = reason;
+        if let Some(mem) = self.memory() {
+            let mut db = mem.lock().expect("memory beads");
+            let Some(issue) = db.issues.get_mut(id) else {
+                return Err(format!("issue {id} not found"));
+            };
+            issue.status = "closed".into();
             return Ok(());
         }
         let mut cmd = self.cmd();
@@ -830,6 +1062,10 @@ impl BeadsClient {
 
     /// Run `bd remember "insight"` to store persistent project memories.
     pub async fn remember(&self, insight: &str) -> Result<(), String> {
+        if let Some(mem) = self.memory() {
+            mem.lock().expect("memory beads").insights.push(insight.to_string());
+            return Ok(());
+        }
         let out = self
             .cmd()
             .args(["remember", insight])
@@ -847,6 +1083,10 @@ impl BeadsClient {
 
     /// Run `bd prime` to get system prompt context injection for agents.
     pub async fn prime(&self) -> Result<String, String> {
+        if let Some(mem) = self.memory() {
+            let db = mem.lock().expect("memory beads");
+            return Ok(db.insights.join("\n"));
+        }
         let out = self
             .cmd()
             .arg("prime")
@@ -893,6 +1133,14 @@ impl BeadsClient {
 
     /// `bd children <parent_id> --json`
     pub async fn list_children(&self, parent_id: &str) -> Result<Vec<BeadsIssue>, String> {
+        if let Some(mem) = self.memory() {
+            let db = mem.lock().expect("memory beads");
+            return Ok(db
+                .list()
+                .into_iter()
+                .filter(|i| i.parent.as_deref() == Some(parent_id))
+                .collect());
+        }
         let out = self
             .cmd()
             .args(["children", parent_id, "--json"])

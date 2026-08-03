@@ -135,17 +135,38 @@ fn create_args(spec: &SandboxSpec) -> Vec<String> {
     args
 }
 
-#[derive(Debug, Clone)]
+#[cfg(test)]
+type MockHandler = std::sync::Arc<dyn Fn(&[String]) -> Output + Send + Sync>;
+
+#[derive(Clone)]
 pub struct OpenShell {
     bin: String,
     /// Applies to control-plane calls (create, list, delete). Exec carries its
     /// own, because an agent legitimately runs for minutes.
     default_timeout: Duration,
+    /// In-process stand-in for unit tests. Spawning a bash mock under nextest
+    /// contention was the remaining ~1–2s per process_verdict case.
+    #[cfg(test)]
+    mock: Option<MockHandler>,
+}
+
+impl std::fmt::Debug for OpenShell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenShell")
+            .field("bin", &self.bin)
+            .field("default_timeout", &self.default_timeout)
+            .finish()
+    }
 }
 
 impl Default for OpenShell {
     fn default() -> Self {
-        Self { bin: "openshell".into(), default_timeout: Duration::from_secs(120) }
+        Self {
+            bin: "openshell".into(),
+            default_timeout: Duration::from_secs(120),
+            #[cfg(test)]
+            mock: None,
+        }
     }
 }
 
@@ -153,7 +174,26 @@ impl OpenShell {
     /// Used by tests to point at a stand-in binary.
     #[allow(dead_code)]
     pub fn new(bin: impl Into<String>, default_timeout: Duration) -> Self {
-        Self { bin: bin.into(), default_timeout }
+        Self {
+            bin: bin.into(),
+            default_timeout,
+            #[cfg(test)]
+            mock: None,
+        }
+    }
+
+    /// In-process CLI stand-in — no process spawn. Prefer this over shell
+    /// scripts in unit tests; argv shape stays the same as the real CLI.
+    #[cfg(test)]
+    pub fn mock(
+        handler: impl Fn(&[String]) -> Output + Send + Sync + 'static,
+        default_timeout: Duration,
+    ) -> Self {
+        Self {
+            bin: "openshell-mock".into(),
+            default_timeout,
+            mock: Some(std::sync::Arc::new(handler)),
+        }
     }
 
     // ------------------------------------------------------------- plumbing
@@ -168,6 +208,12 @@ impl OpenShell {
         let args: Vec<String> =
             args.into_iter().map(|a| a.as_ref().to_string_lossy().into_owned()).collect();
         let argv = args.join(" ");
+
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let _ = (&timeout, &argv);
+            return Ok(mock(&args));
+        }
 
         let child = Command::new(&self.bin)
             .args(&args)

@@ -3589,6 +3589,34 @@ mod tests {
     use super::*;
     use crate::model::Origin;
 
+    /// Poll until `pred` succeeds. Prefer this over multi-second sleep loops —
+    /// memory beads + Capture remotes usually settle within a few yields.
+    async fn eventually(mut pred: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if pred() {
+                return;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn eventually_async<F, Fut>(mut pred: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if pred().await {
+                return;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
     /// A board with one leaf sitting in Backlog, claimed by `agent`.
     fn claimed_leaf() -> (Board, ItemId) {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nowrite.json"));
@@ -4956,20 +4984,16 @@ mod tests {
             board.schedule_beads_mirror(m.id);
         }
 
-        // Wait for async github_push / dolt schedule after mirrors.
-        let mut saw_github_push = false;
-        for _ in 0..120 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let ops = remote_cap.ops();
-            saw_github_push = ops
-                .iter()
-                .any(|op| matches!(op, crate::beads::RemoteOp::GithubPush(ids) if !ids.is_empty()));
-            if saw_github_push {
-                break;
-            }
-        }
+        remote_cap
+            .wait_until(|ops| {
+                ops.iter()
+                    .any(|op| matches!(op, crate::beads::RemoteOp::GithubPush(ids) if !ids.is_empty()))
+            })
+            .await;
         assert!(
-            saw_github_push,
+            remote_cap.ops().iter().any(
+                |op| matches!(op, crate::beads::RemoteOp::GithubPush(ids) if !ids.is_empty())
+            ),
             "expected captured github_push after create/split mirrors, got {:?}",
             remote_cap.ops()
         );
@@ -5027,30 +5051,30 @@ mod tests {
         let _ = b.transition(item2.id, State::Backlog, "t", None);
         let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
 
-        let mut done_closed = false;
-        let mut retired_closed = false;
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if !done_closed {
-                if let Ok(s) = beads_client.show(&task_done.id).await {
-                    if s.status == "closed" {
-                        done_closed = true;
-                    }
-                }
-            }
-            if !retired_closed {
-                if let Ok(s) = beads_client.show(&task_retired.id).await {
-                    if s.status == "closed" {
-                        retired_closed = true;
-                    }
-                }
-            }
-            if done_closed && retired_closed {
-                break;
-            }
-        }
-        assert!(done_closed, "task_done status should be closed in beads");
-        assert!(retired_closed, "task_retired status should be closed in beads");
+        eventually_async(|| async {
+            let done_closed = beads_client
+                .show(&task_done.id)
+                .await
+                .map(|s| s.status == "closed")
+                .unwrap_or(false);
+            let retired_closed = beads_client
+                .show(&task_retired.id)
+                .await
+                .map(|s| s.status == "closed")
+                .unwrap_or(false);
+            done_closed && retired_closed
+        })
+        .await;
+        assert_eq!(
+            beads_client.show(&task_done.id).await.unwrap().status,
+            "closed",
+            "task_done status should be closed in beads"
+        );
+        assert_eq!(
+            beads_client.show(&task_retired.id).await.unwrap().status,
+            "closed",
+            "task_retired status should be closed in beads"
+        );
     }
 
     #[tokio::test]
@@ -5093,7 +5117,12 @@ mod tests {
         let _ = b.transition(item2.id, State::Backlog, "t", None);
         let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // Placeholders must not close unrelated real beads — give the Done/Retired
+        // spawn a moment to misbehave if it would.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let shown_real = beads_client
             .show(&real_issue.id)
@@ -5124,44 +5153,36 @@ mod tests {
             .create(None, "Test URL Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
 
+        // Sync create already assigned a real beads id; mirror push fills the URL.
         board.schedule_beads_mirror(project.id);
+        let project_beads_id = board
+            .get(project.id)
+            .and_then(|p| p.beads_id)
+            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+            .expect("expected real beads_id from sync create");
 
-        let mut real_project_id = None;
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Some(p) = board.get(project.id) {
-                if let Some(ref bid) = p.beads_id {
-                    if crate::beads::BeadsClient::is_real_id(bid) && p.github_issue_url.is_some() {
-                        real_project_id = Some(bid.clone());
-                        break;
-                    }
-                }
+        for _ in 0..200 {
+            if board
+                .get(project.id)
+                .and_then(|p| p.github_issue_url)
+                .is_some()
+            {
+                break;
             }
+            tokio::task::yield_now().await;
         }
-        let project_beads_id = real_project_id.expect("expected real beads_id");
 
-        // Update issue in beads with an external_ref / issue URL
+        // Override with a stable URL and refresh (exercises show → board write-through).
         let expected_url = "https://github.com/shanemcd/honr/issues/777";
         beads_client
-            .cmd()
-            .args(["update", &project_beads_id, "--external-ref", expected_url])
-            .output()
+            .set_external_ref(&project_beads_id, expected_url)
             .await
             .expect("update external ref");
+        board
+            .refresh_github_issue_url(project.id, &project_beads_id)
+            .await;
 
-        // Re-run refresh_github_issue_url to pick up external_ref from beads
-        board.refresh_github_issue_url(project.id, &project_beads_id).await;
-
-        let mut found_url = None;
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Some(p) = board.get(project.id) {
-                if let Some(ref url) = p.github_issue_url {
-                    found_url = Some(url.clone());
-                    break;
-                }
-            }
-        }
+        let found_url = board.get(project.id).and_then(|p| p.github_issue_url);
 
         assert_eq!(
             found_url,
@@ -5591,13 +5612,10 @@ mod tests {
         assert!(board.get(project.id).unwrap().github_issue_url.is_none());
 
         let expected_url = "https://github.com/shanemcd/honr/issues/759";
-        let out = beads_client
-            .cmd()
-            .args(["update", &issue.id, "--external-ref", expected_url])
-            .output()
+        beads_client
+            .set_external_ref(&issue.id, expected_url)
             .await
             .expect("update external ref");
-        assert!(out.status.success(), "bd update --external-ref failed");
 
         // Project already has a real beads_id (the #59 gap). Heal may still
         // create beads for the seeded Initial Plan task; the important part is
@@ -5813,21 +5831,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("honr-sb-del-test-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let log_file = dir.join("openshell_calls.log");
-        let mock_bin = dir.join("mock_openshell.sh");
-
-        let script = format!(
-            "#!/bin/bash\necho \"$@\" >> \"{}\"\nexit 0\n",
-            log_file.display()
-        );
-        std::fs::write(&mock_bin, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let os = crate::openshell::OpenShell::new(
-            mock_bin.to_string_lossy().to_string(),
+        let log_path = log_file.clone();
+        let os = crate::openshell::OpenShell::mock(
+            move |args| {
+                let line = args.join(" ");
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "{line}")
+                    });
+                crate::openshell::Output {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }
+            },
             std::time::Duration::from_secs(5),
         );
 
@@ -5858,15 +5879,13 @@ mod tests {
         let _ = b.transition(t1.id, State::Done, "human", None);
         assert_eq!(b.get(t1.id).unwrap().environment, None);
 
-        let mut log_content = String::new();
-        for _ in 0..80 {
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
-            if log_content.contains("sandbox delete honr-card-1-a1") {
-                break;
-            }
-        }
+        eventually(|| {
+            std::fs::read_to_string(&log_file)
+                .unwrap_or_default()
+                .contains("sandbox delete honr-card-1-a1")
+        })
+        .await;
+        let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
         assert!(
             log_content.contains("sandbox delete honr-card-1-a1"),
             "expected 'sandbox delete honr-card-1-a1' in log, got: {log_content}"
@@ -5880,15 +5899,12 @@ mod tests {
         let _ = b.transition(t2.id, State::Retired, "human", None);
         assert_eq!(b.get(t2.id).unwrap().environment, None);
 
-        log_content.clear();
-        for _ in 0..80 {
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
-            if log_content.contains("sandbox delete honr-card-2-a1") {
-                break;
-            }
-        }
+        eventually(|| {
+            std::fs::read_to_string(&log_file)
+                .unwrap_or_default()
+                .contains("sandbox delete honr-card-2-a1")
+        })
+        .await;
         let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
         assert!(
             log_content.contains("sandbox delete honr-card-2-a1"),
@@ -5903,7 +5919,12 @@ mod tests {
         b.delete_item(t3.id).expect("delete_item succeeds");
         assert!(b.get(t3.id).is_none());
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        eventually(|| {
+            std::fs::read_to_string(&log_file)
+                .unwrap_or_default()
+                .contains("sandbox delete honr-card-3-a1")
+        })
+        .await;
         let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
         assert!(
             log_content.contains("sandbox delete honr-card-3-a1"),
@@ -5965,26 +5986,33 @@ mod tests {
         let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.transition(task.id, State::Done, "human", Some("completed".into()));
 
-        let mut saw_close_push = false;
-        for _ in 0..60 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Ok(show) = beads_client.show(&task_beads_id).await {
-                if show.status == "closed" {
-                    let ops = remote_cap.ops();
-                    if ops.iter().any(|op| match op {
-                        crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&task_beads_id),
-                        _ => false,
-                    }) {
-                        saw_close_push = true;
-                        break;
-                    }
-                }
-            }
-        }
-
+        remote_cap
+            .wait_until(|ops| {
+                ops.iter().any(|op| match op {
+                    crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&task_beads_id),
+                    _ => false,
+                })
+            })
+            .await;
+        eventually_async(|| async {
+            beads_client
+                .show(&task_beads_id)
+                .await
+                .map(|s| s.status == "closed")
+                .unwrap_or(false)
+        })
+        .await;
+        assert_eq!(
+            beads_client.show(&task_beads_id).await.unwrap().status,
+            "closed",
+            "expected beads task closed on Done for {task_beads_id}"
+        );
         assert!(
-            saw_close_push,
-            "expected beads task closed and GithubPush recorded on Done transition for task {task_beads_id}"
+            remote_cap.ops().iter().any(|op| match op {
+                crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&task_beads_id),
+                _ => false,
+            }),
+            "expected GithubPush recorded on Done transition for task {task_beads_id}"
         );
 
         let _ = std::fs::remove_dir_all(&test_dir);
@@ -6058,17 +6086,19 @@ mod tests {
         let done_seed = board.approve_review(seed_id).expect("approve seed review");
         assert_eq!(done_seed.state, State::Done);
 
-        let mut seed_beads_closed = false;
-        for _ in 0..60 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Ok(show) = beads_client.show(&seed_beads_id).await {
-                if show.status == "closed" {
-                    seed_beads_closed = true;
-                    break;
-                }
-            }
-        }
-        assert!(seed_beads_closed, "seed task in beads should be closed");
+        eventually_async(|| async {
+            beads_client
+                .show(&seed_beads_id)
+                .await
+                .map(|s| s.status == "closed")
+                .unwrap_or(false)
+        })
+        .await;
+        assert_eq!(
+            beads_client.show(&seed_beads_id).await.unwrap().status,
+            "closed",
+            "seed task in beads should be closed"
+        );
 
         let ops = remote_cap.ops();
         let seed_pushes: Vec<_> = ops
@@ -6106,23 +6136,34 @@ mod tests {
         let _ = board.transition(mat_task.id, State::Backlog, "test", None);
         let _ = board.transition(mat_task.id, State::Done, "human", Some("done".into()));
 
-        let mut mat_closed = false;
-        for _ in 0..60 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Ok(show) = beads_client.show(&mat_beads_id).await {
-                if show.status == "closed" {
-                    let ops = remote_cap.ops();
-                    if ops.iter().any(|op| match op {
-                        crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&mat_beads_id),
-                        _ => false,
-                    }) {
-                        mat_closed = true;
-                        break;
-                    }
-                }
-            }
-        }
-        assert!(mat_closed, "materialized task should close bead and push to GitHub on Done");
+        remote_cap
+            .wait_until(|ops| {
+                ops.iter().any(|op| match op {
+                    crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&mat_beads_id),
+                    _ => false,
+                })
+            })
+            .await;
+        eventually_async(|| async {
+            beads_client
+                .show(&mat_beads_id)
+                .await
+                .map(|s| s.status == "closed")
+                .unwrap_or(false)
+        })
+        .await;
+        assert_eq!(
+            beads_client.show(&mat_beads_id).await.unwrap().status,
+            "closed",
+            "materialized task should close bead on Done"
+        );
+        assert!(
+            remote_cap.ops().iter().any(|op| match op {
+                crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&mat_beads_id),
+                _ => false,
+            }),
+            "materialized task should push to GitHub on Done"
+        );
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
@@ -6385,10 +6426,10 @@ mod tests {
         let p = b
             .create(None, "Epic Hygiene Project", "intent", None, Origin::Human, true, None)
             .unwrap();
-        let t1 = b
+        let _t1 = b
             .create(Some(p.id), "Child Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
             .unwrap();
-        let t2 = b
+        let _t2 = b
             .create(Some(p.id), "Child Task 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
             .unwrap();
 
