@@ -4,6 +4,7 @@ import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
 import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
 import { Head, PlanEditor, planTasksFromArtifact } from "./dist-test/components/Detail.js";
+import { initial, reduce, isSequenceGap } from "./dist-test/useBoard.js";
 
 const now = Math.floor(Date.now() / 1000);
 
@@ -324,4 +325,68 @@ assert(planEditorHtml.includes("Blocked by tasks:"), "Plan editor should render 
 assert(planEditorHtml.includes("Setup Database"), "Blocker chip for t1 should display human readable sibling task title");
 assert(planEditorHtml.includes("+ Select blocker task..."), "Plan editor should offer '+ Select blocker task...' dropdown to select sibling tasks");
 
-console.log("\n✅ All Card, Cockpit, and Detail component assertions passed!");
+// Test 10: reduce tracks lastSeenSeq from Snapshot and BoardEvent
+let s = reduce(initial, {
+  type: "snapshot",
+  snap: {
+    items: [unblockedItem],
+    levels: [],
+    goals: [],
+    server_time: new Date().toISOString(),
+    agent_timeout_secs: 1800,
+    seq: 10,
+  },
+});
+assert.strictEqual(s.lastSeenSeq, 10, "Snapshot seq 10 should update lastSeenSeq to 10");
+
+const liveItem = { ...unblockedItem, title: "Updated Live by Event" };
+s = reduce(s, {
+  type: "event",
+  ev: {
+    type: "upsert",
+    seq: 11,
+    item: liveItem,
+  },
+});
+assert.strictEqual(s.lastSeenSeq, 11, "BoardEvent seq 11 should update lastSeenSeq to 11");
+assert.strictEqual(s.items.get(8).title, "Updated Live by Event", "Upsert event should update item in state");
+
+// Test 11: Stale REST snapshot race protection
+const staleSnap = {
+  items: [{ ...unblockedItem, title: "Stale REST Snapshot Title" }],
+  levels: [],
+  goals: [],
+  server_time: new Date().toISOString(),
+  agent_timeout_secs: 1800,
+  seq: 9, // older sequence number than lastSeenSeq=11
+};
+
+const sAfterStaleSnap = reduce(s, { type: "snapshot", snap: staleSnap });
+assert.strictEqual(sAfterStaleSnap.lastSeenSeq, 11, "Stale snapshot (seq 9 < 11) must not lower lastSeenSeq");
+assert.strictEqual(
+  sAfterStaleSnap.items.get(8).title,
+  "Updated Live by Event",
+  "Stale REST snapshot (seq 9 < 11) must not overwrite newer live event state"
+);
+
+// Test 12: Stale/duplicate BoardEvent ignored
+const staleEvent = {
+  type: "upsert",
+  seq: 10, // older than lastSeenSeq=11
+  item: { ...unblockedItem, title: "Duplicate/Stale Event Title" },
+};
+const sAfterStaleEvent = reduce(s, { type: "event", ev: staleEvent });
+assert.strictEqual(sAfterStaleEvent.lastSeenSeq, 11, "Stale event (seq 10 <= 11) must keep lastSeenSeq at 11");
+assert.strictEqual(
+  sAfterStaleEvent.items.get(8).title,
+  "Updated Live by Event",
+  "Stale event (seq 10 <= 11) must not overwrite newer state"
+);
+
+// Test 13: Sequence Gap detection helper
+assert.strictEqual(isSequenceGap(11, 12), false, "Sequential event (12 after 11) is not a gap");
+assert.strictEqual(isSequenceGap(11, 14), true, "Event with gap (14 after 11) is detected as sequence gap");
+assert.strictEqual(isSequenceGap(0, 5), false, "Initial event with lastSeenSeq=0 is not a gap");
+
+console.log("\n✅ All Card, Cockpit, Detail, and useBoard sequence guard assertions passed!");
+
