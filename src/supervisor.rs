@@ -94,6 +94,7 @@ async fn sweeper_loop(
             tracing::info!("run deadline exceeded on #{id}; requeued");
         }
         let _ = reconcile(&os, &board, &active).await;
+        let _ = process_awaiting_rebases(&board, &os, &cfg.agents).await;
     }
 }
 
@@ -1805,6 +1806,24 @@ const GIT_CRED: &str =
 pub const MARK_FRESH: &str = "HONR-BRANCH-FRESH";
 pub const MARK_REBASED: &str = "HONR-BRANCH-REBASED";
 pub const MARK_CONFLICT: &str = "HONR-BRANCH-CONFLICT";
+pub const MARK_CONFLICT_FILES: &str = "HONR-CONFLICT-FILES=";
+
+/// Parse comma-separated conflicting file paths from rebase script output.
+pub fn parse_conflict_files(stdout: &str) -> Vec<String> {
+    for line in stdout.lines() {
+        if let Some(rest) = line.trim().strip_prefix(MARK_CONFLICT_FILES) {
+            let files: Vec<String> = rest
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !files.is_empty() {
+                return files;
+            }
+        }
+    }
+    Vec::new()
+}
 
 /// Clone, and **resume the card's branch if it already exists.**
 ///
@@ -1844,8 +1863,12 @@ fi
 if git rebase -q upstream/{base} >/dev/null 2>&1; then
   echo {MARK_REBASED}
 else
+  files=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ',' | sed 's/,$//')
   git rebase --abort >/dev/null 2>&1 || true
   echo {MARK_CONFLICT}
+  if [ -n "$files" ]; then
+    echo "{MARK_CONFLICT_FILES}$files"
+  fi
 fi"#
     )
 }
@@ -1882,10 +1905,98 @@ fi
 if git rebase -q upstream/{base} >/dev/null 2>&1; then
   echo {MARK_REBASED}
 else
+  files=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ',' | sed 's/,$//')
   git rebase --abort >/dev/null 2>&1 || true
   echo {MARK_CONFLICT}
+  if [ -n "$files" ]; then
+    echo "{MARK_CONFLICT_FILES}$files"
+  fi
 fi"#
     )
+}
+
+/// Standalone rebase script for cards in Review that need catching up onto base.
+pub fn rebase_script(cfg: &AgentConfig, branch: &str) -> String {
+    let upstream = &cfg.repo.upstream;
+    let base = &cfg.repo.base;
+    format!(
+        r#"set -e
+export GIT_TERMINAL_PROMPT=0
+if [ ! -d {WORKDIR}/.git ]; then
+  echo "repository missing in workdir" >&2
+  exit 1
+fi
+cd {WORKDIR}
+git config user.email "agent@honr.local"
+git config user.name "honr agent"
+git remote add upstream https://github.com/{upstream}.git 2>/dev/null || true
+git reset --hard >/dev/null 2>&1 || true
+git clean -fd >/dev/null 2>&1 || true
+git -c '{GIT_CRED}' fetch -q upstream {base}
+if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
+  git -c '{GIT_CRED}' fetch -q origin {branch}
+  git checkout -q -B {branch} origin/{branch}
+elif git rev-parse --verify {branch} >/dev/null 2>&1; then
+  git checkout -q {branch}
+else
+  echo "branch {branch} missing" >&2
+  exit 1
+fi
+if git rebase upstream/{base} >/dev/null 2>&1; then
+  git -c '{GIT_CRED}' push -f origin {branch} >/dev/null 2>&1 || true
+  echo {MARK_REBASED}
+else
+  files=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  git rebase --abort >/dev/null 2>&1 || true
+  echo {MARK_CONFLICT}
+  if [ -n "$files" ]; then
+    echo "{MARK_CONFLICT_FILES}$files"
+  fi
+fi"#
+    )
+}
+
+/// Process cards in Review that have pending rebase requests.
+pub async fn process_awaiting_rebases(
+    board: &SharedBoard,
+    os: &OpenShell,
+    cfg: &AgentConfig,
+) -> Vec<Result<crate::model::WorkItem, String>> {
+    let awaiting = board.list_awaiting_rebase();
+    let mut results = Vec::new();
+    for item in awaiting {
+        let branch = format!("honr/card-{}", item.id);
+        let sandbox = item
+            .environment
+            .clone()
+            .unwrap_or_else(|| format!("sandbox-{}", item.id));
+
+        if !is_sandbox_live(os, &sandbox).await {
+            continue;
+        }
+
+        let script = rebase_script(cfg, &branch);
+        let exec_res = os.exec(&sandbox, &script, Duration::from_secs(60)).await;
+        match exec_res {
+            Ok(out) => {
+                let stdout = out.stdout;
+                if stdout.contains(MARK_REBASED) {
+                    results.push(board.complete_rebase_clean(item.id));
+                } else if stdout.contains(MARK_CONFLICT) {
+                    let files = parse_conflict_files(&stdout);
+                    results.push(board.complete_rebase_conflict(
+                        item.id,
+                        &files,
+                        Some("git rebase conflict"),
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("rebase execution failed for card #{}: {e}", item.id);
+            }
+        }
+    }
+    results
 }
 
 /// Ask GitHub whether the agent actually opened a PR.
@@ -3433,6 +3544,25 @@ exit 1
             seed.escalation
         );
         assert!(board.get(project.id).unwrap().plan.is_none());
+    }
+
+    #[test]
+    fn parse_conflict_files_extracts_conflicting_paths() {
+        let stdout = format!("some logs...\n{MARK_CONFLICT}\n{MARK_CONFLICT_FILES}src/main.rs,src/store.rs\nother logs");
+        let files = parse_conflict_files(&stdout);
+        assert_eq!(files, vec!["src/main.rs", "src/store.rs"]);
+
+        let empty_stdout = "clean output\n";
+        assert!(parse_conflict_files(empty_stdout).is_empty());
+    }
+
+    #[test]
+    fn rebase_script_includes_git_rebase_and_conflict_extraction() {
+        let cfg = repo_cfg();
+        let script = rebase_script(&cfg, "honr/card-7");
+        assert!(script.contains("git rebase upstream/main"), "script: {script}");
+        assert!(script.contains("git diff --name-only --diff-filter=U"), "script: {script}");
+        assert!(script.contains(MARK_CONFLICT_FILES), "script: {script}");
     }
 }
 
