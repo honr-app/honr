@@ -42,7 +42,7 @@ export function Cockpit(props: CockpitProps) {
   const [filterState, setFilterState] = useState<BoardFilter>("all");
   const [projectFilter, setProjectFilter] = useState<number | "all">("all");
   const [showArchived, setShowArchived] = useState(false);
-  /** Explicit open/closed overrides; missing keys use the lane's default. */
+  /** Explicit open/closed; missing keys fall back to hot/filter default. */
   const [laneOpen, setLaneOpen] = useState<Record<number, boolean>>({});
 
   const isArchivedGoal = (goal: GoalView) =>
@@ -120,6 +120,30 @@ export function Cockpit(props: CockpitProps) {
     if (projectFilter === "all") return base;
     return base.filter((g) => g.id === projectFilter);
   }, [activeGoals, archivedGoals, projectFilter, showArchived]);
+
+  // Auto-open is driven by "hot" (Needs you / Running / Review). Without
+  // locking that choice, clearing the last Review card flips hot→false and
+  // the lane collapses under you mid-click. Remember open once shown; only
+  // the chevron / Collapse all may close it.
+  useEffect(() => {
+    setLaneOpen((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const goal of sortedGoals) {
+        if (next[goal.id] !== undefined) continue;
+        const archived =
+          goal.archived === true ||
+          props.items.get(goal.id)?.state === "retired";
+        if (archived) continue;
+        const hot = laneRank(goal, props.items) < 3;
+        if (hot || filterState !== "all") {
+          next[goal.id] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [sortedGoals, filterState, props.items]);
 
   const mode = modeCopy({
     needsYou: totals.needsYou,
