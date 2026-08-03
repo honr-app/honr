@@ -203,6 +203,18 @@ pub struct Board {
 
 pub type SharedBoard = Arc<Board>;
 
+/// The result of attempting a git rebase for a card in Review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseOutcome {
+    /// Rebase succeeded cleanly.
+    Clean,
+    /// Rebase encountered git merge conflicts.
+    Conflict {
+        conflicting_files: Vec<String>,
+        reason: Option<String>,
+    },
+}
+
 impl Board {
     pub fn new(schema: Schema, path: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(1024);
@@ -3059,6 +3071,87 @@ fn check_split_relatedness(
         items.sort_by_key(|i| i.entered_state_at);
         items
     }
+
+    /// Record the outcome of a rebase operation for a card in Review.
+    ///
+    /// If Clean: the card remains in Review, and `rebase_requested` & `awaiting_dispatch` are cleared.
+    /// If Conflict: the card transitions to Backlog with `last_bounce_reason` set containing
+    /// the failure reason and conflicting file details, and `rebase_requested` & `awaiting_dispatch` are cleared.
+    pub fn record_rebase_outcome(&self, id: ItemId, outcome: RebaseOutcome) -> Result<WorkItem, String> {
+        let title = {
+            let s = self.state.read().unwrap();
+            let it = s.items.get(&id).ok_or_else(|| format!("no such item #{id}"))?;
+            if it.state != State::Review {
+                return Err(format!("only Review cards can record rebase outcome, #{id} is in {:?}", it.state));
+            }
+            it.title.clone()
+        };
+
+        match outcome {
+            RebaseOutcome::Clean => {
+                let item = {
+                    let mut s = self.state.write().unwrap();
+                    let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
+                    it.rebase_requested = false;
+                    it.awaiting_dispatch = false;
+                    let mut out = it.clone();
+                    Self::populate_blockers(&s, &mut out);
+                    out
+                };
+                self.emit(&item);
+                self.story(id, format!("{title}: rebase clean — retained in Review."));
+                Ok(item)
+            }
+            RebaseOutcome::Conflict { conflicting_files, reason } => {
+                let base_reason = reason.unwrap_or_else(|| "git rebase conflict".to_string());
+                let bounce_reason = if conflicting_files.is_empty() {
+                    base_reason
+                } else {
+                    format!("{base_reason}: conflicting files: {}", conflicting_files.join(", "))
+                };
+
+                let item = {
+                    let mut s = self.state.write().unwrap();
+                    if let Some(it) = s.items.get_mut(&id) {
+                        it.last_bounce_reason = Some(bounce_reason.clone());
+                    }
+                    Self::transition_locked(&mut s, id, State::Backlog, "rebase", Some(bounce_reason.clone()))
+                        .map_err(|e| format!("failed transition to Backlog on rebase conflict: {e}"))?;
+                    let it_mut = s.items.get_mut(&id).unwrap();
+                    it_mut.rebase_requested = false;
+                    it_mut.awaiting_dispatch = false;
+                    let mut out = it_mut.clone();
+                    Self::populate_blockers(&s, &mut out);
+                    out
+                };
+                self.emit(&item);
+                self.story(id, format!("{title}: rebase conflict — returned to Backlog ({bounce_reason})."));
+                Ok(item)
+            }
+        }
+    }
+
+    /// Convenience wrapper to record a clean rebase for a card in Review.
+    pub fn complete_rebase_clean(&self, id: ItemId) -> Result<WorkItem, String> {
+        self.record_rebase_outcome(id, RebaseOutcome::Clean)
+    }
+
+    /// Convenience wrapper to record a rebase conflict for a card in Review.
+    pub fn complete_rebase_conflict(
+        &self,
+        id: ItemId,
+        conflicting_files: &[String],
+        reason: Option<&str>,
+    ) -> Result<WorkItem, String> {
+        self.record_rebase_outcome(
+            id,
+            RebaseOutcome::Conflict {
+                conflicting_files: conflicting_files.to_vec(),
+                reason: reason.map(|r| r.to_string()),
+            },
+        )
+    }
+
 
     /// Normalize a GitHub PR URL for matching board `pr_url` values.
     pub fn normalize_pr_url(url: &str) -> String {
@@ -6348,5 +6441,71 @@ mod tests {
         let t2_updated = b.get(t2.id).unwrap();
         assert!(t2_updated.rebase_requested, "t2 rebase_requested should be true");
         assert!(t2_updated.awaiting_dispatch, "t2 awaiting_dispatch should be true");
+    }
+
+    #[test]
+    fn rebase_clean_keeps_card_in_review() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-test-rebase-clean-{}.json", std::process::id())),
+        );
+        let project = b
+            .create(None, "Rebase Clean Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(Some(project.id), "Task Clean", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+
+        b.transition(t1.id, State::Shaping, "test", None).unwrap();
+        b.transition(t1.id, State::Backlog, "test", None).unwrap();
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/301".into()));
+
+        b.dispatch_rebase(t1.id).unwrap();
+        let item = b.get(t1.id).unwrap();
+        assert!(item.rebase_requested);
+
+        let updated = b.complete_rebase_clean(t1.id).unwrap();
+        assert_eq!(updated.state, State::Review);
+        assert!(!updated.rebase_requested);
+        assert!(!updated.awaiting_dispatch);
+        assert_eq!(updated.last_bounce_reason, None);
+    }
+
+    #[test]
+    fn rebase_conflict_moves_card_to_backlog_with_bounce_reason_and_conflict_details() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-test-rebase-conflict-{}.json", std::process::id())),
+        );
+        let project = b
+            .create(None, "Rebase Conflict Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(Some(project.id), "Task Conflict", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+
+        b.transition(t1.id, State::Shaping, "test", None).unwrap();
+        b.transition(t1.id, State::Backlog, "test", None).unwrap();
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/302".into()));
+
+        b.dispatch_rebase(t1.id).unwrap();
+
+        let conflicting_files = vec!["src/main.rs".to_string(), "src/store.rs".to_string()];
+        let updated = b
+            .complete_rebase_conflict(t1.id, &conflicting_files, Some("git rebase conflict"))
+            .unwrap();
+
+        assert_eq!(updated.state, State::Backlog);
+        assert!(!updated.rebase_requested);
+        assert!(!updated.awaiting_dispatch);
+
+        let bounce_reason = updated.last_bounce_reason.expect("bounce reason set");
+        assert!(bounce_reason.contains("git rebase conflict"));
+        assert!(bounce_reason.contains("src/main.rs"));
+        assert!(bounce_reason.contains("src/store.rs"));
     }
 }
