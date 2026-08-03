@@ -78,8 +78,26 @@ RUN for b in cargo rustc rustup clippy-driver cargo-clippy cargo-fmt rustfmt; do
  && printf 'export RUSTUP_HOME=/opt/rust\nexport CARGO_HOME=/opt/cargo\nexport NPM_CONFIG_CACHE=/opt/npm-cache\nexport PATH=/opt/cargo/bin:$PATH\n' \
       > /etc/profile.d/rust.sh && chmod 0644 /etc/profile.d/rust.sh
 
+# ---- warm dependency caches ------------------------------------------------
+# The README promises this; without it every card cold-fetches crates.io (or
+# hangs when policy denies egress). `cargo fetch` fills $CARGO_HOME/registry
+# from Cargo.lock; agents then `cargo build --offline --locked`. Rebuild the
+# image when Cargo.lock / web/package-lock.json change materially.
+WORKDIR /tmp/honr-warm
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src \
+ && printf 'fn main() {}\n' > src/main.rs \
+ && cargo fetch --locked \
+ && rm -rf /tmp/honr-warm
+
+WORKDIR /tmp/honr-warm-web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --ignore-scripts \
+ && rm -rf /tmp/honr-warm-web
+
 # Cargo and npm both write to their caches during a build, so these must stay
-# group-writable for the unprivileged `sandbox` user.
+# group-writable for the unprivileged `sandbox` user. Re-chmod after the warm
+# steps above — fetch/ci create root-owned cache entries.
 RUN mkdir -p /opt/cargo /opt/npm-cache \
  && chmod -R a+rX /opt/rust \
  && chmod -R a+rwX /opt/cargo /opt/npm-cache
