@@ -422,10 +422,10 @@ export function ProjectSandboxPicker({
           onChange(v === "" ? null : v);
         }}
       >
-        <option value="">Global default ({defaultLabel})</option>
+        <option value="">Use global default</option>
         {profiles.map((p) => (
           <option key={p.id} value={p.id}>
-            {p.name} ({p.id})
+            {p.id === defaultId ? `${p.name} · global default` : p.name}
           </option>
         ))}
       </select>
