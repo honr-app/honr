@@ -1,10 +1,7 @@
 //! `BoardStore` — durable board rows behind the in-process `Board` facade.
 //!
 //! Mutations still go through `Board` / `machine.rs`; transports must not grow
-//! SQL. Implementations (SQLite, later Postgres) land in subsequent Tasks —
-//! this trait is the compile boundary they target.
-
-#![allow(dead_code)]
+//! SQL. Hot list/snapshot/lease indexed queries land in a later Task.
 
 use crate::model::{ItemId, WorkItem};
 use crate::store::StoryLine;
@@ -28,15 +25,9 @@ pub enum StoreError {
         expected: DatabaseBackend,
         got: DatabaseBackend,
     },
-    /// Method reserved for a later Task; trait surface is stable now.
-    #[error("board store method not implemented yet: {0}")]
-    NotYet(&'static str),
 }
 
 /// Persistence API for board items, blockers, stories, and meta.
-///
-/// Hot list/snapshot/lease paths will grow indexed query methods in a later
-/// Task; the load/upsert surface here is enough for the SQLite cutover.
 #[async_trait]
 pub trait BoardStore: Send + Sync {
     async fn meta_get(&self, key: &str) -> Result<Option<String>, StoreError>;
@@ -45,7 +36,7 @@ pub trait BoardStore: Send + Sync {
     async fn get_next_id(&self) -> Result<ItemId, StoreError>;
     async fn set_next_id(&self, next_id: ItemId) -> Result<(), StoreError>;
 
-    /// True when no items (and no import stamp) — JSON import gate for Task 2.
+    /// True when no items and no JSON-import stamp — gate for one-shot import.
     async fn is_empty(&self) -> Result<bool, StoreError>;
 
     async fn upsert_item(&self, item: &WorkItem) -> Result<(), StoreError>;

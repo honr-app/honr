@@ -1,13 +1,13 @@
 //! Pluggable board database (SQLx).
 //!
-//! This module owns the `BoardStore` boundary and migration/config helpers.
-//! Persistence cutover (Board boots from DB, row-level mutations) lands in later
-//! Tasks — until then `Board` still flushes `honr.json`.
-//!
-//! Public items that look unused are the Task 2–4 seam; keep them linked.
+//! Persistence cutover: `Board` boots from SQLite via [`SqliteBoardStore`] and
+//! flushes row updates. `honr.json` is a one-shot import source when the DB is
+//! empty. Indexed query paths land in a later Task; agent engines and beads
+//! dual-write stay unchanged.
 
 #![allow(dead_code)]
 
+mod codec;
 mod config;
 mod sqlite;
 mod store;
@@ -15,10 +15,11 @@ mod store;
 pub use config::{
     apply_database_url_override, parse_database_url, BoardDatabaseConfig, DatabaseBackend,
 };
-pub use sqlite::SqliteBoardStore;
+#[allow(unused_imports)] // trait is the public seam; callers use concrete store today
 pub use store::{BoardStore, StoreError};
+pub use sqlite::SqliteBoardStore;
 
-// Re-exported for later Tasks / callers; not required by main yet.
+// Re-exported for later Tasks / callers.
 #[allow(unused_imports)]
 pub use config::{DatabaseUrl, DEFAULT_DATABASE_URL, ENV_DATABASE_URL};
 
@@ -29,8 +30,7 @@ use std::str::FromStr;
 /// Embedded versioned migrations (`migrations/` at the crate root).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// Open a SQLite pool and apply migrations. Used by tests today; Board cutover
-/// in a later Task will call this (or the Postgres path) at boot.
+/// Open a SQLite pool and apply migrations.
 pub async fn connect_sqlite_migrated(url: &str) -> Result<SqlitePool, StoreError> {
     let parsed = parse_database_url(url)?;
     if parsed.backend() != DatabaseBackend::Sqlite {
