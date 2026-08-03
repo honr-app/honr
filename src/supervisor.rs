@@ -1208,7 +1208,7 @@ async fn apply_initial_plan_sidecar(
         tracing::warn!("#{id}: Initial plan missing plan.json ({e})");
         return escalate_missing(format!(
             "Initial plan must write {VERDICT_DIR}/plan.json (proposed Tasks) before \
-             report.json. Approve creates those Tasks — do not finish with an empty Plan."
+             report.json. Merging the plan PR creates those Tasks — do not finish with an empty Plan."
         ));
     }
 
@@ -1449,12 +1449,15 @@ async fn process_verdict(
                         id,
                         agent_id,
                         "This card already has a Task proposal in Review. Finish via Approve \
-                         (creates siblings) or request_changes — do not also report a PR."
+                         / PR merge (creates siblings) or request_changes — do not also \
+                         report a second PR."
                             .into(),
                         vec![
                             crate::model::EscalationOption {
-                                label: "Approve the proposal".into(),
-                                detail: "Human Approve creates the sibling Tasks.".into(),
+                                label: "Approve / merge the proposal".into(),
+                                detail: "Approve acknowledges; PR merge (or Approve without a PR) \
+                                         creates the sibling Tasks."
+                                    .into(),
                             },
                             crate::model::EscalationOption {
                                 label: "Request changes".into(),
@@ -2098,7 +2101,8 @@ fn briefing(
              (each: `key`, `title`, `intent`, `definition_of_done`, optional `blocked_by_keys`). \
              Open **one** plan/docs PR against the upstream base as written rationale, then \
              finish with `/sandbox/.honr/report.json` (and `pr_url`). The card goes to Review — \
-             a human **Approve** creates those Tasks from your plan.json (not via split.json).\n\
+             when the plan PR **merges**, those Tasks are created from your plan.json \
+             (not via split.json; not via a separate Approve step).\n\
              Do **not** write `/sandbox/.honr/split.json` on this card.\n\
              If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` \
              with options (at least two) and a recommended index, then exit.\n\
@@ -2122,7 +2126,7 @@ fn briefing(
              Write `/sandbox/.honr/split.json` with `children` each having `title`, `intent`, \
              optional `definition_of_done`, optional `key`, and optional `blocked_by_keys` \
              (Plan-style deps), then exit. The card goes to **Review** with that proposal — a human \
-             **Approve** creates the sibling Tasks under the same Project. \
+             **Approve** (or PR merge when a PR exists) creates the sibling Tasks under the same Project. \
              Splits may only carve this card's definition of done into smaller slices of the same outcome. \
              Do not invent work that belongs to another Project — escalate instead. \
              If a PR already exists for the card, do not split — finish via report. \
@@ -2928,8 +2932,8 @@ mod tests {
             "briefing must forbid split on Initial plan: {b}"
         );
         assert!(
-            b.contains("Approve") && b.contains("creates those Tasks"),
-            "briefing must say Approve creates Tasks from plan.json: {b}"
+            b.contains("merges") && b.contains("Tasks"),
+            "briefing must say plan PR merge creates Tasks from plan.json: {b}"
         );
         assert!(
             !b.contains("Split and publish are mutually exclusive"),

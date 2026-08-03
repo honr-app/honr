@@ -531,6 +531,14 @@ impl Board {
             }
         }
 
+        // Initial plan / split proposals become sibling Tasks when the card
+        // reaches Done (typically PR merge via webhook) — not on Approve.
+        if to == State::Done {
+            if let Err(e) = self.materialize_proposal_on_done(id, by) {
+                tracing::warn!(id, error = %e, "materialize proposal on Done failed");
+            }
+        }
+
         if to == State::Done || to == State::Retired {
             let beads = self.beads.clone();
             let beads_id = item.beads_id.clone();
@@ -585,7 +593,8 @@ impl Board {
             }
         }
 
-        Ok(item)
+        // Re-read after Done-side materialize so callers see stamped item_ids.
+        Ok(self.get(id).unwrap_or(item))
     }
 
     /// Create a Project (root) or a Task under a Project. Tasks are flat —
@@ -717,10 +726,10 @@ impl Board {
             format!(
                 "Propose sibling Tasks for «{project_title}» (plan.json: keys, deps, \
                  mechanically checkable DoDs). Open one plan/docs PR, then finish with \
-                 report.json (Review). Human Approve creates those Tasks — do not write \
+                 report.json (Review). Merging the plan PR creates those Tasks — do not write \
                  split.json on this card."
             ),
-            Some("plan.json + docs PR in Review; Approve materializes Tasks.".into()),
+            Some("plan.json + docs PR in Review; merge creates Tasks.".into()),
             Origin::Planner,
             false,
             None,
@@ -899,13 +908,20 @@ impl Board {
         }
 
         let done = self.approve_review(seed_id)?;
+        if done.state == State::Review {
+            return Err(
+                "Plan looks good — Tasks will be created when the plan PR merges \
+                 (no separate Approve materialize step)"
+                    .into(),
+            );
+        }
         let published: Vec<ItemId> = done
             .proposal
             .as_ref()
             .map(|p| p.tasks.iter().filter_map(|t| t.item_id).collect())
             .unwrap_or_default();
         if published.is_empty() {
-            return Err("Approve finished Initial plan but created no Tasks".into());
+            return Err("Initial plan reached Done but created no Tasks".into());
         }
         Ok(published)
     }
@@ -2140,6 +2156,89 @@ fn check_split_relatedness(
         Ok(made)
     }
 
+    /// Create sibling Tasks from a frozen proposal when a card reaches Done.
+    /// Idempotent: title-matched siblings are reused. No-op without a proposal.
+    fn materialize_proposal_on_done(&self, id: ItemId, by: &str) -> Result<usize, String> {
+        let card = match self.get(id) {
+            Some(c) => c,
+            None => return Ok(0),
+        };
+        let has_proposal = card
+            .proposal
+            .as_ref()
+            .is_some_and(|p| !p.tasks.is_empty());
+        if !has_proposal {
+            return Ok(0);
+        }
+        // Already linked every proposal row to a sibling — nothing to do.
+        if card
+            .proposal
+            .as_ref()
+            .is_some_and(|p| p.tasks.iter().all(|t| t.item_id.is_some()))
+        {
+            return Ok(0);
+        }
+
+        let origin = if card.is_initial_plan_task() {
+            Origin::Planner
+        } else {
+            Origin::Split { from: id }
+        };
+        let made = self.materialize_proposal(id, by, origin)?;
+
+        if card.is_initial_plan_task() {
+            if let Some(project_id) = card.parent {
+                let mut s = self.state.write().unwrap();
+                if let Some(p) = s.items.get_mut(&project_id) {
+                    if p.plan.is_some() {
+                        p.plan = None;
+                        let snap = p.clone();
+                        drop(s);
+                        self.emit(&snap);
+                    }
+                }
+            }
+        }
+
+        self.story(
+            id,
+            format!(
+                "{} — {} Tasks created from proposal.",
+                card.title,
+                made.len()
+            ),
+        );
+        Ok(made.len())
+    }
+
+    /// Heal: materialize a Done card's proposal if siblings were never created
+    /// (e.g. merge-to-Done before materialize-on-Done shipped).
+    pub fn materialize_pending_proposal(&self, id: ItemId) -> Result<Vec<WorkItem>, String> {
+        let card = self
+            .get(id)
+            .ok_or_else(|| format!("no work item #{id}"))?;
+        if card.state != State::Done {
+            return Err(format!("card #{id} is {:?}; expected Done", card.state));
+        }
+        let origin = if card.is_initial_plan_task() {
+            Origin::Planner
+        } else {
+            Origin::Split { from: id }
+        };
+        let made = self.materialize_proposal(id, "cockpit", origin)?;
+        if !made.is_empty() {
+            self.story(
+                id,
+                format!(
+                    "{} — {} Tasks created from proposal (heal).",
+                    card.title,
+                    made.len()
+                ),
+            );
+        }
+        Ok(made)
+    }
+
     /// `escalate` — must carry options. An agent that hands back an open
     /// question has transferred the whole problem.
     pub fn escalate(
@@ -2518,44 +2617,33 @@ fn check_split_relatedness(
             .is_some_and(|p| !p.tasks.is_empty());
 
         if has_proposal {
-            let is_initial = item.is_initial_plan_task();
-            let origin = if is_initial {
-                Origin::Planner
-            } else {
-                Origin::Split { from: id }
-            };
-            let made = self.materialize_proposal(id, "human", origin)?;
-
-            // Drop legacy Project.plan — truth is the (frozen) card proposal.
-            if is_initial {
-                if let Some(project_id) = item.parent {
-                    let mut s = self.state.write().unwrap();
-                    if let Some(p) = s.items.get_mut(&project_id) {
-                        if p.plan.is_some() {
-                            p.plan = None;
-                            let snap = p.clone();
-                            drop(s);
-                            self.emit(&snap);
-                        }
-                    }
-                }
+            // With a plan/docs PR: stay in Review until merge → Done materializes
+            // Tasks. Without a PR (rare): Done now, which materializes in transition.
+            if item.pr_url.as_ref().is_some_and(|u| !u.trim().is_empty()) {
+                self.story(
+                    id,
+                    format!(
+                        "{} approved — waiting for GitHub merge to create Tasks ({}).",
+                        item.title,
+                        item.pr_url.as_deref().unwrap_or("")
+                    ),
+                );
+                return self
+                    .get(id)
+                    .ok_or_else(|| format!("no work item #{id}"));
             }
 
             let done = self
                 .transition(id, State::Done, "human", Some("proposal approved".into()))
                 .map_err(|e| e.to_string())?;
+            let n = done
+                .proposal
+                .as_ref()
+                .map(|p| p.tasks.len())
+                .unwrap_or(0);
             self.story(
                 id,
-                format!(
-                    "{} approved — {} Tasks created{}.",
-                    done.title,
-                    made.len(),
-                    if done.pr_url.is_some() {
-                        "; PR surfaced (honr never merges)"
-                    } else {
-                        ""
-                    }
-                ),
+                format!("{} approved — {} Tasks created (no PR).", done.title, n),
             );
             return Ok(done);
         }
@@ -2584,10 +2672,26 @@ fn check_split_relatedness(
             }
         }
 
+        // Impl cards with a PR stay in Review until GitHub merge completes them
+        // (webhook → complete_for_merged_pr). Approve only means "looks good".
+        if item.pr_url.as_ref().is_some_and(|u| !u.trim().is_empty()) {
+            self.story(
+                id,
+                format!(
+                    "{} approved — waiting for GitHub merge ({}).",
+                    item.title,
+                    item.pr_url.as_deref().unwrap_or("")
+                ),
+            );
+            return self
+                .get(id)
+                .ok_or_else(|| format!("no work item #{id}"));
+        }
+
         let item = self
             .transition(id, State::Done, "human", Some("approved".into()))
             .map_err(|e| e.to_string())?;
-        self.story(id, format!("{} approved — PR surfaced (honr never merges).", item.title));
+        self.story(id, format!("{} approved — no PR; marked Done.", item.title));
         Ok(item)
     }
 
@@ -2640,6 +2744,53 @@ fn check_split_relatedness(
             ref_name: ref_name.to_string(),
             commit_sha,
         });
+    }
+
+    /// Normalize a GitHub PR URL for matching board `pr_url` values.
+    pub fn normalize_pr_url(url: &str) -> String {
+        url.trim().trim_end_matches('/').to_ascii_lowercase()
+    }
+
+    /// When a PR merges on GitHub, complete the matching Review/NeedsHuman card.
+    /// Done triggers the usual beads close + github_push (linked Issue close).
+    /// Returns the completed item id, or `None` if no eligible card matched.
+    pub fn complete_for_merged_pr(
+        &self,
+        pr_url: &str,
+        pr_number: Option<u64>,
+    ) -> Option<ItemId> {
+        let needle = Self::normalize_pr_url(pr_url);
+        if needle.is_empty() {
+            return None;
+        }
+
+        let id = {
+            let s = self.state.read().unwrap();
+            s.items
+                .values()
+                .find(|i| {
+                    matches!(i.state, State::Review | State::NeedsHuman)
+                        && i.pr_url
+                            .as_deref()
+                            .is_some_and(|u| Self::normalize_pr_url(u) == needle)
+                })
+                .map(|i| i.id)?
+        };
+
+        let reason = match pr_number {
+            Some(n) => format!("PR merged (#{n})"),
+            None => "PR merged".into(),
+        };
+        match self.transition(id, State::Done, "github-webhook", Some(reason)) {
+            Ok(item) => {
+                self.story(id, format!("{} — PR merged; card Done.", item.title));
+                Some(id)
+            }
+            Err(e) => {
+                tracing::warn!(id, error = %e, "complete_for_merged_pr transition failed");
+                None
+            }
+        }
     }
 
     // -------------------------------------------------------- derived reads
@@ -3734,9 +3885,22 @@ mod tests {
         )
         .expect("propose");
 
-        let published = b.approve_plan(project.id).expect("approve");
-        assert_eq!(published.len(), 1);
+        let err = b.approve_plan(project.id).expect_err("waits for merge");
+        assert!(
+            err.contains("merges"),
+            "approve_plan with PR should defer materialize: {err}"
+        );
+        assert_eq!(b.get(seed_id).unwrap().state, State::Review);
+        b.complete_for_merged_pr("https://example.com/pr/1", Some(1))
+            .expect("merge creates tasks");
         assert_eq!(b.get(seed_id).unwrap().state, State::Done);
+        assert_eq!(
+            b.children_of(project.id)
+                .into_iter()
+                .filter(|&id| !b.get(id).unwrap().is_initial_plan_task())
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -3788,7 +3952,23 @@ mod tests {
         )
         .expect("propose");
 
-        let done = b.approve_review(seed_id).expect("approve_review");
+        // Approve with a PR only acknowledges — merge creates Tasks.
+        let still = b.approve_review(seed_id).expect("approve_review");
+        assert_eq!(still.state, State::Review);
+        assert_eq!(
+            b.children_of(project.id)
+                .into_iter()
+                .filter(|&id| !b.get(id).unwrap().is_initial_plan_task())
+                .count(),
+            0,
+            "no siblings before merge"
+        );
+
+        let done_id = b
+            .complete_for_merged_pr("https://example.com/pr/2", Some(2))
+            .expect("merge completes card");
+        assert_eq!(done_id, seed_id);
+        let done = b.get(seed_id).unwrap();
         assert_eq!(done.state, State::Done);
         assert!(b.get(project.id).unwrap().plan.is_none());
         assert!(done.proposal.as_ref().is_some_and(|p| p.tasks.len() == 2));
@@ -3800,6 +3980,7 @@ mod tests {
             .collect();
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|t| t.state == State::Backlog));
+        assert!(done.proposal.as_ref().unwrap().tasks.iter().all(|t| t.item_id.is_some()));
     }
 
     #[test]
@@ -5213,7 +5394,6 @@ mod tests {
         board_raw.beads = Some(beads_client.clone());
         let board = Arc::new(board_raw);
 
-        // 1. Create Project and Task
         let project = board
             .create(None, "Close GH Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
@@ -5238,12 +5418,10 @@ mod tests {
 
         let _ = remote_cap.take();
 
-        // 2. Transition task to Done
         let _ = board.transition(task.id, State::Shaping, "test", None);
         let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.transition(task.id, State::Done, "human", Some("completed".into()));
 
-        // Wait for async close & github push
         let mut saw_close_push = false;
         for _ in 0..60 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -5293,7 +5471,6 @@ mod tests {
         board_raw.beads = Some(beads_client.clone());
         let board = Arc::new(board_raw);
 
-        // 1. Create Project -> seeds Initial plan task
         let project = board
             .create(None, "No Orphan GH Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
@@ -5308,7 +5485,6 @@ mod tests {
 
         let _ = remote_cap.take();
 
-        // 2. Propose breakdown on seed task and approve review
         board
             .propose_plan(
                 seed_id,
@@ -5339,7 +5515,6 @@ mod tests {
         let done_seed = board.approve_review(seed_id).expect("approve seed review");
         assert_eq!(done_seed.state, State::Done);
 
-        // Wait for async close
         let mut seed_beads_closed = false;
         for _ in 0..60 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -5352,7 +5527,6 @@ mod tests {
         }
         assert!(seed_beads_closed, "seed task in beads should be closed");
 
-        // Verify NO GithubPush was sent for seed_beads_id
         let ops = remote_cap.ops();
         let seed_pushes: Vec<_> = ops
             .iter()
@@ -5365,7 +5539,6 @@ mod tests {
             .collect();
         assert_eq!(seed_pushes.len(), 0, "no GithubPush should be sent for Initial plan seed card");
 
-        // 3. Materialized tasks created by approval DO get mirrored and pushed to GitHub
         let made: Vec<_> = board
             .children_of(project.id)
             .into_iter()
@@ -5382,7 +5555,6 @@ mod tests {
             );
         }
 
-        // 4. Closing one of the materialized tasks closes its GitHub issue
         let mat_task = &made[0];
         let mat_beads_id = mat_task.beads_id.clone().unwrap();
 
@@ -5410,5 +5582,100 @@ mod tests {
         assert!(mat_closed, "materialized task should close bead and push to GitHub on Done");
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn approve_review_with_pr_stays_in_review_until_merge() {
+        let b = Arc::new(Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-approve-waits-merge-{}.json",
+                std::process::id()
+            )),
+        ));
+        let p = b
+            .create(None, "Wait Merge", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Impl",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "human", None);
+        let _ = b.transition(t.id, State::Backlog, "human", None);
+        let _ = b.transition(t.id, State::Claimed, "agent", None);
+        let _ = b.transition(t.id, State::Running, "agent", None);
+        let _ = b.transition(t.id, State::Review, "agent", None);
+        b.set_pr_url(t.id, Some("https://github.com/shanemcd/honr/pull/99".into()));
+
+        let item = b.approve_review(t.id).expect("approve");
+        assert_eq!(item.state, State::Review, "PR cards wait for merge");
+        assert!(
+            b.complete_for_merged_pr("https://github.com/shanemcd/honr/pull/99", Some(99))
+                .is_some()
+        );
+        assert_eq!(b.get(t.id).unwrap().state, State::Done);
+    }
+
+    #[test]
+    fn complete_for_merged_pr_matches_normalized_url_and_is_idempotent() {
+        let b = Arc::new(Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-complete-merged-pr-{}.json",
+                std::process::id()
+            )),
+        ));
+        let p = b
+            .create(None, "Merge Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Feature",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "human", None);
+        let _ = b.transition(t.id, State::Backlog, "human", None);
+        let _ = b.transition(t.id, State::Claimed, "agent", None);
+        let _ = b.transition(t.id, State::Running, "agent", None);
+        let _ = b.transition(t.id, State::Review, "agent", None);
+        b.set_pr_url(
+            t.id,
+            Some("https://github.com/shanemcd/honr/pull/55/".into()),
+        );
+
+        assert_eq!(
+            Board::normalize_pr_url("https://GitHub.com/shanemcd/honr/pull/55/"),
+            "https://github.com/shanemcd/honr/pull/55"
+        );
+
+        let done_id = b
+            .complete_for_merged_pr("https://GitHub.com/shanemcd/honr/pull/55", Some(55))
+            .expect("should complete Review card");
+        assert_eq!(done_id, t.id);
+        assert_eq!(b.get(t.id).unwrap().state, State::Done);
+
+        assert!(
+            b.complete_for_merged_pr("https://github.com/shanemcd/honr/pull/55", Some(55))
+                .is_none(),
+            "idempotent: already Done"
+        );
+        assert!(
+            b.complete_for_merged_pr("https://github.com/shanemcd/honr/pull/56", Some(56))
+                .is_none(),
+            "no match"
+        );
     }
 }
