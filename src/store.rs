@@ -9,7 +9,7 @@ use crate::db::SqliteBoardStore;
 use crate::events::BoardEvent;
 use crate::machine::{self, TransitionError};
 use crate::model::*;
-use crate::schema::{Level, Schema};
+use crate::schema::{AgentConfig, Level, Schema};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,12 @@ pub struct BoardState {
     /// they will be right to.
     #[serde(default)]
     pub stories: BTreeMap<ItemId, Vec<StoryLine>>,
+    /// Named sandbox create profiles. Seeded from YAML AgentConfig when empty.
+    #[serde(default)]
+    pub sandbox_profiles: BTreeMap<String, SandboxProfile>,
+    /// Global default profile id. Projects may override via `sandbox_profile_id`.
+    #[serde(default)]
+    pub default_sandbox_profile_id: Option<String>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
 }
@@ -41,6 +47,8 @@ impl BoardState {
             next_id: self.next_id,
             items: self.items.clone(),
             stories: self.stories.clone(),
+            sandbox_profiles: self.sandbox_profiles.clone(),
+            default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
             agent_logs: BTreeMap::new(),
         }
     }
@@ -347,6 +355,10 @@ impl Board {
                 Err(e) => tracing::warn!("ignoring unreadable {path:?}: {e}"),
             }
         }
+        if board.seed_sandbox_profiles_if_empty() {
+            tracing::info!("seeded sandbox profile catalog from execution.agents");
+            board.flush();
+        }
         board
     }
 
@@ -381,6 +393,10 @@ impl Board {
         *board.state.write().unwrap() = state;
         if healed > 0 || renamed > 0 {
             board.dirty.store(true, Ordering::Relaxed);
+            board.flush();
+        }
+        if board.seed_sandbox_profiles_if_empty() {
+            tracing::info!("seeded sandbox profile catalog from execution.agents");
             board.flush();
         }
         Ok(board)
@@ -1811,6 +1827,176 @@ impl Board {
             }
         }
         Ok(item)
+    }
+
+    // ------------------------------------------------ sandbox profiles (board state)
+    //
+    // Public surface for the follow-on api-supervisor card. Unit tests exercise
+    // it; production callers land with REST/MCP wiring.
+
+    /// Seed one profile from YAML AgentConfig when the catalog is empty.
+    /// Returns true when a profile was inserted. YAML remains fallback only
+    /// after the catalog is populated.
+    pub fn seed_sandbox_profiles_if_empty(&self) -> bool {
+        self.seed_sandbox_profiles_from(&self.schema.execution.agents)
+    }
+
+    /// Same as [`Self::seed_sandbox_profiles_if_empty`] but with an explicit
+    /// AgentConfig (tests and callers that don't want schema.agents).
+    pub fn seed_sandbox_profiles_from(&self, agents: &AgentConfig) -> bool {
+        let mut s = self.state.write().unwrap();
+        if !s.sandbox_profiles.is_empty() {
+            return false;
+        }
+        let id = "default".to_string();
+        s.sandbox_profiles.insert(
+            id.clone(),
+            SandboxProfile {
+                id: id.clone(),
+                name: "Default".into(),
+                image: agents.image.clone(),
+                policy: agents.policy.clone(),
+                cpu: agents.cpu.clone(),
+                memory: agents.memory.clone(),
+            },
+        );
+        s.default_sandbox_profile_id = Some(id);
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        true
+    }
+
+    #[allow(dead_code)] // REST/MCP in api-supervisor
+    pub fn list_sandbox_profiles(&self) -> Vec<SandboxProfile> {
+        let s = self.state.read().unwrap();
+        s.sandbox_profiles.values().cloned().collect()
+    }
+
+    #[allow(dead_code)] // REST/MCP in api-supervisor
+    pub fn default_sandbox_profile_id(&self) -> Option<String> {
+        self.state.read().unwrap().default_sandbox_profile_id.clone()
+    }
+
+    #[allow(dead_code)] // REST/MCP in api-supervisor
+    pub fn get_sandbox_profile(&self, id: &str) -> Option<SandboxProfile> {
+        self.state.read().unwrap().sandbox_profiles.get(id).cloned()
+    }
+
+    /// Insert or replace a profile by id. Does not change the global default.
+    #[allow(dead_code)] // REST/MCP in api-supervisor
+    pub fn upsert_sandbox_profile(
+        &self,
+        profile: SandboxProfile,
+    ) -> Result<SandboxProfile, String> {
+        if profile.id.trim().is_empty() {
+            return Err("sandbox profile id must not be empty".into());
+        }
+        if profile.name.trim().is_empty() {
+            return Err("sandbox profile name must not be empty".into());
+        }
+        if profile.image.trim().is_empty() {
+            return Err("sandbox profile image must not be empty".into());
+        }
+        if profile.policy.trim().is_empty() {
+            return Err("sandbox profile policy must not be empty".into());
+        }
+        let stored = SandboxProfile {
+            id: profile.id.trim().to_string(),
+            name: profile.name.trim().to_string(),
+            image: profile.image.trim().to_string(),
+            policy: profile.policy.trim().to_string(),
+            cpu: profile.cpu.filter(|c| !c.trim().is_empty()),
+            memory: profile.memory.filter(|m| !m.trim().is_empty()),
+        };
+        {
+            let mut s = self.state.write().unwrap();
+            s.sandbox_profiles.insert(stored.id.clone(), stored.clone());
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(stored)
+    }
+
+    #[allow(dead_code)] // REST/MCP in api-supervisor
+    pub fn set_default_sandbox_profile(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.write().unwrap();
+        if !s.sandbox_profiles.contains_key(id) {
+            return Err(format!("no sandbox profile `{id}`"));
+        }
+        s.default_sandbox_profile_id = Some(id.to_string());
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Assign a Project's sandbox profile override. `None` clears (inherit global default).
+    #[allow(dead_code)] // REST/MCP in api-supervisor
+    pub fn set_project_sandbox_profile(
+        &self,
+        project_id: ItemId,
+        profile_id: Option<String>,
+    ) -> Result<WorkItem, String> {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let it = s
+                .items
+                .get(&project_id)
+                .ok_or_else(|| format!("no such item #{project_id}"))?;
+            if !it.is_project() {
+                return Err(format!("#{project_id} is not a Project"));
+            }
+            let resolved = match profile_id {
+                None => None,
+                Some(pid) => {
+                    let pid = pid.trim().to_string();
+                    if pid.is_empty() {
+                        None
+                    } else {
+                        if !s.sandbox_profiles.contains_key(&pid) {
+                            return Err(format!("no sandbox profile `{pid}`"));
+                        }
+                        Some(pid)
+                    }
+                }
+            };
+            let it = s.items.get_mut(&project_id).unwrap();
+            it.sandbox_profile_id = resolved;
+            it.clone()
+        };
+        self.emit(&item);
+        Ok(item)
+    }
+
+    /// Delete a profile. Refused while it is the global default or assigned to
+    /// any Project — reassign / clear those first.
+    #[allow(dead_code)] // REST/MCP in api-supervisor
+    pub fn delete_sandbox_profile(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.write().unwrap();
+        if !s.sandbox_profiles.contains_key(id) {
+            return Err(format!("no sandbox profile `{id}`"));
+        }
+        if s.default_sandbox_profile_id.as_deref() == Some(id) {
+            return Err(format!(
+                "cannot delete sandbox profile `{id}`: it is the global default; \
+                 set another default first"
+            ));
+        }
+        let in_use: Vec<ItemId> = s
+            .items
+            .values()
+            .filter(|i| i.is_project() && i.sandbox_profile_id.as_deref() == Some(id))
+            .map(|i| i.id)
+            .collect();
+        if !in_use.is_empty() {
+            return Err(format!(
+                "cannot delete sandbox profile `{id}`: in use by Project(s) {:?}; \
+                 clear or reassign those overrides first",
+                in_use
+            ));
+        }
+        s.sandbox_profiles.remove(id);
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     // ------------------------------------------------------- the agent verbs
@@ -6977,5 +7163,170 @@ mod tests {
         assert_eq!(updated2.state, State::Backlog);
         assert!(updated2.escalation.is_none());
         assert_eq!(updated2.last_conflict_files, vec!["src/store.rs"]);
+    }
+
+    fn agents_for_seed() -> AgentConfig {
+        AgentConfig {
+            image: "seed-image:test".into(),
+            policy: "sandbox/seed-policy.yaml".into(),
+            cpu: Some("4".into()),
+            memory: Some("8Gi".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sandbox_profiles_seed_from_yaml_when_catalog_empty() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-sbx-seed.json"),
+        );
+        assert!(b.list_sandbox_profiles().is_empty());
+        assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
+        let profiles = b.list_sandbox_profiles();
+        assert_eq!(profiles.len(), 1);
+        let p = &profiles[0];
+        assert_eq!(p.id, "default");
+        assert_eq!(p.image, "seed-image:test");
+        assert_eq!(p.policy, "sandbox/seed-policy.yaml");
+        assert_eq!(p.cpu.as_deref(), Some("4"));
+        assert_eq!(p.memory.as_deref(), Some("8Gi"));
+        assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
+        // Second seed is a no-op.
+        assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
+        assert_eq!(b.list_sandbox_profiles().len(), 1);
+    }
+
+    #[test]
+    fn sandbox_profiles_set_default_and_project_override() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-sbx-override.json"),
+        );
+        b.seed_sandbox_profiles_from(&agents_for_seed());
+        let heavy = b
+            .upsert_sandbox_profile(SandboxProfile {
+                id: "heavy".into(),
+                name: "Heavy".into(),
+                image: "heavy:latest".into(),
+                policy: "sandbox/policy.yaml".into(),
+                cpu: Some("8".into()),
+                memory: Some("16Gi".into()),
+            })
+            .expect("upsert heavy");
+        b.set_default_sandbox_profile(&heavy.id)
+            .expect("set default");
+        assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("heavy"));
+
+        let project = b
+            .create(None, "Sbx Proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        assert!(project.sandbox_profile_id.is_none());
+
+        let updated = b
+            .set_project_sandbox_profile(project.id, Some("default".into()))
+            .expect("set override");
+        assert_eq!(updated.sandbox_profile_id.as_deref(), Some("default"));
+
+        let cleared = b
+            .set_project_sandbox_profile(project.id, None)
+            .expect("clear override");
+        assert!(cleared.sandbox_profile_id.is_none());
+
+        assert!(
+            b.set_project_sandbox_profile(project.id, Some("missing".into()))
+                .is_err(),
+            "unknown profile must be refused"
+        );
+        assert!(
+            b.set_default_sandbox_profile("missing").is_err(),
+            "unknown default must be refused"
+        );
+    }
+
+    #[test]
+    fn sandbox_profiles_refuse_delete_of_default_or_in_use() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-sbx-delete.json"),
+        );
+        b.seed_sandbox_profiles_from(&agents_for_seed());
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "alt".into(),
+            name: "Alt".into(),
+            image: "alt:latest".into(),
+            policy: "sandbox/policy.yaml".into(),
+            cpu: None,
+            memory: None,
+        })
+        .unwrap();
+
+        let err = b.delete_sandbox_profile("default").unwrap_err();
+        assert!(
+            err.contains("global default"),
+            "expected default refusal, got {err}"
+        );
+
+        b.set_default_sandbox_profile("alt").unwrap();
+        let project = b
+            .create(None, "Uses Default", "why", None, Origin::Human, true, None)
+            .unwrap();
+        b.set_project_sandbox_profile(project.id, Some("default".into()))
+            .unwrap();
+
+        let err = b.delete_sandbox_profile("default").unwrap_err();
+        assert!(
+            err.contains("in use"),
+            "expected in-use refusal, got {err}"
+        );
+
+        b.set_project_sandbox_profile(project.id, None).unwrap();
+        b.delete_sandbox_profile("default")
+            .expect("delete after reassignment");
+        assert!(b.get_sandbox_profile("default").is_none());
+    }
+
+    #[test]
+    fn sandbox_profiles_round_trip_json_flush_load() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-sbx-json-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let b = Board::new(Schema::default(), path.clone());
+        b.seed_sandbox_profiles_from(&agents_for_seed());
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "ci".into(),
+            name: "CI".into(),
+            image: "ci:1".into(),
+            policy: "sandbox/policy.yaml".into(),
+            cpu: Some("1".into()),
+            memory: None,
+        })
+        .unwrap();
+        b.set_default_sandbox_profile("ci").unwrap();
+        let project = b
+            .create(None, "Persist Proj", "why", None, Origin::Human, true, None)
+            .unwrap();
+        b.set_project_sandbox_profile(project.id, Some("default".into()))
+            .unwrap();
+        b.flush();
+
+        let restored = Board::load_or_new(Schema::default(), path.clone());
+        assert_eq!(
+            restored.default_sandbox_profile_id().as_deref(),
+            Some("ci")
+        );
+        assert_eq!(restored.list_sandbox_profiles().len(), 2);
+        let p = restored.get(project.id).expect("project");
+        assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
+        // Catalog already populated — must not re-seed over existing profiles.
+        assert!(!restored.seed_sandbox_profiles_from(&agents_for_seed()));
+
+        let _ = std::fs::remove_file(&path);
     }
 }
