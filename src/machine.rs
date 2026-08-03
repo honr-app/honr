@@ -59,6 +59,7 @@ pub fn allowed(from: State, to: State) -> bool {
         (NeedsHuman, Done) => true,
         (Running, Done) => true,
         (Review, Backlog) => true,
+        (Review, NeedsHuman) => true,
         // Approved too early, or Done should wait for GitHub merge — return to Review.
         (Done, Review) => true,
 
@@ -181,6 +182,7 @@ mod tests {
         assert!(allowed(Running, NeedsHuman));
         assert!(allowed(NeedsHuman, Running));
         assert!(allowed(NeedsHuman, Backlog));
+        assert!(allowed(Review, NeedsHuman));
     }
 
     #[test]
