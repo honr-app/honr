@@ -3263,26 +3263,17 @@ fn check_split_relatedness(
             }
         }
 
-        // Impl cards with a PR stay in Review until GitHub merge completes them
-        // (webhook → complete_for_merged_pr). Approve only means "looks good".
-        if item.pr_url.as_ref().is_some_and(|u| !u.trim().is_empty()) {
-            self.story(
-                id,
-                format!(
-                    "{} approved — waiting for GitHub merge ({}).",
-                    item.title,
-                    item.pr_url.as_deref().unwrap_or("")
-                ),
-            );
-            return self
-                .get(id)
-                .ok_or_else(|| format!("no work item #{id}"));
-        }
-
+        // UI: "Approve & Move to Done". Waiting on the merge webhook alone strands
+        // cards when the forwarder missed the event or the PR was already merged
+        // while the card was still Running. Webhook → Done stays idempotent.
         let item = self
             .transition(id, State::Done, "human", Some("approved".into()))
             .map_err(|e| e.to_string())?;
-        self.story(id, format!("{} approved — no PR; marked Done.", item.title));
+        let story = match item.pr_url.as_deref().filter(|u| !u.trim().is_empty()) {
+            Some(url) => format!("{} approved — Done ({}).", item.title, url),
+            None => format!("{} approved — no PR; marked Done.", item.title),
+        };
+        self.story(id, story);
         Ok(item)
     }
 
@@ -6838,16 +6829,16 @@ mod tests {
     }
 
     #[test]
-    fn approve_review_with_pr_stays_in_review_until_merge() {
+    fn approve_review_with_pr_moves_to_done() {
         let b = Arc::new(Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-approve-waits-merge-{}.json",
+                "honr-test-approve-with-pr-{}.json",
                 std::process::id()
             )),
         ));
         let p = b
-            .create(None, "Wait Merge", "intent", None, Origin::Human, true, None)
+            .create(None, "Approve PR", "intent", None, Origin::Human, true, None)
             .unwrap();
         let t = b
             .create(
@@ -6868,10 +6859,11 @@ mod tests {
         b.set_pr_url(t.id, Some("https://github.com/shanemcd/honr/pull/99".into()));
 
         let item = b.approve_review(t.id).expect("approve");
-        assert_eq!(item.state, State::Review, "PR cards wait for merge");
+        assert_eq!(item.state, State::Done, "Approve & Move to Done must complete PR cards");
+        // Webhook after Approve is a no-op (idempotent).
         assert!(
             b.complete_for_merged_pr("https://github.com/shanemcd/honr/pull/99", Some(99))
-                .is_some()
+                .is_none()
         );
         assert_eq!(b.get(t.id).unwrap().state, State::Done);
     }
