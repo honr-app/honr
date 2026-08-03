@@ -13,13 +13,17 @@
     <script>
       (function () {
         try {
-          var t = localStorage.getItem("honr-theme");
-          if (t !== "light" && t !== "dark") {
-            t = window.matchMedia("(prefers-color-scheme: dark)").matches
-              ? "dark"
-              : "light";
+          var pref = localStorage.getItem("honr-theme");
+          if (pref !== "system" && pref !== "light" && pref !== "dark") {
+            pref = "system";
           }
-          document.documentElement.dataset.theme = t;
+          var resolved =
+            pref === "system"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : pref;
+          document.documentElement.dataset.theme = resolved;
         } catch (e) {
           document.documentElement.dataset.theme = "light";
         }

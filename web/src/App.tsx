@@ -7,10 +7,9 @@ import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
 import { money } from "./api";
 import type { WorkItem } from "./types";
 import {
-  applyTheme,
-  resolveInitialTheme,
-  toggleTheme,
-  type Theme,
+  applyThemePreference,
+  readThemePreference,
+  type ThemePreference,
 } from "./theme";
 
 export default function App() {
@@ -18,11 +17,18 @@ export default function App() {
   const now = useNow();
   const [open, setOpen] = useState<number | null>(null);
   const [view, setView] = useState<AppView>("board");
-  const [theme, setTheme] = useState<Theme>(() => resolveInitialTheme());
+  const [themePref, setThemePref] = useState<ThemePreference>(() =>
+    readThemePreference(),
+  );
 
   useEffect(() => {
-    applyTheme(theme);
-  }, [theme]);
+    applyThemePreference(themePref);
+    if (themePref !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyThemePreference("system");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [themePref]);
 
   const { goalOf, breadcrumbOf } = useMemo(() => buildLookups(b.items), [b.items]);
 
@@ -53,15 +59,21 @@ export default function App() {
           <span className={b.connected ? "conn ok" : "conn off"}>
             {b.connected ? "live" : "reconnecting…"}
           </span>
-          <button
-            type="button"
-            className="theme-toggle"
-            title={theme === "light" ? "Switch to dark" : "Switch to light"}
-            aria-label={theme === "light" ? "Switch to dark theme" : "Switch to light theme"}
-            onClick={() => setTheme((t) => toggleTheme(t))}
-          >
-            {theme === "light" ? "Dark" : "Light"}
-          </button>
+          <label className="theme-picker">
+            <span className="dim">Theme</span>
+            <select
+              className="theme-toggle"
+              value={themePref}
+              aria-label="Color theme"
+              onChange={(e) =>
+                setThemePref(e.target.value as ThemePreference)
+              }
+            >
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
         </div>
       </header>
 

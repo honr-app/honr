@@ -228,14 +228,29 @@ textarea {
   align-items: center;
   font-size: 13px;
 }
+.theme-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
 .theme-toggle {
   box-shadow: none;
+  font: inherit;
   font-size: 12px;
   font-weight: 600;
-  color: var(--dim);
-  padding: 4px 10px;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
 }
-.theme-toggle:hover:not(:disabled) { color: var(--ink); }
+.theme-toggle:hover { border-color: var(--accent); }
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .live { color: var(--ok); font-weight: 600; }
 .conn.ok { color: var(--ok); }
 .conn.off { color: var(--warn); }
