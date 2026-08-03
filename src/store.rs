@@ -608,6 +608,27 @@ impl Board {
             if let Err(e) = self.materialize_proposal_on_done(id, by) {
                 tracing::warn!(id, error = %e, "materialize proposal on Done failed");
             }
+            let unblocked = self.newly_unblocked_siblings(id);
+            if unblocked.len() == 1 {
+                let next = &unblocked[0];
+                self.story(
+                    id,
+                    format!(
+                        "Unblocked next sibling #{} ({}) — ready to dispatch.",
+                        next.id, next.title
+                    ),
+                );
+            } else if unblocked.len() > 1 {
+                let list = unblocked
+                    .iter()
+                    .map(|u| format!("#{} ({})", u.id, u.title))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.story(
+                    id,
+                    format!("Unblocked next siblings: {list} — ready to dispatch."),
+                );
+            }
         }
 
         if to == State::Done || to == State::Retired {
@@ -2807,6 +2828,13 @@ fn check_split_relatedness(
         });
     }
 
+    #[allow(dead_code)]
+    pub fn stories_for(&self, near: ItemId) -> Vec<StoryLine> {
+        let s = self.state.read().unwrap();
+        let goal = Self::goal_of(&s, near);
+        s.stories.get(&goal).cloned().unwrap_or_default()
+    }
+
     /// Notify connected subscribers that the main branch advanced (via push or PR merge).
     pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
         tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
@@ -2865,6 +2893,26 @@ fn check_split_relatedness(
     }
 
     // -------------------------------------------------------- derived reads
+
+    /// Returns active (non-terminal) siblings of `id` (sharing the same parent)
+    /// that were blocked by `id` and have now become unblocked (0 unresolved blockers).
+    pub fn newly_unblocked_siblings(&self, id: ItemId) -> Vec<WorkItem> {
+        let s = self.state.read().unwrap();
+        let Some(item) = s.items.get(&id) else {
+            return vec![];
+        };
+        s.items
+            .values()
+            .filter(|other| {
+                other.id != id
+                    && other.parent == item.parent
+                    && !other.state.is_terminal()
+                    && other.blocked_by.contains(&id)
+                    && Self::unresolved_blockers(&s, other).is_empty()
+            })
+            .cloned()
+            .collect()
+    }
 
     pub fn snapshot(&self) -> Snapshot {
         let s = self.state.read().unwrap();
@@ -5896,5 +5944,71 @@ mod tests {
             }
             CatchUpResult::Events(_) => panic!("expected Reset for future last_seq 20"),
         }
+    }
+
+    #[test]
+    fn approve_next_linear_chain_handoff_surfaces_sibling() {
+        let b = Arc::new(Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-approve-next-{}.json",
+                std::process::id()
+            )),
+        ));
+        let p = b
+            .create(None, "Linear Chain Project", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(Some(p.id), "Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+        let t2 = b
+            .create(Some(p.id), "Task 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .unwrap();
+        let t3 = b
+            .create(Some(p.id), "Task 3", "intent 3", Some("dod 3".into()), Origin::Human, false, None)
+            .unwrap();
+
+        b.set_blocked_by(t2.id, vec![t1.id]);
+        b.set_blocked_by(t3.id, vec![t2.id]);
+
+        let _ = b.transition(t1.id, State::Shaping, "test", None);
+        let _ = b.transition(t1.id, State::Backlog, "test", None);
+        let _ = b.transition(t1.id, State::Claimed, "agent", None);
+        let _ = b.transition(t1.id, State::Running, "agent", None);
+        let _ = b.transition(t1.id, State::Review, "agent", None);
+
+        let done1 = b.approve_review(t1.id).expect("approve t1");
+        assert_eq!(done1.state, State::Done);
+
+        let unblocked1 = b.newly_unblocked_siblings(t1.id);
+        assert_eq!(unblocked1.len(), 1);
+        assert_eq!(unblocked1[0].id, t2.id);
+
+        let stories = b.stories_for(p.id);
+        assert!(
+            stories.iter().any(|s| s.text.contains(&format!("Unblocked next sibling #{}", t2.id))),
+            "Expected story line referencing unblocked sibling #{}",
+            t2.id
+        );
+
+        let _ = b.transition(t2.id, State::Shaping, "test", None);
+        let _ = b.transition(t2.id, State::Backlog, "test", None);
+        let _ = b.transition(t2.id, State::Claimed, "agent", None);
+        let _ = b.transition(t2.id, State::Running, "agent", None);
+        let _ = b.transition(t2.id, State::Review, "agent", None);
+
+        let done2 = b.approve_review(t2.id).expect("approve t2");
+        assert_eq!(done2.state, State::Done);
+
+        let unblocked2 = b.newly_unblocked_siblings(t2.id);
+        assert_eq!(unblocked2.len(), 1);
+        assert_eq!(unblocked2[0].id, t3.id);
+
+        let stories2 = b.stories_for(p.id);
+        assert!(
+            stories2.iter().any(|s| s.text.contains(&format!("Unblocked next sibling #{}", t3.id))),
+            "Expected story line referencing unblocked sibling #{}",
+            t3.id
+        );
     }
 }
