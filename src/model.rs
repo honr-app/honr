@@ -326,6 +326,39 @@ pub struct SandboxProfile {
     pub memory: Option<String>,
 }
 
+/// Create knobs after Project override → global default → YAML resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSandboxCreate {
+    pub image: String,
+    pub policy: String,
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    /// Catalog profile that won, if any. `None` means YAML fallback.
+    pub profile_id: Option<String>,
+}
+
+impl ResolvedSandboxCreate {
+    pub fn from_profile(p: &SandboxProfile) -> Self {
+        Self {
+            image: p.image.clone(),
+            policy: p.policy.clone(),
+            cpu: p.cpu.clone(),
+            memory: p.memory.clone(),
+            profile_id: Some(p.id.clone()),
+        }
+    }
+
+    pub fn from_agents(agents: &crate::schema::AgentConfig) -> Self {
+        Self {
+            image: agents.image.clone(),
+            policy: agents.policy.clone(),
+            cpu: agents.cpu.clone(),
+            memory: agents.memory.clone(),
+            profile_id: None,
+        }
+    }
+}
+
 /// Proposed sibling Tasks awaiting human Approve on a card (Initial plan or split).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskProposal {
