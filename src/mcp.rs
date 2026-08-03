@@ -683,7 +683,16 @@ impl Cockpit {
                 }
             }
         }
-        self.ack(a.id, "approved")
+        let unblocked = self.board.newly_unblocked_siblings(a.id);
+        let note = if unblocked.len() == 1 {
+            format!("approved — dispatch #{} next", unblocked[0].id)
+        } else if unblocked.len() > 1 {
+            let ids: Vec<_> = unblocked.iter().map(|u| format!("#{}", u.id)).collect();
+            format!("approved — unblocked: {}", ids.join(", "))
+        } else {
+            "approved".to_string()
+        };
+        self.ack(a.id, &note)
     }
 
     #[tool(
@@ -1226,5 +1235,28 @@ mod tests {
 
         let response = app.call(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn approve_review_mcp_returns_dispatch_next_note() {
+        let (board, goal_id) = test_board();
+        let cockpit = Cockpit::new(board.clone());
+
+        let t1 = board
+            .create(Some(goal_id), "Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+        let t2 = board
+            .create(Some(goal_id), "Task 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .unwrap();
+        board.set_blocked_by(t2.id, vec![t1.id]);
+
+        let _ = board.transition(t1.id, State::Shaping, "test", None);
+        let _ = board.transition(t1.id, State::Backlog, "test", None);
+        let _ = board.transition(t1.id, State::Claimed, "agent", None);
+        let _ = board.transition(t1.id, State::Running, "agent", None);
+        let _ = board.transition(t1.id, State::Review, "agent", None);
+
+        let ack = cockpit.approve_review(Parameters(IdArg { id: t1.id })).expect("approve_review");
+        assert_eq!(ack.0.note, format!("approved — dispatch #{} next", t2.id));
     }
 }
