@@ -281,6 +281,12 @@ pub struct BeadsReadyOut {
     pub items: Vec<crate::beads::BeadsIssue>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct HealEpicsOut {
+    pub healed_count: usize,
+    pub note: String,
+}
+
 // ---------------------------------------------------------------- the server
 
 #[derive(Clone)]
@@ -732,6 +738,18 @@ impl Cockpit {
             .await
             .map_err(bad)?;
         Ok(ToolJson(BeadsReadyOut { items }))
+    }
+
+    #[tool(
+        name = "heal_epics",
+        description = "One-shot heal for completed epics. Scans open beads epics and board projects, closing any whose children are all completed or superseded."
+    )]
+    async fn heal_epics(&self) -> Out<HealEpicsOut> {
+        let healed_count = self.board.heal_completed_epics().await;
+        Ok(ToolJson(HealEpicsOut {
+            healed_count,
+            note: format!("healed {healed_count} completed epic(s)"),
+        }))
     }
 
     #[tool(

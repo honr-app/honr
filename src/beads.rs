@@ -124,6 +124,8 @@ pub struct BeadsIssue {
     pub issue_url: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 impl BeadsIssue {
@@ -888,6 +890,79 @@ impl BeadsClient {
             Err(format!("bd dolt push failed: {err}"))
         }
     }
+
+    /// `bd children <parent_id> --json`
+    pub async fn list_children(&self, parent_id: &str) -> Result<Vec<BeadsIssue>, String> {
+        let out = self
+            .cmd()
+            .args(["children", parent_id, "--json"])
+            .output()
+            .await
+            .map_err(|e| format!("failed to execute bd children: {e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("bd children failed: {err}"));
+        }
+        if out.stdout.is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("failed to parse bd children JSON: {e}"))
+    }
+
+    /// Scans open epics in beads and closes any whose children are all closed or superseded.
+    /// An epic with 0 children is not auto-closed (could be newly created).
+    /// Returns the IDs of epics that were closed.
+    pub async fn close_completed_epics(&self) -> Result<Vec<String>, String> {
+        if !self.db_ready() {
+            return Ok(Vec::new());
+        }
+        let all_issues = self.list_all().await?;
+        let open_epics: Vec<&BeadsIssue> = all_issues
+            .iter()
+            .filter(|i| i.issue_type == "epic" && i.status != "closed" && i.status != "superseded")
+            .collect();
+
+        if open_epics.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Map parent_id -> list of child issues
+        let mut children_map: std::collections::HashMap<String, Vec<&BeadsIssue>> =
+            std::collections::HashMap::new();
+        for issue in &all_issues {
+            if let Some(ref parent_id) = issue.parent {
+                if !parent_id.is_empty() {
+                    children_map.entry(parent_id.clone()).or_default().push(issue);
+                }
+            }
+        }
+
+        let mut closed_epics = Vec::new();
+        for epic in open_epics {
+            let children = children_map.get(&epic.id);
+            if let Some(kids) = children {
+                if !kids.is_empty()
+                    && kids
+                        .iter()
+                        .all(|k| k.status == "closed" || k.status == "superseded")
+                {
+                    tracing::info!(epic_id = %epic.id, "closing epic with all children closed/superseded");
+                    if self
+                        .close(&epic.id, Some("All children completed or superseded"))
+                        .await
+                        .is_ok()
+                    {
+                        let _ = self.github_push(std::slice::from_ref(&epic.id)).await;
+                        self.schedule_dolt_push();
+                        closed_epics.push(epic.id.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(closed_epics)
+    }
 }
 
 #[cfg(test)]
@@ -1131,6 +1206,7 @@ mod tests {
             external_id: None,
             issue_url: None,
             url: None,
+            parent: None,
         };
 
         assert_eq!(issue.github_issue_url(), None);
@@ -1205,5 +1281,54 @@ mod tests {
         let scoped = client.list_ready_focused(Some(&project.id)).await.expect("scoped ready");
         assert!(scoped.iter().any(|i| i.id == task.id), "scoped ready should include child task");
         assert!(!scoped.iter().any(|i| i.issue_type == "epic"), "scoped ready MUST NOT include epics");
+    }
+
+    #[tokio::test]
+    async fn test_close_completed_epics_auto_closes_epic_when_all_children_closed() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-epic-close-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let client = BeadsClient::new(&test_dir);
+        client.init_stealth().await.expect("init stealth");
+
+        let epic = client
+            .create_linked("Test Epic", 0, "epic", None, None, &[], None)
+            .await
+            .expect("create epic");
+
+        let task1 = client
+            .create_linked("Task 1", 1, "task", None, Some(&epic.id), &[], None)
+            .await
+            .expect("create task1");
+
+        let task2 = client
+            .create_linked("Task 2", 1, "task", None, Some(&epic.id), &[], None)
+            .await
+            .expect("create task2");
+
+        // Epic should NOT close when children are still open
+        let closed = client.close_completed_epics().await.expect("close_completed_epics");
+        assert!(closed.is_empty(), "epic with open children must stay open");
+
+        // Close child task 1
+        client.close(&task1.id, Some("done 1")).await.expect("close task1");
+
+        // Still open because task2 is open
+        let closed2 = client.close_completed_epics().await.expect("close_completed_epics");
+        assert!(closed2.is_empty(), "epic with remaining open child must stay open");
+
+        // Close child task 2
+        client.close(&task2.id, Some("done 2")).await.expect("close task2");
+
+        // Now all children are closed -> epic should be automatically closed!
+        let closed3 = client.close_completed_epics().await.expect("close_completed_epics");
+        assert_eq!(closed3, vec![epic.id.clone()], "epic with all children closed must be closed");
+
+        let show_epic = client.show(&epic.id).await.expect("show epic");
+        assert_eq!(show_epic.status, "closed");
     }
 }
