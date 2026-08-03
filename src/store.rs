@@ -1890,14 +1890,13 @@ impl Board {
         self.state.read().unwrap().sandbox_profiles.get(id).cloned()
     }
 
-    /// Insert or replace a profile by id. Does not change the global default.
+    /// Insert or replace a profile. Empty `id` means create: derive a slug from
+    /// `name` and append `-2`, `-3`, … when that slug is already taken. Explicit
+    /// ids still upsert in place (edit / seed). Does not change the global default.
     pub fn upsert_sandbox_profile(
         &self,
         profile: SandboxProfile,
     ) -> Result<SandboxProfile, String> {
-        if profile.id.trim().is_empty() {
-            return Err("sandbox profile id must not be empty".into());
-        }
         if profile.name.trim().is_empty() {
             return Err("sandbox profile name must not be empty".into());
         }
@@ -1907,18 +1906,31 @@ impl Board {
         if profile.policy.trim().is_empty() {
             return Err("sandbox profile policy must not be empty".into());
         }
-        let stored = SandboxProfile {
-            id: profile.id.trim().to_string(),
-            name: profile.name.trim().to_string(),
-            image: profile.image.trim().to_string(),
-            policy: profile.policy.trim().to_string(),
-            cpu: profile.cpu.filter(|c| !c.trim().is_empty()),
-            memory: profile.memory.filter(|m| !m.trim().is_empty()),
+        let name = profile.name.trim().to_string();
+        let image = profile.image.trim().to_string();
+        let policy = profile.policy.trim().to_string();
+        let cpu = profile.cpu.filter(|c| !c.trim().is_empty());
+        let memory = profile.memory.filter(|m| !m.trim().is_empty());
+        let mut s = self.state.write().unwrap();
+        let id = {
+            let trimmed = profile.id.trim();
+            if trimmed.is_empty() {
+                let base = crate::model::slugify_sandbox_profile_id(&name);
+                Self::allocate_unique_sandbox_profile_id(&s.sandbox_profiles, &base)
+            } else {
+                trimmed.to_string()
+            }
         };
-        {
-            let mut s = self.state.write().unwrap();
-            s.sandbox_profiles.insert(stored.id.clone(), stored.clone());
-        }
+        let stored = SandboxProfile {
+            id,
+            name,
+            image,
+            policy,
+            cpu,
+            memory,
+        };
+        s.sandbox_profiles.insert(stored.id.clone(), stored.clone());
+        drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         Ok(stored)
     }
@@ -2334,6 +2346,28 @@ impl Board {
 
 fn normalize_title(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Pick `base`, or `base-2`, `base-3`, … until unused in the catalog.
+fn allocate_unique_sandbox_profile_id(
+    existing: &BTreeMap<String, SandboxProfile>,
+    base: &str,
+) -> String {
+    if !existing.contains_key(base) {
+        return base.to_string();
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !existing.contains_key(&candidate) {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+        if n == u32::MAX {
+            // Pathological; still must terminate.
+            return format!("{base}-{n}");
+        }
+    }
 }
 
 fn tokenize_text(text: &str) -> HashSet<String> {
@@ -7695,5 +7729,57 @@ mod tests {
         assert_eq!(over.profile_id.as_deref(), Some("alt"));
         assert_eq!(over.image, "alt-img");
         assert_eq!(over.memory.as_deref(), Some("8Gi"));
+    }
+
+    #[test]
+    fn sandbox_profiles_create_without_id_slugs_from_name() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-sbx-slug.json"),
+        );
+        b.seed_sandbox_profiles_from(&agents_for_seed());
+
+        let created = b
+            .upsert_sandbox_profile(SandboxProfile {
+                id: String::new(),
+                name: "Heavy CI".into(),
+                image: "img:ci".into(),
+                policy: "policy.yaml".into(),
+                cpu: None,
+                memory: None,
+            })
+            .expect("create from name");
+        assert_eq!(created.id, "heavy-ci");
+
+        // Collision with seeded `default` slug from name "Default" would be
+        // "default" — creating another "Default" must suffix.
+        let again = b
+            .upsert_sandbox_profile(SandboxProfile {
+                id: String::new(),
+                name: "Default".into(),
+                image: "img:2".into(),
+                policy: "p.yaml".into(),
+                cpu: None,
+                memory: None,
+            })
+            .expect("create colliding slug");
+        assert_eq!(again.id, "default-2");
+
+        // Explicit empty-ish punctuation falls back to `profile`.
+        let punct = b
+            .upsert_sandbox_profile(SandboxProfile {
+                id: "".into(),
+                name: "!!!".into(),
+                image: "img:x".into(),
+                policy: "p.yaml".into(),
+                cpu: None,
+                memory: None,
+            })
+            .expect("create punctuation name");
+        assert_eq!(punct.id, "profile");
+
+        // Seeded default still present and untouched.
+        assert!(b.get_sandbox_profile("default").is_some());
+        assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
     }
 }

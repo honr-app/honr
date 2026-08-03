@@ -326,6 +326,31 @@ pub struct SandboxProfile {
     pub memory: Option<String>,
 }
 
+/// Stable id slug from a display name. Lowercase ASCII alphanumerics; runs of
+/// whitespace/`_`/`-` become a single hyphen. Empty/punctuation-only names
+/// fall back to `profile` so create never invents a blank key.
+pub fn slugify_sandbox_profile_id(name: &str) -> String {
+    let mut out = String::new();
+    let mut pending_hyphen = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending_hyphen && !out.is_empty() {
+                out.push('-');
+            }
+            pending_hyphen = false;
+            out.push(c.to_ascii_lowercase());
+        } else if c.is_whitespace() || c == '-' || c == '_' {
+            pending_hyphen = true;
+        }
+        // other punctuation is dropped
+    }
+    if out.is_empty() {
+        "profile".into()
+    } else {
+        out
+    }
+}
+
 /// Create knobs after Project override → global default → YAML resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSandboxCreate {
@@ -650,5 +675,15 @@ mod tests {
         assert_eq!(item.state, State::Backlog);
         assert_eq!(item.state.column(), Column::Backlog);
         assert!(!item.awaiting_dispatch);
+    }
+
+    #[test]
+    fn slugify_sandbox_profile_id_from_display_name() {
+        assert_eq!(slugify_sandbox_profile_id("Heavy CI"), "heavy-ci");
+        assert_eq!(slugify_sandbox_profile_id("  Default  "), "default");
+        assert_eq!(slugify_sandbox_profile_id("Foo_Bar--Baz"), "foo-bar-baz");
+        assert_eq!(slugify_sandbox_profile_id("!!!"), "profile");
+        assert_eq!(slugify_sandbox_profile_id(""), "profile");
+        assert_eq!(slugify_sandbox_profile_id("A"), "a");
     }
 }

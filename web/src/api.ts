@@ -76,7 +76,8 @@ export const api = {
   listSandboxProfiles: (): Promise<SandboxProfilesOut> =>
     fetch("/api/sandbox-profiles").then(jsonOrThrow),
   upsertSandboxProfile: (profile: {
-    id: string;
+    /** Omit on create — server derives a slug from `name`. */
+    id?: string;
     name: string;
     image: string;
     policy: string;
