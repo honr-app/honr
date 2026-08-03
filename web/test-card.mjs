@@ -687,8 +687,12 @@ const pickerHtml = renderToString(
 );
 assert(pickerHtml.includes("data-testid=\"project-sandbox-picker\""), "Project sandbox picker should render");
 assert(pickerHtml.includes("data-testid=\"project-sandbox-select-42\""), "Project sandbox select should render");
-assert(pickerHtml.includes("Global default"), "Unset option should be labeled as global default");
-assert(pickerHtml.includes("Heavy"), "Picker should list catalog profiles");
+assert(pickerHtml.includes("Use global default"), "Unset option should read 'Use global default'");
+assert(!pickerHtml.includes("Global default ("), "Unset option must not duplicate name as 'Global default (…)'");
+assert(pickerHtml.includes("Default · global default"), "Global default profile marked once by name");
+assert(pickerHtml.includes("Heavy"), "Named profiles list by display name");
+assert(!pickerHtml.includes("Default (default)"), "Must not show 'Default (default)' duplication");
+assert(!pickerHtml.includes("Heavy (heavy)"), "Must not show raw id in every option");
 
 // Board view still mounts Cockpit (regression: chrome must not replace it).
 const emptyCockpitHtml = renderToString(
