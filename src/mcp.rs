@@ -924,10 +924,19 @@ impl ServerHandler for Cockpit {
 
 /// Mounted on the same axum router, same port, same state as the human face.
 pub fn service(board: SharedBoard) -> StreamableHttpService<Cockpit, LocalSessionManager> {
+    // rmcp defaults to localhost/127.0.0.1/::1 only (DNS-rebinding guard).
+    // Docker clients reach us as host.docker.internal — allow that Host.
+    let mcp_http = StreamableHttpServerConfig::default().with_allowed_hosts([
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "host.docker.internal",
+        "host.docker.internal:8080",
+    ]);
     StreamableHttpService::new(
         move || Ok(Cockpit::new(board.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        mcp_http,
     )
 }
 
