@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { Cockpit } from "./components/Cockpit";
 import { DetailDrawer } from "./components/Detail";
+import { PrimarySidebar, type AppView } from "./components/PrimarySidebar";
+import { Settings } from "./components/Settings";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
 import { money } from "./api";
 import type { WorkItem } from "./types";
@@ -9,6 +11,7 @@ export default function App() {
   const b = useBoard();
   const now = useNow();
   const [open, setOpen] = useState<number | null>(null);
+  const [view, setView] = useState<AppView>("board");
 
   const { goalOf, breadcrumbOf } = useMemo(() => buildLookups(b.items), [b.items]);
 
@@ -53,36 +56,52 @@ export default function App() {
       )}
       {b.error && staleFor === null && <div className="err banner">{b.error}</div>}
 
-      <main className={open ? "with-drawer" : ""}>
-        {!b.loaded ? (
-          <div className="dim pad">loading…</div>
-        ) : (
-          <Cockpit
-            goals={b.goals}
-            items={b.items}
-            stories={b.stories}
-            goalOf={goalOf}
-            breadcrumbOf={breadcrumbOf}
-            now={now}
-            agentTimeout={b.agentTimeout}
-            defaultEngine={b.defaultEngine}
-            defaultModel={b.defaultModel}
-            onOpen={setOpen}
-            onChanged={b.refresh}
-          />
-        )}
+      <div className="shell">
+        <PrimarySidebar
+          view={view}
+          onNavigate={(next) => {
+            if (next === "settings") setOpen(null);
+            setView(next);
+          }}
+        />
 
-        {open != null && (
-          <DetailDrawer
-            id={open}
-            now={now}
-            onClose={() => setOpen(null)}
-            onChanged={b.refresh}
-            defaultEngine={b.defaultEngine}
-            defaultModel={b.defaultModel}
-          />
-        )}
-      </main>
+        <main className={open && view === "board" ? "with-drawer" : ""}>
+          {view === "board" ? (
+            <>
+              {!b.loaded ? (
+                <div className="dim pad">loading…</div>
+              ) : (
+                <Cockpit
+                  goals={b.goals}
+                  items={b.items}
+                  stories={b.stories}
+                  goalOf={goalOf}
+                  breadcrumbOf={breadcrumbOf}
+                  now={now}
+                  agentTimeout={b.agentTimeout}
+                  defaultEngine={b.defaultEngine}
+                  defaultModel={b.defaultModel}
+                  onOpen={setOpen}
+                  onChanged={b.refresh}
+                />
+              )}
+
+              {open != null && (
+                <DetailDrawer
+                  id={open}
+                  now={now}
+                  onClose={() => setOpen(null)}
+                  onChanged={b.refresh}
+                  defaultEngine={b.defaultEngine}
+                  defaultModel={b.defaultModel}
+                />
+              )}
+            </>
+          ) : (
+            <Settings />
+          )}
+        </main>
+      </div>
     </div>
   );
 }
