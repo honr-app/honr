@@ -4,7 +4,12 @@ import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
 import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
+import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
+import { Settings } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const now = Math.floor(Date.now() / 1000);
 
@@ -565,5 +570,53 @@ const pingPayload = JSON.stringify({ type: "ping" });
 const parsedPing = JSON.parse(pingPayload);
 assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
-console.log("\n✅ All Card, Cockpit, Detail, and useBoard sequence guard assertions passed!");
+// Test 17: App chrome — Board | Settings sidebar + Settings shell placeholders
+const sidebarHtml = renderToString(
+  React.createElement(PrimarySidebar, {
+    view: "board",
+    onNavigate: () => {},
+  }),
+);
+assert(sidebarHtml.includes("data-testid=\"app-sidebar\""), "App should render primary sidebar");
+assert(sidebarHtml.includes("Board"), "Sidebar should include Board nav");
+assert(sidebarHtml.includes("Settings"), "Sidebar should include Settings nav");
+assert(sidebarHtml.includes("data-testid=\"nav-board\""), "Sidebar should expose Board control");
+assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should expose Settings control");
+
+const settingsHtml = renderToString(React.createElement(Settings));
+assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
+assert(settingsHtml.includes("Sandboxes"), "Settings should include Sandboxes section");
+assert(
+  settingsHtml.includes("data-testid=\"sandboxes-placeholder\""),
+  "Settings should show Sandboxes placeholder",
+);
+assert(settingsHtml.includes("General"), "Settings should include at least one stub section");
+assert(settingsHtml.includes("data-testid=\"general-stub\"") || settingsHtml.includes("soon"),
+  "Settings stub section should be marked as placeholder");
+
+// Board view still mounts Cockpit (regression: chrome must not replace it).
+const emptyCockpitHtml = renderToString(
+  React.createElement(Cockpit, {
+    goals: [],
+    items: new Map(),
+    stories: new Map(),
+    goalOf: (id) => id,
+    breadcrumbOf: () => "",
+    now: Date.now(),
+    agentTimeout: 300,
+    onOpen: () => {},
+  }),
+);
+assert(emptyCockpitHtml.includes("cockpit") || emptyCockpitHtml.includes("Welcome to honr"),
+  "Board view should still render Cockpit");
+
+const pkg = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
+);
+assert(!Object.keys(pkg.dependencies || {}).some((d) => /patternfly/i.test(d)),
+  "Must not add a PatternFly dependency");
+assert(!Object.keys(pkg.devDependencies || {}).some((d) => /patternfly/i.test(d)),
+  "Must not add a PatternFly devDependency");
+
+console.log("\n✅ All Card, Cockpit, Detail, Settings chrome, and useBoard sequence guard assertions passed!");
 
