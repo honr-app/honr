@@ -98,7 +98,7 @@ impl Default for DoltPushDebouncer {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
 pub struct BeadsIssue {
     pub id: String,
     pub title: String,
@@ -364,11 +364,14 @@ impl BeadsClient {
         }
     }
 
-    /// Run `bd ready --json` to fetch unblocked ready issues.
-    pub async fn list_ready(&self) -> Result<Vec<BeadsIssue>, String> {
-        let out = self
-            .cmd()
-            .args(["ready", "--json"])
+    /// Run `bd ready --json --exclude-type=epic` (and optional `--parent=<epic>`) to fetch task-only ready work.
+    pub async fn list_ready_focused(&self, parent: Option<&str>) -> Result<Vec<BeadsIssue>, String> {
+        let mut cmd = self.cmd();
+        cmd.args(["ready", "--json", "--exclude-type=epic"]);
+        if let Some(p) = parent.filter(|p| !p.trim().is_empty() && Self::is_real_id(p)) {
+            cmd.arg("--parent").arg(p);
+        }
+        let out = cmd
             .output()
             .await
             .map_err(|e| format!("failed to execute bd ready: {e}"))?;
@@ -381,8 +384,14 @@ impl BeadsClient {
         if out.stdout.is_empty() {
             return Ok(Vec::new());
         }
-        serde_json::from_slice(&out.stdout)
-            .map_err(|e| format!("failed to parse bd ready JSON: {e}"))
+        let items: Vec<BeadsIssue> = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("failed to parse bd ready JSON: {e}"))?;
+        Ok(items.into_iter().filter(|i| i.issue_type != "epic").collect())
+    }
+
+    /// Run `bd ready --json --exclude-type=epic` to fetch unblocked ready tasks.
+    pub async fn list_ready(&self) -> Result<Vec<BeadsIssue>, String> {
+        self.list_ready_focused(None).await
     }
 
     /// List issues (`bd list --json --all -n 0`).
@@ -925,17 +934,21 @@ mod tests {
             .await
             .expect("create task");
 
+        let ready_before_claim = client.list_ready().await.expect("list ready");
+        assert!(
+            ready_before_claim.iter().any(|i| i.id == task.id),
+            "expected open task in ready work before claim"
+        );
+        assert!(
+            !ready_before_claim.iter().any(|i| i.id == project.id),
+            "epics must be excluded from ready work"
+        );
+
         client.claim(&task.id).await.expect("claim task");
         client
             .remember("Test insight for beads")
             .await
             .expect("remember insight");
-
-        let ready = client.list_ready().await.expect("list ready");
-        assert!(
-            ready.iter().any(|i| i.id == task.id) || !ready.is_empty(),
-            "expected ready work after claim/in_progress semantics"
-        );
 
         let prime_out = client.prime().await.expect("prime");
         assert!(prime_out.contains("Test insight for beads"));
@@ -1145,5 +1158,52 @@ mod tests {
             issue.github_issue_url(),
             Some("https://github.com/shanemcd/honr/issues/103".into())
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_ready_focused_excludes_epics() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-ready-epic-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let client = BeadsClient::new(&test_dir);
+        client.init_stealth().await.expect("init stealth");
+
+        let project = client
+            .create_linked(
+                "Epic Project",
+                0,
+                "epic",
+                Some("Epic description"),
+                None,
+                &[],
+                None,
+            )
+            .await
+            .expect("create epic");
+
+        let task = client
+            .create_linked(
+                "Task Work Item",
+                1,
+                "task",
+                Some("Task description"),
+                Some(&project.id),
+                &[],
+                None,
+            )
+            .await
+            .expect("create task");
+
+        let ready = client.list_ready_focused(None).await.expect("list_ready_focused");
+        assert!(ready.iter().any(|i| i.id == task.id), "ready tasks should include task item");
+        assert!(!ready.iter().any(|i| i.issue_type == "epic"), "ready tasks MUST NOT include epics");
+
+        let scoped = client.list_ready_focused(Some(&project.id)).await.expect("scoped ready");
+        assert!(scoped.iter().any(|i| i.id == task.id), "scoped ready should include child task");
+        assert!(!scoped.iter().any(|i| i.issue_type == "epic"), "scoped ready MUST NOT include epics");
     }
 }
