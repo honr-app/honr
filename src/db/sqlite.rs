@@ -1,12 +1,13 @@
 //! SQLite `BoardStore` — row-level board persistence and one-shot JSON import.
 
 use super::codec::{
-    item_from_row, item_to_row, parent_first, META_JSON_IMPORTED, META_NEXT_ID,
+    item_from_row, item_to_row, parent_first, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
+    META_NEXT_ID, META_SANDBOX_PROFILES,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
-use crate::model::{ItemId, WorkItem};
+use crate::model::{ItemId, SandboxProfile, WorkItem};
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -54,10 +55,14 @@ impl SqliteBoardStore {
             items.insert(item.id, item);
         }
         let stories = self.load_all_stories().await?;
+        let sandbox_profiles = self.load_sandbox_profiles().await?;
+        let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
         Ok(BoardState {
             next_id,
             items,
             stories,
+            sandbox_profiles,
+            default_sandbox_profile_id,
             agent_logs: BTreeMap::new(),
         })
     }
@@ -109,6 +114,15 @@ impl SqliteBoardStore {
         }
 
         set_meta_tx(&mut tx, META_NEXT_ID, &state.next_id.to_string()).await?;
+        let profiles_json = serde_json::to_string(&state.sandbox_profiles)
+            .map_err(|e| StoreError::Query(format!("serialize sandbox_profiles: {e}")))?;
+        set_meta_tx(&mut tx, META_SANDBOX_PROFILES, &profiles_json).await?;
+        set_meta_tx(
+            &mut tx,
+            META_DEFAULT_SANDBOX_PROFILE_ID,
+            state.default_sandbox_profile_id.as_deref().unwrap_or(""),
+        )
+        .await?;
 
         tx.commit()
             .await
@@ -139,6 +153,24 @@ impl SqliteBoardStore {
         self.meta_set(META_JSON_IMPORTED, &Utc::now().to_rfc3339())
             .await?;
         Ok(true)
+    }
+
+    async fn load_sandbox_profiles(
+        &self,
+    ) -> Result<BTreeMap<String, SandboxProfile>, StoreError> {
+        match self.meta_get(META_SANDBOX_PROFILES).await? {
+            None => Ok(BTreeMap::new()),
+            Some(raw) if raw.is_empty() || raw == "{}" => Ok(BTreeMap::new()),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode sandbox_profiles: {e}"))),
+        }
+    }
+
+    async fn load_default_sandbox_profile_id(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .meta_get(META_DEFAULT_SANDBOX_PROFILE_ID)
+            .await?
+            .filter(|s| !s.is_empty()))
     }
 }
 
@@ -507,6 +539,7 @@ mod tests {
         parent.state = State::Backlog;
         parent.project_prompt = Some("standing".into());
         parent.beads_id = Some("honr-abc".into());
+        parent.sandbox_profile_id = Some("default".into());
 
         let mut child = WorkItem::new(2, "Task", "do it");
         child.parent = Some(1);
@@ -539,20 +572,39 @@ mod tests {
         let p = store.get_item(1).await.expect("get p").expect("p");
         assert_eq!(p.project_prompt.as_deref(), Some("standing"));
         assert_eq!(p.beads_id.as_deref(), Some("honr-abc"));
+        assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
 
         let stories = store.load_stories(1).await.expect("stories");
         assert_eq!(stories.len(), 1);
         assert_eq!(stories[0].text, "kicked off");
         assert_eq!(store.get_next_id().await.unwrap(), 3);
 
-        // Full snapshot round-trip.
-        let state = store.load_board_state().await.expect("load state");
+        // Full snapshot round-trip including sandbox profile catalog.
+        let mut state = store.load_board_state().await.expect("load state");
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.next_id, 3);
+        state.sandbox_profiles.insert(
+            "default".into(),
+            SandboxProfile {
+                id: "default".into(),
+                name: "Default".into(),
+                image: "img:1".into(),
+                policy: "pol.yaml".into(),
+                cpu: Some("2".into()),
+                memory: None,
+            },
+        );
+        state.default_sandbox_profile_id = Some("default".into());
         store.save_board_state(&state).await.expect("save");
         let again = store.load_board_state().await.expect("reload");
         assert_eq!(again.items.get(&2).unwrap().blocked_by, vec![1]);
         assert_eq!(again.stories.get(&1).unwrap()[0].text, "kicked off");
+        assert_eq!(
+            again.items.get(&1).unwrap().sandbox_profile_id.as_deref(),
+            Some("default")
+        );
+        assert_eq!(again.default_sandbox_profile_id.as_deref(), Some("default"));
+        assert_eq!(again.sandbox_profiles.get("default").unwrap().image, "img:1");
     }
 
     #[tokio::test]
@@ -580,8 +632,7 @@ mod tests {
         let state = BoardState {
             next_id: 4,
             items,
-            stories: BTreeMap::new(),
-            agent_logs: BTreeMap::new(),
+            ..Default::default()
         };
         store.save_board_state(&state).await.expect("save");
         let loaded = store.load_board_state().await.expect("load");

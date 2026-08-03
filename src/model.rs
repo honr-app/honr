@@ -311,6 +311,21 @@ pub struct PlanTaskBrief {
     pub current: bool,
 }
 
+/// Named create-spec for OpenShell sandboxes. Board-state catalog entries;
+/// YAML `execution.agents` image/policy/cpu/memory is seed/fallback only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxProfile {
+    pub id: String,
+    pub name: String,
+    /// Passed to `openshell sandbox create --from`.
+    pub image: String,
+    pub policy: String,
+    #[serde(default)]
+    pub cpu: Option<String>,
+    #[serde(default)]
+    pub memory: Option<String>,
+}
+
 /// Proposed sibling Tasks awaiting human Approve on a card (Initial plan or split).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskProposal {
@@ -442,6 +457,12 @@ pub struct WorkItem {
     #[serde(default)]
     pub project_prompt: Option<String>,
 
+    /// Optional sandbox profile override for this Project. Null / unset means
+    /// inherit [`crate::store::BoardState::default_sandbox_profile_id`].
+    /// Null on Tasks.
+    #[serde(default)]
+    pub sandbox_profile_id: Option<String>,
+
     /// The bounce reason if this card was returned to Backlog due to an infra or execution bounce.
     #[serde(default)]
     pub last_bounce_reason: Option<String>,
@@ -530,6 +551,7 @@ impl WorkItem {
             diff_removed: 0,
             notes: Vec::new(),
             project_prompt: None,
+            sandbox_profile_id: None,
             last_bounce_reason: None,
             last_conflict_files: Vec::new(),
             release_target: None,
