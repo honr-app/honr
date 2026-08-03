@@ -4,6 +4,13 @@
 # related by dependency edges (blocks / relates-to), not nested hierarchy.
 # Vision / Epic / Story are retired.
 
+# Board persistence. Default is local SQLite; set a postgres:// URL (or
+# HONR_DATABASE_URL) for Postgres. Board still flushes honr.json until the
+# SQLite cutover Task lands — this stanza selects the future store.
+board:
+  database:
+    url: sqlite:honr.db
+
 levels:
   - name: Project
     horizon: 2q
