@@ -11,10 +11,49 @@ use crate::model::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
 
 use super::store::StoreError;
+
+/// Read an INTEGER column as i64 on both SQLite and Postgres.
+///
+/// SQLite exposes integers as i64; Postgres `INTEGER` (int4) decodes as i32 in
+/// sqlx, while `COUNT(*)` / `BIGINT` decode as i64. Try wide then narrow.
+fn row_i64<'r, R>(row: &'r R, col: &'r str) -> Result<i64, StoreError>
+where
+    R: Row,
+    &'r str: sqlx::ColumnIndex<R>,
+    i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    i32: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    match row.try_get::<i64, _>(col) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            let v: i32 = row
+                .try_get(col)
+                .map_err(|e| StoreError::Query(format!("{col}: {e}")))?;
+            Ok(i64::from(v))
+        }
+    }
+}
+
+fn row_i64_opt<'r, R>(row: &'r R, col: &'r str) -> Result<Option<i64>, StoreError>
+where
+    R: Row,
+    &'r str: sqlx::ColumnIndex<R>,
+    Option<i64>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    match row.try_get::<Option<i64>, _>(col) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            let v: Option<i32> = row
+                .try_get(col)
+                .map_err(|e| StoreError::Query(format!("{col}: {e}")))?;
+            Ok(v.map(i64::from))
+        }
+    }
+}
 
 /// Meta key written after a successful one-shot `honr.json` import.
 pub const META_JSON_IMPORTED: &str = "json_imported";
@@ -260,11 +299,19 @@ fn parse_dt(raw: &str, field: &str) -> Result<DateTime<Utc>, StoreError> {
         .map_err(|e| StoreError::Query(format!("parse {field}: {e}")))
 }
 
-pub fn item_from_row(row: &SqliteRow) -> Result<WorkItem, StoreError> {
-    let id: i64 = row.try_get("id").map_err(|e| StoreError::Query(e.to_string()))?;
-    let parent_id: Option<i64> = row
-        .try_get("parent_id")
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+pub fn item_from_row<'r, R>(row: &'r R) -> Result<WorkItem, StoreError>
+where
+    R: Row,
+    &'r str: sqlx::ColumnIndex<R>,
+    i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    i32: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<i64>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    let id = row_i64(row, "id")?;
+    let parent_id = row_i64_opt(row, "parent_id")?;
     let level: Option<String> = row
         .try_get("level")
         .map_err(|e| StoreError::Query(e.to_string()))?;
@@ -280,24 +327,16 @@ pub fn item_from_row(row: &SqliteRow) -> Result<WorkItem, StoreError> {
     let state_raw: String = row
         .try_get("state")
         .map_err(|e| StoreError::Query(e.to_string()))?;
-    let above_line: i64 = row
-        .try_get("above_line")
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+    let above_line = row_i64(row, "above_line")?;
     let capability: Option<String> = row
         .try_get("capability")
         .map_err(|e| StoreError::Query(e.to_string()))?;
     let run_deadline_raw: Option<String> = row
         .try_get("run_deadline_at")
         .map_err(|e| StoreError::Query(e.to_string()))?;
-    let parked: i64 = row
-        .try_get("parked")
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let awaiting_dispatch: i64 = row
-        .try_get("awaiting_dispatch")
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let rebase_requested: i64 = row
-        .try_get("rebase_requested")
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+    let parked = row_i64(row, "parked")?;
+    let awaiting_dispatch = row_i64(row, "awaiting_dispatch")?;
+    let rebase_requested = row_i64(row, "rebase_requested")?;
     let entered_state_at: String = row
         .try_get("entered_state_at")
         .map_err(|e| StoreError::Query(e.to_string()))?;
