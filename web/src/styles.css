@@ -680,34 +680,6 @@ main > :first-child { flex: 1; min-width: 0; }
 .cockpit-needs { margin: 0; }
 .cockpit-needs-list { display: flex; flex-direction: column; gap: 10px; }
 
-.cockpit-ready { margin: 0; }
-.cockpit-ready-list { display: flex; flex-direction: column; gap: 10px; }
-.cockpit-ready-card {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-}
-.cockpit-ready-main { flex: 1; min-width: 220px; }
-.cockpit-ready-title {
-  background: none;
-  border: 0;
-  padding: 0;
-  color: var(--ink);
-  font-weight: 600;
-  font-size: 14px;
-  text-align: left;
-}
-.cockpit-ready-title .id { color: var(--accent); }
-.cockpit-ready-title:hover { color: var(--accent); }
-.cockpit-ready-intent { margin: 4px 0 0; font-size: 12px; color: var(--dim); }
-.cockpit-ready-actions { display: flex; align-items: center; gap: 8px; }
-
 .cockpit-need {
   display: flex;
   flex-wrap: wrap;
@@ -777,36 +749,6 @@ main > :first-child { flex: 1; min-width: 0; }
   flex-direction: column;
   gap: 12px;
 }
-.cockpit-howto {
-  margin-top: 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  padding: 0 14px 12px;
-}
-.cockpit-howto > summary {
-  cursor: pointer;
-  list-style: none;
-  padding: 12px 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--dim);
-  user-select: none;
-}
-.cockpit-howto > summary::-webkit-details-marker { display: none; }
-.cockpit-howto > summary::before { content: "▸ "; color: var(--dim); }
-.cockpit-howto[open] > summary::before { content: "▾ "; }
-.cockpit-howto-steps {
-  margin: 0 0 4px;
-  padding-left: 18px;
-  color: var(--dim);
-  font-size: 12px;
-  line-height: 1.55;
-}
-.cockpit-howto-steps strong { color: var(--ink); font-weight: 600; }
-
 /* ------------------------------------------------------------------- board lanes */
 
 .lane { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); }

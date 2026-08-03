@@ -75,25 +75,6 @@ export function Cockpit(props: CockpitProps) {
     });
   }, [tasks, filterQuery, projectFilter]);
 
-  const readyToDispatchItems = useMemo(() => {
-    const q = filterQuery.toLowerCase().trim();
-    return tasks.filter((t) => {
-      if (normState(t.state) !== "backlog") return false;
-      if (t.parked) return false;
-      if (t.awaiting_dispatch) return false;
-      if (isBlocked(t)) return false;
-      if (projectFilter !== "all" && t.parent !== projectFilter) return false;
-      if (
-        q &&
-        !t.title.toLowerCase().includes(q) &&
-        !`#${t.id}`.includes(q) &&
-        !(t.beads_id ?? "").toLowerCase().includes(q)
-      )
-        return false;
-      return true;
-    });
-  }, [tasks, filterQuery, projectFilter]);
-
   const totals = useMemo(() => {
     let needsYou = 0;
     let running = 0;
@@ -183,7 +164,6 @@ export function Cockpit(props: CockpitProps) {
             </p>
           )}
         </div>
-        <HowItWorks />
       </div>
     );
   }
@@ -191,10 +171,6 @@ export function Cockpit(props: CockpitProps) {
   const showNeedsBlock =
     needsYouItems.length > 0 &&
     (filterState === "all" || filterState === "needs_you");
-
-  const showReadyBlock =
-    readyToDispatchItems.length > 0 &&
-    (filterState === "all" || filterState === "running");
 
   return (
     <div className={`cockpit ${totals.needsYou > 0 ? "cockpit-attention" : ""}`}>
@@ -306,20 +282,6 @@ export function Cockpit(props: CockpitProps) {
         </section>
       )}
 
-      {showReadyBlock && (
-        <section className="cockpit-ready" aria-labelledby="cockpit-ready-title">
-          <div className="cockpit-section-head">
-            <h2 id="cockpit-ready-title">Ready to dispatch</h2>
-            <span className="dim">Unblocked Backlog cards — click Start to dispatch</span>
-          </div>
-          <ReadyToDispatchList
-            items={readyToDispatchItems}
-            onOpen={props.onOpen}
-            onChanged={props.onChanged ?? (() => {})}
-          />
-        </section>
-      )}
-
       <div className="cockpit-lanes">
         {sortedGoals.map((goal) => {
           const archived =
@@ -345,8 +307,6 @@ export function Cockpit(props: CockpitProps) {
           );
         })}
       </div>
-
-      <HowItWorks />
     </div>
   );
 }
@@ -400,28 +360,6 @@ function modeCopy({
     title: "Quiet for now",
     lede: "No decisions and nothing running. Expand a project, or change the filter.",
   };
-}
-
-function HowItWorks() {
-  return (
-    <details className="cockpit-howto">
-      <summary>How this works</summary>
-      <ol className="cockpit-howto-steps">
-        <li>
-          <strong>Project</strong> — a goal. The Initial plan card holds the proposed Tasks until you accept them.
-        </li>
-        <li>
-          <strong>Approve Initial plan</strong> — creates those Tasks in Backlog (proposal freezes on the card); dispatch to start a run.
-        </li>
-        <li>
-          <strong>Needs you</strong> — an agent stopped; answer so it can continue.
-        </li>
-        <li>
-          <strong>Review</strong> — finished work with a PR. You merge; honr never does.
-        </li>
-      </ol>
-    </details>
-  );
 }
 
 function NeedsYouList({
@@ -492,58 +430,6 @@ function NeedsYouList({
           </div>
         );
       })}
-    </div>
-  );
-}
-
-function ReadyToDispatchList({
-  items,
-  onOpen,
-  onChanged,
-}: {
-  items: WorkItem[];
-  onOpen: (id: number) => void;
-  onChanged: () => void;
-}) {
-  const [busy, setBusy] = useState<number | null>(null);
-
-  return (
-    <div className="cockpit-ready-list">
-      {items.map((item) => (
-        <div className="cockpit-ready-card" key={item.id}>
-          <div className="cockpit-ready-main">
-            <button
-              type="button"
-              className="cockpit-ready-title"
-              onClick={() => onOpen(item.id)}
-            >
-              <span className="id">
-                {item.beads_id && !item.beads_id.startsWith("bd-honr-")
-                  ? item.beads_id
-                  : `#${item.id}`}
-              </span>{" "}
-              {item.title}
-            </button>
-            {item.intent && <p className="cockpit-ready-intent">{clip(item.intent, 120)}</p>}
-          </div>
-          <div className="cockpit-ready-actions">
-            <button
-              type="button"
-              className="primary"
-              disabled={busy === item.id}
-              onClick={() => {
-                setBusy(item.id);
-                api
-                  .dispatch(item.id)
-                  .then(onChanged)
-                  .finally(() => setBusy(null));
-              }}
-            >
-              Start
-            </button>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
