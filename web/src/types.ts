@@ -129,6 +129,11 @@ export interface ChunkSummary { count: number; text: string }
 export interface ColumnView { column: ColumnKey; summary: ChunkSummary }
 export interface StoryLine { at: string; text: string }
 
+export interface ReadyCard {
+  id: number;
+  title: string;
+}
+
 export interface GoalView {
   id: number;
   title: string;
@@ -140,6 +145,7 @@ export interface GoalView {
   budget_cents: number | null;
   agents_live: number;
   needs_you: number;
+  ready_to_dispatch?: ReadyCard[];
   /** `no_plan` | `awaiting_approval` | `approved_vN` */
   plan_status: string;
   /** Soft-retired Project — cockpit hides unless "Show archived". */
@@ -147,6 +153,7 @@ export interface GoalView {
   columns: ColumnView[];
   story: StoryLine[];
 }
+
 
 export interface Level {
   name: string;

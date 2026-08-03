@@ -291,7 +291,96 @@ assert(
 );
 assert(cockpitHtml.includes("Investigate the environment"), "Cockpit should offer answer options");
 
+// Test 7b: Cockpit renders Ready to dispatch section for unblocked Backlog cards
+const readyBacklogItem = {
+  ...unblockedItem,
+  id: 11,
+  parent: 100,
+  title: "Unblocked Task Ready To Dispatch",
+  intent: "Do work",
+  state: "backlog",
+  blocked_by: [],
+  blockers: [],
+  parked: false,
+  awaiting_dispatch: false,
+};
+
+const cockpitWithReadyHtml = renderToString(
+  React.createElement(Cockpit, {
+    items: new Map([
+      [100, projectItem],
+      [11, readyBacklogItem],
+    ]),
+    goals: [
+      {
+        id: 100,
+        title: "Test Project",
+        intent: "Test",
+        progress: 0,
+        leaves_done: 0,
+        leaves_total: 1,
+        spend_cents: 0,
+        budget_cents: null,
+        agents_live: 0,
+        needs_you: 0,
+        plan_status: "approved_v1",
+        columns: [],
+        story: [],
+      },
+    ],
+    stories: new Map(),
+    goalOf: () => 100,
+    breadcrumbOf: () => "Test Project",
+    now,
+    agentTimeout: 600,
+    onOpen: () => {},
+    onChanged: () => {},
+  })
+);
+
+assert(cockpitWithReadyHtml.includes("cockpit-ready"), "Cockpit should show Ready to dispatch section");
+assert(cockpitWithReadyHtml.includes("Unblocked Task Ready To Dispatch"), "Cockpit Ready to dispatch should list card title");
+assert(cockpitWithReadyHtml.includes("Start"), "Cockpit Ready to dispatch card should feature Start button");
+
+// When card is awaiting_dispatch, it should not appear in Ready to dispatch section
+const awaitingDispatchItem = { ...readyBacklogItem, awaiting_dispatch: true };
+const cockpitAwaitingHtml = renderToString(
+  React.createElement(Cockpit, {
+    items: new Map([
+      [100, projectItem],
+      [11, awaitingDispatchItem],
+    ]),
+    goals: [
+      {
+        id: 100,
+        title: "Test Project",
+        intent: "Test",
+        progress: 0,
+        leaves_done: 0,
+        leaves_total: 1,
+        spend_cents: 0,
+        budget_cents: null,
+        agents_live: 0,
+        needs_you: 0,
+        plan_status: "approved_v1",
+        columns: [],
+        story: [],
+      },
+    ],
+    stories: new Map(),
+    goalOf: () => 100,
+    breadcrumbOf: () => "Test Project",
+    now,
+    agentTimeout: 600,
+    onOpen: () => {},
+    onChanged: () => {},
+  })
+);
+
+assert(!cockpitAwaitingHtml.includes("cockpit-ready"), "Card awaiting_dispatch should not be listed in Ready to dispatch section");
+
 // Test 8: Detail Head renders Archive and Delete actions
+
 const headHtml = renderToString(
   React.createElement(Head, {
     title: "#100 Test Project",
