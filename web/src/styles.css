@@ -740,9 +740,16 @@ main > :first-child { flex: 1; min-width: 0; }
   display: flex;
   flex-direction: column;
   gap: 6px;
-  min-width: 180px;
+  flex: 1 1 240px;
+  min-width: 0;
+  max-width: 100%;
 }
-.cockpit-need-opts button { text-align: left; }
+.cockpit-need-opts button {
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
 
 .cockpit-project-select {
   background: var(--bg);
@@ -1103,8 +1110,22 @@ ul.plain { list-style: none; margin: 0; padding: 0; display: flex; flex-directio
 ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 .reason { font-size: 11px; }
 
-.option { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 6px; font-size: 12px; }
-.option button { flex: 0 0 auto; }
+/* Stack label above detail so long URL options stay inside the drawer.
+   Mobile media query used to be the only place that did this. */
+.option {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.option button {
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 
 /* -------------------------------------------------------------------- tree */
 
@@ -1332,10 +1353,6 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   .qq { margin-bottom: 8px; }
   .qrow .btns { display: flex; flex-direction: column; align-items: stretch; }
   .qrow .btns button { width: 100%; text-align: left; }
-
-  /* Same shape in the drawer: option label above its explanation. */
-  .option { display: block; margin-bottom: 10px; }
-  .option button { width: 100%; text-align: left; margin-bottom: 4px; }
 
   .chips { display: block; }
   .chip { display: inline-block; margin: 2px 0; }

@@ -1042,7 +1042,9 @@ export function DetailDrawer({
                 {o.label}
                 {n === d.escalation!.recommended && " ★"}
               </button>
-              <span className="dim">{o.detail}</span>
+              {o.detail && o.detail !== o.label && (
+                <span className="dim">{o.detail}</span>
+              )}
             </div>
           ))}
         </Section>
