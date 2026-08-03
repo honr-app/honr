@@ -614,8 +614,12 @@ assert(workspaceHtml.includes("data-testid=\"workspace-field-beads\""), "Beads s
 assert(workspaceHtml.includes("data-testid=\"workspace-field-forge\""), "Forge field");
 assert(workspaceHtml.includes("GitLab (future)"), "GitLab listed as future/disabled");
 assert(workspaceHtml.includes("data-testid=\"workspace-webhook-hint\""), "Webhook hint present");
-assert(workspaceHtml.includes("--repo=acme/widget"), "Webhook hint uses configured upstream");
+assert(workspaceHtml.includes("--repo=<owner/name>"), "Webhook hint is a repo placeholder template");
 assert(!workspaceHtml.includes("shanemcd/honr"), "Webhook hint must not hardcode Shane repo");
+assert(
+  workspaceHtml.includes("pr_url") || workspaceHtml.includes("fallback for first clone"),
+  "Workspace copy must not claim install binding is the only work target",
+);
 assert(workspaceHtml.includes("data-testid=\"workspace-save\""), "Workspace save control");
 
 const fixtureProfiles = [

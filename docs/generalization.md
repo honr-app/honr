@@ -1,12 +1,13 @@
 # Investigation: generalize honr beyond this stack
 
-**Status:** Tasks `workspace-binding` (#169) and `settings-workspace` (#170)
-landed as install-wide Workspace binding + Settings panel. Card **#175**
-(multi-repo forge model) revises that assumption: work remotes must not be a
-single install-wide upstream/fork. Remaining open Plan Tasks (#171–#174) are
-re-scoped below. **No GitLab** beyond a named future seam. **No Settings UI
-rewrite in #175** — this note is the decision a human Approves from; follow-on
-Tasks implement it.
+**Status:** Multi-repo forge model **implemented** (card #175 / PR #247+): work
+remotes resolve per card from `pr_url` → optional Workspace/yaml default →
+refuse. Settings Workspace upstream/fork are optional install defaults (not
+required for `agents.enabled`). No per-Project repo field — the card's PR URL
+is the multi-repo signal; fork owner is derived from the Workspace fork default.
+GitLab remains a named future seam only. Remaining Plan Tasks (#171–#174): Agent
+runtime Settings, OpenShell ops surface, briefing quality-gate agnosticism,
+second-repo proof.
 
 **Goal:** a fresh install can drive **any GitHub-hosted repo** (and eventually
 **many** on one board) with configurable OpenShell/runtime, without hardcoding
@@ -66,14 +67,15 @@ No global work binding required. Resolve **per card** (via its Project +
 optional `pr_url`):
 
 ```
-card.pr_url  →  parse owner/repo (+ gh head repo for fork)
+card.pr_url  →  parse owner/repo as upstream; fork = {Workspace.fork_owner}/{repo}
        ↓ if missing
-Project.repo (upstream, fork, base)   [required for first clone]
+Workspace / yaml default (upstream, fork, base)
        ↓ if missing
-Workspace default_repo (optional install convenience / yaml seed)
-       ↓ if missing
-refuse with error naming Project (and optional Workspace default) fields
+refuse with error naming missing pr_url / Workspace defaults
 ```
+
+No per-Project `repo` field — the card's reported PR URL is the multi-repo
+signal (binding note on #175).
 
 | Path | How it learns the repo | Notes |
 |---|---|---|
@@ -291,13 +293,14 @@ Extend the existing Settings chrome (`web/src/components/Settings.tsx`):
 
 | Section | Contents | vs Project picker |
 |---|---|---|
-| **Workspace** (narrow after #175) | Forge: GitHub; **beads sync repo**; optional default upstream/fork/base; webhook **template**. | Defaults only. **Work remotes live on Project.** |
+| **Workspace** (narrowed in #175) | Forge: GitHub; **beads sync repo**; optional default upstream/fork/base; webhook **template**. | Defaults only. **Work remotes from card `pr_url`** (+ fork-owner derive). |
 | **Sandboxes** (exists) | Profiles: image, inline policy, cpu, memory; set default. | Project overrides profile. |
 | **Agent runtime** (new, #171) | Default engine; Vertex project/location/model; OpenShell provider names; enabled / concurrency / budgets. | Project may override engine only (keep). |
 | **OpenShell** (new, thin, #172) | Read-only gateway health (`openshell status` summary); link to ops doc; optional binary path. **No** Colima path editor — host env stays host. | Global. |
 
-**Project Detail** (not Settings): editors for that Project’s `upstream` / `fork` /
-`base` (same UX weight as engine / sandbox picker).
+**Project Detail** (not Settings): engine / sandbox picker as today. Work remotes
+are **not** Project fields — derive from card `pr_url` and Workspace fork-owner
+defaults (see §2).
 
 **Not** a parallel “config app.” YAML remains cold bootstrap: seed Workspace
 defaults + each new Project’s repo when empty.

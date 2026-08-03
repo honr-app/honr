@@ -58,9 +58,9 @@ export function Settings() {
       <header className="settings-hero">
         <h1>Settings</h1>
         <p className="settings-lede">
-          Control-plane preferences. Workspace binds the forge repo; Sandboxes
-          manages named profiles and the global default. Projects can override
-          the sandbox profile per-assignment.
+          Control-plane preferences. Workspace holds optional forge defaults and
+          beads sync; card <code>pr_url</code> drives multi-repo work remotes.
+          Sandboxes manages named profiles and the global default.
         </p>
       </header>
 
@@ -464,16 +464,16 @@ export function WorkspacePanelView({
   onDraftChange: (next: WorkspaceBinding) => void;
   onSave: () => void;
 }) {
-  const upstreamHint = draft.upstream.trim() || "owner/name";
   const incomplete = !draft.upstream.trim() || !draft.fork.trim();
 
   return (
     <section aria-labelledby="workspace-title" data-testid="workspace-panel">
       <h2 id="workspace-title">Workspace</h2>
       <p className="dim">
-        Per-install forge binding. Seeded from <code>honr.yaml</code> on first
-        boot; edits here are durable board state — supervisor and beads use them
-        after reload without re-editing yaml.
+        Optional install defaults for forge remotes and beads Issue sync.
+        Seeded from <code>honr.yaml</code> on first boot. Work remotes for a
+        card come from its <code>pr_url</code> when set (multi-repo); these
+        fields are a fallback for first clone, not the only work target.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -516,7 +516,10 @@ export function WorkspacePanelView({
             onChange={(e) => onDraftChange({ ...draft, upstream: e.target.value })}
             data-testid="workspace-field-upstream"
           />
-          <span className="dim sandbox-field-hint">Repo PRs target (<code>owner/name</code>).</span>
+          <span className="dim sandbox-field-hint">
+            Optional default PR target (<code>owner/name</code>). Cards with a
+            <code> pr_url</code> use that upstream instead.
+          </span>
         </label>
         <label>
           Fork
@@ -529,7 +532,8 @@ export function WorkspacePanelView({
             data-testid="workspace-field-fork"
           />
           <span className="dim sandbox-field-hint">
-            Repo the agent clones and pushes to.
+            Optional default fork (bot <code>owner/name</code>). For other
+            upstreams, the bot owner is reused with that repo name.
           </span>
         </label>
         <label>
@@ -556,13 +560,17 @@ export function WorkspacePanelView({
             data-testid="workspace-field-beads"
           />
           <span className="dim sandbox-field-hint">
-            Optional. Empty uses upstream for Issue URL construction.
+            Explicit beads ↔ GitHub Issues mirror (<code>owner/name</code>).
+            Empty falls back to the Workspace upstream default when set.
           </span>
         </label>
 
         {incomplete && (
           <p className="dim" data-testid="workspace-incomplete-hint">
-            Agents stay disabled until upstream and fork are both set.
+            Defaults incomplete — first clone needs upstream and fork here (or
+            in yaml), or a card <code>pr_url</code> after the first PR. Agents
+            can still start; per-card resolve fails closed when remotes are
+            missing.
           </p>
         )}
 
@@ -576,11 +584,12 @@ export function WorkspacePanelView({
       <aside className="workspace-webhook-hint" data-testid="workspace-webhook-hint">
         <h3>Local webhook forward</h3>
         <p className="dim">
-          Point <code>gh webhook forward</code> at this install using the
-          configured upstream (not a hardcoded Shane repo):
+          Point <code>gh webhook forward</code> at each upstream you care about
+          (template — not a single hard-coded repo). Cards complete on{" "}
+          <code>pr_url</code> match:
         </p>
         <pre data-testid="workspace-webhook-example">{`gh webhook forward \\
-  --repo=${upstreamHint} \\
+  --repo=<owner/name> \\
   --events=pull_request,push \\
   --url=http://127.0.0.1:8080/api/webhooks/github`}</pre>
       </aside>
