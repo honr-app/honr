@@ -1,8 +1,8 @@
 import { useEffect, useReducer, useRef, useState } from "react";
-import { api } from "./api";
-import type { BoardEvent, GoalView, Snapshot, StoryLine, WorkItem } from "./types";
+import { api } from "./api.js";
+import type { BoardEvent, GoalView, Snapshot, StoryLine, WorkItem } from "./types.js";
 
-interface BoardState {
+export interface BoardState {
   items: Map<number, WorkItem>;
   goals: GoalView[];
   stories: Map<number, StoryLine[]>;
@@ -14,14 +14,16 @@ interface BoardState {
   defaultModel: string;
   /** When the last successful load happened. Drives the staleness warning. */
   lastLoadedAt: number | null;
+  /** Monotonic event sequence number. */
+  lastSeenSeq: number;
 }
 
-type Action =
+export type Action =
   | { type: "snapshot"; snap: Snapshot }
   | { type: "event"; ev: BoardEvent }
   | { type: "connected"; ok: boolean };
 
-const initial: BoardState = {
+export const initial: BoardState = {
   items: new Map(),
   goals: [],
   stories: new Map(),
@@ -32,11 +34,24 @@ const initial: BoardState = {
   defaultEngine: "",
   defaultModel: "",
   lastLoadedAt: null,
+  lastSeenSeq: 0,
 };
 
-function reduce(s: BoardState, a: Action): BoardState {
+/**
+ * Pure reducer for board state updates.
+ * Guards against stale REST snapshots with older sequence numbers overwriting
+ * newer live event state.
+ */
+export function reduce(s: BoardState, a: Action): BoardState {
   switch (a.type) {
     case "snapshot": {
+      const snapSeq = a.snap.seq ?? 0;
+      // REST race guard: do not allow older snapshot updates to overwrite state
+      // that has already advanced to a higher sequence number via live events.
+      if (s.lastSeenSeq > 0 && snapSeq < s.lastSeenSeq) {
+        return s;
+      }
+
       const items = new Map(a.snap.items.map((i) => [i.id, i]));
       const stories = new Map(a.snap.goals.map((g) => [g.id, g.story]));
       return {
@@ -50,30 +65,43 @@ function reduce(s: BoardState, a: Action): BoardState {
         defaultModel: a.snap.default_model ?? "",
         loaded: true,
         lastLoadedAt: Date.now(),
+        lastSeenSeq: Math.max(s.lastSeenSeq, snapSeq),
       };
     }
     case "event": {
+      const evSeq = a.ev.seq ?? (s.lastSeenSeq + 1);
+      // Ignore duplicate or out-of-order events with older/equal sequence numbers
+      if (s.lastSeenSeq > 0 && evSeq <= s.lastSeenSeq) {
+        return s;
+      }
+
+      const lastSeenSeq = Math.max(s.lastSeenSeq, evSeq);
+
       if (a.ev.type === "upsert") {
         const items = new Map(s.items);
         items.set(a.ev.item.id, a.ev.item);
-        return { ...s, items };
+        return { ...s, items, lastSeenSeq };
       }
       if (a.ev.type === "delete") {
         const items = new Map(s.items);
         items.delete(a.ev.id);
-        return { ...s, items };
+        return { ...s, items, lastSeenSeq };
       }
       if (a.ev.type === "story") {
         const stories = new Map(s.stories);
         const prev = stories.get(a.ev.goal) ?? [];
         stories.set(a.ev.goal, [...prev, { at: a.ev.at, text: a.ev.text }]);
-        return { ...s, stories };
+        return { ...s, stories, lastSeenSeq };
       }
-      return s;
+      return { ...s, lastSeenSeq };
     }
     case "connected":
       return { ...s, connected: a.ok };
   }
+}
+
+export function isSequenceGap(lastSeenSeq: number, incomingSeq: number): boolean {
+  return lastSeenSeq > 0 && incomingSeq > lastSeenSeq + 1;
 }
 
 /** Past this with no successful load, what you are looking at is history. */
@@ -92,6 +120,13 @@ export function useBoard() {
   const [state, dispatch] = useReducer(reduce, initial);
   const [error, setError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  const lastSeenSeqRef = useRef<number>(0);
+  const wasConnectedRef = useRef<boolean>(false);
+
+  // Keep lastSeenSeqRef updated synchronously with state.lastSeenSeq
+  useEffect(() => {
+    lastSeenSeqRef.current = state.lastSeenSeq;
+  }, [state.lastSeenSeq]);
 
   useEffect(() => {
     let alive = true;
@@ -110,11 +145,30 @@ export function useBoard() {
 
     const es = new EventSource("/api/events");
     esRef.current = es;
-    es.onopen = () => dispatch({ type: "connected", ok: true });
-    es.onerror = () => dispatch({ type: "connected", ok: false });
+
+    es.onopen = () => {
+      dispatch({ type: "connected", ok: true });
+      // Reconnect recovery: re-sync snapshot upon reconnecting after a drop
+      if (wasConnectedRef.current) {
+        load();
+      }
+      wasConnectedRef.current = true;
+    };
+
+    es.onerror = () => {
+      dispatch({ type: "connected", ok: false });
+    };
+
     es.onmessage = (m) => {
       try {
-        dispatch({ type: "event", ev: JSON.parse(m.data) as BoardEvent });
+        const ev = JSON.parse(m.data) as BoardEvent;
+        if (ev && typeof ev.seq === "number") {
+          // Detect sequence gap: if incoming event seq > lastSeenSeq + 1, trigger snapshot re-fetch
+          if (isSequenceGap(lastSeenSeqRef.current, ev.seq)) {
+            load();
+          }
+        }
+        dispatch({ type: "event", ev });
       } catch {
         /* keep-alive frames */
       }
@@ -147,3 +201,4 @@ export function useNow(intervalMs = 1000) {
   }, [intervalMs]);
   return now;
 }
+
