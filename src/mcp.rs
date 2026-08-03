@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 
 use rmcp::handler::server::wrapper::{Json as ToolJson, Parameters};
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use schemars::JsonSchema;
@@ -975,19 +975,25 @@ impl ServerHandler for Cockpit {
 }
 
 /// Mounted on the same axum router, same port, same state as the human face.
-pub fn service(board: SharedBoard) -> StreamableHttpService<Cockpit, LocalSessionManager> {
+///
+/// Stateless on purpose. Cockpit tools are request/response over `SharedBoard`;
+/// an in-memory `Mcp-Session-Id` only made Cursor brittle across `cargo run`
+/// restarts ("Session not found") without buying us server→client streams.
+pub fn service(board: SharedBoard) -> StreamableHttpService<Cockpit, NeverSessionManager> {
     // rmcp defaults to localhost/127.0.0.1/::1 only (DNS-rebinding guard).
     // Docker clients reach us as host.docker.internal — allow that Host.
-    let mcp_http = StreamableHttpServerConfig::default().with_allowed_hosts([
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        "host.docker.internal",
-        "host.docker.internal:8080",
-    ]);
+    let mcp_http = StreamableHttpServerConfig::default()
+        .with_legacy_session_mode(false)
+        .with_allowed_hosts([
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "host.docker.internal",
+            "host.docker.internal:8080",
+        ]);
     StreamableHttpService::new(
         move || Ok(Cockpit::new(board.clone())),
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(NeverSessionManager::default()),
         mcp_http,
     )
 }
@@ -1344,6 +1350,69 @@ mod tests {
 
         let response = app.call(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Cursor keeps a dead `Mcp-Session-Id` across `cargo run` restarts. With
+    /// legacy sessions that was a hard 404; stateless mode must ignore it.
+    #[tokio::test]
+    async fn mcp_ignores_stale_session_id_after_restart() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower_service::Service;
+
+        let (board, _) = test_board();
+        let mut app = router::<()>(board);
+
+        let init = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8080")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", "dead-session-from-previous-honr-process")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0"}},"id":1}"#,
+            ))
+            .unwrap();
+        let response = app.call(init).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "stale session must not 404 initialize"
+        );
+        assert!(
+            response.headers().get("mcp-session-id").is_none(),
+            "stateless initialize must not mint a session id for Cursor to cling to"
+        );
+
+        // tools/list with the same dead id — the restart failure mode.
+        let list = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8080")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2024-11-05")
+            .header("mcp-session-id", "dead-session-from-previous-honr-process")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}"#,
+            ))
+            .unwrap();
+        let response = app.call(list).await.unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "stale session must not 404 tools/list"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read body");
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(
+            body.contains("board_snapshot") || body.contains("tools"),
+            "expected tools listing, got: {body}"
+        );
     }
 
     #[test]
