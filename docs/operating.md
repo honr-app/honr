@@ -11,9 +11,29 @@ No podman, no gateway, no credentials needed. Agents are off by default.
 
 ### Local GitHub webhooks (`gh webhook forward`)
 
-Ingress is `POST /api/webhooks/github`. For a merged PR into the default branch,
-honr emits `MainAdvanced` and, when a Review/NeedsHuman card's `pr_url` matches,
-moves that card to Done (beads close + `github_push` closes the linked Issue).
+Ingress is `POST /api/webhooks/github`. A push to the default branch emits
+`MainAdvanced`. That event does three distinct things:
+
+1. **Merged card → Done** — when a Review/NeedsHuman card's `pr_url` matches the
+   merged PR, the card moves to Done (beads close + `github_push` closes the
+   linked Issue).
+2. **Review rebase catch-up** — sibling PRs still in Review that are behind
+   `main` get a rebase dispatch. The supervisor rebases those PR branches
+   against updated `main`. Clean rebase stays in Review; a true conflict
+   returns the card to Backlog with conflict context. This path is
+   supervisor-driven git on the PR branch — not an agent turn.
+3. **Live runs (Claimed / Running)** — each live card gets a steer note naming
+   the advanced ref (and commit sha when present) and instructing the agent to
+   fetch upstream main, rebase the card branch onto it, then continue. Because
+   steer alone does not inject mid-turn, honr then **parks** (reason: main
+   advanced) and **unparks** so the supervisor re-claims with a resume briefing
+   that includes the note. Sandbox and `conversation_id` are preserved. Cards
+   already parked are steered only (no second park/unpark). The supervisor does
+   **not** git-rebase the live worktree itself — the agent does that on resume.
+
+Operators will see Running cards pause briefly and come back with a
+fetch/rebase instruction whenever someone pushes to `main`. That is expected,
+not a wedged run.
 
 ```bash
 gh extension install cli/gh-webhook   # once
@@ -122,9 +142,11 @@ to Backlog. Approve Plan does not auto-dispatch.
 | Throw away the LLM session | **Halt** — stops the agent and clears `conversation_id`; sandbox may still be reused for caches. |
 | Anything requiring a reason | Tell the cockpit. Steer, pin, park, halt and cut live there. |
 
-`steer` on a *running* card does not inject mid-turn today: the note is stored
+Manual `steer` on a *running* card does not inject mid-turn: the note is stored
 and seen on the next claim (or on resume after park). Prefer **park** when the
-agent is stuck and you want the same conversation to continue.
+agent is stuck and you want the same conversation to continue. Exception:
+`MainAdvanced` steers every Claimed/Running card and then auto park+unparks so
+that fetch/rebase note is acted on promptly — see the webhook section above.
 
 Park + resume (agy only): the supervisor persists `conversation_id` from
 stream-json. Park leaves it on the card and sets `parked` so the supervisor will
