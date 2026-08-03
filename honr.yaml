@@ -27,7 +27,7 @@ execution:
   # spends real money — see docs/sandbox-stack.md before you do.
   agents:
     enabled: true
-    engine: agy
+    engine: cursor
 
     # Needs a Rust toolchain to build honr: docker build -f sandbox/Containerfile .
     image: honr-sandbox:latest

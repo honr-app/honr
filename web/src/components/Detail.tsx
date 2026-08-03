@@ -240,6 +240,9 @@ export function PlanEditor({
   );
 }
 
+type LogLineType = "text" | "tool" | "result" | "system" | "error" | "thinking";
+type ParsedLogLine = { text: string; type: LogLineType };
+
 function formatToolTarget(name: string, input: any): string {
   if (!input) return "";
   if (typeof input === "string") return input;
@@ -258,6 +261,7 @@ function formatToolTarget(name: string, input: any): string {
 
   if (input.command) return input.command;
   if (input.file_path) return input.file_path;
+  if (input.targetFile || input.target_file) return input.targetFile || input.target_file;
   if (input.path) return input.path;
   if (input.file) return input.file;
   if (input.pattern) return `"${input.pattern}" in ${input.path || input.directory || "."}`;
@@ -265,9 +269,41 @@ function formatToolTarget(name: string, input: any): string {
   return JSON.stringify(input);
 }
 
-function parseClaudeLogLine(
-  line: string
-): { text: string; type: "text" | "tool" | "result" | "system" | "error" } | null {
+/** Cursor Agent CLI: `{ tool_call: { shellToolCall: { args, result } } }`. */
+function cursorToolCallBody(
+  obj: any
+): { name: string; args: any; result: any; description?: string } | null {
+  const tc = obj?.tool_call;
+  if (!tc || typeof tc !== "object") return null;
+  const key = Object.keys(tc).find((k) => k.endsWith("ToolCall"));
+  if (!key) return null;
+  const body = tc[key] ?? {};
+  const name = key.replace(/ToolCall$/, "") || "tool";
+  return {
+    name,
+    args: body.args ?? {},
+    result: body.result,
+    description: typeof body.description === "string" ? body.description : undefined,
+  };
+}
+
+function cursorToolResultText(name: string, result: any): string {
+  if (!result) return "";
+  const success = result.success ?? result;
+  if (typeof success === "string") return success;
+  if (success?.stdout != null) {
+    const err = success.stderr ? `\nstderr: ${success.stderr}` : "";
+    return `${success.stdout}${err}`;
+  }
+  if (success?.interleavedOutput != null) return String(success.interleavedOutput);
+  if (success?.content != null) return String(success.content);
+  if (result.failure || result.error) {
+    return JSON.stringify(result.failure ?? result.error);
+  }
+  return JSON.stringify(success);
+}
+
+function parseClaudeLogLine(line: string): ParsedLogLine | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
   if (!trimmed.startsWith("{")) {
@@ -277,6 +313,29 @@ function parseClaudeLogLine(
   try {
     const obj = JSON.parse(trimmed);
 
+    // Cursor Agent CLI stream-json (not Claude Code's content_block_* shape).
+    if (obj.type === "thinking") {
+      if (obj.subtype === "delta" && typeof obj.text === "string" && obj.text) {
+        return { text: obj.text, type: "thinking" };
+      }
+      return null;
+    }
+    if (obj.type === "tool_call") {
+      const tool = cursorToolCallBody(obj);
+      if (!tool) return null;
+      const label = tool.description || formatToolTarget(tool.name, tool.args);
+      if (obj.subtype === "started") {
+        return { text: `🔨 [${tool.name}] ${label}`, type: "tool" };
+      }
+      if (obj.subtype === "completed") {
+        const out = cursorToolResultText(tool.name, tool.result).slice(0, 240);
+        return {
+          text: out ? `⚙️ [${tool.name}] ${out}` : `⚙️ [${tool.name}] done`,
+          type: "result",
+        };
+      }
+      return null;
+    }
     if (obj.event === "step_update" && obj.step_update) {
       const su = obj.step_update;
       if (su.step_type === "tool" && su.tool_info) {
@@ -319,7 +378,7 @@ function parseClaudeLogLine(
       return null;
     }
 
-    if (obj.type === "tool_use" || obj.name) {
+    if (obj.type === "tool_use" || (obj.name && obj.type !== "assistant")) {
       const name = obj.name || "tool";
       return { text: `🔨 [${name}] ${formatToolTarget(name, obj.input)}`, type: "tool" };
     }
@@ -364,6 +423,29 @@ function parseClaudeLogLine(
   } catch {
     return { text: line, type: "text" };
   }
+}
+
+/** Merge Cursor thinking deltas so the drawer doesn't render one word per line. */
+function coalesceAgentLogLines(lines: string[]): ParsedLogLine[] {
+  const out: ParsedLogLine[] = [];
+  let thinking = "";
+  const flushThinking = () => {
+    const t = thinking.trim();
+    if (t) out.push({ text: t, type: "thinking" });
+    thinking = "";
+  };
+  for (const line of lines) {
+    const parsed = parseClaudeLogLine(line);
+    if (!parsed) continue;
+    if (parsed.type === "thinking") {
+      thinking += parsed.text;
+      continue;
+    }
+    flushThinking();
+    out.push(parsed);
+  }
+  flushThinking();
+  return out;
 }
 
 /**
@@ -753,23 +835,25 @@ export function DetailDrawer({
       )}
 
       {(d.environment || ["running", "claimed"].includes(d.state)) && (() => {
-        const parsedClaudeLogs = logs.claude
-          .map((l) => parseClaudeLogLine(l))
-          .filter((p): p is { text: string; type: "text" | "tool" | "result" | "system" | "error" } => p !== null);
+        const parsedClaudeLogs = coalesceAgentLogLines(logs.claude);
 
         const agentTabLabel =
           resolvedEngine === "agy"
             ? "Antigravity Agent"
             : resolvedEngine === "claude"
               ? "Claude Agent"
-              : `${resolvedEngine} Agent`;
+              : resolvedEngine === "cursor"
+                ? "Cursor Agent"
+                : `${resolvedEngine} Agent`;
 
         const engineDisplayName =
           resolvedEngine === "agy"
             ? "Antigravity (agy)"
             : resolvedEngine === "claude"
               ? "Claude"
-              : resolvedEngine;
+              : resolvedEngine === "cursor"
+                ? "Cursor"
+                : resolvedEngine;
 
         return (
           <Section title="Live Logs">
@@ -824,16 +908,20 @@ export function DetailDrawer({
                                 ? "#a7f3d0"
                                 : parsed.type === "error"
                                 ? "#f87171"
+                                : parsed.type === "thinking"
+                                ? "#94a3b8"
                                 : "#f8fafc",
                             fontWeight: parsed.type === "tool" ? "600" : "normal",
+                            fontStyle: parsed.type === "thinking" ? "italic" : "normal",
                           }}
                         >
-                          {parsed.text}
+                          {parsed.type === "thinking" ? `💭 ${parsed.text}` : parsed.text}
                         </div>
                       ))}
                       {(() => {
                         const last = parsedClaudeLogs[parsedClaudeLogs.length - 1];
                         let statusText = `${engineDisplayName} is thinking / evaluating response...`;
+                        if (last.type === "thinking") statusText = `${engineDisplayName} is thinking…`;
                         if (last.type === "tool") statusText = `Executing ${last.text.replace("🔨 ", "")}...`;
                         if (last.type === "result") statusText = "Tool output received, processing next action...";
                         return (
@@ -981,6 +1069,7 @@ export function DetailDrawer({
                 >
                   <option value="claude">Claude Code (Anthropic)</option>
                   <option value="agy">Antigravity CLI (agy)</option>
+                  <option value="cursor">Cursor Agent (cursor)</option>
                 </select>
               </div>
               <div className="btns">
@@ -1181,6 +1270,7 @@ export function DetailDrawer({
               >
                 <option value="claude">Claude Code (Anthropic)</option>
                 <option value="agy">Antigravity CLI (agy)</option>
+                <option value="cursor">Cursor Agent (cursor)</option>
               </select>
             </div>
           </div>
