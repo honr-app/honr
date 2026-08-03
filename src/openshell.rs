@@ -28,6 +28,8 @@ pub enum Error {
     Spawn(#[source] std::io::Error),
     #[error("could not parse `openshell {argv}` output: {source}")]
     Parse { argv: String, #[source] source: serde_json::Error },
+    #[error("could not write sandbox policy temp file: {0}")]
+    PolicyTemp(#[source] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -64,11 +66,53 @@ pub struct SandboxSpec {
     /// registry, a path builds a Dockerfile, a tag is an image reference.
     pub from: String,
     pub providers: Vec<String>,
+    /// Inline OpenShell policy YAML. Materialized to a temp file for `--policy`
+    /// at create — the board never treats a host path as source of truth.
     pub policy: Option<String>,
     pub env: Vec<(String, String)>,
     pub labels: Vec<(String, String)>,
     pub cpu: Option<String>,
     pub memory: Option<String>,
+}
+
+/// Temp file holding inline policy YAML for `--policy`. Deleted on drop so
+/// create does not leave host paths in the board or require a pre-existing file.
+struct PolicyTempFile {
+    path: std::path::PathBuf,
+}
+
+impl PolicyTempFile {
+    fn write(yaml: &str) -> std::io::Result<Self> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "honr-policy-{}-{nanos}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(&path, yaml)?;
+        Ok(Self { path })
+    }
+
+    fn path_string(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for PolicyTempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Write inline policy YAML to a temp path for `openshell sandbox create --policy`.
+/// Returns `None` when no policy is set.
+fn materialize_policy(policy_yaml: Option<&str>) -> Result<Option<PolicyTempFile>> {
+    match policy_yaml {
+        None => Ok(None),
+        Some(yaml) => Ok(Some(PolicyTempFile::write(yaml).map_err(Error::PolicyTemp)?)),
+    }
 }
 
 /// What a finished command produced.
@@ -107,6 +151,8 @@ fn create_args(spec: &SandboxSpec) -> Vec<String> {
         args.push(p.clone());
     }
     if let Some(policy) = &spec.policy {
+        // Caller passes a host path here — OpenShell::create materializes
+        // inline YAML into a temp file before invoking create_args.
         args.push("--policy".into());
         args.push(policy.clone());
     }
@@ -279,10 +325,20 @@ impl OpenShell {
 
     /// Create and keep alive; we exec into it afterwards. The trailing command
     /// is a no-op that just proves the sandbox came up.
+    ///
+    /// `spec.policy` is inline YAML content. We write a temp file for the CLI's
+    /// `--policy` flag and delete it when create returns — the board must not
+    /// store host paths as the policy source of truth.
     pub async fn create(&self, spec: &SandboxSpec) -> Result<()> {
         // Sandbox startup is seconds, not milliseconds, and this is alpha
         // software — give creation more room than a control-plane call.
-        self.run_ok(create_args(spec), Duration::from_secs(300)).await?;
+        let policy_file = materialize_policy(spec.policy.as_deref())?;
+        let mut path_spec = spec.clone();
+        if let Some(ref f) = policy_file {
+            path_spec.policy = Some(f.path_string());
+        }
+        self.run_ok(create_args(&path_spec), Duration::from_secs(300))
+            .await?;
         Ok(())
     }
 
@@ -425,7 +481,8 @@ mod tests {
             name: "honr-card-7".into(),
             from: "honr-sandbox:latest".into(),
             providers: vec!["vertex".into(), "gh-clankr".into()],
-            policy: Some("sandbox/policy.yaml".into()),
+            // create_args takes a path; OpenShell::create materializes YAML first.
+            policy: Some("/tmp/honr-policy-test.yaml".into()),
             env: vec![("CLAUDE_CODE_USE_VERTEX".into(), "1".into())],
             labels: vec![(LABEL_ITEM.into(), "7".into())],
             cpu: Some("2".into()),
@@ -470,7 +527,52 @@ mod tests {
     fn policy_is_passed_at_creation() {
         let args = create_args(&spec());
         let i = args.iter().position(|a| a == "--policy").expect("--policy present");
-        assert_eq!(args[i + 1], "sandbox/policy.yaml");
+        assert_eq!(args[i + 1], "/tmp/honr-policy-test.yaml");
+    }
+
+    /// Inline YAML is written to a temp file whose contents match; the path is
+    /// what `--policy` receives — never a board-stored host path.
+    #[test]
+    fn inline_policy_materializes_to_temp_file() {
+        let yaml = "version: 1\nfilesystem_policy:\n  include_workdir: true\n";
+        let file = materialize_policy(Some(yaml))
+            .expect("materialize")
+            .expect("some file");
+        let path = file.path_string();
+        assert!(path.ends_with(".yaml"), "path={path}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), yaml);
+        drop(file);
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "temp policy file should be removed on drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_passes_temp_path_whose_contents_are_inline_yaml() {
+        let yaml = "version: 1\n# inline create test\n";
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
+        let seen_c = seen.clone();
+        let os = OpenShell::mock(
+            move |args| {
+                let i = args.iter().position(|a| a == "--policy").expect("--policy");
+                let path = args[i + 1].clone();
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                *seen_c.lock().unwrap() = Some((path, content));
+                Output {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }
+            },
+            Duration::from_secs(5),
+        );
+        let mut s = spec();
+        s.policy = Some(yaml.into());
+        os.create(&s).await.expect("create");
+        let (path, content) = seen.lock().unwrap().clone().expect("policy seen");
+        assert!(path.contains("honr-policy-"), "temp path={path}");
+        assert_eq!(content, yaml);
     }
 
     #[test]

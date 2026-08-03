@@ -100,13 +100,18 @@ config is read once at startup, there is no hot reload and no runtime toggle.
 ## Sandbox profile resolution
 
 When the supervisor creates an OpenShell sandbox for a card, create knobs
-(`--from` image, policy, cpu, memory) resolve in this order:
+(`--from` image, policy YAML, cpu, memory) resolve in this order:
 
 1. **Project override** — `sandbox_profile_id` on the containing Project, if set
    and present in the board profile catalog
 2. **Global default** — `default_sandbox_profile_id` on durable board state
 3. **YAML fallback** — `execution.agents` `image` / `policy` / `cpu` / `memory`
    in `honr.yaml` (also used to seed the catalog when it is empty at load)
+
+Profile `policy` is **inline YAML text** stored on the board (edited in Settings
+as a textarea). At create, the supervisor writes a temp file for OpenShell's
+`--policy` flag. The host path in `execution.agents.policy` is seed/fallback
+only — not the catalog source of truth.
 
 Profiles are managed via Settings (REST: `/api/sandbox-profiles`). Process
 knobs (auth, repo, engine, budgets, concurrency) stay in YAML and are not

@@ -589,7 +589,7 @@ mod tests {
                 id: "default".into(),
                 name: "Default".into(),
                 image: "img:1".into(),
-                policy: "pol.yaml".into(),
+                policy: "version: 1\n# sqlite-roundtrip\n".into(),
                 cpu: Some("2".into()),
                 memory: None,
             },
@@ -605,6 +605,15 @@ mod tests {
         );
         assert_eq!(again.default_sandbox_profile_id.as_deref(), Some("default"));
         assert_eq!(again.sandbox_profiles.get("default").unwrap().image, "img:1");
+        assert!(
+            again
+                .sandbox_profiles
+                .get("default")
+                .unwrap()
+                .policy
+                .contains("sqlite-roundtrip"),
+            "policy YAML must round-trip"
+        );
     }
 
     #[tokio::test]

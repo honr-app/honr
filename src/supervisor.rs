@@ -3570,7 +3570,7 @@ mod tests {
 
         let mut schema = crate::schema::Schema::default();
         schema.execution.agents.image = "yaml-image:fallback".into();
-        schema.execution.agents.policy = "sandbox/yaml-policy.yaml".into();
+        schema.execution.agents.policy = "version: 1\n# yaml-fallback\n".into();
         schema.execution.agents.cpu = Some("1".into());
         schema.execution.agents.memory = Some("1Gi".into());
 
@@ -3585,12 +3585,14 @@ mod tests {
             )),
         ));
 
+        let default_policy = "version: 1\n# default\n";
+        let heavy_policy = "version: 1\n# heavy\n";
         board
             .upsert_sandbox_profile(SandboxProfile {
                 id: "default".into(),
                 name: "Default".into(),
                 image: "default-image:1".into(),
-                policy: "sandbox/default.yaml".into(),
+                policy: default_policy.into(),
                 cpu: Some("2".into()),
                 memory: Some("4Gi".into()),
             })
@@ -3600,7 +3602,7 @@ mod tests {
                 id: "heavy".into(),
                 name: "Heavy".into(),
                 image: "heavy-image:1".into(),
-                policy: "sandbox/heavy.yaml".into(),
+                policy: heavy_policy.into(),
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
             })
@@ -3628,7 +3630,7 @@ mod tests {
             sandbox_spec_for_card(task.id, "honr-card-test", &board.schema.execution.agents, &unset);
         assert_eq!(unset.profile_id.as_deref(), Some("default"));
         assert_eq!(unset_spec.from, "default-image:1");
-        assert_eq!(unset_spec.policy.as_deref(), Some("sandbox/default.yaml"));
+        assert_eq!(unset_spec.policy.as_deref(), Some(default_policy));
         assert_eq!(unset_spec.cpu.as_deref(), Some("2"));
         assert_eq!(unset_spec.memory.as_deref(), Some("4Gi"));
 
@@ -3641,7 +3643,7 @@ mod tests {
             sandbox_spec_for_card(task.id, "honr-card-test", &board.schema.execution.agents, &over);
         assert_eq!(over.profile_id.as_deref(), Some("heavy"));
         assert_eq!(over_spec.from, "heavy-image:1");
-        assert_eq!(over_spec.policy.as_deref(), Some("sandbox/heavy.yaml"));
+        assert_eq!(over_spec.policy.as_deref(), Some(heavy_policy));
         assert_eq!(over_spec.cpu.as_deref(), Some("8"));
         assert_eq!(over_spec.memory.as_deref(), Some("16Gi"));
     }
