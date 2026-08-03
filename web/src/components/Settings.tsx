@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
-import type { SandboxProfile, WorkspaceBinding } from "../types.js";
+import type {
+  OpenShellSettings,
+  OpenShellStatus,
+  SandboxProfile,
+  WorkspaceBinding,
+} from "../types.js";
 
-type SettingsSection = "sandboxes" | "workspace";
+type SettingsSection = "sandboxes" | "workspace" | "openshell";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "sandboxes", label: "Sandboxes" },
   // Nav label is Forge — "Workspace" implied a single work repo (upstream/fork).
   { id: "workspace", label: "Forge" },
+  { id: "openshell", label: "OpenShell" },
 ];
 
 type ProfileDraft = {
@@ -45,8 +51,8 @@ const emptyWorkspace = (): WorkspaceBinding => ({
 });
 
 /**
- * Settings shell — Sandboxes + Workspace are real panels; more sections land
- * via the generalization roadmap (Agent runtime, OpenShell).
+ * Settings shell — Sandboxes, Forge, and OpenShell connectivity.
+ * Agent runtime lands via the generalization roadmap.
  */
 export function Settings() {
   const [section, setSection] = useState<SettingsSection>("sandboxes");
@@ -58,7 +64,8 @@ export function Settings() {
         <p className="settings-lede">
           Control-plane preferences. Forge holds Issue sync — not a work repo.
           Each card’s <code>pull_request</code> (after report) holds remotes.
-          Sandboxes manages named profiles and the global default.
+          Sandboxes manages named profiles and the global default. OpenShell
+          shows gateway health on this host.
         </p>
       </header>
 
@@ -80,7 +87,13 @@ export function Settings() {
         </nav>
 
         <div className="settings-panel" data-testid={`settings-panel-${section}`}>
-          {section === "sandboxes" ? <SandboxesPanel /> : <WorkspacePanel />}
+          {section === "sandboxes" ? (
+            <SandboxesPanel />
+          ) : section === "workspace" ? (
+            <WorkspacePanel />
+          ) : (
+            <OpenShellPanel />
+          )}
         </div>
       </div>
     </div>
@@ -604,6 +617,208 @@ function WorkspacePanel() {
             });
             setSavedHint("Saved. Forge + beads sync update board state.");
           })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+    />
+  );
+}
+
+/** Presentational OpenShell panel — exported for UI tests without fetch. */
+export function OpenShellPanelView({
+  status,
+  binaryPath,
+  busy,
+  error,
+  savedHint,
+  onBinaryPathChange,
+  onRefresh,
+  onSaveBinary,
+}: {
+  status: OpenShellStatus | null;
+  binaryPath: string;
+  busy?: boolean;
+  error?: string | null;
+  savedHint?: string | null;
+  onBinaryPathChange: (next: string) => void;
+  onRefresh: () => void;
+  onSaveBinary: () => void;
+}) {
+  const healthLabel = !status
+    ? "…"
+    : status.cli_missing
+      ? "CLI missing"
+      : status.healthy
+        ? "Healthy"
+        : "Unhealthy";
+  const healthClass = !status
+    ? "dim"
+    : status.cli_missing
+      ? "openshell-health-missing"
+      : status.healthy
+        ? "openshell-health-ok"
+        : "openshell-health-bad";
+
+  return (
+    <section aria-labelledby="openshell-title" data-testid="openshell-panel">
+      <h2 id="openshell-title">OpenShell</h2>
+      <p className="dim">
+        Gateway connectivity on this host. Dispatch will not claim cards while
+        the gateway is unhealthy. Compute driver, providers, and image stay
+        host/ops setup — see the operating docs.
+      </p>
+
+      {error && <div className="err">{error}</div>}
+      {savedHint && (
+        <p className="dim" data-testid="openshell-saved-hint">
+          {savedHint}
+        </p>
+      )}
+
+      <div className="openshell-health" data-testid="openshell-health">
+        <div className="openshell-health-row">
+          <span className="dim">Gateway</span>
+          <strong
+            className={healthClass}
+            data-testid="openshell-health-label"
+            data-healthy={status?.healthy ? "true" : "false"}
+            data-cli-missing={status?.cli_missing ? "true" : "false"}
+          >
+            {healthLabel}
+          </strong>
+        </div>
+        {status && (
+          <>
+            <p className="dim openshell-health-bin" data-testid="openshell-health-binary">
+              Binary: <code>{status.binary}</code>
+            </p>
+            <pre className="openshell-health-summary" data-testid="openshell-health-summary">
+              {status.summary}
+            </pre>
+          </>
+        )}
+        <div className="btns">
+          <button
+            type="button"
+            className="primary"
+            disabled={busy}
+            onClick={onRefresh}
+            data-testid="openshell-refresh"
+          >
+            Refresh status
+          </button>
+        </div>
+      </div>
+
+      <form
+        className="sandbox-profile-form workspace-form"
+        data-testid="openshell-binary-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSaveBinary();
+        }}
+      >
+        <label>
+          Binary path (optional)
+          <input
+            className="search-input"
+            value={binaryPath}
+            disabled={busy}
+            placeholder="openshell — leave empty to use PATH"
+            onChange={(e) => onBinaryPathChange(e.target.value)}
+            data-testid="openshell-field-binary"
+          />
+          <span className="dim sandbox-field-hint">
+            Override only when the CLI is not on PATH. Host Docker / Colima /
+            podman and <code>DOCKER_HOST</code> stay outside honr — configure
+            them for the OpenShell gateway process, not here.
+          </span>
+        </label>
+        <div className="btns">
+          <button type="submit" className="primary" disabled={busy} data-testid="openshell-save-binary">
+            Save binary path
+          </button>
+        </div>
+      </form>
+
+      <aside className="workspace-webhook-hint" data-testid="openshell-ops-hint">
+        <h3>Host setup</h3>
+        <p className="dim">
+          Role checklist: compute driver → OpenShell gateway → providers →
+          sandbox image. Details in <code>docs/operating.md</code> (Running real
+          agents) and <code>docs/sandbox-stack.md</code>.
+        </p>
+      </aside>
+    </section>
+  );
+}
+
+function OpenShellPanel() {
+  const [status, setStatus] = useState<OpenShellStatus | null>(null);
+  const [binaryPath, setBinaryPath] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedHint, setSavedHint] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    setBusy(true);
+    return Promise.all([api.getOpenShellStatus(), api.getOpenShell()])
+      .then(([st, cfg]: [OpenShellStatus, OpenShellSettings]) => {
+        setStatus(st);
+        setBinaryPath(cfg.binary_path ?? st.binary_path ?? "");
+        setError(null);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => {
+        setBusy(false);
+        setLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  if (loading && !error && !status) {
+    return (
+      <section aria-labelledby="openshell-title" data-testid="openshell-panel">
+        <h2 id="openshell-title">OpenShell</h2>
+        <p className="dim">loading…</p>
+      </section>
+    );
+  }
+
+  return (
+    <OpenShellPanelView
+      status={status}
+      binaryPath={binaryPath}
+      busy={busy}
+      error={error}
+      savedHint={savedHint}
+      onBinaryPathChange={(next) => {
+        setSavedHint(null);
+        setBinaryPath(next);
+      }}
+      onRefresh={() => {
+        setSavedHint(null);
+        refresh();
+      }}
+      onSaveBinary={() => {
+        setBusy(true);
+        setError(null);
+        setSavedHint(null);
+        const body: OpenShellSettings = {
+          binary_path: binaryPath.trim() || null,
+        };
+        api
+          .putOpenShell(body)
+          .then((saved) => {
+            setBinaryPath(saved.binary_path ?? "");
+            setSavedHint("Saved. Status and dispatch health checks use this binary.");
+            return api.getOpenShellStatus();
+          })
+          .then((st) => setStatus(st))
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));
       }}

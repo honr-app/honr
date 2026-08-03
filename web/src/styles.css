@@ -511,6 +511,39 @@ main > :first-child { flex: 1; min-width: 0; }
   white-space: pre-wrap;
 }
 
+.openshell-health {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.openshell-health-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.openshell-health-ok { color: var(--ok, #2a7a4b); }
+.openshell-health-bad { color: var(--err, #b33); }
+.openshell-health-missing { color: var(--warn, #a67c00); }
+.openshell-health-bin { margin: 0 0 8px; font-size: 12px; }
+.openshell-health-summary {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
 /* ------------------------------------------------------------------- cockpit */
 
 .cockpit {

@@ -4,9 +4,10 @@
 (`url` + GitHub-shaped `base`/`head`) from `report.json` (schema at
 `docs/schemas/report.schema.json`). First clone is prompt-only — supervisor
 does not pre-clone without card remotes. Settings → Forge is **provider +
-beads sync only**. Yaml `execution.agents.repo` is legacy/optional. Remaining
-Plan Tasks (#171–#174): Agent runtime Settings, OpenShell ops surface,
-briefing quality-gate agnosticism, second-repo proof.
+beads sync only**. Settings → **OpenShell** shows gateway health (`openshell
+status`) and an optional CLI binary override. Yaml `execution.agents.repo` is
+legacy/optional. Remaining Plan Tasks: Agent runtime Settings, briefing
+quality-gate agnosticism, second-repo proof.
 
 **Goal:** a fresh install can drive **any GitHub-hosted repo** (and eventually
 **many** on one board) with configurable OpenShell/runtime, without hardcoding
@@ -132,7 +133,7 @@ Board cards under Project **Generalize honr beyond this stack**:
 |---|---|---|---|
 | **#170** | `settings-workspace` | **Revise (already merged).** No further UI expansion that treats install upstream/fork as the only work binding. Follow-on narrows copy + fail-closed. | **DoD (residual / follow-on `narrow-workspace-settings`):** (1) Workspace panel states work remotes are **per-Project**; install upstream/fork are **optional defaults**. (2) Agents may run with empty install upstream/fork when the **Project** binding is complete (fail-closed names Project fields). (3) Webhook hint is a placeholder template, not “the” configured install upstream as sole ops path. (4) Beads sync field stays install-wide and is labeled as Issue mirror, not PR target. *No new Settings app.* |
 | **#171** | `settings-agent-runtime` | **Keep.** Unchanged product intent. | **DoD:** unchanged from Plan (Settings Agent runtime; Vertex location from config; providers from durable config; `cargo test --offline` + clippy clean). **blocked_by:** none beyond already-landed #169 (do **not** wait on install upstream/fork being mandatory). |
-| **#172** | `openshell-ops-surface` | **Keep.** | **DoD:** unchanged (OpenShell health panel; role-based ops docs; Shane as worked example; dispatch still gates on gateway health). **blocked_by:** none on Workspace completeness. |
+| **#172** | `openshell-ops-surface` | **Shipped.** Settings → OpenShell health + binary; role-based ops docs; Shane values labeled example. | **DoD:** met (panel; operating.md roles; sandbox-stack example table; dispatch still gates on `healthy()`). |
 | **#173** | `briefing-repo-agnostic` | **Revise.** | **DoD:** (1) Briefing without Rust gates omits mandatory `cargo test/clippy --offline` (test covers). (2) Branch/sandbox prefix from config default, overridable — not only literal `honr/card-` with no override. (3) Verdict paths unchanged. (4) Briefing / clone scripts use **Project-resolved** (or `pr_url`-resolved) upstream/base; a Project whose repo ≠ install default does not get the install upstream interpolated (test covers). (5) `cargo test --offline` covers briefing variants. **blocked_by:** `project-repo-binding` (new) — or land binding first in the same PR if scoped tightly. |
 | **#174** | `second-repo-proof` | **Revise + re-block.** | **DoD:** (1) Run record names a **non-Shane** upstream/fork used as the **Project** binding (install Workspace may remain Shane for beads). (2) Card reaches Review with `pr_url` on that upstream. (3) No code path required editing `shanemcd/honr` into config for the **work** remotes. (4) Residual hardcodes filed as follow-ups. **blocked_by:** `project-repo-binding`, #171, #172, #173 (not “rebind install Workspace”). |
 
@@ -218,6 +219,7 @@ webhooks, or clone URLs in DoDs above.
 | Project sandbox picker | Real (`ProjectSandboxPicker`) |
 | Project engine select | Real in Detail drawer |
 | Settings → **Workspace** | Real (#170) — install upstream/fork/base + beads sync (**narrow after #175**) |
+| Settings → **OpenShell** | Real (#172) — gateway health + optional CLI binary; host Docker/Colima stays docs |
 | Repo / vertex / providers / budgets | **Not in Settings** — yaml only (#171) |
 | Production UI strings | No Shane repo names (fixtures in `web/ui-fixture.mjs` / tests only) |
 

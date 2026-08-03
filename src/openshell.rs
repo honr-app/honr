@@ -34,6 +34,36 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Default CLI name when Settings has no binary-path override.
+pub const DEFAULT_BIN: &str = "openshell";
+
+/// Outcome of `openshell status` for Settings → OpenShell and ops surfaces.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct GatewayStatus {
+    pub healthy: bool,
+    /// Binary that was invoked (`openshell` or a Settings override).
+    pub binary: String,
+    /// Short human summary (stdout/stderr trim, or an actionable error).
+    pub summary: String,
+    /// True when the CLI binary could not be spawned (missing from PATH / bad path).
+    pub cli_missing: bool,
+    /// Optional detail when unhealthy or CLI missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+fn status_summary(stdout: &str, stderr: &str) -> String {
+    let out = stdout.trim();
+    if !out.is_empty() {
+        return out.chars().take(2000).collect();
+    }
+    let err = stderr.trim();
+    if !err.is_empty() {
+        return err.chars().take(2000).collect();
+    }
+    String::new()
+}
+
 /// One sandbox, as `sandbox list -o json` reports it. Deliberately partial:
 /// unknown fields are ignored so a CLI that grows a field doesn't break us.
 #[derive(Debug, Clone, Deserialize)]
@@ -208,7 +238,7 @@ impl std::fmt::Debug for OpenShell {
 impl Default for OpenShell {
     fn default() -> Self {
         Self {
-            bin: "openshell".into(),
+            bin: DEFAULT_BIN.into(),
             default_timeout: Duration::from_secs(120),
             #[cfg(test)]
             mock: None,
@@ -309,7 +339,66 @@ impl OpenShell {
     /// Is the gateway reachable? Cheap enough to call before claiming a card,
     /// and worth it: the podman machine stops on its own.
     pub async fn healthy(&self) -> bool {
-        self.run(["status"], Duration::from_secs(15)).await.map(|o| o.ok()).unwrap_or(false)
+        self.gateway_status().await.healthy
+    }
+
+    /// Run `openshell status` and classify the result for Settings / ops.
+    /// Distinguishes a missing CLI (`cli_missing`) from an unhealthy gateway.
+    pub async fn gateway_status(&self) -> GatewayStatus {
+        match self.run(["status"], Duration::from_secs(15)).await {
+            Ok(o) if o.ok() => {
+                let summary = status_summary(&o.stdout, &o.stderr);
+                GatewayStatus {
+                    healthy: true,
+                    binary: self.bin.clone(),
+                    summary: if summary.is_empty() {
+                        "Connected".into()
+                    } else {
+                        summary
+                    },
+                    cli_missing: false,
+                    error: None,
+                }
+            }
+            Ok(o) => {
+                let summary = status_summary(&o.stdout, &o.stderr);
+                GatewayStatus {
+                    healthy: false,
+                    binary: self.bin.clone(),
+                    summary: if summary.is_empty() {
+                        format!("openshell status exited {}", o.code)
+                    } else {
+                        summary
+                    },
+                    cli_missing: false,
+                    error: Some(format!("openshell status exited {}", o.code)),
+                }
+            }
+            Err(Error::Spawn(e)) => {
+                let missing = e.kind() == std::io::ErrorKind::NotFound;
+                GatewayStatus {
+                    healthy: false,
+                    binary: self.bin.clone(),
+                    summary: if missing {
+                        format!(
+                            "OpenShell CLI not found at `{}` — install it or set a binary path in Settings → OpenShell",
+                            self.bin
+                        )
+                    } else {
+                        format!("could not spawn `{}`: {e}", self.bin)
+                    },
+                    cli_missing: missing,
+                    error: Some(e.to_string()),
+                }
+            }
+            Err(e) => GatewayStatus {
+                healthy: false,
+                binary: self.bin.clone(),
+                summary: e.to_string(),
+                cli_missing: false,
+                error: Some(e.to_string()),
+            },
+        }
     }
 
     pub async fn list(&self) -> Result<Vec<Sandbox>> {
@@ -488,6 +577,56 @@ mod tests {
             cpu: Some("2".into()),
             memory: Some("4Gi".into()),
         }
+    }
+
+    #[tokio::test]
+    async fn gateway_status_healthy_when_status_exits_zero() {
+        let os = OpenShell::mock(
+            |args| {
+                assert_eq!(args, &["status".to_string()]);
+                Output {
+                    code: 0,
+                    stdout: "Connected\nAuthenticated (mTLS transport)\n".into(),
+                    stderr: String::new(),
+                }
+            },
+            Duration::from_secs(5),
+        );
+        let st = os.gateway_status().await;
+        assert!(st.healthy);
+        assert!(!st.cli_missing);
+        assert!(st.summary.contains("Connected"));
+        assert!(os.healthy().await);
+    }
+
+    #[tokio::test]
+    async fn gateway_status_unhealthy_when_status_exits_nonzero() {
+        let os = OpenShell::mock(
+            |_| Output {
+                code: 1,
+                stdout: String::new(),
+                stderr: "gateway unreachable".into(),
+            },
+            Duration::from_secs(5),
+        );
+        let st = os.gateway_status().await;
+        assert!(!st.healthy);
+        assert!(!st.cli_missing);
+        assert!(st.summary.contains("gateway unreachable"));
+        assert!(!os.healthy().await);
+    }
+
+    #[tokio::test]
+    async fn gateway_status_marks_cli_missing_on_spawn_not_found() {
+        let os = OpenShell::new(
+            "/nonexistent/honr-openshell-bin-should-not-exist",
+            Duration::from_secs(5),
+        );
+        let st = os.gateway_status().await;
+        assert!(!st.healthy);
+        assert!(st.cli_missing, "summary={}", st.summary);
+        assert!(st.summary.contains("not found") || st.summary.contains("CLI"));
+        assert!(!os.healthy().await);
     }
 
     /// The image flag is `--from`. `--image` does not exist, and passing it
