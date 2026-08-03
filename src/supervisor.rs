@@ -923,14 +923,20 @@ async fn run_inside(
 
     let engine = grant.engine.as_deref().unwrap_or(&cfg.engine);
     let conversation_id = board.get(id).and_then(|i| i.conversation_id.clone());
+    // Conversation resume flag is independent of briefing shape: a conflicted
+    // branch still needs the cold CONFLICTS briefing even when agy/cursor can
+    // `--conversation` continue the same session.
     let resume = is_reused
         && matches!(engine, "agy" | "cursor")
         && conversation_id.is_some();
-    let briefing_text = if resume {
-        resume_briefing(grant)
-    } else {
-        briefing(grant, branch_state, branch, &cfg.repo.upstream, &cfg.repo.base)
-    };
+    let briefing_text = choose_briefing(
+        grant,
+        branch_state,
+        branch,
+        &cfg.repo.upstream,
+        &cfg.repo.base,
+        resume,
+    );
     if resume {
         board.story(
             id,
@@ -1390,10 +1396,7 @@ async fn process_verdict(
                 Some(url)
             } else if let Ok(out) = os.exec(name, &pr_lookup_script(cfg, branch), short).await {
                 if out.ok() {
-                    out.stdout
-                        .lines()
-                        .find_map(|l| l.strip_prefix(PR_URL_MARK))
-                        .map(str::to_string)
+                    parse_pr_url(&out.stdout)
                 } else {
                     None
                 }
@@ -1506,10 +1509,7 @@ async fn process_verdict(
                 url
             } else {
                 let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
-                pr.stdout
-                    .lines()
-                    .find_map(|l| l.strip_prefix(PR_URL_MARK))
-                    .map(str::to_string)
+                parse_pr_url(&pr.stdout)
                     .ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?
             };
             board.set_pr_url(id, Some(pr_url.clone()));
@@ -1531,6 +1531,25 @@ async fn process_verdict(
             } else {
                 (rep.added, rep.removed)
             };
+            // Hollow Review after a conflict bounce: refuse report while GitHub
+            // still says CONFLICTING. UNKNOWN/null is not a hard fail.
+            let mergeable = match os.exec(name, &pr_lookup_script(cfg, branch), short).await {
+                Ok(out) if out.ok() => parse_pr_mergeable(&out.stdout),
+                _ => PrMergeable::Unknown,
+            };
+            if mergeable == PrMergeable::Conflicting {
+                board
+                    .release_with_reason(
+                        id,
+                        agent_id,
+                        Some(CONFLICTING_PR_BOUNCE_REASON),
+                    )
+                    .map_err(|e| anyhow::anyhow!("release conflicting PR: {e}"))?;
+                tracing::info!(
+                    "#{id}: refused report — PR mergeable CONFLICTING; returned to Backlog"
+                );
+                return Ok(true);
+            }
             board.report(id, agent_id, added, removed, gates)?;
             tracing::info!("#{id}: agent reported via verdict file; pr={pr_url}");
             Ok(true)
@@ -1586,17 +1605,21 @@ async fn finish(
     // so the worst it can do is make a mess of a disposable fork.
     let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
     anyhow::ensure!(pr.ok(), "could not ask GitHub about the PR: {}", outerr(&pr));
-    let url = pr
-        .stdout
-        .lines()
-        .find_map(|l| l.strip_prefix(PR_URL_MARK))
-        .map(str::to_string)
+    let url = parse_pr_url(&pr.stdout)
         // A Review card with no PR is a card you cannot action, so this is a
         // failure rather than a quietly empty field.
         .ok_or_else(|| {
             anyhow::anyhow!("agent finished but opened no PR for {branch}")
         })?;
     board.set_pr_url(id, Some(url.clone()));
+
+    // Refuse hollow Review while GitHub still reports CONFLICTING. UNKNOWN
+    // (and null/missing) must not hard-fail — the API is eventually consistent.
+    if parse_pr_mergeable(&pr.stdout) == PrMergeable::Conflicting {
+        board.release_with_reason(id, agent_id, Some(CONFLICTING_PR_BOUNCE_REASON))?;
+        tracing::info!("#{id}: refused report — PR mergeable CONFLICTING; returned to Backlog");
+        return Ok(());
+    }
 
     // Mechanical checks are CI on the PR. honr only records the PR + diffstat.
     let (added, removed) = match os.exec(name, &diffstat_script(cfg), short).await {
@@ -2033,6 +2056,10 @@ pub async fn process_awaiting_rebases(
     results
 }
 
+/// Bounce reason when finish refuses Review because the PR cannot merge.
+pub const CONFLICTING_PR_BOUNCE_REASON: &str =
+    "PR mergeable is CONFLICTING; resolve rebase conflicts before Review";
+
 /// Ask GitHub whether the agent actually opened a PR.
 ///
 /// Not "create a PR" — the agent does that. This is the supervisor checking a
@@ -2040,18 +2067,60 @@ pub async fn process_awaiting_rebases(
 /// take on trust. A query keeps working when tool output changes; a script
 /// that creates things has to be right about flags, idempotency and failure
 /// modes, and ours repeatedly was not.
+///
+/// Also emits mergeable state (`MERGEABLE` / `CONFLICTING` / `UNKNOWN`). A
+/// hollow Review after a conflict bounce is worse than bouncing again: the
+/// card looks finished while GitHub still cannot merge.
 fn pr_lookup_script(cfg: &AgentConfig, branch: &str) -> String {
     let upstream = &cfg.repo.upstream;
     format!(
         r#"set -e
 export GH_TOKEN=$GITHUB_TOKEN
-url=$(gh pr list --repo {upstream} --head {branch} --state open --json url --jq '.[0].url // empty')
-if [ -n "$url" ]; then echo "{PR_URL_MARK}$url"; fi"#
+row=$(gh pr list --repo {upstream} --head {branch} --state open --json url,mergeable --jq '.[0] // empty')
+if [ -n "$row" ]; then
+  url=$(printf '%s' "$row" | jq -r '.url // empty')
+  mergeable=$(printf '%s' "$row" | jq -r '.mergeable // empty')
+  if [ -n "$url" ]; then echo "{PR_URL_MARK}$url"; fi
+  if [ -n "$mergeable" ]; then echo "{PR_MERGEABLE_MARK}$mergeable"; fi
+fi"#
     )
 }
 
 /// Prefix so the URL is read from a line we chose, not guessed at.
 pub const PR_URL_MARK: &str = "HONR-PR-URL=";
+/// GitHub `mergeable` enum from `gh pr list --json mergeable`.
+pub const PR_MERGEABLE_MARK: &str = "HONR-PR-MERGEABLE=";
+
+/// GitHub PR mergeability as reported by the API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrMergeable {
+    Mergeable,
+    Conflicting,
+    /// API returned UNKNOWN, null, empty, or an unrecognised value — do not
+    /// hard-fail a finish on a flaky signal.
+    Unknown,
+}
+
+/// Read `HONR-PR-MERGEABLE=` from a pr_lookup stdout. Missing/empty → Unknown.
+pub fn parse_pr_mergeable(stdout: &str) -> PrMergeable {
+    for line in stdout.lines() {
+        if let Some(rest) = line.trim().strip_prefix(PR_MERGEABLE_MARK) {
+            return match rest.trim().to_ascii_uppercase().as_str() {
+                "MERGEABLE" => PrMergeable::Mergeable,
+                "CONFLICTING" => PrMergeable::Conflicting,
+                _ => PrMergeable::Unknown,
+            };
+        }
+    }
+    PrMergeable::Unknown
+}
+
+fn parse_pr_url(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix(PR_URL_MARK))
+        .map(str::to_string)
+}
 
 /// Script to run `git diff --numstat` against the base branch.
 fn diffstat_script(cfg: &AgentConfig) -> String {
@@ -2104,6 +2173,27 @@ fn branch_state_of(stdout: &str) -> BranchState {
         BranchState::Rebased
     } else {
         BranchState::Fresh
+    }
+}
+
+/// Pick cold vs parked-resume briefing.
+///
+/// Park mid-run keeps the short resume prompt (session memory already has the
+/// cold text). A conflicted branch is different: the agent must be told to
+/// resolve conflicts even when the conversation id is reused — otherwise a
+/// hollow resume walks past CONFLICTS and reports into Review again.
+fn choose_briefing(
+    grant: &ClaimGrant,
+    branch: BranchState,
+    branch_name: &str,
+    upstream: &str,
+    base: &str,
+    resume: bool,
+) -> String {
+    if resume && branch != BranchState::Conflicted {
+        resume_briefing(grant)
+    } else {
+        briefing(grant, branch, branch_name, upstream, base)
     }
 }
 
@@ -2220,22 +2310,26 @@ fn briefing(
         }
     }
 
-    b.push_str(match branch {
-        BranchState::Fresh => {
-            "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n"
-        }
-        BranchState::Rebased => {
+    match branch {
+        BranchState::Fresh => b.push_str(
+            "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n",
+        ),
+        BranchState::Rebased => b.push_str(
             "\nThis card has been worked before. You are on its existing branch, already rebased \
              onto the current base — review what is there and address the notes above rather \
-             than starting over.\n"
-        }
+             than starting over.\n",
+        ),
         BranchState::Conflicted => {
-            "\nThis card has been worked before and its branch CONFLICTS with the base. The \
+            // upstream/<base>, not origin/<base>: the fork's base freezes at
+            // create time; the PR merges into upstream.
+            b.push_str(&format!(
+                "\nThis card has been worked before and its branch CONFLICTS with the base. The \
              rebase was left un-applied, so you are on the branch as it was. Rebase onto \
-             `origin/<base>` yourself and resolve the conflicts, keeping the intent of both \
+             `upstream/{base}` yourself and resolve the conflicts, keeping the intent of both \
              sides. Do this before any other work.\n"
+            ));
         }
-    });
+    }
 
     let is_initial_plan = crate::model::title_is_initial_plan(&grant.title);
 
@@ -2656,10 +2750,83 @@ mod tests {
         let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", "shanemcd/honr", "main");
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
         assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
+        // Fork base freezes; rebase onto upstream, never origin/<base>.
+        assert!(
+            conflicted.contains("upstream/main"),
+            "must say rebase onto upstream/<base>: {conflicted}"
+        );
+        assert!(
+            !conflicted.contains("origin/<base>") && !conflicted.contains("origin/main"),
+            "must not tell the agent to rebase onto the fork base: {conflicted}"
+        );
 
         let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", "shanemcd/honr", "main");
         assert!(!fresh.contains("CONFLICTS"));
         assert!(fresh.contains("new branch"));
+    }
+
+    /// Conflicted + conversation resume still gets the cold CONFLICTS briefing;
+    /// only a clean park mid-run uses the short resume prompt. The resume flag
+    /// (conversation id passed to start_script) is independent.
+    #[test]
+    fn conflicted_branch_uses_cold_briefing_even_when_resuming_conversation() {
+        let mut g = grant();
+        g.notes = vec!["Parked: cargo test deadlocked.".into()];
+        let conflicted = choose_briefing(
+            &g,
+            BranchState::Conflicted,
+            "honr/card-7",
+            "shanemcd/honr",
+            "main",
+            true,
+        );
+        assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
+        assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
+        assert!(
+            !conflicted.contains("parked mid-run"),
+            "must not use the short park resume prompt on CONFLICTS: {conflicted}"
+        );
+
+        let parked = choose_briefing(
+            &g,
+            BranchState::Rebased,
+            "honr/card-7",
+            "shanemcd/honr",
+            "main",
+            true,
+        );
+        assert!(parked.contains("parked mid-run"), "{parked}");
+        assert!(!parked.contains("CONFLICTS"), "{parked}");
+    }
+
+    #[test]
+    fn parse_pr_mergeable_reads_mark_and_tolerates_unknown() {
+        assert_eq!(
+            parse_pr_mergeable("HONR-PR-URL=https://x\nHONR-PR-MERGEABLE=CONFLICTING\n"),
+            PrMergeable::Conflicting
+        );
+        assert_eq!(
+            parse_pr_mergeable("HONR-PR-MERGEABLE=MERGEABLE\n"),
+            PrMergeable::Mergeable
+        );
+        assert_eq!(
+            parse_pr_mergeable("HONR-PR-MERGEABLE=UNKNOWN\n"),
+            PrMergeable::Unknown
+        );
+        assert_eq!(parse_pr_mergeable("HONR-PR-URL=https://x\n"), PrMergeable::Unknown);
+        assert_eq!(parse_pr_mergeable(""), PrMergeable::Unknown);
+        assert_eq!(
+            parse_pr_mergeable("HONR-PR-MERGEABLE=\n"),
+            PrMergeable::Unknown
+        );
+    }
+
+    #[test]
+    fn pr_lookup_script_asks_for_mergeable() {
+        let s = pr_lookup_script(&repo_cfg(), "honr/card-8");
+        assert!(s.contains("mergeable"), "{s}");
+        assert!(s.contains(PR_MERGEABLE_MARK), "{s}");
+        assert!(s.contains("// empty"), "must yield nothing rather than error: {s}");
     }
 
     /// Changes-requested notes are the whole steering mechanism: they reach the
@@ -2966,9 +3133,20 @@ mod tests {
         pr_lookup_url: Option<&str>,
         deny_download_substr: Option<&str>,
     ) -> OpenShell {
+        verdict_openshell_mergeable(kind, payload_path, pr_lookup_url, None, deny_download_substr)
+    }
+
+    fn verdict_openshell_mergeable(
+        kind: &str,
+        payload_path: impl AsRef<std::path::Path>,
+        pr_lookup_url: Option<&str>,
+        mergeable: Option<&str>,
+        deny_download_substr: Option<&str>,
+    ) -> OpenShell {
         let kind = kind.to_string();
         let payload = payload_path.as_ref().to_path_buf();
         let pr_url = pr_lookup_url.map(|s| s.to_string());
+        let mergeable = mergeable.map(|s| s.to_string());
         let deny = deny_download_substr.map(|s| s.to_string());
         OpenShell::mock(
             move |args| {
@@ -2990,7 +3168,13 @@ mod tests {
                         let script = args.last().map(String::as_str).unwrap_or("");
                         if script.contains("gh pr list") {
                             return match &pr_url {
-                                Some(url) => ok(format!("{PR_URL_MARK}{url}\n")),
+                                Some(url) => {
+                                    let mut out = format!("{PR_URL_MARK}{url}\n");
+                                    if let Some(m) = &mergeable {
+                                        out.push_str(&format!("{PR_MERGEABLE_MARK}{m}\n"));
+                                    }
+                                    ok(out)
+                                }
                                 None => ok(String::new()),
                             };
                         }
@@ -3541,6 +3725,133 @@ mod tests {
             seed.escalation
         );
         assert!(board.get(project.id).unwrap().plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn process_verdict_refuses_report_when_pr_conflicting() {
+        let board = test_board();
+        let project = board
+            .create(None, "project", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
+        let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
+        let _ = board.transition(task.id, State::Running, "agent-1", None);
+        board.set_environment(task.id, Some("sandbox-keep".into()));
+        board.set_conversation_id(task.id, Some("conv-keep".into()));
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-report-conflicting-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let report_path = dir.join("report.json");
+        let pr_url = "https://github.com/shanemcd/honr/pull/166";
+        std::fs::write(
+            &report_path,
+            format!(r#"{{"added":2,"removed":1,"pr_url":"{pr_url}"}}"#),
+        )
+        .unwrap();
+
+        let os = verdict_openshell_mergeable(
+            "report",
+            &report_path,
+            Some(pr_url),
+            Some("CONFLICTING"),
+            None,
+        );
+        let cfg = repo_cfg();
+        let handled =
+            process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-166")
+                .await
+                .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(handled);
+        let item = board.get(task.id).unwrap();
+        assert_eq!(item.state, State::Backlog, "must not reach Review while CONFLICTING");
+        assert_eq!(item.pr_url.as_deref(), Some(pr_url));
+        assert_eq!(
+            item.last_bounce_reason.as_deref(),
+            Some(CONFLICTING_PR_BOUNCE_REASON)
+        );
+        assert_eq!(
+            item.environment.as_deref(),
+            Some("sandbox-keep"),
+            "sandbox must survive release"
+        );
+        assert_eq!(
+            item.conversation_id.as_deref(),
+            Some("conv-keep"),
+            "conversation must survive release"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_verdict_reports_when_mergeable_unknown() {
+        let board = test_board();
+        let project = board
+            .create(None, "project", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
+        let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
+        let _ = board.transition(task.id, State::Running, "agent-1", None);
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-report-unknown-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let report_path = dir.join("report.json");
+        let pr_url = "https://github.com/shanemcd/honr/pull/167";
+        std::fs::write(
+            &report_path,
+            format!(r#"{{"added":1,"removed":0,"pr_url":"{pr_url}"}}"#),
+        )
+        .unwrap();
+
+        // UNKNOWN must not hard-fail — treat as proceed to Review.
+        let os = verdict_openshell_mergeable(
+            "report",
+            &report_path,
+            Some(pr_url),
+            Some("UNKNOWN"),
+            None,
+        );
+        let cfg = repo_cfg();
+        let handled =
+            process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-167")
+                .await
+                .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(handled);
+        let item = board.get(task.id).unwrap();
+        assert_eq!(item.state, State::Review);
+        assert_eq!(item.pr_url.as_deref(), Some(pr_url));
     }
 
     #[test]

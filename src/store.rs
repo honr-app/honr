@@ -240,6 +240,21 @@ pub enum RebaseOutcome {
     },
 }
 
+/// Binding note appended when a Review rebase conflict returns the card to
+/// Backlog. Must reach the next claim briefing so a reused conversation does
+/// not hollow-report while GitHub still says CONFLICTING.
+pub fn conflict_bounce_note(conflicting_files: &[String]) -> String {
+    let files = if conflicting_files.is_empty() {
+        "(unknown)".to_string()
+    } else {
+        conflicting_files.join(", ")
+    };
+    format!(
+        "BINDING: rebase conflict — conflicting files: {files}. \
+         do-not-re-report-while-CONFLICTING; resolve onto upstream base before finishing."
+    )
+}
+
 impl Board {
     pub fn new(schema: Schema, path: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(1024);
@@ -2884,6 +2899,10 @@ fn check_split_relatedness(
     ///
     /// Mechanical checks are CI on the PR, not a honr Verify column. `gates` is
     /// kept as optional agent-side notes only.
+    ///
+    /// Clears stale bounce UI (`last_bounce_reason` / `last_conflict_files`) —
+    /// a successful report means the conflict / infra bounce is no longer the
+    /// story the drawer should tell.
     pub fn report(
         &self,
         id: ItemId,
@@ -2898,6 +2917,8 @@ fn check_split_relatedness(
                 it.diff_added = added;
                 it.diff_removed = removed;
                 it.progress = 1.0;
+                it.last_bounce_reason = None;
+                it.last_conflict_files.clear();
                 it.gates = gates
                     .into_iter()
                     .map(|name| GateRun {
@@ -3539,6 +3560,7 @@ fn check_split_relatedness(
                     let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
                     it.rebase_requested = false;
                     it.awaiting_dispatch = false;
+                    it.last_bounce_reason = None;
                     it.last_conflict_files.clear();
                     let mut out = it.clone();
                     Self::populate_blockers(&s, &mut out);
@@ -3553,6 +3575,7 @@ fn check_split_relatedness(
                 let has_overlap = !curr_files.is_empty()
                     && !previous_files.is_empty()
                     && curr_files.iter().any(|f| previous_files.contains(f));
+                let binding_note = conflict_bounce_note(&curr_files);
 
                 if has_overlap {
                     let overlapping: Vec<String> = curr_files
@@ -3572,6 +3595,11 @@ fn check_split_relatedness(
                         if let Some(it) = s.items.get_mut(&id) {
                             it.last_bounce_reason = Some(bounce_reason.clone());
                             it.last_conflict_files = curr_files;
+                            it.notes.push(Note {
+                                at: Utc::now(),
+                                author: "rebase".into(),
+                                text: binding_note,
+                            });
                         }
                     }
 
@@ -3609,6 +3637,11 @@ fn check_split_relatedness(
                         if let Some(it) = s.items.get_mut(&id) {
                             it.last_bounce_reason = Some(bounce_reason.clone());
                             it.last_conflict_files = curr_files;
+                            it.notes.push(Note {
+                                at: Utc::now(),
+                                author: "rebase".into(),
+                                text: binding_note,
+                            });
                         }
                         Self::transition_locked(&mut s, id, State::Backlog, "rebase", Some(bounce_reason.clone()))
                             .map_err(|e| format!("failed transition to Backlog on rebase conflict: {e}"))?;
@@ -7390,11 +7423,19 @@ mod tests {
         let item = b.get(t1.id).unwrap();
         assert!(item.rebase_requested);
 
+        {
+            let mut s = b.state.write().unwrap();
+            let it = s.items.get_mut(&t1.id).unwrap();
+            it.last_bounce_reason = Some("prior conflict bounce".into());
+            it.last_conflict_files = vec!["src/stale.rs".into()];
+        }
+
         let updated = b.complete_rebase_clean(t1.id).unwrap();
         assert_eq!(updated.state, State::Review);
         assert!(!updated.rebase_requested);
         assert!(!updated.awaiting_dispatch);
         assert_eq!(updated.last_bounce_reason, None);
+        assert!(updated.last_conflict_files.is_empty());
     }
 
     #[test]
@@ -7431,6 +7472,65 @@ mod tests {
         assert!(bounce_reason.contains("git rebase conflict"));
         assert!(bounce_reason.contains("src/main.rs"));
         assert!(bounce_reason.contains("src/store.rs"));
+
+        let note = updated
+            .notes
+            .iter()
+            .find(|n| n.text.contains("do-not-re-report-while-CONFLICTING"))
+            .expect("binding conflict note");
+        assert!(note.text.contains("src/main.rs"));
+        assert!(note.text.contains("src/store.rs"));
+        assert!(note.text.contains("BINDING"));
+    }
+
+    #[test]
+    fn report_clears_stale_bounce_fields() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-test-report-clear-bounce-{}.json", std::process::id())),
+        );
+        let project = b
+            .create(None, "Clear Bounce Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(
+                Some(project.id),
+                "Task Clear",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+
+        b.transition(t1.id, State::Shaping, "test", None).unwrap();
+        b.transition(t1.id, State::Backlog, "test", None).unwrap();
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Running, "agent", None).unwrap();
+
+        {
+            let mut s = b.state.write().unwrap();
+            let it = s.items.get_mut(&t1.id).unwrap();
+            it.last_bounce_reason = Some("stale bounce".into());
+            it.last_conflict_files = vec!["src/old.rs".into()];
+        }
+
+        let updated = b
+            .report(t1.id, "agent", 3, 1, vec!["ci-on-pr".into()])
+            .unwrap();
+        assert_eq!(updated.state, State::Review);
+        assert_eq!(updated.last_bounce_reason, None);
+        assert!(updated.last_conflict_files.is_empty());
+    }
+
+    #[test]
+    fn conflict_bounce_note_names_files_and_forbids_hollow_report() {
+        let note = conflict_bounce_note(&["a.rs".into(), "b.rs".into()]);
+        assert!(note.contains("BINDING"));
+        assert!(note.contains("a.rs"));
+        assert!(note.contains("b.rs"));
+        assert!(note.contains("do-not-re-report-while-CONFLICTING"));
     }
 
     #[test]
