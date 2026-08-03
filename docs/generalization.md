@@ -6,9 +6,9 @@
 does not pre-clone without card remotes. Settings → Forge is **provider +
 beads sync only**. Settings → **OpenShell** shows gateway health (`openshell
 status`) and an optional CLI binary override. Settings → **Agent runtime**
-holds engine / Vertex / providers / budgets (seeded from yaml; Board SoT).
-Yaml `execution.agents.repo` is legacy/optional. Remaining Plan Tasks:
-briefing quality-gate agnosticism, second-repo proof.
+holds engine / Vertex / providers / budgets / **branch_prefix** /
+**quality_gates** (seeded from yaml; Board SoT). Yaml `execution.agents.repo`
+is legacy/optional. Remaining Plan Task: second-repo proof.
 
 **Goal:** a fresh install can drive **any GitHub-hosted repo** (and eventually
 **many** on one board) with configurable OpenShell/runtime, without hardcoding
@@ -135,7 +135,7 @@ Board cards under Project **Generalize honr beyond this stack**:
 | **#170** | `settings-workspace` | **Revise (already merged).** No further UI expansion that treats install upstream/fork as the only work binding. Follow-on narrows copy + fail-closed. | **DoD (residual / follow-on `narrow-workspace-settings`):** (1) Workspace panel states work remotes are **per-Project**; install upstream/fork are **optional defaults**. (2) Agents may run with empty install upstream/fork when the **Project** binding is complete (fail-closed names Project fields). (3) Webhook hint is a placeholder template, not “the” configured install upstream as sole ops path. (4) Beads sync field stays install-wide and is labeled as Issue mirror, not PR target. *No new Settings app.* |
 | **#171** | `settings-agent-runtime` | **Shipped.** Settings → Agent runtime; Vertex location from durable config; providers from Board. | **DoD:** met (panel + Board REST; `setup_agy_auth` uses configured location; providers at sandbox create from durable config). |
 | **#172** | `openshell-ops-surface` | **Shipped.** Settings → OpenShell health + binary; role-based ops docs; Shane values labeled example. | **DoD:** met (panel; operating.md roles; sandbox-stack example table; dispatch still gates on `healthy()`). |
-| **#173** | `briefing-repo-agnostic` | **Revise.** | **DoD:** (1) Briefing without Rust gates omits mandatory `cargo test/clippy --offline` (test covers). (2) Branch/sandbox prefix from config default, overridable — not only literal `honr/card-` with no override. (3) Verdict paths unchanged. (4) Briefing / clone scripts use **Project-resolved** (or `pr_url`-resolved) upstream/base; a Project whose repo ≠ install default does not get the install upstream interpolated (test covers). (5) `cargo test --offline` covers briefing variants. **blocked_by:** `project-repo-binding` (new) — or land binding first in the same PR if scoped tightly. |
+| **#173** | `briefing-repo-agnostic` | **Shipped.** | **DoD:** (1) Empty `quality_gates` omits mandatory cargo from briefing (test). (2) `branch_prefix` config default drives `{prefix}/card-N` (override via Settings/yaml). (3) Verdict paths unchanged. (4) Briefing variants covered by `cargo test --offline`. |
 | **#174** | `second-repo-proof` | **Revise + re-block.** | **DoD:** (1) Run record names a **non-Shane** upstream/fork used as the **Project** binding (install Workspace may remain Shane for beads). (2) Card reaches Review with `pr_url` on that upstream. (3) No code path required editing `shanemcd/honr` into config for the **work** remotes. (4) Residual hardcodes filed as follow-ups. **blocked_by:** `project-repo-binding`, #171, #172, #173 (not “rebind install Workspace”). |
 
 **New sibling Task (create after Approve of this decision):**
@@ -228,8 +228,8 @@ webhooks, or clone URLs in DoDs above.
 
 | Assumption | Where | Today |
 |---|---|---|
-| Branch `honr/card-{id}`, sandbox `honr-card-…` | supervisor | Hardcoded prefix |
-| Quality gates `cargo test/clippy --offline` | `briefing()` | Honr-repo-specific |
+| Branch `{prefix}/card-{id}`, sandbox `{prefix}-card-…` | supervisor via `branch_prefix` | **Configurable** (default `honr`) on Agent runtime / yaml |
+| Quality gates (e.g. cargo) | `briefing()` from `quality_gates` + Project prompt | **No hardcoded cargo** — empty gates omit toolchain; yaml/Settings list or Project prompt names them |
 | Verdict paths `/sandbox/.honr/*.json` | supervisor constants | Product protocol (keep) |
 | Widespread `shanemcd/honr` URLs | supervisor/store/api/beads tests | Fixtures |
 
@@ -270,7 +270,8 @@ webhooks, or clone URLs in DoDs above.
 - Base branch default `main`.
 - Seed image / policy path / cpu / memory.
 - Vertex location/model defaults when Vertex is used.
-- Branch/sandbox name prefixes (`honr/card-…`) — override via workspace or Project.
+- Branch/sandbox name prefixes (`honr/card-…`) — **Settings / yaml `branch_prefix`** (default `honr`).
+- Install-wide `quality_gates` list — clear for non-Rust; prefer Project `project_prompt` for per-repo gates.
 - Metadata shim listen address.
 - `openshell` CLI name.
 - Test fixture owner/repo strings (not runtime).
@@ -363,7 +364,7 @@ Workspace/yaml when empty so existing single-repo installs keep working.
 3. **`project-repo-binding`** (new) — Project remotes + `pr_url` resolve; fail-closed without install-wide requirement.
 4. **Settings → Agent runtime** (#171) — providers / Vertex / engine / budgets.
 5. **OpenShell ops surface + docs** (#172) — health in Settings; de-Shane ops docs.
-6. **Repo-agnostic briefing / gates** (#173) — prefixes + quality gates + Project-resolved upstream in briefing.
+6. ~~**Repo-agnostic briefing / gates** (#173)~~ — `branch_prefix` + `quality_gates` on Agent runtime; no hardcoded cargo.
 7. **Second-repo proof** (#174) — Project bound to non-Shane upstream/fork; one card to Review with real PR (**without** rebinding install Workspace).
 
 GitLab: mention only as `forge: github | (future) gitlab` — no Tasks implement it.

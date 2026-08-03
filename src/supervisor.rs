@@ -424,11 +424,11 @@ fn adoptable<'a>(item: Option<&'a WorkItem>, sandbox: &str) -> Option<&'a WorkIt
 
 /// Should reconcile keep this sandbox?
 ///
-/// When the card has an `environment`, keep that name and any `honr-card-{id}-*`
-/// sibling (mid-create races / prior attempts). Matching only `environment`
-/// reaped sandboxes mid-setup. Halt clears `environment` so nothing is kept —
-/// park / Review / request-changes leave it set so caches survive.
-fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str) -> bool {
+/// When the card has an `environment`, keep that name and any
+/// `{prefix}-card-{id}-*` sibling (mid-create races / prior attempts). Matching
+/// only `environment` reaped sandboxes mid-setup. Halt clears `environment` so
+/// nothing is kept — park / Review / request-changes leave it set so caches survive.
+fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str, branch_prefix: &str) -> bool {
     let Some(i) = item else { return false };
     if i.state.is_terminal() {
         return false;
@@ -436,7 +436,8 @@ fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str) -> bool {
     let Some(env) = i.environment.as_deref() else {
         return false;
     };
-    env == sandbox || sandbox.starts_with(&format!("honr-card-{}-", i.id))
+    let stem = crate::schema::card_sandbox_stem(branch_prefix, i.id);
+    env == sandbox || sandbox.starts_with(&stem)
 }
 
 /// How long startup waits for the gateway before giving up on reconciling.
@@ -526,10 +527,11 @@ async fn reconcile(
     };
 
     let mut adopted = Vec::new();
+    let branch_prefix = board.effective_agents().branch_prefix.clone();
     for sb in ours {
         let Some(id) = sb.item_id() else { continue };
         let card = board.get(id);
-        if !should_keep_sandbox(card.as_ref(), &sb.name) {
+        if !should_keep_sandbox(card.as_ref(), &sb.name, &branch_prefix) {
             tracing::info!(
                 "reaping unneeded sandbox {} (card={:?} state={:?} env={:?})",
                 sb.name,
@@ -698,10 +700,6 @@ async fn is_sandbox_live(os: &OpenShell, name: &str) -> bool {
 async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Result<()> {
     let (board, os) = (&f.board, &f.os);
     let id = grant.item_id;
-    let branch = format!("honr/card-{id}");
-
-    ensure_board_owns_run(board, id)?;
-
     // Live Settings → Agent runtime; per-card remotes from pull_request.
     let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
@@ -709,6 +707,10 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
         Ok(None) => agents.repo = Default::default(),
         Err(e) => return Err(anyhow::anyhow!("{e}")),
     }
+    let branch = crate::schema::card_branch_name(&agents.branch_prefix, id);
+
+    ensure_board_owns_run(board, id)?;
+
     let cfg = &agents;
 
     let existing_env = board.get(id).and_then(|i| i.environment);
@@ -726,7 +728,8 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
                 .get(id)
                 .map(|i| (i.run_failures + 1, i.environment.clone()))
                 .unwrap_or((1, None));
-            let new_name = format!("honr-card-{id}-a{attempt}");
+            let new_name =
+                crate::schema::card_sandbox_name(&agents.branch_prefix, id, attempt);
             // Drop the previous attempt before renaming — reconcile used to
             // reap by exact environment match and raced the new create.
             if let Some(prev) = prev_env {
@@ -788,13 +791,13 @@ fn sandbox_spec_for_card(
 async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     let (board, os) = (&f.board, &f.os);
     let id = a.item_id;
-    let branch = format!("honr/card-{id}");
     let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
         Ok(Some(repo)) => agents.repo = repo,
         Ok(None) => agents.repo = Default::default(),
         Err(e) => return Err(anyhow::anyhow!("{e}")),
     }
+    let branch = crate::schema::card_branch_name(&agents.branch_prefix, id);
     let cfg = &agents;
     let result = async {
         let (run, spent) = watch_agent(
@@ -1086,7 +1089,14 @@ async fn run_inside(
     let resume = is_reused
         && matches!(engine, "agy" | "cursor")
         && conversation_id.is_some();
-    let briefing_text = choose_briefing(grant, branch_state, branch, &cfg.repo, resume);
+    let briefing_text = choose_briefing(
+        grant,
+        branch_state,
+        branch,
+        &cfg.repo,
+        &cfg.quality_gates,
+        resume,
+    );
     if resume {
         board.story(
             id,
@@ -2297,11 +2307,13 @@ pub async fn process_awaiting_rebases(
     let awaiting = board.list_awaiting_rebase();
     let mut results = Vec::new();
     for item in awaiting {
-        let branch = format!("honr/card-{}", item.id);
+        let branch = crate::schema::card_branch_name(&cfg.branch_prefix, item.id);
         let sandbox = item
             .environment
             .clone()
-            .unwrap_or_else(|| format!("sandbox-{}", item.id));
+            .unwrap_or_else(|| {
+                crate::schema::card_sandbox_name(&cfg.branch_prefix, item.id, item.run_failures + 1)
+            });
 
         if !is_sandbox_live(os, &sandbox).await {
             continue;
@@ -2564,12 +2576,13 @@ fn choose_briefing(
     branch: BranchState,
     branch_name: &str,
     repo: &crate::schema::RepoConfig,
+    quality_gates: &[String],
     resume: bool,
 ) -> String {
     if resume && branch != BranchState::Conflicted {
         resume_briefing(grant, repo)
     } else {
-        briefing(grant, branch, branch_name, repo)
+        briefing(grant, branch, branch_name, repo, quality_gates)
     }
 }
 
@@ -2620,6 +2633,7 @@ fn briefing(
     branch: BranchState,
     branch_name: &str,
     repo: &crate::schema::RepoConfig,
+    quality_gates: &[String],
 ) -> String {
     let upstream = repo.upstream.trim();
     let base = repo.base.trim();
@@ -2776,11 +2790,33 @@ does not name a clone target, escalate instead (see Remotes).\n",
 `head` (see `/sandbox/.honr/report.schema.json`), diffstat (`added`/`removed`), and optional \
 `gates`.\n",
         );
+        if quality_gates.is_empty() {
+            b.push_str(
+                "\nRun the project's own checks before you finish — see the Project prompt and \
+definition of done for which gates apply. Do not assume cargo or any other toolchain unless \
+those instructions name it.\n",
+            );
+        } else {
+            b.push_str("\nRun the project's own checks before you finish");
+            if quality_gates.len() == 1 {
+                b.push_str(&format!(
+                    " — `{}`. If the check needs the network, something is wrong and you should \
+say so rather than work around it.\n",
+                    quality_gates[0]
+                ));
+            } else {
+                b.push_str(":\n");
+                for g in quality_gates {
+                    b.push_str(&format!("  - `{g}`\n"));
+                }
+                b.push_str(
+                    "If any check needs the network, something is wrong and you should say so \
+rather than work around it.\n",
+                );
+            }
+        }
         b.push_str(&format!(
-            "\nRun the project's own checks before you finish — `cargo test --offline --locked` and \
-             `cargo clippy --offline -- -D warnings`. Both work with no network; if either needs to \
-             reach the network, something is wrong and you should say so rather than work around it.\n\
-             \nWhen the work is done, publish it yourself:\n\
+            "\nWhen the work is done, publish it yourself:\n\
              \n  1. Commit on `{branch}`. Do not commit to any other branch.\n\
                2. Push to `origin`. Force-push is fine on your own branch.\n\
                3. Open or update a pull request against the product base (see Remotes above).\n\
@@ -3134,12 +3170,73 @@ mod tests {
     /// place that says how. If it stops saying it, nothing pushes at all.
     #[test]
     fn the_briefing_tells_the_agent_to_publish() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo());
+        let gates = vec![
+            "cargo test --offline --locked".into(),
+            "cargo clippy --offline -- -D warnings".into(),
+        ];
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "honr/card-7",
+            &cross_fork_repo(),
+            &gates,
+        );
         assert!(b.contains("honr/card-7"), "must name the branch: {b}");
         assert!(b.contains("shanemcd/honr"), "must name the PR target: {b}");
         assert!(b.to_lowercase().contains("push"), "{b}");
         assert!(b.to_lowercase().contains("pull request"), "{b}");
         assert!(b.contains("cargo test --offline --locked"), "gates must be named: {b}");
+        assert!(b.contains("cargo clippy --offline -- -D warnings"), "clippy gate: {b}");
+    }
+
+    /// Empty quality_gates must not invent cargo for a non-Rust Project.
+    #[test]
+    fn briefing_without_rust_gates_omits_cargo() {
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "acme/card-7",
+            &cross_fork_repo(),
+            &[],
+        );
+        assert!(
+            !b.contains("cargo test --offline"),
+            "must not mandate cargo test: {b}"
+        );
+        assert!(
+            !b.contains("cargo clippy"),
+            "must not mandate cargo clippy: {b}"
+        );
+        assert!(
+            b.contains("Do not assume cargo"),
+            "must point at Project prompt for gates: {b}"
+        );
+        assert!(b.contains("/sandbox/.honr/report.json"), "verdict path invariant: {b}");
+    }
+
+    #[test]
+    fn card_names_come_from_branch_prefix_not_only_honr_literal() {
+        assert_eq!(
+            crate::schema::card_branch_name("honr", 173),
+            "honr/card-173"
+        );
+        assert_eq!(
+            crate::schema::card_branch_name("widgets", 173),
+            "widgets/card-173"
+        );
+        assert_eq!(
+            crate::schema::card_sandbox_name("widgets", 173, 2),
+            "widgets-card-173-a2"
+        );
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            &crate::schema::card_branch_name("widgets", 7),
+            &cross_fork_repo(),
+            &[],
+        );
+        assert!(b.contains("widgets/card-7"), "briefing must use configured prefix: {b}");
+        assert!(!b.contains("honr/card-7"), "must not force honr/card- hardcode: {b}");
     }
 
     #[test]
@@ -3155,7 +3252,7 @@ mod tests {
     /// on top of a branch that cannot merge.
     #[test]
     fn the_briefing_tells_the_agent_about_a_conflict() {
-        let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", &cross_fork_repo());
+        let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", &cross_fork_repo(), &[]);
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
         assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
         // Fork base freezes; rebase onto upstream, never origin/<base> as the target.
@@ -3173,7 +3270,7 @@ mod tests {
             "must not instruct rebase onto the fork base: {conflicted}"
         );
 
-        let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo());
+        let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo(), &[]);
         assert!(!fresh.contains("CONFLICTS"));
         assert!(fresh.contains("new branch"));
     }
@@ -3190,6 +3287,7 @@ mod tests {
             BranchState::Conflicted,
             "honr/card-7",
             &cross_fork_repo(),
+            &[],
             true,
         );
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
@@ -3204,6 +3302,7 @@ mod tests {
             BranchState::Rebased,
             "honr/card-7",
             &cross_fork_repo(),
+            &[],
             true,
         );
         assert!(parked.contains("parked mid-run"), "{parked}");
@@ -3246,7 +3345,7 @@ mod tests {
     fn steering_notes_reach_the_briefing() {
         let mut g = grant();
         g.notes = vec!["Changes requested: rebase onto latest, api.rs only.".into()];
-        let b = briefing(&g, BranchState::Rebased, "honr/card-7", &cross_fork_repo());
+        let b = briefing(&g, BranchState::Rebased, "honr/card-7", &cross_fork_repo(), &[]);
         assert!(b.contains("rebase onto latest, api.rs only."), "{b}");
         assert!(
             b.contains("BINDING"),
@@ -3417,39 +3516,44 @@ mod tests {
         item.state = State::Review;
         item.environment = Some("honr-card-9-a2".into());
 
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
 
         // Backlog with environment set (e.g. Request changes)
         item.state = State::Backlog;
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
 
         // Prior attempt for the same card is kept (prefix match) so create
         // cannot race reconcile; run_card deletes the previous name explicitly.
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a1"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a1", "honr"));
 
         // Halt clears environment — sweeper must not preserve the box.
         item.environment = None;
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1", "honr"));
         item.environment = Some("honr-card-9-a2".into());
 
         item.state = State::NeedsHuman;
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a3"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a3", "honr"));
 
         // Terminal card sandbox is not kept (reaped)
         item.state = State::Done;
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
 
         item.state = State::Retired;
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
 
         // Deleted item sandbox is not kept
-        assert!(!should_keep_sandbox(None, "honr-card-9-a2"));
+        assert!(!should_keep_sandbox(None, "honr-card-9-a2", "honr"));
 
         // Other cards' sandboxes are not kept
         item.state = State::Backlog;
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-8-a1"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-8-a1", "honr"));
+
+        // Configured non-honr prefix keeps matching sandboxes.
+        item.environment = Some("widgets-card-9-a2".into());
+        assert!(should_keep_sandbox(Some(&item), "widgets-card-9-a1", "widgets"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1", "widgets"));
     }
 
     #[test]
@@ -3725,7 +3829,7 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_escalate_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", &cross_fork_repo());
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", &cross_fork_repo(), &[]);
         assert!(b.contains("/sandbox/.honr/escalate.json"), "briefing must mention /sandbox/.honr/escalate.json: {b}");
         assert!(!b.contains("`.honr/escalate.json`"), "briefing must omit WORKDIR .honr/escalate.json: {b}");
     }
@@ -3736,7 +3840,7 @@ mod tests {
     fn unbound_briefing_forbids_guessing_the_repo() {
         let unbound = crate::schema::RepoConfig::default();
         assert!(!unbound.is_complete());
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-172", &unbound);
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-172", &unbound, &[]);
         assert!(
             b.contains("Do **not** guess") || b.contains("do not guess"),
             "must forbid guessing: {b}"
@@ -3758,7 +3862,7 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_split_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", &cross_fork_repo());
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", &cross_fork_repo(), &[]);
         assert!(b.contains("/sandbox/.honr/split.json"), "briefing must mention /sandbox/.honr/split.json: {b}");
         assert!(!b.contains("`.honr/split.json`"), "briefing must omit WORKDIR .honr/split.json: {b}");
         assert!(
@@ -3783,7 +3887,7 @@ mod tests {
     fn briefing_initial_plan_requires_report_not_split() {
         let mut g = grant();
         g.title = crate::model::initial_plan_title("Test Project");
-        let b = briefing(&g, BranchState::Fresh, "honr/card-92", &cross_fork_repo());
+        let b = briefing(&g, BranchState::Fresh, "honr/card-92", &cross_fork_repo(), &[]);
         assert!(b.contains("Initial plan"), "briefing must identify Initial plan: {b}");
         assert!(
             b.contains("report.json"),
@@ -3829,7 +3933,7 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_report_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", &cross_fork_repo());
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", &cross_fork_repo(), &[]);
         assert!(b.contains("/sandbox/.honr/report.json"), "briefing must mention /sandbox/.honr/report.json: {b}");
         assert!(!b.contains("`.honr/report.json`"), "briefing must omit WORKDIR .honr/report.json: {b}");
         assert!(b.contains("diffstat"), "briefing must mention diffstat: {b}");
@@ -4469,6 +4573,7 @@ mod tests {
             daily_budget_cents: None,
             agent_timeout_secs: 1800,
             max_attempts: 3,
+            ..Default::default()
         });
 
         let cfg = board.effective_agents();

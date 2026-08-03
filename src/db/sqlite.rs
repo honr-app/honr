@@ -885,6 +885,7 @@ mod tests {
             daily_budget_cents: None,
             agent_timeout_secs: 900,
             max_attempts: 3,
+            ..Default::default()
         });
         store.save_board_state(&with_rt).await.expect("save runtime");
         let rt_again = store.load_board_state().await.expect("reload runtime");

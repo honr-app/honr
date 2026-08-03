@@ -2291,6 +2291,8 @@ impl Board {
             daily_budget_cents: agents.daily_budget_cents,
             agent_timeout_secs: agents.agent_timeout_secs,
             max_attempts: agents.max_attempts,
+            branch_prefix: agents.branch_prefix.clone(),
+            quality_gates: agents.quality_gates.clone(),
         });
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
@@ -2374,6 +2376,8 @@ impl Board {
         cfg.daily_budget_cents = rt.daily_budget_cents;
         cfg.agent_timeout_secs = rt.agent_timeout_secs;
         cfg.max_attempts = rt.max_attempts;
+        cfg.branch_prefix = rt.branch_prefix;
+        cfg.quality_gates = rt.quality_gates;
         cfg
     }
 
@@ -8781,6 +8785,7 @@ mod tests {
             daily_budget_cents: None,
             agent_timeout_secs: 900,
             max_attempts: 2,
+            ..Default::default()
         });
         let eff = b.effective_agents();
         assert_eq!(eff.engine, "agy");
