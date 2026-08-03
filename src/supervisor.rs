@@ -905,7 +905,9 @@ async fn run_inside(
 
     let engine = grant.engine.as_deref().unwrap_or(&cfg.engine);
     let conversation_id = board.get(id).and_then(|i| i.conversation_id.clone());
-    let resume = is_reused && engine == "agy" && conversation_id.is_some();
+    let resume = is_reused
+        && matches!(engine, "agy" | "cursor")
+        && conversation_id.is_some();
     let briefing_text = if resume {
         resume_briefing(grant)
     } else {
@@ -915,7 +917,7 @@ async fn run_inside(
         board.story(
             id,
             format!(
-                "resuming agy conversation {}",
+                "resuming {engine} conversation {}",
                 conversation_id.as_deref().unwrap_or("?")
             ),
         );
@@ -1617,6 +1619,9 @@ fn start_script(
     conversation_id: Option<&str>,
 ) -> String {
     let secs = cfg.agent_timeout_secs;
+    // Cursor Agent CLI: --print for headless; --force/--trust so tool calls do
+    // not stall on approval; --sandbox disabled because OpenShell already
+    // contains the process (Cursor's nested sandbox fights landlock/egress).
     let cmd = match (engine, conversation_id) {
         ("agy", Some(_)) => {
             "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json --conversation \"$HONR_CONVERSATION\" -p \"$HONR_BRIEFING\""
@@ -1624,6 +1629,14 @@ fn start_script(
         }
         ("agy", None) => {
             "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\""
+                .to_string()
+        }
+        ("cursor", Some(_)) => {
+            "agent -p --force --trust --sandbox disabled --output-format stream-json --resume \"$HONR_CONVERSATION\" \"$HONR_BRIEFING\""
+                .to_string()
+        }
+        ("cursor", None) => {
+            "agent -p --force --trust --sandbox disabled --output-format stream-json \"$HONR_BRIEFING\""
                 .to_string()
         }
         _ => "claude -p \"$HONR_BRIEFING\" --output-format stream-json --verbose --permission-mode bypassPermissions"
@@ -1747,6 +1760,9 @@ fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
         ("PATH".into(), "/opt/cargo/bin:/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin".into()),
         // Shared task graph with the host control plane (uploaded at sandbox start).
         ("BEADS_DIR".into(), BEADS_SANDBOX_DIR.into()),
+        // Cursor Agent CLI compile cache (defaults to $HOME/Library/... on darwin
+        // host builds of the wrapper; keep it under the writable sandbox tree).
+        ("NODE_COMPILE_CACHE".into(), "/tmp/cursor-compile-cache".into()),
     ]
 }
 
@@ -2295,9 +2311,10 @@ fn parse_cost_cents(line: &str) -> Option<u64> {
     Some((usd * 100.0).round().max(0.0) as u64)
 }
 
-/// Pull an agy `conversation_id` out of a stream-json line, if present.
+/// Pull a resume handle out of a stream-json line, if present.
 ///
-/// Tolerant like cost parsing: walk a few known shapes and ignore the rest.
+/// agy uses `conversation_id`; Cursor Agent CLI uses `session_id`. Tolerant
+/// like cost parsing: walk a few known shapes and ignore the rest.
 fn parse_conversation_id(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     const KEYS: &[&str] = &[
@@ -2305,6 +2322,8 @@ fn parse_conversation_id(line: &str) -> Option<String> {
         "/step_update/conversation_id",
         "/result/conversation_id",
         "/message/conversation_id",
+        "/session_id",
+        "/result/session_id",
     ];
     for key in KEYS {
         if let Some(s) = v.pointer(key).and_then(|x| x.as_str()) {
@@ -2712,8 +2731,35 @@ mod tests {
             parse_conversation_id(r#"{"conversation_id":"top-level"}"#).as_deref(),
             Some("top-level")
         );
+        assert_eq!(
+            parse_conversation_id(
+                r#"{"type":"system","subtype":"init","session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}"#
+            )
+            .as_deref(),
+            Some("c6b62c6f-7ead-4fd6-9922-e952131177ff")
+        );
         assert_eq!(parse_conversation_id(r#"{"type":"assistant"}"#), None);
         assert_eq!(parse_conversation_id("not json"), None);
+    }
+
+    #[test]
+    fn cursor_engine_uses_agent_cli_flags() {
+        let s = start_script(&repo_cfg(), "do the thing", "cursor", None);
+        assert!(s.contains("timeout --foreground"), "{s}");
+        assert!(s.contains("agent -p --force --trust --sandbox disabled"), "{s}");
+        assert!(s.contains("--output-format stream-json"), "{s}");
+        assert!(!s.contains("--resume"), "{s}");
+        let resume = start_script(
+            &repo_cfg(),
+            "continue",
+            "cursor",
+            Some("c6b62c6f-7ead-4fd6-9922-e952131177ff"),
+        );
+        assert!(resume.contains("--resume \"$HONR_CONVERSATION\""), "{resume}");
+        assert!(
+            resume.contains("HONR_CONVERSATION='c6b62c6f-7ead-4fd6-9922-e952131177ff'"),
+            "{resume}"
+        );
     }
 
     #[test]

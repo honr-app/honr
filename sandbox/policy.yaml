@@ -1,4 +1,4 @@
-# honr agent sandbox: reach Vertex for inference and GitHub for code. Nothing else.
+# honr agent sandbox: reach Vertex / Cursor for inference and GitHub for code.
 version: 1
 
 filesystem_policy:
@@ -7,7 +7,8 @@ filesystem_policy:
   # pre-warmed registries baked by sandbox/Containerfile. Cargo and npm both
   # write to their caches during a build, so those two must be read_write —
   # without them a build fails on permissions, which surfaces as a hang.
-  read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust]
+  # /opt/cursor-agent is the baked Cursor CLI (node + index.js); read-only.
+  read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust, /opt/cursor-agent]
   read_write: [/sandbox, /tmp, /dev, /opt/cargo, /opt/npm-cache]
 
 landlock:
@@ -67,3 +68,39 @@ network_policies:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/agy }
       - { path: /usr/bin/agy }
+      - { path: /usr/local/bin/agent }
+      - { path: /usr/local/bin/cursor-agent }
+
+  # Cursor Agent CLI. Builtin OpenShell `cursor` profile only covers editor
+  # bootstrap hosts; the CLI's agent loop also hits api5 / repoNN hosts.
+  #
+  # api5 must be L4 passthrough (`tls: skip`, no `protocol`). With protocol
+  # rest/websocket the egress MITM breaks the Cursor CLI's CONNECT/upgrade to
+  # agentn.*.api5.cursor.sh (NET:FAIL / CONNECT 403). See OpenShell docs:
+  # endpoints without protocol + tls:skip relay the encrypted stream raw.
+  cursor:
+    name: cursor
+    endpoints:
+      - { host: api2.cursor.sh, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: '*.api5.cursor.sh', port: 443, access: full, tls: skip }
+      - { host: agentn.us.api5.cursor.sh, port: 443, access: full, tls: skip }
+      - { host: '*.api5geo.cursor.sh', port: 443, access: full, tls: skip }
+      - { host: '*.api5lat.cursor.sh', port: 443, access: full, tls: skip }
+      - { host: agentn.api5geo.cursor.sh, port: 443, access: full, tls: skip }
+      - { host: agentn.api5lat.cursor.sh, port: 443, access: full, tls: skip }
+      - { host: repo.cursor.sh, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: 'repo*.cursor.sh', port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: repo42.cursor.sh, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: cursor.blob.core.windows.net, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: download.cursor.sh, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: downloads.cursor.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: cursor.download.prss.microsoft.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+    binaries:
+      - { path: /usr/local/bin/agent }
+      - { path: /usr/local/bin/cursor-agent }
+      - { path: /opt/cursor-agent/versions/**/cursor-agent }
+      - { path: /opt/cursor-agent/versions/**/node }
+      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/bash }
+      - { path: /bin/bash }

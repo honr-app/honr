@@ -43,6 +43,19 @@ RUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/
  && (mv /root/.local/bin/bd /usr/local/bin/bd 2>/dev/null || cp ~/.local/bin/bd /usr/local/bin/bd 2>/dev/null || true) \
  && chmod 0755 /usr/local/bin/bd 2>/dev/null || true
 
+# Bake Cursor Agent CLI. Install lands under $HOME/.local; move under /opt so
+# the sandbox user's /sandbox HOME overlay does not hide it, and put a stable
+# /usr/local/bin/agent on the default PATH (exec env does not inherit image ENV).
+RUN curl -fsSL https://cursor.com/install | bash \
+ && mkdir -p /opt/cursor-agent \
+ && cp -a /root/.local/share/cursor-agent/. /opt/cursor-agent/ \
+ && AGENT_BIN="$(find /opt/cursor-agent/versions -type f -name cursor-agent | sort | tail -1)" \
+ && test -n "$AGENT_BIN" \
+ && ln -sfn "$AGENT_BIN" /usr/local/bin/agent \
+ && ln -sfn "$AGENT_BIN" /usr/local/bin/cursor-agent \
+ && chmod -R a+rX /opt/cursor-agent \
+ && /usr/local/bin/agent --version
+
 # ---- rustup shims & environment --------------------------------------------
 
 # The toolchain must work from ANY shell, not just one that inherited our env.
