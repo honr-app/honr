@@ -667,6 +667,8 @@ impl BeadsClient {
         match self.gate_remote(RemoteOp::GithubPush(ids.clone())) {
             RemoteGate::Skip => {
                 if self.db_ready() {
+                    let repo = std::env::var("GITHUB_REPOSITORY")
+                        .unwrap_or_else(|_| "shanemcd/honr".to_string());
                     for id in &ids {
                         let _ = self
                             .cmd()
@@ -674,7 +676,7 @@ impl BeadsClient {
                                 "update",
                                 id,
                                 "--external-ref",
-                                &format!("https://github.com/shanemcd/honr/issues/{id}"),
+                                &format!("https://github.com/{repo}/issues/{id}"),
                             ])
                             .output()
                             .await;
