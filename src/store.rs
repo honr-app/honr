@@ -559,6 +559,7 @@ impl Board {
             item.progress = 0.0;
             // Bounce / park / halt / deadline expiry all land here — never auto-start again.
             item.awaiting_dispatch = false;
+            item.rebase_requested = false;
             if by == "human" {
                 item.run_failures = 0;
                 item.escalation = None;
@@ -570,6 +571,7 @@ impl Board {
             item.conversation_id = None;
             item.parked = false;
             item.awaiting_dispatch = false;
+            item.rebase_requested = false;
             item.environment = None;
         }
         let mut item_out = item.clone();
@@ -1796,6 +1798,7 @@ impl Board {
             let mut s = self.state.write().unwrap();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             it.awaiting_dispatch = false;
+            it.rebase_requested = false;
             it.clone()
         };
         self.emit(&item);
@@ -1842,6 +1845,7 @@ impl Board {
             let it = s.items.get_mut(&id).unwrap();
             it.parked = false;
             it.awaiting_dispatch = false;
+            it.rebase_requested = false;
             it.run_deadline_at = Some(deadline);
             it.lease = Some(Lease {
                 agent_id: agent_id.to_string(),
@@ -2927,6 +2931,133 @@ fn check_split_relatedness(
             ref_name: ref_name.to_string(),
             commit_sha,
         });
+        self.trigger_rebase_for_all_behind_siblings();
+    }
+
+    /// Identify open sibling PRs in Review that are behind main for a given item's parent.
+    pub fn identify_behind_sibling_prs(&self, near_id: ItemId) -> Vec<WorkItem> {
+        let s = self.state.read().unwrap();
+        let mut results = Vec::new();
+        if let Some(item) = s.items.get(&near_id) {
+            let parent_id = item.parent.unwrap_or(item.id);
+            for child_id in s.items.values().filter(|i| i.parent == Some(parent_id)).map(|i| i.id) {
+                if child_id == near_id {
+                    continue;
+                }
+                if let Some(child) = s.items.get(&child_id) {
+                    if child.state == State::Review
+                        && child
+                            .pr_url
+                            .as_ref()
+                            .is_some_and(|u| !u.trim().is_empty())
+                    {
+                        results.push(child.clone());
+                    }
+                }
+            }
+        }
+        results.sort_by_key(|i| i.entered_state_at);
+        results
+    }
+
+    /// Identify all open sibling PRs in Review that are behind main across the entire board.
+    pub fn identify_all_behind_sibling_prs(&self) -> Vec<WorkItem> {
+        let s = self.state.read().unwrap();
+        let mut results = Vec::new();
+        let parents_with_done: std::collections::HashSet<ItemId> = s
+            .items
+            .values()
+            .filter(|i| i.state == State::Done)
+            .filter_map(|i| i.parent)
+            .collect();
+
+        for parent_id in parents_with_done {
+            for child_id in s.items.values().filter(|i| i.parent == Some(parent_id)).map(|i| i.id) {
+                if let Some(child) = s.items.get(&child_id) {
+                    if child.state == State::Review
+                        && child
+                            .pr_url
+                            .as_ref()
+                            .is_some_and(|u| !u.trim().is_empty())
+                    {
+                        results.push(child.clone());
+                    }
+                }
+            }
+        }
+        results.sort_by_key(|i| i.entered_state_at);
+        results.dedup_by_key(|i| i.id);
+        results
+    }
+
+    /// Dispatch/queue a rebase request for a card in Review whose branch is behind main.
+    pub fn dispatch_rebase(&self, id: ItemId) -> Result<WorkItem, String> {
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item {id}"))?;
+            if it.state != State::Review {
+                return Err(format!(
+                    "only Review cards can be rebased, #{id} is in {:?}",
+                    it.state
+                ));
+            }
+            if it.pr_url.as_ref().is_none_or(|u| u.trim().is_empty()) {
+                return Err(format!("card #{id} has no PR URL to rebase"));
+            }
+            it.rebase_requested = true;
+            it.awaiting_dispatch = true;
+            let mut out = it.clone();
+            Self::populate_blockers(&s, &mut out);
+            out
+        };
+        self.emit(&item);
+        self.story(
+            id,
+            format!("{}: queued rebase request — branch is behind main.", item.title),
+        );
+        Ok(item)
+    }
+
+    /// Identify sibling PRs in Review behind main for `near_id`'s parent and dispatch rebase requests.
+    pub fn trigger_rebase_for_behind_siblings(&self, near_id: ItemId) -> Vec<WorkItem> {
+        let siblings = self.identify_behind_sibling_prs(near_id);
+        let mut dispatched = Vec::new();
+        for s in siblings {
+            if let Ok(item) = self.dispatch_rebase(s.id) {
+                dispatched.push(item);
+            }
+        }
+        dispatched
+    }
+
+    /// Identify all sibling PRs in Review behind main across the board and dispatch rebase requests.
+    pub fn trigger_rebase_for_all_behind_siblings(&self) -> Vec<WorkItem> {
+        let siblings = self.identify_all_behind_sibling_prs();
+        let mut dispatched = Vec::new();
+        for s in siblings {
+            if let Ok(item) = self.dispatch_rebase(s.id) {
+                dispatched.push(item);
+            }
+        }
+        dispatched
+    }
+
+    /// List all cards in Review that have a pending rebase request.
+    #[allow(dead_code)]
+    pub fn list_awaiting_rebase(&self) -> Vec<WorkItem> {
+        let s = self.state.read().unwrap();
+        let mut items: Vec<_> = s
+            .items
+            .values()
+            .filter(|i| {
+                i.state == State::Review
+                    && (i.rebase_requested || i.awaiting_dispatch)
+                    && !i.parked
+            })
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| i.entered_state_at);
+        items
     }
 
     /// Normalize a GitHub PR URL for matching board `pr_url` values.
@@ -2967,6 +3098,7 @@ fn check_split_relatedness(
         match self.transition(id, State::Done, "github-webhook", Some(reason)) {
             Ok(item) => {
                 self.story(id, format!("{} — PR merged; card Done.", item.title));
+                self.trigger_rebase_for_behind_siblings(id);
                 Some(id)
             }
             Err(e) => {
@@ -6136,5 +6268,85 @@ mod tests {
         assert!(healed > 0, "expected at least 1 project healed");
 
         assert_eq!(b.get(p.id).unwrap().state, State::Done);
+    }
+
+    #[test]
+    fn identify_behind_sibling_prs_and_dispatch_rebase() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-test-rebase-{}.json", std::process::id())),
+        );
+        let project = b
+            .create(None, "Rebase Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+
+        let t1 = b
+            .create(Some(project.id), "Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+        let t2 = b
+            .create(Some(project.id), "Task 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .unwrap();
+
+        b.transition(t1.id, State::Shaping, "test", None).unwrap();
+        b.transition(t1.id, State::Backlog, "test", None).unwrap();
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/101".into()));
+
+        b.transition(t2.id, State::Shaping, "test", None).unwrap();
+        b.transition(t2.id, State::Backlog, "test", None).unwrap();
+        b.transition(t2.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t2.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(t2.id, Some("https://github.com/shanemcd/honr/pull/102".into()));
+
+        let behind = b.identify_behind_sibling_prs(t1.id);
+        assert_eq!(behind.len(), 1);
+        assert_eq!(behind[0].id, t2.id);
+
+        let completed_id = b
+            .complete_for_merged_pr("https://github.com/shanemcd/honr/pull/101", Some(101))
+            .expect("t1 completed");
+        assert_eq!(completed_id, t1.id);
+
+        let t2_updated = b.get(t2.id).unwrap();
+        assert!(t2_updated.rebase_requested, "t2 should have rebase_requested set");
+        assert!(t2_updated.awaiting_dispatch, "t2 should have awaiting_dispatch set");
+
+        let awaiting_rebase = b.list_awaiting_rebase();
+        assert_eq!(awaiting_rebase.len(), 1);
+        assert_eq!(awaiting_rebase[0].id, t2.id);
+    }
+
+    #[test]
+    fn notify_main_advanced_dispatches_rebase_for_sibling_prs_in_review() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-test-rebase-main-{}.json", std::process::id())),
+        );
+        let project = b
+            .create(None, "Rebase Main Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+
+        let t1 = b
+            .create(Some(project.id), "Merged Task", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+        let t2 = b
+            .create(Some(project.id), "Behind Task", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .unwrap();
+
+        b.transition(t1.id, State::Shaping, "test", None).unwrap();
+        b.transition(t1.id, State::Done, "test", None).unwrap();
+
+        b.transition(t2.id, State::Shaping, "test", None).unwrap();
+        b.transition(t2.id, State::Backlog, "test", None).unwrap();
+        b.transition(t2.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t2.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(t2.id, Some("https://github.com/shanemcd/honr/pull/202".into()));
+
+        b.notify_main_advanced("refs/heads/main", Some("sha123".into()));
+
+        let t2_updated = b.get(t2.id).unwrap();
+        assert!(t2_updated.rebase_requested, "t2 rebase_requested should be true");
+        assert!(t2_updated.awaiting_dispatch, "t2 awaiting_dispatch should be true");
     }
 }
