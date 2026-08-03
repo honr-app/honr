@@ -2,6 +2,34 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { api } from "./api.js";
 import type { BoardEvent, GoalView, Snapshot, StoryLine, WorkItem } from "./types.js";
 
+export type BoardEventListener = (ev: BoardEvent) => void;
+
+const listeners = new Set<BoardEventListener>();
+
+/**
+ * Subscribe to real-time board events emitted by SSE/WebSocket stream.
+ * Returns an unsubscribe function that cleans up the listener when called.
+ */
+export function subscribeBoardEvents(listener: BoardEventListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/**
+ * Emit a board event to all active subscribers.
+ */
+export function emitBoardEvent(ev: BoardEvent): void {
+  for (const listener of listeners) {
+    try {
+      listener(ev);
+    } catch {
+      /* ignore subscriber errors */
+    }
+  }
+}
+
 export interface BoardState {
   items: Map<number, WorkItem>;
   goals: GoalView[];
@@ -169,6 +197,7 @@ export function useBoard() {
           }
         }
         dispatch({ type: "event", ev });
+        emitBoardEvent(ev);
       } catch {
         /* keep-alive frames */
       }
