@@ -535,6 +535,7 @@ impl Board {
             let beads = self.beads.clone();
             let beads_id = item.beads_id.clone();
             let is_initial = item.is_initial_plan_task();
+            let has_gh_url = item.github_issue_url.is_some();
             let reason_str = item
                 .history
                 .last()
@@ -545,7 +546,12 @@ impl Board {
                     if let (Some(b), Some(bid)) = (beads, beads_id) {
                         if crate::beads::BeadsClient::is_real_id(&bid) {
                             let _ = b.close(&bid, Some(&reason_str)).await;
-                            if !is_initial {
+                            let has_beads_gh_url = if is_initial && !has_gh_url {
+                                b.show(&bid).await.ok().and_then(|s| s.github_issue_url()).is_some()
+                            } else {
+                                false
+                            };
+                            if !is_initial || has_gh_url || has_beads_gh_url {
                                 let _ = b.github_push(&[bid]).await;
                             }
                             b.schedule_dolt_push();
@@ -2459,6 +2465,7 @@ fn check_split_relatedness(
                 let beads = self.beads.clone();
                 let beads_id = it.beads_id.clone();
                 let is_initial = it.is_initial_plan_task();
+                let has_gh_url = it.github_issue_url.is_some();
                 let env = it.environment.clone();
                 let os = self.openshell.clone().unwrap_or_default();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -2469,7 +2476,12 @@ fn check_split_relatedness(
                         if let (Some(b), Some(bid)) = (beads, beads_id) {
                             if crate::beads::BeadsClient::is_real_id(&bid) {
                                 let _ = b.close(&bid, Some("Deleted from honr board")).await;
-                                if !is_initial {
+                                let has_beads_gh_url = if is_initial && !has_gh_url {
+                                    b.show(&bid).await.ok().and_then(|s| s.github_issue_url()).is_some()
+                                } else {
+                                    false
+                                };
+                                if !is_initial || has_gh_url || has_beads_gh_url {
                                     let _ = b.github_push(&[bid]).await;
                                 }
                                 b.schedule_dolt_push();
@@ -4413,8 +4425,8 @@ mod tests {
             .await
             .expect("update external ref");
 
-        // Re-run schedule_beads_mirror to pick up external_ref from beads
-        board.schedule_beads_mirror(project.id);
+        // Re-run refresh_github_issue_url to pick up external_ref from beads
+        board.refresh_github_issue_url(project.id, &project_beads_id).await;
 
         let mut found_url = None;
         for _ in 0..50 {
@@ -5175,5 +5187,228 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_close_linked_github_issue_on_done_and_retired() {
+        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-close-gh-on-done-test-{}-{}",
+            std::process::id(),
+            tid
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let remote_cap = crate::beads::RemoteCapture::new();
+        let beads_client = crate::beads::BeadsClient::with_remotes(
+            &beads_dir,
+            crate::beads::Remotes::Capture(remote_cap.clone()),
+        );
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        // 1. Create Project and Task
+        let project = board
+            .create(None, "Close GH Project", "intent", None, Origin::Human, true, None)
+            .expect("create project");
+        let task = board
+            .create(
+                Some(project.id),
+                "Task to Close",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("create task");
+
+        board.mirror_beads_item(project.id).await;
+        board.mirror_beads_item(task.id).await;
+
+        let task_item = board.get(task.id).unwrap();
+        let task_beads_id = task_item.beads_id.clone().unwrap();
+        assert!(task_item.github_issue_url.is_some(), "task should have github_issue_url");
+
+        let _ = remote_cap.take();
+
+        // 2. Transition task to Done
+        let _ = board.transition(task.id, State::Shaping, "test", None);
+        let _ = board.transition(task.id, State::Backlog, "test", None);
+        let _ = board.transition(task.id, State::Done, "human", Some("completed".into()));
+
+        // Wait for async close & github push
+        let mut saw_close_push = false;
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if let Ok(show) = beads_client.show(&task_beads_id).await {
+                if show.status == "closed" {
+                    let ops = remote_cap.ops();
+                    if ops.iter().any(|op| match op {
+                        crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&task_beads_id),
+                        _ => false,
+                    }) {
+                        saw_close_push = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            saw_close_push,
+            "expected beads task closed and GithubPush recorded on Done transition for task {task_beads_id}"
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[tokio::test]
+    async fn test_initial_plan_approve_and_done_does_not_leave_orphan_open_issues() {
+        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-initial-plan-no-orphan-gh-test-{}-{}",
+            std::process::id(),
+            tid
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let remote_cap = crate::beads::RemoteCapture::new();
+        let beads_client = crate::beads::BeadsClient::with_remotes(
+            &beads_dir,
+            crate::beads::Remotes::Capture(remote_cap.clone()),
+        );
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        // 1. Create Project -> seeds Initial plan task
+        let project = board
+            .create(None, "No Orphan GH Project", "intent", None, Origin::Human, true, None)
+            .expect("create project");
+        let seed_id = board.children_of(project.id)[0];
+
+        board.mirror_beads_item(project.id).await;
+        board.mirror_beads_item(seed_id).await;
+
+        let seed_item = board.get(seed_id).unwrap();
+        let seed_beads_id = seed_item.beads_id.clone().unwrap();
+        assert_eq!(seed_item.github_issue_url, None, "seed task should have no github_issue_url");
+
+        let _ = remote_cap.take();
+
+        // 2. Propose breakdown on seed task and approve review
+        board
+            .propose_plan(
+                seed_id,
+                "Plan breakdown",
+                vec![
+                    PlanTaskSpec {
+                        key: "f1".into(),
+                        title: "Feature One".into(),
+                        intent: "intent 1".into(),
+                        definition_of_done: "dod 1".into(),
+                        blocked_by_keys: vec![],
+                        capability: None,
+                        item_id: None,
+                    },
+                    PlanTaskSpec {
+                        key: "f2".into(),
+                        title: "Feature Two".into(),
+                        intent: "intent 2".into(),
+                        definition_of_done: "dod 2".into(),
+                        blocked_by_keys: vec![],
+                        capability: None,
+                        item_id: None,
+                    },
+                ],
+                vec![],
+            )
+            .expect("propose plan on seed");
+        let done_seed = board.approve_review(seed_id).expect("approve seed review");
+        assert_eq!(done_seed.state, State::Done);
+
+        // Wait for async close
+        let mut seed_beads_closed = false;
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if let Ok(show) = beads_client.show(&seed_beads_id).await {
+                if show.status == "closed" {
+                    seed_beads_closed = true;
+                    break;
+                }
+            }
+        }
+        assert!(seed_beads_closed, "seed task in beads should be closed");
+
+        // Verify NO GithubPush was sent for seed_beads_id
+        let ops = remote_cap.ops();
+        let seed_pushes: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&seed_beads_id) => {
+                    Some(ids.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seed_pushes.len(), 0, "no GithubPush should be sent for Initial plan seed card");
+
+        // 3. Materialized tasks created by approval DO get mirrored and pushed to GitHub
+        let made: Vec<_> = board
+            .children_of(project.id)
+            .into_iter()
+            .filter_map(|cid| board.get(cid))
+            .filter(|i| !i.is_initial_plan_task())
+            .collect();
+        assert_eq!(made.len(), 2, "expected 2 materialized tasks");
+
+        for m in &made {
+            board.mirror_beads_item(m.id).await;
+            assert!(
+                board.get(m.id).unwrap().github_issue_url.is_some(),
+                "materialized task should get github_issue_url"
+            );
+        }
+
+        // 4. Closing one of the materialized tasks closes its GitHub issue
+        let mat_task = &made[0];
+        let mat_beads_id = mat_task.beads_id.clone().unwrap();
+
+        let _ = remote_cap.take();
+        let _ = board.transition(mat_task.id, State::Shaping, "test", None);
+        let _ = board.transition(mat_task.id, State::Backlog, "test", None);
+        let _ = board.transition(mat_task.id, State::Done, "human", Some("done".into()));
+
+        let mut mat_closed = false;
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if let Ok(show) = beads_client.show(&mat_beads_id).await {
+                if show.status == "closed" {
+                    let ops = remote_cap.ops();
+                    if ops.iter().any(|op| match op {
+                        crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&mat_beads_id),
+                        _ => false,
+                    }) {
+                        mat_closed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(mat_closed, "materialized task should close bead and push to GitHub on Done");
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }
