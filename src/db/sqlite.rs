@@ -510,7 +510,7 @@ mod tests {
             text: "kicked off".into(),
         };
         store
-            .replace_stories(1, &[line.clone()])
+            .replace_stories(1, std::slice::from_ref(&line))
             .await
             .expect("stories");
 

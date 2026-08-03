@@ -239,9 +239,9 @@ impl Board {
         // beads dir so `bd`'s current_dir is never the empty relative parent of
         // `.beads` (that used to make every `bd` spawn fail with ENOENT).
         // Production always co-locates beads with the board file. Under `cargo test`
-        // leave beads detached by default — sync create would otherwise stampede a
-        // shared `/tmp/.beads` (or cwd `.beads`) across parallel Board::new callers.
-        // Beads-focused tests attach an isolated client explicitly.
+        // leave beads detached by default — attaching a shared beads dir across
+        // parallel Board::new callers races heal/mirror. Beads-focused tests
+        // attach an isolated client explicitly.
         let beads = if cfg!(test) {
             None
         } else {
@@ -809,10 +809,10 @@ impl Board {
     /// Create a Project (root) or a Task under a Project. Tasks are flat —
     /// nesting under another Task is refused.
     ///
-    /// When a beads client is attached, creates the epic/task **synchronously**
-    /// so the card emits with a real `beads_id` (parent-child via `--parent`).
-    /// Placeholder `bd-honr-*` ids remain only as a heal fallback when `bd`
-    /// create fails.
+    /// Beads dual-write is **asynchronous**: cards keep a `bd-honr-*`
+    /// placeholder until [`Self::schedule_beads_mirror`] /
+    /// [`Self::heal_placeholder_beads_ids`] bind a real id. Approve/materialize
+    /// must not wait on `bd create` or an in-flight `bd dolt push`.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -824,7 +824,7 @@ impl Board {
         above_line: bool,
         capability: Option<String>,
     ) -> Result<WorkItem, String> {
-        let parent_beads = if let Some(pid) = parent {
+        if let Some(pid) = parent {
             let s = self.state.read().unwrap();
             let Some(p) = s.items.get(&pid) else {
                 return Err(format!("no parent #{pid}"));
@@ -837,12 +837,7 @@ impl Board {
             if p.level.as_deref() == Some("Task") {
                 return Err("cannot add children to a Task; parent must be a Project".into());
             }
-            p.beads_id
-                .clone()
-                .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-        } else {
-            None
-        };
+        }
 
         let item = {
             let mut s = self.state.write().unwrap();
@@ -855,7 +850,7 @@ impl Board {
             item.origin = origin;
             item.above_line = above_line;
             item.capability = capability;
-            // Temporary until sync create below; heal still recognizes this shape.
+            // Placeholder until async mirror / heal binds a real beads hash.
             item.beads_id = Some(format!("bd-honr-{id}"));
             item.level = if parent.is_none() {
                 self.schema
@@ -879,44 +874,6 @@ impl Board {
             item_out
         };
 
-        // Bind a real beads id before the first emit so cockpit/UI never see
-        // a placeholder for a successful create. Seed Initial plan after this
-        // so the child can take `--parent=<epic>`.
-        if let Some(beads) = self.beads.as_ref() {
-            let issue_type = if parent.is_none() { "epic" } else { "task" };
-            let meta = crate::beads::BeadsClient::honr_metadata(item.id, None);
-            let blockers: Vec<String> = item
-                .blocked_by
-                .iter()
-                .filter_map(|bid| self.get(*bid).and_then(|b| b.beads_id))
-                .filter(|bid| crate::beads::BeadsClient::is_real_id(bid))
-                .collect();
-            match beads.create_linked_sync(
-                &item.title,
-                2,
-                issue_type,
-                Some(&item.intent),
-                parent_beads.as_deref(),
-                &blockers,
-                Some(&meta),
-            ) {
-                Ok(issue) if crate::beads::BeadsClient::is_real_id(&issue.id) => {
-                    self.set_beads_id(item.id, &issue.id);
-                }
-                Ok(issue) => {
-                    tracing::warn!(
-                        id = item.id,
-                        beads_id = %issue.id,
-                        "bd create returned non-real id; keeping placeholder"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(id = item.id, error = %e, "beads sync create failed; placeholder kept for heal");
-                }
-            }
-        }
-
-        let item = self.get(item.id).ok_or_else(|| format!("lost item #{}", item.id))?;
         self.emit(&item);
 
         // Every Project gets a claimable Initial Plan Task so planning can run
@@ -1339,6 +1296,70 @@ impl Board {
         }
     }
 
+    /// Mirror many cards after Approve/materialize: suppress dolt push for the
+    /// storm, bind real beads ids (parents before children), then write deps.
+    /// Returns immediately — work runs on the runtime; cockpit must not wait.
+    pub fn schedule_beads_mirror_batch(self: &Arc<Self>, ids: &[ItemId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let board = Arc::clone(self);
+        let mut ids = ids.to_vec();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Some(beads) = board.beads.clone() {
+                    beads.begin_create_storm();
+                }
+                // Projects / lower ids first so `--parent` and blocker deps resolve.
+                ids.sort_by_key(|id| {
+                    let is_task = board.get(*id).is_some_and(|i| i.parent.is_some());
+                    (is_task, *id)
+                });
+                for id in &ids {
+                    if let Some(pid) = board.get(*id).and_then(|i| i.parent) {
+                        board.mirror_beads_item(pid).await;
+                    }
+                    board.mirror_beads_item(*id).await;
+                }
+                for id in &ids {
+                    board.sync_beads_blocked_by(*id).await;
+                }
+                if let Some(beads) = board.beads.clone() {
+                    beads.end_create_storm();
+                }
+            });
+        }
+    }
+
+    /// Write board `blocked_by` edges into beads once both sides have real ids.
+    async fn sync_beads_blocked_by(self: &Arc<Self>, id: ItemId) {
+        let Some(beads) = self.beads.clone() else {
+            return;
+        };
+        let Some(item) = self.get(id) else {
+            return;
+        };
+        let Some(bid) = item
+            .beads_id
+            .as_deref()
+            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let deps: Vec<String> = item
+            .blocked_by
+            .iter()
+            .filter_map(|b| self.get(*b).and_then(|w| w.beads_id))
+            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+            .collect();
+        for dep in deps {
+            if let Err(e) = beads.dep_add(&bid, &dep, "blocks").await {
+                tracing::warn!(%bid, %dep, error = %e, "beads dep sync failed");
+            }
+        }
+    }
+
     /// For non-retired cards that already have a real beads id but no
     /// `github_issue_url`, copy the URL from beads (push first if needed).
     ///
@@ -1435,6 +1456,10 @@ impl Board {
         if !created.is_empty() {
             for (id, beads_id) in &created {
                 self.push_beads_item_single_flight(*id, beads_id).await;
+            }
+            // Deps may have been set on the board while ids were still placeholders.
+            for (id, _) in &created {
+                self.sync_beads_blocked_by(*id).await;
             }
             let healed = created.len();
             tracing::info!("healed {healed} placeholder beads_id(s) with real beads IDs");
@@ -4478,6 +4503,133 @@ mod tests {
         assert!(prop.tasks.iter().all(|t| t.item_id.is_some()));
     }
 
+    #[tokio::test]
+    async fn approve_plan_materialize_skips_sync_bd_create_and_heals_async() {
+        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-materialize-async-beads-{}-{}",
+            std::process::id(),
+            tid
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let beads_client = crate::beads::BeadsClient::with_remotes(
+            &beads_dir,
+            crate::beads::Remotes::Capture(crate::beads::RemoteCapture::new()),
+        );
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        let project = board
+            .create(
+                None,
+                "Async Materialize Project",
+                "why",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .expect("project");
+        let _ = board.transition(project.id, State::Shaping, "t", None);
+
+        // Simulate an in-flight dolt push / create storm — request path must not wait.
+        beads_client.begin_create_storm();
+        beads_client.schedule_dolt_push();
+
+        let before_creates = beads_client.create_sync_call_count();
+        assert_eq!(
+            before_creates, 0,
+            "Board::create must not call create_linked_sync"
+        );
+
+        board
+            .propose_plan(
+                project.id,
+                "three tasks",
+                vec![
+                    PlanTaskSpec {
+                        key: "a".into(),
+                        title: "Task A".into(),
+                        intent: "ia".into(),
+                        definition_of_done: "da".into(),
+                        blocked_by_keys: vec![],
+                        capability: None,
+                        item_id: None,
+                    },
+                    PlanTaskSpec {
+                        key: "b".into(),
+                        title: "Task B".into(),
+                        intent: "ib".into(),
+                        definition_of_done: "db".into(),
+                        blocked_by_keys: vec!["a".into()],
+                        capability: None,
+                        item_id: None,
+                    },
+                    PlanTaskSpec {
+                        key: "c".into(),
+                        title: "Task C".into(),
+                        intent: "ic".into(),
+                        definition_of_done: "dc".into(),
+                        blocked_by_keys: vec!["b".into()],
+                        capability: None,
+                        item_id: None,
+                    },
+                ],
+                vec![],
+            )
+            .expect("propose");
+
+        let started = std::time::Instant::now();
+        let published = board.approve_plan(project.id).expect("approve");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "approve/materialize must return quickly even with dolt storm open; took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            beads_client.create_sync_call_count(),
+            before_creates,
+            "materialize must not call create_linked_sync on the request path"
+        );
+        assert_eq!(published.len(), 3);
+
+        for &id in &published {
+            let item = board.get(id).expect("sibling");
+            assert_eq!(item.state, State::Backlog, "siblings land in Backlog, not draft");
+            assert!(
+                item.beads_id
+                    .as_deref()
+                    .is_some_and(|b| b.starts_with("bd-honr-")),
+                "siblings keep placeholders until heal/mirror, got {:?}",
+                item.beads_id
+            );
+        }
+
+        beads_client.end_create_storm();
+
+        let healed = board.heal_placeholder_beads_ids().await;
+        assert!(
+            healed >= 3,
+            "heal should bind real beads ids for materialized siblings (and project/seed); got {healed}"
+        );
+        for &id in &published {
+            let bid = board.get(id).and_then(|i| i.beads_id).expect("beads_id");
+            assert!(
+                crate::beads::BeadsClient::is_real_id(&bid),
+                "sibling #{id} should have real beads_id after heal, got {bid}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
     #[test]
     fn approve_plan_closes_initial_plan_in_review() {
         let b = Board::new(
@@ -5024,23 +5176,33 @@ mod tests {
         board_raw.beads = Some(beads_client);
         let board = Arc::new(board_raw);
 
-        // 1. Sync create assigns a real beads id before return.
+        // Create leaves placeholders; mirror binds real beads ids.
         let project = board
             .create(None, "Test Mirror Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
-        let project_beads_id = project
-            .beads_id
-            .clone()
-            .expect("project beads_id");
         assert!(
-            crate::beads::BeadsClient::is_real_id(&project_beads_id),
-            "sync create should assign a real beads id, got {project_beads_id}"
+            project
+                .beads_id
+                .as_deref()
+                .is_some_and(|b| b.starts_with("bd-honr-")),
+            "create must leave a placeholder, got {:?}",
+            project.beads_id
+        );
+        board.mirror_beads_item(project.id).await;
+        assert!(
+            crate::beads::BeadsClient::is_real_id(
+                board
+                    .get(project.id)
+                    .and_then(|p| p.beads_id)
+                    .as_deref()
+                    .unwrap_or("")
+            ),
+            "mirror should assign a real beads id"
         );
 
         // Schedule github push / URL refresh for the epic.
         board.schedule_beads_mirror(project.id);
 
-        // 2. Create a task under project — also sync-bound to the epic.
         let task = board
             .create(
                 Some(project.id),
@@ -5053,12 +5215,25 @@ mod tests {
             )
             .expect("create task");
         assert!(
-            crate::beads::BeadsClient::is_real_id(task.beads_id.as_deref().unwrap_or("")),
-            "task should have real beads id after sync create"
+            task.beads_id
+                .as_deref()
+                .is_some_and(|b| b.starts_with("bd-honr-")),
+            "task create must leave placeholder"
+        );
+        board.mirror_beads_item(task.id).await;
+        assert!(
+            crate::beads::BeadsClient::is_real_id(
+                board
+                    .get(task.id)
+                    .and_then(|t| t.beads_id)
+                    .as_deref()
+                    .unwrap_or("")
+            ),
+            "task should have real beads id after mirror"
         );
         board.schedule_beads_mirror(task.id);
 
-        // 3. Propose split → Approve creates siblings (beads on materialize).
+        // Propose split → Approve creates siblings (placeholders; mirror binds).
         let _ = board.transition(task.id, State::Shaping, "test", None);
         let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent", None, 45);
@@ -5081,8 +5256,22 @@ mod tests {
 
         for m in &made {
             assert!(
-                crate::beads::BeadsClient::is_real_id(m.beads_id.as_deref().unwrap_or("")),
-                "split sibling #{} should sync-create a real beads id",
+                m.beads_id
+                    .as_deref()
+                    .is_some_and(|b| b.starts_with("bd-honr-")),
+                "split sibling #{} should start as placeholder",
+                m.id
+            );
+            board.mirror_beads_item(m.id).await;
+            assert!(
+                crate::beads::BeadsClient::is_real_id(
+                    board
+                        .get(m.id)
+                        .and_then(|i| i.beads_id)
+                        .as_deref()
+                        .unwrap_or("")
+                ),
+                "split sibling #{} should get a real beads id after mirror",
                 m.id
             );
             board.schedule_beads_mirror(m.id);
@@ -5257,13 +5446,14 @@ mod tests {
             .create(None, "Test URL Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
 
-        // Sync create already assigned a real beads id; mirror push fills the URL.
+        // Mirror binds a real beads id; push fills the URL.
+        board.mirror_beads_item(project.id).await;
         board.schedule_beads_mirror(project.id);
         let project_beads_id = board
             .get(project.id)
             .and_then(|p| p.beads_id)
             .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-            .expect("expected real beads_id from sync create");
+            .expect("expected real beads_id after mirror");
 
         for _ in 0..200 {
             if board
@@ -5329,10 +5519,10 @@ mod tests {
         let project = board
             .create(None, "Single Flight Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
-        let project_beads_id = project.beads_id.clone().expect("real beads_id");
 
         let _ = remote_cap.take();
 
+        // Concurrent mirrors: first binds + pushes; the rest single-flight / no-op.
         let mut handles = Vec::new();
         for _ in 0..10 {
             let b = Arc::clone(&board);
@@ -5345,6 +5535,12 @@ mod tests {
         for h in handles {
             h.await.expect("join task");
         }
+
+        let project_beads_id = board
+            .get(project.id)
+            .and_then(|p| p.beads_id)
+            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+            .expect("real beads_id after mirror");
 
         let ops = remote_cap.ops();
         let push_ops: Vec<_> = ops
@@ -5408,12 +5604,9 @@ mod tests {
         let project = board
             .create(None, "Seeded Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
-        let project_beads_id = project.beads_id.clone().expect("project beads_id");
-
         let children = board.children_of(project.id);
         assert!(!children.is_empty(), "expected seeded initial plan task");
         let seed_id = children[0];
-        let seed_beads_id = board.get(seed_id).unwrap().beads_id.expect("seed beads_id");
 
         let _ = remote_cap.take();
 
@@ -5431,6 +5624,16 @@ mod tests {
 
         t1.await.unwrap();
         t2.await.unwrap();
+
+        let project_beads_id = board
+            .get(project.id)
+            .and_then(|p| p.beads_id)
+            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+            .expect("project beads_id");
+        let seed_beads_id = board
+            .get(seed_id)
+            .and_then(|s| s.beads_id)
+            .expect("seed beads_id");
 
         let ops = remote_cap.ops();
 
@@ -5621,7 +5824,7 @@ mod tests {
         let _ = board.transition(retired.id, State::Retired, "test", None);
 
         // Force placeholders on open cards (+ keep retired as placeholder) so heal
-        // has work — sync create normally binds real ids immediately.
+        // has work — create already leaves placeholders; overwrite for stable ids.
         let initial_plan = board
             .snapshot()
             .items
@@ -6232,13 +6435,17 @@ mod tests {
             );
         }
 
-        let mat_task = &made[0];
-        let mat_beads_id = mat_task.beads_id.clone().unwrap();
+        let mat_task_id = made[0].id;
+        let mat_beads_id = board
+            .get(mat_task_id)
+            .and_then(|t| t.beads_id)
+            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+            .expect("materialized task real beads_id");
 
         let _ = remote_cap.take();
-        let _ = board.transition(mat_task.id, State::Shaping, "test", None);
-        let _ = board.transition(mat_task.id, State::Backlog, "test", None);
-        let _ = board.transition(mat_task.id, State::Done, "human", Some("done".into()));
+        let _ = board.transition(mat_task_id, State::Shaping, "test", None);
+        let _ = board.transition(mat_task_id, State::Backlog, "test", None);
+        let _ = board.transition(mat_task_id, State::Done, "human", Some("done".into()));
 
         remote_cap
             .wait_until(|ops| {

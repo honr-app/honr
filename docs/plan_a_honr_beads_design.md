@@ -127,7 +127,8 @@ Phase 1 eval and this model cutover are landed in-tree:
 - [x] Project + Task schema (`honr.yaml`)
 - [x] Flat create / sibling split / MCP breakdown
 - [x] Plan artifact + Initial plan seed Task + Approve Plan materialize
-- [x] `BeadsClient` + **synchronous** dual-write on create
+- [x] `BeadsClient` + **asynchronous** dual-write on create (placeholders + heal/mirror;
+  Approve/materialize never waits on `bd create` / in-flight Dolt push)
 - [x] Write-through title/deps/claim/close + honr metadata
 - [x] Sandbox `BEADS_DIR` snapshot + briefing (read-only durable policy)
 - [x] UI Home / Board swimlanes / beads id display

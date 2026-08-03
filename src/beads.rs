@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::process::Command;
@@ -15,6 +15,10 @@ use tokio::sync::Notify;
 /// Coalesce Dolt remote pushes after Issue-sync mutations so create storms
 /// don't N× `bd dolt push` the whole DB.
 const DOLT_PUSH_DEBOUNCE: Duration = Duration::from_secs(30);
+
+/// While a create storm is open, the dolt worker waits instead of pushing —
+/// overlapping `bd dolt push` must not serialize cockpit-driven `bd create`.
+const DOLT_STORM_POLL: Duration = Duration::from_millis(50);
 
 /// A remote side-effect `BeadsClient` would perform (`bd github …` / `bd dolt push`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +111,8 @@ enum RemoteGate {
 struct DoltPushDebouncer {
     pending: AtomicBool,
     worker_started: AtomicBool,
+    /// Nested create-storm depth; push worker idles while > 0.
+    storm_depth: AtomicUsize,
     notify: Notify,
 }
 
@@ -115,6 +121,7 @@ impl Default for DoltPushDebouncer {
         Self {
             pending: AtomicBool::new(false),
             worker_started: AtomicBool::new(false),
+            storm_depth: AtomicUsize::new(0),
             notify: Notify::new(),
         }
     }
@@ -221,6 +228,8 @@ pub struct BeadsClient {
     remotes: Remotes,
     dolt_push: Arc<DoltPushDebouncer>,
     backend: BeadsBackend,
+    /// Counts [`Self::create_linked_sync`] calls (tests assert cockpit paths skip it).
+    create_sync_calls: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for BeadsClient {
@@ -261,6 +270,7 @@ impl BeadsClient {
             remotes,
             dolt_push: Arc::new(DoltPushDebouncer::default()),
             backend,
+            create_sync_calls: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -273,6 +283,40 @@ impl BeadsClient {
             remotes,
             dolt_push: Arc::new(DoltPushDebouncer::default()),
             backend: BeadsBackend::Cli,
+            create_sync_calls: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// How many times [`Self::create_linked_sync`] has run on this client.
+    pub fn create_sync_call_count(&self) -> u64 {
+        self.create_sync_calls.load(Ordering::SeqCst)
+    }
+
+    /// Begin a create storm: hold off debounced `bd dolt push` until
+    /// [`Self::end_create_storm`]. Nestable.
+    pub fn begin_create_storm(&self) {
+        self.dolt_push.storm_depth.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// End a create storm opened by [`Self::begin_create_storm`]. When the
+    /// last nest closes, wake the push worker if a push is pending.
+    pub fn end_create_storm(&self) {
+        loop {
+            let cur = self.dolt_push.storm_depth.load(Ordering::SeqCst);
+            if cur == 0 {
+                return;
+            }
+            if self
+                .dolt_push
+                .storm_depth
+                .compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                if cur == 1 && self.dolt_push.pending.load(Ordering::SeqCst) {
+                    self.dolt_push.notify.notify_one();
+                }
+                return;
+            }
         }
     }
 
@@ -426,7 +470,18 @@ impl BeadsClient {
                 client.dolt_push.notify.notified().await;
                 // Trailing debounce: wait so create storms collapse to one push.
                 tokio::time::sleep(DOLT_PUSH_DEBOUNCE).await;
+                // Hold the remote push while `bd create` storms are open so the
+                // Dolt lock cannot serialize cockpit materialize (or its async
+                // mirrors) behind an in-flight push.
+                while client.dolt_push.storm_depth.load(Ordering::SeqCst) > 0 {
+                    tokio::time::sleep(DOLT_STORM_POLL).await;
+                }
                 if !client.dolt_push.pending.swap(false, Ordering::SeqCst) {
+                    continue;
+                }
+                // Storm may have opened during the wait — re-check.
+                if client.dolt_push.storm_depth.load(Ordering::SeqCst) > 0 {
+                    client.dolt_push.pending.store(true, Ordering::SeqCst);
                     continue;
                 }
                 match client.sync_remote(Some("origin")).await {
@@ -600,6 +655,25 @@ impl BeadsClient {
         blocked_by: &[String],
         metadata: Option<&str>,
     ) -> Result<BeadsIssue, String> {
+        self.begin_create_storm();
+        let result = self
+            .create_linked_inner(title, priority, issue_type, description, parent, blocked_by, metadata)
+            .await;
+        self.end_create_storm();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_linked_inner(
+        &self,
+        title: &str,
+        priority: u32,
+        issue_type: &str,
+        description: Option<&str>,
+        parent: Option<&str>,
+        blocked_by: &[String],
+        metadata: Option<&str>,
+    ) -> Result<BeadsIssue, String> {
         // Memory path is sync and cheap — skip spawn_blocking.
         if self.memory().is_some() {
             return self.create_linked_sync(
@@ -636,7 +710,8 @@ impl BeadsClient {
         .map_err(|e| format!("bd create join: {e}"))?
     }
 
-    /// Synchronous create for `Board::create` (must not nest `block_on`).
+    /// Synchronous create — used by the async mirror path via `spawn_blocking`,
+    /// never from the cockpit request path (`Board::create` / Approve).
     #[allow(clippy::too_many_arguments)]
     pub fn create_linked_sync(
         &self,
@@ -648,6 +723,7 @@ impl BeadsClient {
         blocked_by: &[String],
         metadata: Option<&str>,
     ) -> Result<BeadsIssue, String> {
+        self.create_sync_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(mem) = self.memory() {
             let _ = metadata; // board-side honr metadata; memory graph does not persist it.
             let mut db = mem.lock().expect("memory beads");
@@ -1384,6 +1460,31 @@ mod tests {
             cap.take(),
             vec![RemoteOp::GithubPush(vec!["honr-abc".into()])]
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_storm_suppresses_dolt_push_until_ended() {
+        let test_dir = temp_dir().join(format!(
+            "honr-beads-dolt-storm-{}/.beads",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(test_dir.join("metadata.json"), "{}").unwrap();
+
+        // Live remotes so schedule_dolt_push actually marks pending (Capture skips).
+        let client = BeadsClient::with_remotes(&test_dir, Remotes::Live);
+        // Force memory backend semantics aren't required — storm_depth is independent.
+        client.begin_create_storm();
+        client.schedule_dolt_push();
+        assert!(
+            client.dolt_push.pending.load(Ordering::SeqCst),
+            "schedule under Live must mark pending"
+        );
+        assert_eq!(client.dolt_push.storm_depth.load(Ordering::SeqCst), 1);
+
+        client.end_create_storm();
+        assert_eq!(client.dolt_push.storm_depth.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
