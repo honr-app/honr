@@ -5,6 +5,7 @@
 //! into here. Neither owns any state-machine logic, which is what keeps the two
 //! renderings from drifting.
 
+use crate::db::SqliteBoardStore;
 use crate::events::BoardEvent;
 use crate::machine::{self, TransitionError};
 use crate::model::*;
@@ -20,7 +21,7 @@ use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------- persistence
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BoardState {
     pub next_id: ItemId,
     pub items: BTreeMap<ItemId, WorkItem>,
@@ -31,6 +32,18 @@ pub struct BoardState {
     pub stories: BTreeMap<ItemId, Vec<StoryLine>>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
+}
+
+impl BoardState {
+    /// Snapshot for durable flush — drops in-process-only agent log rings.
+    fn clone_for_persist(&self) -> Self {
+        Self {
+            next_id: self.next_id,
+            items: self.items.clone(),
+            stories: self.stories.clone(),
+            agent_logs: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +204,11 @@ pub struct Board {
     buffer_capacity: usize,
     dirty: AtomicBool,
     pub schema: Schema,
+    /// Legacy JSON path: import source when the DB is empty; also beads co-locate.
+    /// When [`Self::store`] is set, flush no longer rewrites this file.
     path: PathBuf,
+    /// SQLite (later Postgres) row store. `None` in unit tests that stay in-memory/JSON.
+    store: Option<Arc<SqliteBoardStore>>,
     started_at: DateTime<Utc>,
     pub beads: Option<crate::beads::BeadsClient>,
     pub openshell: Option<crate::openshell::OpenShell>,
@@ -253,6 +270,7 @@ impl Board {
             dirty: AtomicBool::new(false),
             schema,
             path,
+            store: None,
             started_at: Utc::now(),
             beads,
             openshell: Some(crate::openshell::OpenShell::default()),
@@ -267,42 +285,50 @@ impl Board {
         self
     }
 
-    /// Load a previously persisted board, or start empty.
+    /// Apply legacy renames / beads placeholders. Returns whether the state was mutated.
+    fn heal_loaded_state(state: &mut BoardState) -> (usize, usize) {
+        let mut healed = 0usize;
+        let mut renamed = 0usize;
+        let rename_to: Vec<(ItemId, String)> = state
+            .items
+            .values()
+            .filter(|i| i.title == crate::model::INITIAL_PLAN_TITLE_LEGACY)
+            .filter_map(|i| {
+                let parent = i.parent?;
+                let pname = state.items.get(&parent)?.title.clone();
+                Some((i.id, crate::model::initial_plan_title(&pname)))
+            })
+            .collect();
+        for (id, title) in rename_to {
+            if let Some(item) = state.items.get_mut(&id) {
+                item.title = title;
+                renamed += 1;
+            }
+        }
+        for (id, item) in state.items.iter_mut() {
+            if item.beads_id.is_none() {
+                item.beads_id = Some(format!("bd-honr-{id}"));
+            }
+            // A brief experiment left Initial plan in Shaping; restore
+            // them to Backlog so dedicated planning agents can claim.
+            if item.is_initial_plan_task() && item.state == State::Shaping {
+                item.state = State::Backlog;
+                healed += 1;
+            }
+        }
+        (healed, renamed)
+    }
+
+    /// Load a previously persisted board from `honr.json`, or start empty.
+    ///
+    /// Prefer [`Self::load_with_store`] in production — JSON is the one-shot
+    /// import source once a `BoardStore` is attached.
     pub fn load_or_new(schema: Schema, path: PathBuf) -> Self {
         let board = Self::new(schema, path.clone());
         if let Ok(raw) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<BoardState>(&raw) {
                 Ok(mut state) => {
-                    let mut healed = 0usize;
-                    let mut renamed = 0usize;
-                    // Collect legacy renames before mutably walking (need parent titles).
-                    let rename_to: Vec<(ItemId, String)> = state
-                        .items
-                        .values()
-                        .filter(|i| i.title == crate::model::INITIAL_PLAN_TITLE_LEGACY)
-                        .filter_map(|i| {
-                            let parent = i.parent?;
-                            let pname = state.items.get(&parent)?.title.clone();
-                            Some((i.id, crate::model::initial_plan_title(&pname)))
-                        })
-                        .collect();
-                    for (id, title) in rename_to {
-                        if let Some(item) = state.items.get_mut(&id) {
-                            item.title = title;
-                            renamed += 1;
-                        }
-                    }
-                    for (id, item) in state.items.iter_mut() {
-                        if item.beads_id.is_none() {
-                            item.beads_id = Some(format!("bd-honr-{id}"));
-                        }
-                        // A brief experiment left Initial plan in Shaping; restore
-                        // them to Backlog so dedicated planning agents can claim.
-                        if item.is_initial_plan_task() && item.state == State::Shaping {
-                            item.state = State::Backlog;
-                            healed += 1;
-                        }
-                    }
+                    let (healed, renamed) = Self::heal_loaded_state(&mut state);
                     tracing::info!(items = state.items.len(), "restored board from {path:?}");
                     if healed > 0 {
                         tracing::info!("healed {healed} Initial plan Task(s) Shaping → Backlog");
@@ -322,6 +348,42 @@ impl Board {
             }
         }
         board
+    }
+
+    /// Boot from SQLite: one-shot import from `json_path` when the DB is empty,
+    /// otherwise restore rows. Mutations flush as row updates, not a JSON rewrite.
+    pub async fn load_with_store(
+        schema: Schema,
+        json_path: PathBuf,
+        store: Arc<SqliteBoardStore>,
+    ) -> Result<Self, crate::db::StoreError> {
+        let imported = store.import_json_if_empty(&json_path).await?;
+        if imported {
+            tracing::info!(
+                path = %json_path.display(),
+                "imported board from JSON into database (one-shot)"
+            );
+        }
+        let mut state = store.load_board_state().await?;
+        let (healed, renamed) = Self::heal_loaded_state(&mut state);
+        if healed > 0 {
+            tracing::info!("healed {healed} Initial plan Task(s) Shaping → Backlog");
+        }
+        if renamed > 0 {
+            tracing::info!("renamed {renamed} Initial plan Task(s) to include Project name");
+        }
+        tracing::info!(
+            items = state.items.len(),
+            "restored board from database"
+        );
+        let mut board = Self::new(schema, json_path);
+        board.store = Some(store);
+        *board.state.write().unwrap() = state;
+        if healed > 0 || renamed > 0 {
+            board.dirty.store(true, Ordering::Relaxed);
+            board.flush();
+        }
+        Ok(board)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<BoardEvent> {
@@ -397,10 +459,48 @@ impl Board {
         self.dirty.store(true, Ordering::Relaxed);
     }
 
-    /// Flush to disk if anything changed. Called on an interval so a fleet of
-    /// heartbeating agents doesn't turn into a write storm.
+    /// Flush durable state if anything changed. Called on an interval so a
+    /// fleet of heartbeating agents doesn't turn into a write storm.
+    ///
+    /// With a [`SqliteBoardStore`] attached, this writes rows (not `honr.json`).
+    /// Without a store (unit tests), the legacy whole-file JSON path remains.
     pub fn flush(&self) {
         if !self.dirty.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        if let Some(store) = &self.store {
+            let snapshot = self.state.read().unwrap().clone_for_persist();
+            let result = match tokio::runtime::Handle::try_current() {
+                Ok(handle)
+                    if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+                {
+                    tokio::task::block_in_place(|| {
+                        handle.block_on(store.save_board_state(&snapshot))
+                    })
+                }
+                Ok(_) | Err(_) => {
+                    // current-thread runtime (tests) or no runtime: own thread so
+                    // we never call block_in_place / nest block_on on CurrentThread.
+                    let store = Arc::clone(store);
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("board flush runtime");
+                        rt.block_on(store.save_board_state(&snapshot))
+                    })
+                    .join()
+                    .unwrap_or_else(|_| {
+                        Err(crate::db::StoreError::Query(
+                            "board flush thread panicked".into(),
+                        ))
+                    })
+                }
+            };
+            if let Err(e) = result {
+                tracing::error!("board database flush failed: {e}");
+                self.dirty.store(true, Ordering::Relaxed);
+            }
             return;
         }
         let json = { serde_json::to_string_pretty(&*self.state.read().unwrap()) };

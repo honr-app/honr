@@ -44,30 +44,35 @@ async fn main() -> anyhow::Result<()> {
         Schema::default()
     });
     db::apply_database_url_override(&mut schema.board.database);
-    match schema.board.database.parsed() {
-        Ok(url) => {
+    let json_path = PathBuf::from("honr.json");
+    let board: SharedBoard = match schema.board.database.parsed() {
+        Ok(url) if url.backend() == db::DatabaseBackend::Sqlite => {
             tracing::info!(%url, backend = %url.backend(), "board database configured");
-            // Apply migrations early so the store surface is real; Board still
-            // flushes honr.json until the cutover Task attaches this pool.
-            if url.backend() == db::DatabaseBackend::Sqlite {
-                match db::SqliteBoardStore::connect(url.as_str()).await {
-                    Ok(store) => {
-                        let _: &dyn db::BoardStore = &store;
-                        tracing::info!(
-                            "board database migrations applied (JSON flush remains primary)"
-                        );
-                        drop(store);
-                    }
-                    Err(e) => tracing::warn!("board database open/migrate skipped: {e}"),
-                }
-            }
+            let store = Arc::new(
+                db::SqliteBoardStore::connect(url.as_str())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("board database open/migrate: {e}"))?,
+            );
+            Arc::new(
+                Board::load_with_store(schema.clone(), json_path, store)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("board load from database: {e}"))?,
+            )
         }
-        Err(e) => tracing::warn!("board.database.url invalid ({e}); ignoring until cutover"),
-    }
+        Ok(url) => {
+            // Postgres cutover is a later Task — keep JSON until then.
+            tracing::warn!(
+                %url,
+                "board database backend not yet wired for boot; using honr.json"
+            );
+            Arc::new(Board::load_or_new(schema.clone(), json_path))
+        }
+        Err(e) => {
+            tracing::warn!("board.database.url invalid ({e}); using honr.json");
+            Arc::new(Board::load_or_new(schema.clone(), json_path))
+        }
+    };
     let exec_cfg = schema.execution.clone();
-
-    // Persistence cutover (DB-backed Board) is a later Task; JSON flush remains.
-    let board: SharedBoard = Arc::new(Board::load_or_new(schema, PathBuf::from("honr.json")));
 
     // Ensure the beads graph DB exists beside the board (identity + deps) and heal placeholders.
     if let Some(beads) = board.beads.clone() {
