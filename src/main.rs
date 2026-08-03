@@ -39,6 +39,25 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // parking_lot deadlock_detection: poll and log holders instead of hanging
+    // forever like std RwLock (the NOT LIVE freeze mode).
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let deadlocks = parking_lot::deadlock::check_deadlock();
+            if deadlocks.is_empty() {
+                continue;
+            }
+            tracing::error!("{} deadlock(s) detected", deadlocks.len());
+            for (i, threads) in deadlocks.iter().enumerate() {
+                tracing::error!("deadlock #{i} ({} threads)", threads.len());
+                for t in threads {
+                    tracing::error!("  thread {:?}\n{:?}", t.thread_id(), t.backtrace());
+                }
+            }
+        }
+    });
+
     let mut schema = Schema::load("honr.yaml").unwrap_or_else(|e| {
         tracing::warn!("could not read honr.yaml ({e}); falling back to defaults");
         Schema::default()

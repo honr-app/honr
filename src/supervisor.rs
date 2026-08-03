@@ -52,8 +52,8 @@ const AGENT_LOG: &str = "/tmp/agent.log";
 const AGENT_PID: &str = "/tmp/agent.pid";
 const AGENT_STATUS: &str = "/tmp/agent.status";
 
-type Active = Arc<std::sync::Mutex<std::collections::HashSet<ItemId>>>;
-type Cooldown = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
+type Active = Arc<parking_lot::Mutex<std::collections::HashSet<ItemId>>>;
+type Cooldown = Arc<parking_lot::Mutex<Option<std::time::Instant>>>;
 
 pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     let os = Arc::new(board.openshell_client());
@@ -257,7 +257,7 @@ impl Fleet {
         F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     {
         self.in_flight.fetch_add(1, Ordering::Relaxed);
-        self.active.lock().unwrap().insert(id);
+        self.active.lock().insert(id);
         let f = self.clone();
         tokio::spawn(async move {
             match work.await {
@@ -280,7 +280,7 @@ impl Fleet {
                         // dispatching for a while rather than spending the
                         // card's retry budget on a broken machine.
                         tracing::warn!("#{id}: infrastructure failure, not counting it: {msg}");
-                        *f.cooldown.lock().unwrap() =
+                        *f.cooldown.lock() =
                             Some(std::time::Instant::now() + INFRA_COOLDOWN);
                         let _ = f.board.release(id, &agent_id);
                     } else {
@@ -297,7 +297,7 @@ impl Fleet {
                     }
                 }
             }
-            f.active.lock().unwrap().remove(&id);
+            f.active.lock().remove(&id);
             f.in_flight.fetch_sub(1, Ordering::Relaxed);
         });
     }
@@ -345,7 +345,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
                 continue;
             }
         }
-        if fleet.cooldown.lock().unwrap().is_some_and(|t| std::time::Instant::now() < t) {
+        if fleet.cooldown.lock().is_some_and(|t| std::time::Instant::now() < t) {
             continue;
         }
         // The compute driver / gateway stop on their own. Claiming a card we
@@ -362,7 +362,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
 
         let awaiting = board.list_awaiting_dispatch();
         let Some(item) = awaiting.into_iter().find(|i| {
-            !fleet.active.lock().unwrap().contains(&i.id) && board.may_claim(i.id)
+            !fleet.active.lock().contains(&i.id) && board.may_claim(i.id)
         }) else {
             continue;
         };
@@ -543,7 +543,7 @@ async fn reconcile(
             continue;
         }
 
-        if active.lock().unwrap().contains(&id) {
+        if active.lock().contains(&id) {
             continue;
         }
 
@@ -2539,8 +2539,46 @@ fn branch_state_of(stdout: &str) -> BranchState {
 /// cold text). A conflicted branch is different: the agent must be told to
 /// resolve conflicts even when the conversation id is reused — otherwise a
 /// hollow resume walks past CONFLICTS and reports into Review again.
-fn remotes_briefing_lines(repo: &crate::schema::RepoConfig) -> String {
+/// Pull a human-decided clone target out of steering notes.
+///
+/// `answer_escalation` stores `Decision: Clone owner/name …`. Without this,
+/// unbound Remotes text still says "escalate if the Project prompt is silent"
+/// and the agent re-asks the same Needs You after every answer.
+fn clone_target_from_notes(notes: &[String]) -> Option<String> {
+    for n in notes.iter().rev() {
+        let raw = n.trim();
+        let after_decision = raw
+            .strip_prefix("Decision:")
+            .or_else(|| raw.strip_prefix("decision:"))
+            .map(str::trim)
+            .unwrap_or(raw);
+        let after_clone = after_decision
+            .strip_prefix("Clone ")
+            .or_else(|| after_decision.strip_prefix("clone "))
+            .or_else(|| {
+                after_decision
+                    .strip_prefix("Clone target:")
+                    .or_else(|| after_decision.strip_prefix("clone target:"))
+            })
+            .map(str::trim)?;
+        let token = after_clone.split_whitespace().next()?;
+        let token = token.trim_matches(|c: char| matches!(c, ')' | '(' | ',' | ';' | '.'));
+        if token.contains('/') || token.starts_with("http") {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+fn remotes_briefing_lines(repo: &crate::schema::RepoConfig, notes: &[String]) -> String {
     if !repo.is_complete() {
+        if let Some(target) = clone_target_from_notes(notes) {
+            return format!(
+                "\nNo card pull_request yet (first run). The human already decided the clone \
+target: `{target}`. Clone that into `/sandbox/repo` and continue the card. Do **not** \
+re-escalate asking which repository to clone.\n"
+            );
+        }
         // Unbound cards used to say "clone per the Project prompt", and agents
         // invented owner/name from ambient context (this product's own repo).
         // Needs You is the correct outcome when the clone target is not named.
@@ -2618,7 +2656,7 @@ fn resume_briefing(grant: &ClaimGrant, repo: &crate::schema::RepoConfig) -> Stri
             b.push_str(&format!("  - {n}\n"));
         }
     }
-    b.push_str(&remotes_briefing_lines(repo));
+    b.push_str(&remotes_briefing_lines(repo, &grant.notes));
     b.push_str(
         "\nWhen the work is done, write `/sandbox/.honr/report.json` (url/base/head per \
          report.schema.json) and publish the PR on this card's branch.\n",
@@ -2709,6 +2747,11 @@ fn briefing(
                 b.push_str(
                     "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n",
                 );
+            } else if clone_target_from_notes(&grant.notes).is_some() {
+                b.push_str(
+                    "\nFirst run: `/sandbox/repo` is empty. Clone the human-decided target \
+(see Remotes / notes) — do not re-ask which repository.\n",
+                );
             } else {
                 b.push_str(
                     "\nFirst run: `/sandbox/repo` is empty. Clone only if the Project prompt names \
@@ -2731,7 +2774,7 @@ an exact product repo; otherwise escalate (see Remotes) — do not guess.\n",
         }
     }
 
-    b.push_str(&remotes_briefing_lines(repo));
+    b.push_str(&remotes_briefing_lines(repo, &grant.notes));
 
     let is_initial_plan = crate::model::title_is_initial_plan(&grant.title);
 
@@ -3857,6 +3900,39 @@ mod tests {
         assert!(
             !b.contains("Clone into `/sandbox/repo` per the Project prompt"),
             "old invite-to-guess wording must be gone: {b}"
+        );
+    }
+
+    /// Answering "Clone owner/name" must stop the Remotes block from
+    /// re-instructing escalate on the next claim — that loop burned #146.
+    #[test]
+    fn unbound_briefing_honors_clone_decision_note() {
+        let unbound = crate::schema::RepoConfig::default();
+        let mut g = grant();
+        g.notes = vec![
+            "Decision: Clone shanemcd/honr (suggested by beads External https://github.com/shanemcd/honr/issues/204)"
+                .into(),
+        ];
+        let b = briefing(&g, BranchState::Fresh, "honr/card-146", &unbound);
+        assert!(b.contains("shanemcd/honr"), "{b}");
+        assert!(
+            b.contains("already decided") || b.contains("human-decided"),
+            "must treat Decision as the clone target: {b}"
+        );
+        assert!(
+            b.contains("Do **not** re-escalate") || b.contains("do not re-ask"),
+            "must forbid re-asking: {b}"
+        );
+        assert!(
+            !b.contains("only if the Project prompt names"),
+            "must not keep the escalate-when-prompt-silent gate: {b}"
+        );
+
+        let resume = resume_briefing(&g, &unbound);
+        assert!(resume.contains("shanemcd/honr"), "{resume}");
+        assert!(
+            resume.contains("already decided"),
+            "resume must carry the decided clone too: {resume}"
         );
     }
 

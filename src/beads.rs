@@ -4,10 +4,11 @@
 //! task↔task dependency edges. Honr keeps the richer lifecycle machine and
 //! runtime fields (lease, sandbox, cost) keyed by board id + `beads_id`.
 
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Notify;
@@ -37,7 +38,7 @@ pub struct RemoteCapture {
 
 impl std::fmt::Debug for RemoteCapture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let n = self.ops.lock().map(|g| g.len()).unwrap_or(0);
+        let n = self.ops.lock().len();
         f.debug_struct("RemoteCapture").field("ops", &n).finish()
     }
 }
@@ -52,15 +53,15 @@ impl RemoteCapture {
     }
 
     pub fn ops(&self) -> Vec<RemoteOp> {
-        self.ops.lock().expect("remote capture lock").clone()
+        self.ops.lock().clone()
     }
 
     pub fn take(&self) -> Vec<RemoteOp> {
-        std::mem::take(&mut *self.ops.lock().expect("remote capture lock"))
+        std::mem::take(&mut *self.ops.lock())
     }
 
     fn record(&self, op: RemoteOp) {
-        self.ops.lock().expect("remote capture lock").push(op);
+        self.ops.lock().push(op);
         self.notify.notify_waiters();
     }
 
@@ -260,7 +261,7 @@ pub struct BeadsClient {
     create_sync_calls: Arc<AtomicU64>,
     /// Workspace / yaml beads sync target (`owner/repo`). Env still wins via
     /// [`resolve_github_repository`].
-    github_repository: Arc<std::sync::RwLock<Option<String>>>,
+    github_repository: Arc<RwLock<Option<String>>>,
 }
 
 impl std::fmt::Debug for BeadsClient {
@@ -302,7 +303,7 @@ impl BeadsClient {
             dolt_push: Arc::new(DoltPushDebouncer::default()),
             backend,
             create_sync_calls: Arc::new(AtomicU64::new(0)),
-            github_repository: Arc::new(std::sync::RwLock::new(None)),
+            github_repository: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -316,7 +317,7 @@ impl BeadsClient {
             dolt_push: Arc::new(DoltPushDebouncer::default()),
             backend: BeadsBackend::Cli,
             create_sync_calls: Arc::new(AtomicU64::new(0)),
-            github_repository: Arc::new(std::sync::RwLock::new(None)),
+            github_repository: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -324,8 +325,7 @@ impl BeadsClient {
     pub fn set_github_repository(&self, repo: Option<String>) {
         *self
             .github_repository
-            .write()
-            .expect("github_repository lock") = repo.filter(|s| !s.trim().is_empty());
+            .write() = repo.filter(|s| !s.trim().is_empty());
     }
 
     /// Env → client-configured Workspace value. Never invents a default.
@@ -333,7 +333,6 @@ impl BeadsClient {
         let configured = self
             .github_repository
             .read()
-            .expect("github_repository lock")
             .clone();
         resolve_github_repository(configured.as_deref())
     }
@@ -575,7 +574,7 @@ impl BeadsClient {
     /// Run `bd ready --json --exclude-type=epic` (and optional `--parent=<epic>`) to fetch task-only ready work.
     pub async fn list_ready_focused(&self, parent: Option<&str>) -> Result<Vec<BeadsIssue>, String> {
         if let Some(mem) = self.memory() {
-            let db = mem.lock().expect("memory beads");
+            let db = mem.lock();
             let parent = parent.filter(|p| !p.trim().is_empty() && Self::is_real_id(p));
             let items: Vec<BeadsIssue> = db
                 .list()
@@ -629,7 +628,7 @@ impl BeadsClient {
     /// List issues (`bd list --json --all -n 0`).
     pub async fn list_all(&self) -> Result<Vec<BeadsIssue>, String> {
         if let Some(mem) = self.memory() {
-            return Ok(mem.lock().expect("memory beads").list());
+            return Ok(mem.lock().list());
         }
         let out = self
             .cmd()
@@ -653,7 +652,6 @@ impl BeadsClient {
         if let Some(mem) = self.memory() {
             return mem
                 .lock()
-                .expect("memory beads")
                 .to_issue(id)
                 .ok_or_else(|| format!("issue {id} not found"));
         }
@@ -777,7 +775,7 @@ impl BeadsClient {
         self.create_sync_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(mem) = self.memory() {
             let _ = metadata; // board-side honr metadata; memory graph does not persist it.
-            let mut db = mem.lock().expect("memory beads");
+            let mut db = mem.lock();
             let id = db.alloc_id();
             let parent = parent.filter(|p| Self::is_real_id(p)).map(|p| p.to_string());
             let blockers: Vec<String> = blocked_by
@@ -861,7 +859,7 @@ impl BeadsClient {
             return Ok(());
         }
         if let Some(mem) = self.memory() {
-            let mut db = mem.lock().expect("memory beads");
+            let mut db = mem.lock();
             if dep_type == "blocks" {
                 db.blockers
                     .entry(issue_id.to_string())
@@ -898,7 +896,7 @@ impl BeadsClient {
             return Ok(());
         }
         if let Some(mem) = self.memory() {
-            let mut db = mem.lock().expect("memory beads");
+            let mut db = mem.lock();
             let Some(issue) = db.issues.get_mut(id) else {
                 return Err(format!("issue {id} not found"));
             };
@@ -940,7 +938,7 @@ impl BeadsClient {
             return Ok(());
         }
         if let Some(mem) = self.memory() {
-            let mut db = mem.lock().expect("memory beads");
+            let mut db = mem.lock();
             let Some(issue) = db.issues.get_mut(id) else {
                 return Err(format!("issue {id} not found"));
             };
@@ -967,7 +965,7 @@ impl BeadsClient {
             return Ok(());
         }
         if let Some(mem) = self.memory() {
-            let mut db = mem.lock().expect("memory beads");
+            let mut db = mem.lock();
             let Some(issue) = db.issues.get_mut(id) else {
                 return Err(format!("issue {id} not found"));
             };
@@ -1124,7 +1122,7 @@ impl BeadsClient {
             return Ok(());
         }
         if let Some(mem) = self.memory() {
-            let mut db = mem.lock().expect("memory beads");
+            let mut db = mem.lock();
             let Some(issue) = db.issues.get_mut(id) else {
                 return Err(format!("issue {id} not found"));
             };
@@ -1165,7 +1163,7 @@ impl BeadsClient {
         }
         let _ = reason;
         if let Some(mem) = self.memory() {
-            let mut db = mem.lock().expect("memory beads");
+            let mut db = mem.lock();
             let Some(issue) = db.issues.get_mut(id) else {
                 return Err(format!("issue {id} not found"));
             };
@@ -1195,7 +1193,7 @@ impl BeadsClient {
     /// Run `bd remember "insight"` to store persistent project memories.
     pub async fn remember(&self, insight: &str) -> Result<(), String> {
         if let Some(mem) = self.memory() {
-            mem.lock().expect("memory beads").insights.push(insight.to_string());
+            mem.lock().insights.push(insight.to_string());
             return Ok(());
         }
         let out = self
@@ -1216,7 +1214,7 @@ impl BeadsClient {
     /// Run `bd prime` to get system prompt context injection for agents.
     pub async fn prime(&self) -> Result<String, String> {
         if let Some(mem) = self.memory() {
-            let db = mem.lock().expect("memory beads");
+            let db = mem.lock();
             return Ok(db.insights.join("\n"));
         }
         let out = self
@@ -1266,7 +1264,7 @@ impl BeadsClient {
     /// `bd children <parent_id> --json`
     pub async fn list_children(&self, parent_id: &str) -> Result<Vec<BeadsIssue>, String> {
         if let Some(mem) = self.memory() {
-            let db = mem.lock().expect("memory beads");
+            let db = mem.lock();
             return Ok(db
                 .list()
                 .into_iter()

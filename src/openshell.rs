@@ -690,14 +690,14 @@ mod tests {
     #[tokio::test]
     async fn create_passes_temp_path_whose_contents_are_inline_yaml() {
         let yaml = "version: 1\n# inline create test\n";
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(None::<(String, String)>));
         let seen_c = seen.clone();
         let os = OpenShell::mock(
             move |args| {
                 let i = args.iter().position(|a| a == "--policy").expect("--policy");
                 let path = args[i + 1].clone();
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
-                *seen_c.lock().unwrap() = Some((path, content));
+                *seen_c.lock() = Some((path, content));
                 Output {
                     code: 0,
                     stdout: String::new(),
@@ -709,7 +709,7 @@ mod tests {
         let mut s = spec();
         s.policy = Some(yaml.into());
         os.create(&s).await.expect("create");
-        let (path, content) = seen.lock().unwrap().clone().expect("policy seen");
+        let (path, content) = seen.lock().clone().expect("policy seen");
         assert!(path.contains("honr-policy-"), "temp path={path}");
         assert_eq!(content, yaml);
     }
