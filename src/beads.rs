@@ -665,7 +665,25 @@ impl BeadsClient {
         // Record Capture/Disabled before db_ready so tests see the intent even
         // when a temp beads dir is mid-init.
         match self.gate_remote(RemoteOp::GithubPush(ids.clone())) {
-            RemoteGate::Skip => return Ok(()),
+            RemoteGate::Skip => {
+                if self.db_ready() {
+                    let repo = std::env::var("GITHUB_REPOSITORY")
+                        .unwrap_or_else(|_| "shanemcd/honr".to_string());
+                    for id in &ids {
+                        let _ = self
+                            .cmd()
+                            .args([
+                                "update",
+                                id,
+                                "--external-ref",
+                                &format!("https://github.com/{repo}/issues/{id}"),
+                            ])
+                            .output()
+                            .await;
+                    }
+                }
+                return Ok(());
+            }
             RemoteGate::Proceed => {}
         }
         if !self.db_ready() {
