@@ -729,8 +729,8 @@ impl Cockpit {
     #[tool(
         name = "approve_review",
         description = "Approve a Review card. Cards with a PR stay in Review until GitHub merge \
-                       (webhook → Done); Initial plan / split proposals materialize into Tasks \
-                       on that Done, not on Approve. Sort Review by blast radius and novelty."
+                       (webhook → Done). Initial plan / split proposals with a Task list \
+                       materialize on Approve (Done). Sort Review by blast radius and novelty."
     )]
     fn approve_review(&self, Parameters(a): Parameters<IdArg>) -> Out<Ack> {
         let before: std::collections::HashSet<_> = self

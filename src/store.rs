@@ -717,7 +717,7 @@ impl Board {
         }
 
         // Initial plan / split proposals become sibling Tasks when the card
-        // reaches Done (typically PR merge via webhook) — not on Approve.
+        // reaches Done (Approve, or PR merge via webhook if Approve never ran).
         if to == State::Done {
             if let Err(e) = self.materialize_proposal_on_done(id, by) {
                 tracing::warn!(id, error = %e, "materialize proposal on Done failed");
@@ -1074,13 +1074,6 @@ impl Board {
         }
 
         let done = self.approve_review(seed_id)?;
-        if done.state == State::Review {
-            return Err(
-                "Plan looks good — Tasks will be created when the plan PR merges \
-                 (no separate Approve materialize step)"
-                    .into(),
-            );
-        }
         let published: Vec<ItemId> = done
             .proposal
             .as_ref()
@@ -2938,22 +2931,9 @@ fn check_split_relatedness(
             .is_some_and(|p| !p.tasks.is_empty());
 
         if has_proposal {
-            // With a plan/docs PR: stay in Review until merge → Done materializes
-            // Tasks. Without a PR (rare): Done now, which materializes in transition.
-            if item.pr_url.as_ref().is_some_and(|u| !u.trim().is_empty()) {
-                self.story(
-                    id,
-                    format!(
-                        "{} approved — waiting for GitHub merge to create Tasks ({}).",
-                        item.title,
-                        item.pr_url.as_deref().unwrap_or("")
-                    ),
-                );
-                return self
-                    .get(id)
-                    .ok_or_else(|| format!("no work item #{id}"));
-            }
-
+            // UI: "Approve — create Tasks". Materialize now even when a plan/docs
+            // PR is attached — waiting on the merge webhook strands the cockpit
+            // whenever the forwarder is down. Merge → Done stays idempotent.
             let done = self
                 .transition(id, State::Done, "human", Some("proposal approved".into()))
                 .map_err(|e| e.to_string())?;
@@ -2964,7 +2944,7 @@ fn check_split_relatedness(
                 .unwrap_or(0);
             self.story(
                 id,
-                format!("{} approved — {} Tasks created (no PR).", done.title, n),
+                format!("{} approved — {} Tasks created.", done.title, n),
             );
             return Ok(done);
         }
@@ -4670,15 +4650,22 @@ mod tests {
         )
         .expect("propose");
 
-        let err = b.approve_plan(project.id).expect_err("waits for merge");
-        assert!(
-            err.contains("merges"),
-            "approve_plan with PR should defer materialize: {err}"
-        );
-        assert_eq!(b.get(seed_id).unwrap().state, State::Review);
-        b.complete_for_merged_pr("https://example.com/pr/1", Some(1))
-            .expect("merge creates tasks");
+        let published = b.approve_plan(project.id).expect("approve creates tasks");
+        assert_eq!(published.len(), 1);
         assert_eq!(b.get(seed_id).unwrap().state, State::Done);
+        assert_eq!(
+            b.children_of(project.id)
+                .into_iter()
+                .filter(|&id| !b.get(id).unwrap().is_initial_plan_task())
+                .count(),
+            1
+        );
+        // Late webhook must not invent a second set of Tasks.
+        assert!(
+            b.complete_for_merged_pr("https://example.com/pr/1", Some(1))
+                .is_none(),
+            "already-Done Initial plan ignores merge webhook"
+        );
         assert_eq!(
             b.children_of(project.id)
                 .into_iter()
@@ -4737,23 +4724,8 @@ mod tests {
         )
         .expect("propose");
 
-        // Approve with a PR only acknowledges — merge creates Tasks.
-        let still = b.approve_review(seed_id).expect("approve_review");
-        assert_eq!(still.state, State::Review);
-        assert_eq!(
-            b.children_of(project.id)
-                .into_iter()
-                .filter(|&id| !b.get(id).unwrap().is_initial_plan_task())
-                .count(),
-            0,
-            "no siblings before merge"
-        );
-
-        let done_id = b
-            .complete_for_merged_pr("https://example.com/pr/2", Some(2))
-            .expect("merge completes card");
-        assert_eq!(done_id, seed_id);
-        let done = b.get(seed_id).unwrap();
+        // Approve creates Tasks even with a plan/docs PR attached.
+        let done = b.approve_review(seed_id).expect("approve_review");
         assert_eq!(done.state, State::Done);
         assert!(b.get(project.id).unwrap().plan.is_none());
         assert!(done.proposal.as_ref().is_some_and(|p| p.tasks.len() == 2));
