@@ -445,6 +445,9 @@ pub struct WorkItem {
     /// The bounce reason if this card was returned to Backlog due to an infra or execution bounce.
     #[serde(default)]
     pub last_bounce_reason: Option<String>,
+    /// Conflicting file paths from the last rebase conflict.
+    #[serde(default)]
+    pub last_conflict_files: Vec<String>,
 
     /// The tree says *why*; the release target says *which shipped artifact*.
     /// These vary independently.
@@ -528,6 +531,7 @@ impl WorkItem {
             notes: Vec::new(),
             project_prompt: None,
             last_bounce_reason: None,
+            last_conflict_files: Vec::new(),
             release_target: None,
             environment: None,
             conversation_id: None,

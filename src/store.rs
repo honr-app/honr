@@ -2462,6 +2462,8 @@ fn check_split_relatedness(
                 blocked_since: Utc::now(),
                 answer: None,
             });
+            it.rebase_requested = false;
+            it.awaiting_dispatch = false;
         }
         let item = self
             .transition(id, State::NeedsHuman, agent_id, Some(question.clone()))
@@ -2601,6 +2603,7 @@ fn check_split_relatedness(
             // otherwise the next single failure would escalate again
             // immediately and the answer would have bought nothing.
             it.run_failures = 0;
+            it.last_conflict_files.clear();
             // The answer becomes standing context for whoever picks it up next.
             it.notes.push(Note {
                 at: Utc::now(),
@@ -3078,13 +3081,13 @@ fn check_split_relatedness(
     /// If Conflict: the card transitions to Backlog with `last_bounce_reason` set containing
     /// the failure reason and conflicting file details, and `rebase_requested` & `awaiting_dispatch` are cleared.
     pub fn record_rebase_outcome(&self, id: ItemId, outcome: RebaseOutcome) -> Result<WorkItem, String> {
-        let title = {
+        let (title, previous_files) = {
             let s = self.state.read().unwrap();
             let it = s.items.get(&id).ok_or_else(|| format!("no such item #{id}"))?;
             if it.state != State::Review {
                 return Err(format!("only Review cards can record rebase outcome, #{id} is in {:?}", it.state));
             }
-            it.title.clone()
+            (it.title.clone(), it.last_conflict_files.clone())
         };
 
         match outcome {
@@ -3094,6 +3097,7 @@ fn check_split_relatedness(
                     let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
                     it.rebase_requested = false;
                     it.awaiting_dispatch = false;
+                    it.last_conflict_files.clear();
                     let mut out = it.clone();
                     Self::populate_blockers(&s, &mut out);
                     out
@@ -3103,30 +3107,80 @@ fn check_split_relatedness(
                 Ok(item)
             }
             RebaseOutcome::Conflict { conflicting_files, reason } => {
-                let base_reason = reason.unwrap_or_else(|| "git rebase conflict".to_string());
-                let bounce_reason = if conflicting_files.is_empty() {
-                    base_reason
-                } else {
-                    format!("{base_reason}: conflicting files: {}", conflicting_files.join(", "))
-                };
+                let curr_files: Vec<String> = conflicting_files.iter().map(|f| f.trim().to_string()).collect();
+                let has_overlap = !curr_files.is_empty()
+                    && !previous_files.is_empty()
+                    && curr_files.iter().any(|f| previous_files.contains(f));
 
-                let item = {
-                    let mut s = self.state.write().unwrap();
-                    if let Some(it) = s.items.get_mut(&id) {
-                        it.last_bounce_reason = Some(bounce_reason.clone());
+                if has_overlap {
+                    let overlapping: Vec<String> = curr_files
+                        .iter()
+                        .filter(|f| previous_files.contains(f))
+                        .cloned()
+                        .collect();
+
+                    let base_reason = reason.unwrap_or_else(|| "git rebase conflict".to_string());
+                    let bounce_reason = format!(
+                        "{base_reason}: decomposition failure: repeated conflict on overlapping files: {}",
+                        overlapping.join(", ")
+                    );
+
+                    {
+                        let mut s = self.state.write().unwrap();
+                        if let Some(it) = s.items.get_mut(&id) {
+                            it.last_bounce_reason = Some(bounce_reason.clone());
+                            it.last_conflict_files = curr_files;
+                        }
                     }
-                    Self::transition_locked(&mut s, id, State::Backlog, "rebase", Some(bounce_reason.clone()))
-                        .map_err(|e| format!("failed transition to Backlog on rebase conflict: {e}"))?;
-                    let it_mut = s.items.get_mut(&id).unwrap();
-                    it_mut.rebase_requested = false;
-                    it_mut.awaiting_dispatch = false;
-                    let mut out = it_mut.clone();
-                    Self::populate_blockers(&s, &mut out);
-                    out
-                };
-                self.emit(&item);
-                self.story(id, format!("{title}: rebase conflict — returned to Backlog ({bounce_reason})."));
-                Ok(item)
+
+                    let question = format!(
+                        "Decomposition failure: repeated rebase conflict on overlapping files ({}) for card #{id}",
+                        overlapping.join(", ")
+                    );
+
+                    let options = vec![
+                        EscalationOption {
+                            label: "Re-split tasks to isolate overlapping files".into(),
+                            detail: "Return card to Shaping/Backlog or re-split the task so overlapping file boundaries are separated.".into(),
+                        },
+                        EscalationOption {
+                            label: "Manually resolve conflict and approve".into(),
+                            detail: "Manually rebase or merge the PR branch onto main and approve.".into(),
+                        },
+                        EscalationOption {
+                            label: "Retire card".into(),
+                            detail: "Cut scope and retire this card if the conflict cannot be resolved.".into(),
+                        },
+                    ];
+
+                    self.escalate(id, "rebase", question, options, 0)
+                } else {
+                    let base_reason = reason.unwrap_or_else(|| "git rebase conflict".to_string());
+                    let bounce_reason = if curr_files.is_empty() {
+                        base_reason
+                    } else {
+                        format!("{base_reason}: conflicting files: {}", curr_files.join(", "))
+                    };
+
+                    let item = {
+                        let mut s = self.state.write().unwrap();
+                        if let Some(it) = s.items.get_mut(&id) {
+                            it.last_bounce_reason = Some(bounce_reason.clone());
+                            it.last_conflict_files = curr_files;
+                        }
+                        Self::transition_locked(&mut s, id, State::Backlog, "rebase", Some(bounce_reason.clone()))
+                            .map_err(|e| format!("failed transition to Backlog on rebase conflict: {e}"))?;
+                        let it_mut = s.items.get_mut(&id).unwrap();
+                        it_mut.rebase_requested = false;
+                        it_mut.awaiting_dispatch = false;
+                        let mut out = it_mut.clone();
+                        Self::populate_blockers(&s, &mut out);
+                        out
+                    };
+                    self.emit(&item);
+                    self.story(id, format!("{title}: rebase conflict — returned to Backlog ({bounce_reason})."));
+                    Ok(item)
+                }
             }
         }
     }
@@ -6507,5 +6561,97 @@ mod tests {
         assert!(bounce_reason.contains("git rebase conflict"));
         assert!(bounce_reason.contains("src/main.rs"));
         assert!(bounce_reason.contains("src/store.rs"));
+    }
+
+    #[test]
+    fn repeated_rebase_conflict_on_overlapping_files_escalates_to_needs_human() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-test-rebase-conflict-repeat-{}.json", std::process::id())),
+        );
+        let project = b
+            .create(None, "Repeated Conflict Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(Some(project.id), "Task Repeated Conflict", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+
+        b.transition(t1.id, State::Shaping, "test", None).unwrap();
+        b.transition(t1.id, State::Backlog, "test", None).unwrap();
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/303".into()));
+
+        // First conflict -> Backlog
+        b.dispatch_rebase(t1.id).unwrap();
+        let first_conflict_files = vec!["src/main.rs".to_string(), "src/store.rs".to_string()];
+        let updated1 = b
+            .complete_rebase_conflict(t1.id, &first_conflict_files, Some("git rebase conflict"))
+            .unwrap();
+        assert_eq!(updated1.state, State::Backlog);
+        assert_eq!(updated1.last_conflict_files, vec!["src/main.rs", "src/store.rs"]);
+
+        // Card is claimed again and moves back to Review
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Review, "agent", None).unwrap();
+
+        // Second conflict on overlapping file "src/main.rs" -> NeedsHuman
+        b.dispatch_rebase(t1.id).unwrap();
+        let second_conflict_files = vec!["src/main.rs".to_string(), "src/api.rs".to_string()];
+        let updated2 = b
+            .complete_rebase_conflict(t1.id, &second_conflict_files, Some("git rebase conflict"))
+            .unwrap();
+
+        assert_eq!(updated2.state, State::NeedsHuman);
+        assert!(!updated2.rebase_requested);
+        assert!(!updated2.awaiting_dispatch);
+
+        let esc = updated2.escalation.expect("escalation present");
+        assert!(esc.question.contains("Decomposition failure"));
+        assert!(esc.question.contains("src/main.rs"));
+        assert!(esc.options.len() >= 2);
+    }
+
+    #[test]
+    fn second_rebase_conflict_on_disjoint_files_returns_to_backlog() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-test-rebase-conflict-disjoint-{}.json", std::process::id())),
+        );
+        let project = b
+            .create(None, "Disjoint Conflict Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(Some(project.id), "Task Disjoint Conflict", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+
+        b.transition(t1.id, State::Shaping, "test", None).unwrap();
+        b.transition(t1.id, State::Backlog, "test", None).unwrap();
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/304".into()));
+
+        // First conflict -> Backlog
+        b.dispatch_rebase(t1.id).unwrap();
+        let first_conflict_files = vec!["src/main.rs".to_string()];
+        let updated1 = b
+            .complete_rebase_conflict(t1.id, &first_conflict_files, Some("git rebase conflict"))
+            .unwrap();
+        assert_eq!(updated1.state, State::Backlog);
+
+        // Card is claimed again and moves back to Review
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Review, "agent", None).unwrap();
+
+        // Second conflict on disjoint file "src/store.rs" -> Backlog (not NeedsHuman)
+        b.dispatch_rebase(t1.id).unwrap();
+        let second_conflict_files = vec!["src/store.rs".to_string()];
+        let updated2 = b
+            .complete_rebase_conflict(t1.id, &second_conflict_files, Some("git rebase conflict"))
+            .unwrap();
+
+        assert_eq!(updated2.state, State::Backlog);
+        assert!(updated2.escalation.is_none());
+        assert_eq!(updated2.last_conflict_files, vec!["src/store.rs"]);
     }
 }
