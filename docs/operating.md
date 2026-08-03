@@ -7,7 +7,35 @@ cargo run           # :8080 — API, SSE, MCP, and web/dist if built
 ```
 
 No podman, no gateway, no credentials needed. Agents are off by default.
-`HONR_PORT` overrides the port. State is `honr.json` in the working directory.
+`HONR_PORT` overrides the port.
+
+### Board database
+
+Board rows live in a SQLx store. **SQLite is the default** (local + offline
+tests). **Postgres is optional** for operators who want a shared server.
+
+| Source | Example |
+|---|---|
+| `honr.yaml` → `board.database.url` | `sqlite:honr.db` (default) |
+| Env override | `HONR_DATABASE_URL=postgres://honr:honr@127.0.0.1:5432/honr` |
+
+Accepted URL forms:
+
+- SQLite: `sqlite:honr.db`, `sqlite://…`, `sqlite::memory:` (tests)
+- Postgres: `postgres://…` or `postgresql://…`
+
+On boot honr opens the URL, applies versioned migrations from `migrations/`,
+and restores the board from rows. Mutations flush as row updates — not a
+whole-file rewrite of `honr.json`.
+
+**One-shot JSON import:** if the database is empty (no items and no import
+stamp) and `honr.json` exists in the working directory, honr loads that file
+into the DB once, stamps meta, and leaves the JSON file untouched (archive or
+delete it yourself). Later boots use the DB only. Agent engines and beads
+dual-write are unchanged; see `docs/plans/pluggable-board-database.md`.
+
+Offline `cargo test` always uses SQLite. To exercise Postgres migrations
+locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 
 ### Local GitHub webhooks (`gh webhook forward`)
 

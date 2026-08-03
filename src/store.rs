@@ -5,7 +5,7 @@
 //! into here. Neither owns any state-machine logic, which is what keeps the two
 //! renderings from drifting.
 
-use crate::db::SqliteBoardStore;
+use crate::db::DurableBoardStore;
 use crate::events::BoardEvent;
 use crate::machine::{self, TransitionError};
 use crate::model::*;
@@ -337,8 +337,8 @@ pub struct Board {
     /// Legacy JSON path: import source when the DB is empty; also beads co-locate.
     /// When [`Self::store`] is set, flush no longer rewrites this file.
     path: PathBuf,
-    /// SQLite (later Postgres) row store. `None` in unit tests that stay in-memory/JSON.
-    store: Option<Arc<SqliteBoardStore>>,
+    /// SQLite or Postgres row store. `None` in unit tests that stay in-memory/JSON.
+    store: Option<Arc<DurableBoardStore>>,
     started_at: DateTime<Utc>,
     pub beads: Option<crate::beads::BeadsClient>,
     pub openshell: Option<crate::openshell::OpenShell>,
@@ -537,12 +537,13 @@ impl Board {
         board
     }
 
-    /// Boot from SQLite: one-shot import from `json_path` when the DB is empty,
-    /// otherwise restore rows. Mutations flush as row updates, not a JSON rewrite.
+    /// Boot from the configured board database: one-shot import from `json_path`
+    /// when the DB is empty, otherwise restore rows. Mutations flush as row
+    /// updates, not a JSON rewrite.
     pub async fn load_with_store(
         schema: Schema,
         json_path: PathBuf,
-        store: Arc<SqliteBoardStore>,
+        store: Arc<DurableBoardStore>,
     ) -> Result<Self, crate::db::StoreError> {
         let imported = store.import_json_if_empty(&json_path).await?;
         if imported {
@@ -669,7 +670,7 @@ impl Board {
     /// Flush durable state if anything changed. Called on an interval so a
     /// fleet of heartbeating agents doesn't turn into a write storm.
     ///
-    /// With a [`SqliteBoardStore`] attached, this writes rows (not `honr.json`).
+    /// With a [`DurableBoardStore`] attached, this writes rows (not `honr.json`).
     /// Without a store (unit tests), the legacy whole-file JSON path remains.
     pub fn flush(&self) {
         if !self.dirty.swap(false, Ordering::Relaxed) {

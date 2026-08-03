@@ -1,34 +1,42 @@
 //! Pluggable board database (SQLx).
 //!
-//! Persistence cutover: `Board` boots from SQLite via [`SqliteBoardStore`] and
-//! flushes row updates. `honr.json` is a one-shot import source when the DB is
-//! empty. Hot list/snapshot/lease paths use denormalized columns and indexed
-//! SQL (`query_*` on [`BoardStore`]); agent engines and beads dual-write stay
-//! unchanged.
+//! Persistence: `Board` boots from SQLite (default) or Postgres via
+//! [`DurableBoardStore`] and flushes row updates. `honr.json` is a one-shot
+//! import source when the DB is empty. Hot list/snapshot/lease paths use
+//! denormalized columns and indexed SQL (`query_*` on [`BoardStore`]); agent
+//! engines and beads dual-write stay unchanged.
 
 #![allow(dead_code)]
 
 mod codec;
 mod config;
+mod durable;
+mod postgres;
 mod sqlite;
 mod store;
 
 pub use config::{
     apply_database_url_override, parse_database_url, BoardDatabaseConfig, DatabaseBackend,
 };
-#[allow(unused_imports)] // trait is the public seam; callers use concrete store today
+pub use durable::DurableBoardStore;
+#[allow(unused_imports)] // trait is the public seam; callers use concrete stores today
 pub use store::{BoardStore, StoreError};
+#[allow(unused_imports)] // public API for operators / later callers
+pub use postgres::PostgresBoardStore;
+#[allow(unused_imports)] // public API; Board goes through DurableBoardStore
 pub use sqlite::SqliteBoardStore;
 
-// Re-exported for later Tasks / callers.
+// Re-exported for callers / tests.
 #[allow(unused_imports)]
 pub use config::{DatabaseUrl, DEFAULT_DATABASE_URL, ENV_DATABASE_URL};
 
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::ConnectOptions;
 use std::str::FromStr;
 
 /// Embedded versioned migrations (`migrations/` at the crate root).
+/// Same SQL applies to SQLite and Postgres (portable types / indexes).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Open a SQLite pool and apply migrations.
@@ -48,6 +56,30 @@ pub async fn connect_sqlite_migrated(url: &str) -> Result<SqlitePool, StoreError
     // shared_cache when parsing `:memory:`, and assigns a stable name per
     // options value so one pool's connections see the same DB.
     let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .map_err(|e| StoreError::Connect(e.to_string()))?;
+    MIGRATOR
+        .run(&pool)
+        .await
+        .map_err(|e| StoreError::Migrate(e.to_string()))?;
+    Ok(pool)
+}
+
+/// Open a Postgres pool and apply the same migrations as SQLite.
+pub async fn connect_postgres_migrated(url: &str) -> Result<PgPool, StoreError> {
+    let parsed = parse_database_url(url)?;
+    if parsed.backend() != DatabaseBackend::Postgres {
+        return Err(StoreError::WrongBackend {
+            expected: DatabaseBackend::Postgres,
+            got: parsed.backend(),
+        });
+    }
+    let options = PgConnectOptions::from_str(parsed.as_str())
+        .map_err(|e| StoreError::Connect(e.to_string()))?
+        .disable_statement_logging();
+    let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect_with(options)
         .await
@@ -159,5 +191,74 @@ mod tests {
         assert!(count >= 4, "expected board tables, got {count}");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn connect_postgres_migrated_rejects_sqlite_url() {
+        let err = connect_postgres_migrated("sqlite::memory:")
+            .await
+            .expect_err("sqlite URL must not open as postgres");
+        assert!(matches!(
+            err,
+            StoreError::WrongBackend {
+                expected: DatabaseBackend::Postgres,
+                got: DatabaseBackend::Sqlite,
+            }
+        ));
+    }
+
+    /// When `HONR_TEST_DATABASE_URL` is a reachable `postgres://` / `postgresql://`
+    /// URL, apply migrations there. Offline CI leaves the env unset and skips.
+    #[tokio::test]
+    async fn migrations_apply_to_postgres_when_available() {
+        let url = match std::env::var("HONR_TEST_DATABASE_URL") {
+            Ok(u) if !u.trim().is_empty() => u,
+            _ => {
+                eprintln!("skipping: set HONR_TEST_DATABASE_URL to exercise Postgres migrations");
+                return;
+            }
+        };
+        let parsed = parse_database_url(&url).expect("HONR_TEST_DATABASE_URL must parse");
+        assert_eq!(
+            parsed.backend(),
+            DatabaseBackend::Postgres,
+            "HONR_TEST_DATABASE_URL must be postgres:// or postgresql://"
+        );
+
+        let pool = connect_postgres_migrated(parsed.as_str())
+            .await
+            .expect("postgres connect+migrate");
+
+        for table in ["meta", "items", "item_blockers", "stories"] {
+            let (exists,): (bool,) = sqlx::query_as(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = $1
+                )
+                "#,
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .expect("table exists query");
+            assert!(exists, "missing table {table}");
+        }
+
+        sqlx::query("INSERT INTO meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+            .bind("next_id")
+            .bind("1")
+            .execute(&pool)
+            .await
+            .expect("insert meta");
+        let value: String = sqlx::query("SELECT value FROM meta WHERE key = $1")
+            .bind("next_id")
+            .fetch_one(&pool)
+            .await
+            .expect("select meta")
+            .get("value");
+        assert_eq!(value, "1");
+
+        pool.close().await;
     }
 }
