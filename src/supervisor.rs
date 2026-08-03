@@ -2235,8 +2235,8 @@ fn briefing(
              (each: `key`, `title`, `intent`, `definition_of_done`, optional `blocked_by_keys`). \
              Open **one** plan/docs PR against the upstream base as written rationale, then \
              finish with `/sandbox/.honr/report.json` (and `pr_url`). The card goes to Review — \
-             when the plan PR **merges**, those Tasks are created from your plan.json \
-             (not via split.json; not via a separate Approve step).\n\
+             cockpit **Approve** creates those Tasks from your plan.json (merge webhook is a \
+             backup if Approve never ran; not via split.json).\n\
              Do **not** write `/sandbox/.honr/split.json` on this card.\n\
              If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` \
              with options (at least two) and a recommended index, then exit.\n\
@@ -3150,8 +3150,8 @@ mod tests {
             "briefing must forbid split on Initial plan: {b}"
         );
         assert!(
-            b.contains("merges") && b.contains("Tasks"),
-            "briefing must say plan PR merge creates Tasks from plan.json: {b}"
+            b.contains("Approve") && b.contains("Tasks"),
+            "briefing must say Approve creates Tasks from plan.json: {b}"
         );
         assert!(
             !b.contains("Split and publish are mutually exclusive"),
