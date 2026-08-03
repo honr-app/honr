@@ -3,6 +3,7 @@ import type {
   SandboxProfilesOut,
   Snapshot,
   WorkItem,
+  WorkspaceBinding,
 } from "./types";
 
 async function jsonOrThrow(r: Response) {
@@ -14,6 +15,13 @@ async function jsonOrThrow(r: Response) {
 const post = (path: string, body?: unknown) =>
   fetch(`/api${path}`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  }).then(jsonOrThrow);
+
+const put = (path: string, body?: unknown) =>
+  fetch(`/api${path}`, {
+    method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
   }).then(jsonOrThrow);
@@ -92,6 +100,11 @@ export const api = {
     sandbox_profile_id: string | null,
   ): Promise<WorkItem> =>
     post(`/items/${id}/sandbox-profile`, { sandbox_profile_id }),
+
+  getWorkspace: (): Promise<WorkspaceBinding> =>
+    fetch("/api/workspace").then(jsonOrThrow),
+  putWorkspace: (binding: WorkspaceBinding): Promise<WorkspaceBinding> =>
+    put("/workspace", binding),
 };
 
 export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;

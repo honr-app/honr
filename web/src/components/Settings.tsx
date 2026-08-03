@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
-import type { SandboxProfile } from "../types.js";
+import type { SandboxProfile, WorkspaceBinding } from "../types.js";
 
-type SettingsSection = "sandboxes" | "general";
+type SettingsSection = "sandboxes" | "workspace";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "sandboxes", label: "Sandboxes" },
-  { id: "general", label: "General", stub: true },
+  { id: "workspace", label: "Workspace" },
 ];
 
 type ProfileDraft = {
@@ -38,8 +38,17 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
   };
 }
 
+const emptyWorkspace = (): WorkspaceBinding => ({
+  forge: "github",
+  upstream: "",
+  fork: "",
+  base: "main",
+  beads_sync_repo: "",
+});
+
 /**
- * Settings shell — Sandboxes is the first real panel; other sections stay stubs.
+ * Settings shell — Sandboxes + Workspace are real panels; more sections land
+ * via the generalization roadmap (Agent runtime, OpenShell).
  */
 export function Settings() {
   const [section, setSection] = useState<SettingsSection>("sandboxes");
@@ -49,8 +58,9 @@ export function Settings() {
       <header className="settings-hero">
         <h1>Settings</h1>
         <p className="settings-lede">
-          Control-plane preferences. Sandboxes manages named profiles and the
-          global default; Projects can override per-assignment.
+          Control-plane preferences. Workspace binds the forge repo; Sandboxes
+          manages named profiles and the global default. Projects can override
+          the sandbox profile per-assignment.
         </p>
       </header>
 
@@ -72,7 +82,7 @@ export function Settings() {
         </nav>
 
         <div className="settings-panel" data-testid={`settings-panel-${section}`}>
-          {section === "sandboxes" ? <SandboxesPanel /> : <GeneralStub />}
+          {section === "sandboxes" ? <SandboxesPanel /> : <WorkspacePanel />}
         </div>
       </div>
     </div>
@@ -438,17 +448,220 @@ export function ProjectSandboxPicker({
   );
 }
 
-function GeneralStub() {
+/** Presentational Workspace form — exported for UI tests without fetch. */
+export function WorkspacePanelView({
+  draft,
+  busy,
+  error,
+  savedHint,
+  onDraftChange,
+  onSave,
+}: {
+  draft: WorkspaceBinding;
+  busy?: boolean;
+  error?: string | null;
+  savedHint?: string | null;
+  onDraftChange: (next: WorkspaceBinding) => void;
+  onSave: () => void;
+}) {
+  const upstreamHint = draft.upstream.trim() || "owner/name";
+  const incomplete = !draft.upstream.trim() || !draft.fork.trim();
+
   return (
-    <section aria-labelledby="general-title">
-      <h2 id="general-title">General</h2>
+    <section aria-labelledby="workspace-title" data-testid="workspace-panel">
+      <h2 id="workspace-title">Workspace</h2>
       <p className="dim">
-        Stub section — reserved for preferences that are not sandbox-related.
-        Nothing to configure here yet.
+        Per-install forge binding. Seeded from <code>honr.yaml</code> on first
+        boot; edits here are durable board state — supervisor and beads use them
+        after reload without re-editing yaml.
       </p>
-      <div className="settings-placeholder" data-testid="general-stub">
-        <p className="dim">Coming soon.</p>
-      </div>
+
+      {error && <div className="err">{error}</div>}
+      {savedHint && (
+        <p className="dim" data-testid="workspace-saved-hint">
+          {savedHint}
+        </p>
+      )}
+
+      <form
+        className="sandbox-profile-form workspace-form"
+        data-testid="workspace-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSave();
+        }}
+      >
+        <label>
+          Forge
+          <select
+            className="search-input"
+            value={draft.forge}
+            disabled={busy}
+            onChange={(e) => onDraftChange({ ...draft, forge: e.target.value })}
+            data-testid="workspace-field-forge"
+          >
+            <option value="github">GitHub</option>
+            <option value="gitlab" disabled>
+              GitLab (future)
+            </option>
+          </select>
+        </label>
+        <label>
+          Upstream
+          <input
+            className="search-input"
+            value={draft.upstream}
+            disabled={busy}
+            placeholder="owner/name"
+            onChange={(e) => onDraftChange({ ...draft, upstream: e.target.value })}
+            data-testid="workspace-field-upstream"
+          />
+          <span className="dim sandbox-field-hint">Repo PRs target (<code>owner/name</code>).</span>
+        </label>
+        <label>
+          Fork
+          <input
+            className="search-input"
+            value={draft.fork}
+            disabled={busy}
+            placeholder="owner/name"
+            onChange={(e) => onDraftChange({ ...draft, fork: e.target.value })}
+            data-testid="workspace-field-fork"
+          />
+          <span className="dim sandbox-field-hint">
+            Repo the agent clones and pushes to.
+          </span>
+        </label>
+        <label>
+          Base branch
+          <input
+            className="search-input"
+            value={draft.base}
+            disabled={busy}
+            placeholder="main"
+            onChange={(e) => onDraftChange({ ...draft, base: e.target.value })}
+            data-testid="workspace-field-base"
+          />
+        </label>
+        <label>
+          Beads sync repo
+          <input
+            className="search-input"
+            value={draft.beads_sync_repo ?? ""}
+            disabled={busy}
+            placeholder="defaults to upstream"
+            onChange={(e) =>
+              onDraftChange({ ...draft, beads_sync_repo: e.target.value })
+            }
+            data-testid="workspace-field-beads"
+          />
+          <span className="dim sandbox-field-hint">
+            Optional. Empty uses upstream for Issue URL construction.
+          </span>
+        </label>
+
+        {incomplete && (
+          <p className="dim" data-testid="workspace-incomplete-hint">
+            Agents stay disabled until upstream and fork are both set.
+          </p>
+        )}
+
+        <div className="btns">
+          <button type="submit" className="primary" disabled={busy} data-testid="workspace-save">
+            Save
+          </button>
+        </div>
+      </form>
+
+      <aside className="workspace-webhook-hint" data-testid="workspace-webhook-hint">
+        <h3>Local webhook forward</h3>
+        <p className="dim">
+          Point <code>gh webhook forward</code> at this install using the
+          configured upstream (not a hardcoded Shane repo):
+        </p>
+        <pre data-testid="workspace-webhook-example">{`gh webhook forward \\
+  --repo=${upstreamHint} \\
+  --events=pull_request,push \\
+  --url=http://127.0.0.1:8080/api/webhooks/github`}</pre>
+      </aside>
     </section>
+  );
+}
+
+function WorkspacePanel() {
+  const [draft, setDraft] = useState<WorkspaceBinding>(emptyWorkspace);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedHint, setSavedHint] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    return api
+      .getWorkspace()
+      .then((ws) => {
+        setDraft({
+          forge: ws.forge || "github",
+          upstream: ws.upstream ?? "",
+          fork: ws.fork ?? "",
+          base: ws.base || "main",
+          beads_sync_repo: ws.beads_sync_repo ?? "",
+        });
+        setError(null);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  if (loading && !error) {
+    return (
+      <section aria-labelledby="workspace-title" data-testid="workspace-panel">
+        <h2 id="workspace-title">Workspace</h2>
+        <p className="dim">loading…</p>
+      </section>
+    );
+  }
+
+  return (
+    <WorkspacePanelView
+      draft={draft}
+      busy={busy}
+      error={error}
+      savedHint={savedHint}
+      onDraftChange={(next) => {
+        setSavedHint(null);
+        setDraft(next);
+      }}
+      onSave={() => {
+        setBusy(true);
+        setError(null);
+        setSavedHint(null);
+        const body: WorkspaceBinding = {
+          forge: draft.forge.trim() || "github",
+          upstream: draft.upstream.trim(),
+          fork: draft.fork.trim(),
+          base: draft.base.trim() || "main",
+          beads_sync_repo: (draft.beads_sync_repo ?? "").trim() || null,
+        };
+        api
+          .putWorkspace(body)
+          .then((saved) => {
+            setDraft({
+              forge: saved.forge,
+              upstream: saved.upstream,
+              fork: saved.fork,
+              base: saved.base,
+              beads_sync_repo: saved.beads_sync_repo ?? "",
+            });
+            setSavedHint("Saved. Binding is board state — used after reload.");
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+    />
   );
 }

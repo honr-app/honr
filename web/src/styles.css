@@ -477,6 +477,40 @@ main > :first-child { flex: 1; min-width: 0; }
 }
 .project-sandbox-picker { margin-top: 4px; }
 
+.workspace-form {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 8px;
+}
+.workspace-form select.search-input {
+  width: 100%;
+  color: var(--ink);
+  background: var(--panel);
+  padding: 6px;
+}
+.workspace-webhook-hint {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.workspace-webhook-hint h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.workspace-webhook-hint pre {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
 /* ------------------------------------------------------------------- cockpit */
 
 .cockpit {
