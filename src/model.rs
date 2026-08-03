@@ -467,6 +467,9 @@ pub struct WorkItem {
     /// claim, bounce to Backlog, or cancel. Nothing auto-sets this.
     #[serde(default)]
     pub awaiting_dispatch: bool,
+    /// Indicates that main advanced and this card's PR branch needs a rebase.
+    #[serde(default)]
+    pub rebase_requested: bool,
     /// Beads issue hash ID (e.g. `bd-a1b2`).
     #[serde(default)]
     pub beads_id: Option<String>,
@@ -530,6 +533,7 @@ impl WorkItem {
             conversation_id: None,
             parked: false,
             awaiting_dispatch: false,
+            rebase_requested: false,
             beads_id: None,
             github_issue_url: None,
             pr_url: None,

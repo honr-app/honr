@@ -1109,4 +1109,73 @@ mod tests {
         );
         assert_eq!(b.get(id).unwrap().state, State::Done);
     }
+
+    #[tokio::test]
+    async fn github_webhook_triggers_rebase_for_sibling_prs_in_review() {
+        use crate::model::{Origin, State};
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-rebase-{}.json",
+                std::process::id()
+            )),
+        ));
+
+        let p = b
+            .create(None, "Webhook Rebase Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+
+        let t1 = b
+            .create(Some(p.id), "Impl 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .unwrap();
+        let t2 = b
+            .create(Some(p.id), "Impl 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .unwrap();
+
+        let pr1_url = "https://github.com/shanemcd/honr/pull/5001";
+        let pr2_url = "https://github.com/shanemcd/honr/pull/5002";
+
+        for (id, url) in [(t1.id, pr1_url), (t2.id, pr2_url)] {
+            let _ = b.transition(id, State::Shaping, "human", None);
+            let _ = b.transition(id, State::Backlog, "human", None);
+            let _ = b.transition(id, State::Claimed, "agent", None);
+            let _ = b.transition(id, State::Review, "agent", None);
+            b.set_pr_url(id, Some(url.to_string()));
+        }
+
+        let pr_payload = serde_json::json!({
+            "action": "closed",
+            "pull_request": {
+                "merged": true,
+                "html_url": pr1_url,
+                "number": 5001,
+                "merge_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "base": { "ref": "main" }
+            },
+            "repository": {
+                "default_branch": "main",
+                "full_name": "shanemcd/honr"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(pr_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.completed_item_ids, vec![t1.id]);
+        assert_eq!(b.get(t1.id).unwrap().state, State::Done);
+
+        let t2_card = b.get(t2.id).unwrap();
+        assert_eq!(t2_card.state, State::Review);
+        assert!(t2_card.rebase_requested);
+        assert!(t2_card.awaiting_dispatch);
+    }
 }
