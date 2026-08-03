@@ -607,9 +607,7 @@ impl Cockpit {
     )]
     fn approve_plan(&self, Parameters(a): Parameters<IdArg>) -> Out<ApprovePlanOut> {
         let published = self.board.approve_plan(a.id).map_err(bad)?;
-        for cid in &published {
-            self.board.schedule_beads_mirror(*cid);
-        }
+        self.board.schedule_beads_mirror_batch(&published);
         Ok(ToolJson(ApprovePlanOut { items: published }))
     }
 
@@ -745,11 +743,13 @@ impl Cockpit {
             .collect();
         let item = self.board.approve_review(a.id).map_err(bad)?;
         if let Some(parent) = item.parent {
+            let mut new_ids = Vec::new();
             for cid in self.board.children_of(parent) {
                 if !before.contains(&cid) {
-                    self.board.schedule_beads_mirror(cid);
+                    new_ids.push(cid);
                 }
             }
+            self.board.schedule_beads_mirror_batch(&new_ids);
         }
         let unblocked = self.board.newly_unblocked_siblings(a.id);
         let note = if unblocked.len() == 1 {
