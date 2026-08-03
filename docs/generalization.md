@@ -1,6 +1,8 @@
 # Investigation: generalize honr beyond this stack
 
-**Status:** plan only — approve to materialize Tasks. No product code in this PR.
+**Status:** Task `workspace-binding` landed durable Board Workspace + kill
+Shane fallbacks. Remaining Tasks still implement Settings panels / second-repo
+proof. No GitLab.
 
 **Goal:** a fresh install can drive **any GitHub-hosted repo** with a configurable
 OpenShell/runtime, without hardcoding `shanemcd/honr`, Colima/gateway paths, or
@@ -84,8 +86,8 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 
 | Assumption | Where | Today |
 |---|---|---|
-| Fallback repo `shanemcd/honr` | `src/beads.rs` (issue URL + push/sync) when `GITHUB_REPOSITORY` unset | **Hardcoded — high severity** |
-| Env `GITHUB_REPOSITORY` / `OWNER` / `REPO` | beads | Env-only; no yaml stanza |
+| Fallback repo `shanemcd/honr` | ~~`src/beads.rs`~~ **removed** — Workspace / env / refuse | Was hardcoded — fixed in `workspace-binding` |
+| Env `GITHUB_REPOSITORY` / `OWNER` / `REPO` | beads + Workspace `beads_sync_repo` | Env wins; else Workspace / yaml |
 | `bd config github.owner/repo` | live e2e test uses `clankrshq`/`honr` | External to honr config |
 | Mirror scheduling | `src/store.rs` | Generic once URL known |
 
@@ -175,6 +177,32 @@ Extend the existing Settings chrome (`web/src/components/Settings.tsx`):
 | **OpenShell** (new, thin) | Read-only gateway health (`openshell status` summary); link to ops doc; optional binary path. **No** Colima path editor — host env stays host. | Global. |
 
 **Not** a parallel “config app.” YAML remains cold bootstrap: empty/placeholder example + migration into board state on first boot (same pattern as sandbox profile seed).
+
+---
+
+## Workspace binding field map (Task `workspace-binding`)
+
+Durable state lives on the Board (`BoardState.workspace` / SQLite meta
+`workspace_binding`). `honr.yaml` `execution.agents.repo` is bootstrap only.
+
+| Field | Type | Seed / read order | Used by |
+|---|---|---|---|
+| `forge` | string | default `github` | Settings IA seam (GitLab later) |
+| `upstream` | `owner/name` | yaml `execution.agents.repo.upstream` | clone/PR target, supervisor |
+| `fork` | `owner/name` | yaml `execution.agents.repo.fork` | agent clone + push |
+| `base` | branch | yaml `base` or `main` | PR base / rebase |
+| `beads_sync_repo` | optional `owner/name` | `GITHUB_REPOSITORY` env at seed, else `upstream` | beads Issue URLs / `bd github` |
+
+**Resolution for agents:** complete Workspace → else yaml repo → else refuse
+with an error naming missing Workspace `upstream` / `fork` (no
+`shanemcd/honr` default).
+
+**Resolution for beads Issue URLs:** `GITHUB_REPOSITORY` env → Workspace
+`beads_sync_repo` / `upstream` → yaml upstream → refuse (numeric / `gh-N`
+refs yield no URL).
+
+**Seed once:** `Board::seed_workspace_binding_if_empty` on load (mirrors
+sandbox profile seed). After seed, Board is source of truth.
 
 ---
 

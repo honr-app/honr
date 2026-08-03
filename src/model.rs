@@ -311,6 +311,100 @@ pub struct PlanTaskBrief {
     pub current: bool,
 }
 
+/// Per-install forge/repo binding. Seeded once from `execution.agents.repo`
+/// (and env); Board is source of truth afterward. See `docs/generalization.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceBinding {
+    /// Forge provider. Only `github` is implemented; `gitlab` is a future seam.
+    #[serde(default = "default_forge")]
+    pub forge: String,
+    /// `owner/name` that PRs target.
+    #[serde(default)]
+    pub upstream: String,
+    /// `owner/name` the agent clones and pushes to.
+    #[serde(default)]
+    pub fork: String,
+    #[serde(default = "default_workspace_base")]
+    pub base: String,
+    /// Beads ↔ GitHub Issues sync target (`owner/name`). Empty → use `upstream`.
+    #[serde(default)]
+    pub beads_sync_repo: Option<String>,
+}
+
+fn default_forge() -> String {
+    "github".into()
+}
+
+fn default_workspace_base() -> String {
+    "main".into()
+}
+
+impl Default for WorkspaceBinding {
+    fn default() -> Self {
+        Self {
+            forge: default_forge(),
+            upstream: String::new(),
+            fork: String::new(),
+            base: default_workspace_base(),
+            beads_sync_repo: None,
+        }
+    }
+}
+
+impl WorkspaceBinding {
+    /// True when upstream and fork are both non-empty (agents may run).
+    pub fn is_complete(&self) -> bool {
+        !self.upstream.trim().is_empty() && !self.fork.trim().is_empty()
+    }
+
+    /// Repo used for beads Issue URL construction / `bd github` env.
+    pub fn beads_repo(&self) -> Option<String> {
+        let explicit = self
+            .beads_sync_repo
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(r) = explicit {
+            return Some(r.to_string());
+        }
+        let upstream = self.upstream.trim();
+        if upstream.is_empty() {
+            None
+        } else {
+            Some(upstream.to_string())
+        }
+    }
+
+    pub fn to_repo_config(&self) -> crate::schema::RepoConfig {
+        crate::schema::RepoConfig {
+            upstream: self.upstream.trim().to_string(),
+            fork: self.fork.trim().to_string(),
+            base: {
+                let b = self.base.trim();
+                if b.is_empty() {
+                    default_workspace_base()
+                } else {
+                    b.to_string()
+                }
+            },
+        }
+    }
+
+    pub fn from_repo_config(repo: &crate::schema::RepoConfig) -> Self {
+        Self {
+            forge: default_forge(),
+            upstream: repo.upstream.clone(),
+            fork: repo.fork.clone(),
+            base: if repo.base.trim().is_empty() {
+                default_workspace_base()
+            } else {
+                repo.base.clone()
+            },
+            beads_sync_repo: None,
+        }
+    }
+}
+
 /// Named create-spec for OpenShell sandboxes. Board-state catalog entries;
 /// YAML `execution.agents` image/policy/cpu/memory is seed/fallback only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -592,7 +686,7 @@ pub struct WorkItem {
     /// Beads issue hash ID (e.g. `bd-a1b2`).
     #[serde(default)]
     pub beads_id: Option<String>,
-    /// Associated GitHub Issue URL (e.g. `https://github.com/shanemcd/honr/issues/8`).
+    /// Associated GitHub Issue URL (e.g. `https://github.com/owner/repo/issues/8`).
     #[serde(default)]
     pub github_issue_url: Option<String>,
     /// The pull request the agent opened. Review is a real PR: approving here

@@ -2,12 +2,12 @@
 
 use super::codec::{
     item_from_row, item_to_row, parent_first, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
-    META_NEXT_ID, META_SANDBOX_PROFILES,
+    META_NEXT_ID, META_SANDBOX_PROFILES, META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
-use crate::model::{ItemId, SandboxProfile, WorkItem};
+use crate::model::{ItemId, SandboxProfile, WorkItem, WorkspaceBinding};
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -57,12 +57,14 @@ impl SqliteBoardStore {
         let stories = self.load_all_stories().await?;
         let sandbox_profiles = self.load_sandbox_profiles().await?;
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
+        let workspace = self.load_workspace_binding().await?;
         Ok(BoardState {
             next_id,
             items,
             stories,
             sandbox_profiles,
             default_sandbox_profile_id,
+            workspace,
             agent_logs: BTreeMap::new(),
         })
     }
@@ -123,6 +125,12 @@ impl SqliteBoardStore {
             state.default_sandbox_profile_id.as_deref().unwrap_or(""),
         )
         .await?;
+        let workspace_json = match &state.workspace {
+            None => String::new(),
+            Some(ws) => serde_json::to_string(ws)
+                .map_err(|e| StoreError::Query(format!("serialize workspace_binding: {e}")))?,
+        };
+        set_meta_tx(&mut tx, META_WORKSPACE_BINDING, &workspace_json).await?;
 
         tx.commit()
             .await
@@ -171,6 +179,15 @@ impl SqliteBoardStore {
             .meta_get(META_DEFAULT_SANDBOX_PROFILE_ID)
             .await?
             .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_workspace_binding(&self) -> Result<Option<WorkspaceBinding>, StoreError> {
+        match self.meta_get(META_WORKSPACE_BINDING).await? {
+            None => Ok(None),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(None),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode workspace_binding: {e}"))),
+        }
     }
 }
 
@@ -595,6 +612,13 @@ mod tests {
             },
         );
         state.default_sandbox_profile_id = Some("default".into());
+        state.workspace = Some(crate::model::WorkspaceBinding {
+            forge: "github".into(),
+            upstream: "acme/widgets".into(),
+            fork: "bot/widgets".into(),
+            base: "develop".into(),
+            beads_sync_repo: Some("acme/beads-mirror".into()),
+        });
         store.save_board_state(&state).await.expect("save");
         let again = store.load_board_state().await.expect("reload");
         assert_eq!(again.items.get(&2).unwrap().blocked_by, vec![1]);
@@ -614,6 +638,11 @@ mod tests {
                 .contains("sqlite-roundtrip"),
             "policy YAML must round-trip"
         );
+        let ws = again.workspace.expect("workspace round-trip");
+        assert_eq!(ws.upstream, "acme/widgets");
+        assert_eq!(ws.fork, "bot/widgets");
+        assert_eq!(ws.base, "develop");
+        assert_eq!(ws.beads_sync_repo.as_deref(), Some("acme/beads-mirror"));
     }
 
     #[tokio::test]
