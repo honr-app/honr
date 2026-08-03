@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, money, since } from "../api.js";
-import type { PlanTaskSpec, WorkItem } from "../types.js";
+import type { BoardEvent, PlanTaskSpec, WorkItem } from "../types.js";
+import { subscribeBoardEvents } from "../useBoard.js";
 
 interface Detail extends WorkItem {
   ancestry: { level: string; title: string; intent: string }[];
@@ -365,6 +366,33 @@ function parseClaudeLogLine(
   }
 }
 
+/**
+ * Pure reducer function to update card Detail state live when board events arrive.
+ */
+export function reduceDetail<T extends Detail = Detail>(
+  prev: T | null,
+  ev: BoardEvent,
+  id: number
+): T | null {
+  if (ev.type === "upsert" && ev.item && ev.item.id === id) {
+    if (!prev) {
+      return {
+        ancestry: [],
+        children: [],
+        ...ev.item,
+      } as unknown as T;
+    }
+    return {
+      ...prev,
+      ...ev.item,
+    };
+  }
+  if (ev.type === "delete" && ev.id === id) {
+    return null;
+  }
+  return prev;
+}
+
 /** Layer 3: is this right? Transcript, diff, cost — and why it exists at all. */
 export function DetailDrawer({
   id,
@@ -456,6 +484,16 @@ export function DetailDrawer({
     setPlanTasks([]);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  useEffect(() => {
+    if (!id) return;
+    const unsubscribe = subscribeBoardEvents((ev) => {
+      setD((prev) => reduceDetail(prev, ev, id));
+    });
+    return () => {
+      unsubscribe();
+    };
   }, [id]);
 
   const act = (p: Promise<unknown>) =>

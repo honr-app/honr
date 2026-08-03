@@ -3,8 +3,8 @@ import { renderToString } from "react-dom/server";
 import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
 import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
-import { Head, PlanEditor, planTasksFromArtifact } from "./dist-test/components/Detail.js";
-import { initial, reduce, isSequenceGap } from "./dist-test/useBoard.js";
+import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
+import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 
 const now = Math.floor(Date.now() / 1000);
 
@@ -387,6 +387,71 @@ assert.strictEqual(
 assert.strictEqual(isSequenceGap(11, 12), false, "Sequential event (12 after 11) is not a gap");
 assert.strictEqual(isSequenceGap(11, 14), true, "Event with gap (14 after 11) is detected as sequence gap");
 assert.strictEqual(isSequenceGap(0, 5), false, "Initial event with lastSeenSeq=0 is not a gap");
+
+// Test 14: reduceDetail updates card Detail drawer state live upon receiving Upsert event
+const detailInitial = {
+  ...unblockedItem,
+  id: 7,
+  title: "Initial Card Title",
+  state: "running",
+  notes: [{ author: "human", text: "initial note" }],
+  ancestry: [{ level: "Project", title: "Parent Project", intent: "project intent" }],
+  children: [10, 11],
+};
+
+const upsertEv = {
+  type: "upsert",
+  seq: 20,
+  item: {
+    ...unblockedItem,
+    id: 7,
+    title: "Updated Card Title Live",
+    state: "review",
+    pr_url: "https://github.com/shanemcd/honr/pull/186",
+    notes: [
+      { author: "human", text: "initial note" },
+      { author: "agent", text: "PR opened" },
+    ],
+  },
+};
+
+const updatedDetail = reduceDetail(detailInitial, upsertEv, 7);
+assert.strictEqual(updatedDetail.title, "Updated Card Title Live", "Upsert event for id 7 must update detail title live");
+assert.strictEqual(updatedDetail.state, "review", "Upsert event for id 7 must update detail state live");
+assert.strictEqual(updatedDetail.pr_url, "https://github.com/shanemcd/honr/pull/186", "Upsert event for id 7 must update pr_url live");
+assert.strictEqual(updatedDetail.notes.length, 2, "Upsert event for id 7 must update notes live");
+assert.strictEqual(updatedDetail.ancestry.length, 1, "reduceDetail must preserve existing detail ancestry");
+
+// Upsert event for a different card ID does not alter Detail state for card 7
+const otherUpsertEv = {
+  type: "upsert",
+  seq: 21,
+  item: { ...unblockedItem, id: 99, title: "Unrelated Card" },
+};
+const unchangedDetail = reduceDetail(updatedDetail, otherUpsertEv, 7);
+assert.strictEqual(unchangedDetail.title, "Updated Card Title Live", "Upsert event for different id 99 must not modify detail for id 7");
+
+// Delete event for card 7 clears detail
+const deleteEv = { type: "delete", seq: 22, id: 7 };
+const deletedDetail = reduceDetail(updatedDetail, deleteEv, 7);
+assert.strictEqual(deletedDetail, null, "Delete event for matching id 7 must clear detail");
+
+// Test 15: subscribeBoardEvents and emitBoardEvent live drawer subscription
+let receivedEvent = null;
+const unsubscribe = subscribeBoardEvents((ev) => {
+  receivedEvent = ev;
+});
+
+emitBoardEvent(upsertEv);
+assert.deepStrictEqual(receivedEvent, upsertEv, "subscribeBoardEvents listener must receive emitted board event");
+
+// Unsubscribe cleanly removes listener
+receivedEvent = null;
+unsubscribe();
+
+const nextEv = { type: "delete", seq: 23, id: 88 };
+emitBoardEvent(nextEv);
+assert.strictEqual(receivedEvent, null, "Closing drawer cleanly unsubscribes and receives no further events");
 
 console.log("\n✅ All Card, Cockpit, Detail, and useBoard sequence guard assertions passed!");
 
