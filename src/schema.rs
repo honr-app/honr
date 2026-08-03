@@ -182,7 +182,11 @@ impl AgentConfig {
             return Ok(());
         }
         if self.repo.upstream.is_empty() || self.repo.fork.is_empty() {
-            return Err("execution.agents.repo needs both `upstream` and `fork`".into());
+            return Err(
+                "Workspace binding incomplete: missing upstream and/or fork \
+                 (Settings → Workspace, or execution.agents.repo in honr.yaml)"
+                    .into(),
+            );
         }
         if self.vertex.project.is_empty() {
             return Err("execution.agents.vertex.project is required".into());
