@@ -11,6 +11,7 @@ mod schema;
 mod sse;
 mod store;
 mod supervisor;
+mod ws;
 
 use crate::schema::Schema;
 use crate::store::{Board, SharedBoard};
@@ -81,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
     let mut app = Router::new()
         .nest("/api", api::routes())
         .route("/api/events", get(sse::events))
+        .route("/api/ws", get(ws::ws_handler))
         .route("/healthz", get(|| async { "ok" }));
 
     // The cockpit's door. Same process, same port, same state.

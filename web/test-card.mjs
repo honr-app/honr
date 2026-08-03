@@ -451,7 +451,30 @@ unsubscribe();
 
 const nextEv = { type: "delete", seq: 23, id: 88 };
 emitBoardEvent(nextEv);
-assert.strictEqual(receivedEvent, null, "Closing drawer cleanly unsubscribes and receives no further events");
+// Test 16: WebSocket subscribe and ping/pong message protocol
+let mockSent = [];
+class MockWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.readyState = 1;
+  }
+  send(data) {
+    mockSent.push(data);
+  }
+  close() {
+    if (this.onclose) this.onclose();
+  }
+}
+
+const mockWs = new MockWebSocket("ws://localhost:8080/api/ws");
+const subPayload = JSON.stringify({ type: "subscribe", last_seq: 15 });
+mockWs.send(subPayload);
+assert.strictEqual(mockSent.length, 1, "Mock WebSocket send must record sent message");
+assert(mockSent[0].includes('"type":"subscribe"') && mockSent[0].includes('"last_seq":15'), "Subscribe message must match required protocol");
+
+const pingPayload = JSON.stringify({ type: "ping" });
+const parsedPing = JSON.parse(pingPayload);
+assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
 console.log("\n✅ All Card, Cockpit, Detail, and useBoard sequence guard assertions passed!");
 

@@ -15,6 +15,11 @@ export default defineConfig({
         timeout: 0,
         proxyTimeout: 0,
       },
+      "/api/ws": {
+        target: "http://127.0.0.1:8080",
+        changeOrigin: true,
+        ws: true,
+      },
       // One origin in dev, so SSE and the MCP endpoint behave as they will in prod.
       "/api": { target: "http://127.0.0.1:8080", changeOrigin: true },
       "/mcp": { target: "http://127.0.0.1:8080", changeOrigin: true },

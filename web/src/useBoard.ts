@@ -147,7 +147,7 @@ export const STALE_AFTER_MS = 12_000;
 export function useBoard() {
   const [state, dispatch] = useReducer(reduce, initial);
   const [error, setError] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
+  const wsRef = useRef<WebSocket | EventSource | null>(null);
   const lastSeenSeqRef = useRef<number>(0);
   const wasConnectedRef = useRef<boolean>(false);
 
@@ -171,46 +171,114 @@ export function useBoard() {
 
     load();
 
-    const es = new EventSource("/api/events");
-    esRef.current = es;
+    let socket: WebSocket | EventSource | null = null;
 
-    es.onopen = () => {
-      dispatch({ type: "connected", ok: true });
-      // Reconnect recovery: re-sync snapshot upon reconnecting after a drop
-      if (wasConnectedRef.current) {
-        load();
-      }
-      wasConnectedRef.current = true;
-    };
+    if (typeof WebSocket !== "undefined") {
+      const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
+      const host = typeof window !== "undefined" ? window.location.host : "localhost:8080";
+      const wsUrl = `${protocol}//${host}/api/ws`;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      socket = ws;
 
-    es.onerror = () => {
-      dispatch({ type: "connected", ok: false });
-    };
+      ws.onopen = () => {
+        if (!alive) return;
+        dispatch({ type: "connected", ok: true });
+        ws.send(JSON.stringify({ type: "subscribe", last_seq: lastSeenSeqRef.current || null }));
+        if (wasConnectedRef.current) {
+          load();
+        }
+        wasConnectedRef.current = true;
+      };
 
-    es.onmessage = (m) => {
-      try {
-        const ev = JSON.parse(m.data) as BoardEvent;
-        if (ev && typeof ev.seq === "number") {
-          // Detect sequence gap: if incoming event seq > lastSeenSeq + 1, trigger snapshot re-fetch
-          if (isSequenceGap(lastSeenSeqRef.current, ev.seq)) {
+      ws.onclose = () => {
+        if (!alive) return;
+        dispatch({ type: "connected", ok: false });
+      };
+
+      ws.onerror = () => {
+        if (!alive) return;
+        dispatch({ type: "connected", ok: false });
+      };
+
+      ws.onmessage = (m) => {
+        if (!alive) return;
+        try {
+          const data = typeof m.data === "string" ? JSON.parse(m.data) : null;
+          if (!data) return;
+
+          if (data.type === "ping") {
+            ws.send(JSON.stringify({ type: "pong" }));
+            return;
+          }
+          if (data.type === "pong") {
+            return;
+          }
+
+          const ev = data as BoardEvent;
+          if (ev && typeof ev.seq === "number") {
+            if (isSequenceGap(lastSeenSeqRef.current, ev.seq)) {
+              load();
+            }
+          }
+          if (ev && ev.type === "reset") {
             load();
           }
+          dispatch({ type: "event", ev });
+          emitBoardEvent(ev);
+        } catch {
+          /* ignore non-json frames */
         }
-        dispatch({ type: "event", ev });
-        emitBoardEvent(ev);
-      } catch {
-        /* keep-alive frames */
-      }
-    };
+      };
+    } else {
+      const es = new EventSource("/api/events");
+      wsRef.current = es;
+      socket = es;
+
+      es.onopen = () => {
+        if (!alive) return;
+        dispatch({ type: "connected", ok: true });
+        if (wasConnectedRef.current) {
+          load();
+        }
+        wasConnectedRef.current = true;
+      };
+
+      es.onerror = () => {
+        if (!alive) return;
+        dispatch({ type: "connected", ok: false });
+      };
+
+      es.onmessage = (m) => {
+        if (!alive) return;
+        try {
+          const ev = JSON.parse(m.data) as BoardEvent;
+          if (ev && typeof ev.seq === "number") {
+            if (isSequenceGap(lastSeenSeqRef.current, ev.seq)) {
+              load();
+            }
+          }
+          if (ev && ev.type === "reset") {
+            load();
+          }
+          dispatch({ type: "event", ev });
+          emitBoardEvent(ev);
+        } catch {
+          /* keep-alive frames */
+        }
+      };
+    }
 
     // Rollups (progress, chunk summaries, spend) are derived server-side, so
-    // re-pull them periodically. Card state itself arrives over SSE.
+    // re-pull them periodically. Card state itself arrives over WebSocket.
     const poll = setInterval(load, 4000);
 
     return () => {
       alive = false;
       clearInterval(poll);
-      es.close();
+      if (socket) {
+        socket.close();
+      }
     };
   }, []);
 
