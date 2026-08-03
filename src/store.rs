@@ -39,6 +39,9 @@ pub struct BoardState {
     /// Per-install forge/repo binding. Seeded from yaml; Board is SoT after.
     #[serde(default)]
     pub workspace: Option<WorkspaceBinding>,
+    /// Optional OpenShell CLI path override (Settings → OpenShell). Empty/None → `openshell` on PATH.
+    #[serde(default)]
+    pub openshell_bin: Option<String>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
 }
@@ -53,6 +56,7 @@ impl BoardState {
             sandbox_profiles: self.sandbox_profiles.clone(),
             default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
             workspace: self.workspace.clone(),
+            openshell_bin: self.openshell_bin.clone(),
             agent_logs: BTreeMap::new(),
         }
     }
@@ -2026,6 +2030,52 @@ impl Board {
         self.dirty.store(true, Ordering::Relaxed);
         self.sync_beads_github_repository();
         Ok(stored)
+    }
+
+    // ------------------------------------------------ OpenShell connectivity (board state)
+
+    /// Effective OpenShell CLI binary: Settings override, else `openshell`.
+    pub fn openshell_bin(&self) -> String {
+        self.state
+            .read()
+            .unwrap()
+            .openshell_bin
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| crate::openshell::DEFAULT_BIN.to_string())
+    }
+
+    /// Optional override as stored (None / empty → use PATH default).
+    pub fn openshell_bin_override(&self) -> Option<String> {
+        self.state
+            .read()
+            .unwrap()
+            .openshell_bin
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Persist optional OpenShell binary path. Empty clears the override.
+    pub fn set_openshell_bin(&self, bin: Option<String>) -> Option<String> {
+        let stored = bin
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        {
+            let mut s = self.state.write().unwrap();
+            s.openshell_bin = stored.clone();
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    /// Client using the board's configured binary (Settings override or default).
+    pub fn openshell_client(&self) -> crate::openshell::OpenShell {
+        crate::openshell::OpenShell::new(
+            self.openshell_bin(),
+            std::time::Duration::from_secs(120),
+        )
     }
 
     /// Push the beads sync repo into the attached BeadsClient (if any).

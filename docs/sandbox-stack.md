@@ -67,33 +67,39 @@ Until then, going direct sidesteps the bug entirely.
 
 ## Verified environment facts
 
-| Thing | Value | Notes |
+One worked example (Shane’s laptop at the time of the Phase 0 spike) — **not**
+the required schema for every install. Substitute your driver, Vertex project,
+bot identity, and provider names.
+
+| Thing | Example value | Notes |
 |---|---|---|
-| OpenShell | 0.0.92 | installed via the release's own Homebrew formula into a local tap `shanemcd/openshell` |
-| Gateway | `https://127.0.0.1:17670` | **not** 8080 — no conflict with honr |
-| Compute driver | podman | `brew install docker` supplies only the CLI; podman serves `/var/run/docker.sock` |
-| Vertex project | `shanemcd-rh` | |
-| Vertex location | **`global`** | `us-east5` is quota-exhausted; `us-central1` does not serve the model |
+| OpenShell | 0.0.92 | Example: release Homebrew formula into a local tap `shanemcd/openshell` |
+| Gateway | `https://127.0.0.1:17670` | **not** 8080 — no conflict with honr (your port may differ) |
+| Compute driver | podman | Example: `brew install docker` supplies only the CLI; podman serves `/var/run/docker.sock`. Colima + `DOCKER_HOST` is another valid driver — see `docs/operating.md`. |
+| Vertex project | `shanemcd-rh` | Example project id — use yours |
+| Vertex location | **`global`** | Example: `us-east5` was quota-exhausted; `us-central1` did not serve the model |
 | Vertex model | `claude-opus-5` | |
 | Sandbox image | `ghcr.io/nvidia/openshell-community/sandboxes/base:latest` | Ubuntu 24.04.3, multi-arch (amd64 + arm64). Ships `claude` 2.1.156, `gh` 2.93, git, node 22 + npm, python 3.14. **No Rust toolchain** — see below. |
 | Sandbox `HOME` | `/sandbox` | writable; user is `sandbox`, **no sudo** |
 | Image `ENTRYPOINT` | `/bin/bash` | so `docker run <image> sh -c '…'` fails with `cannot execute binary file` — bash reads `sh` as a *script*. Use `-c '…'` directly, or `--entrypoint`. |
-| GitHub identity | `clankrshq` (bot) | active `gh` account; `shanemcd` still present but inactive |
+| GitHub identity | `clankrshq` (bot) | Example bot; `shanemcd` still present but inactive on that machine |
 
-### Providers configured on the gateway
+### Providers configured on the gateway (example)
 
 ```bash
 openshell provider create --name vertex    --type google-vertex-ai --from-gcloud-adc
-openshell provider update  vertex --config VERTEX_AI_PROJECT_ID=shanemcd-rh \
+openshell provider update  vertex --config VERTEX_AI_PROJECT_ID=<your-gcp-project> \
                                   --config VERTEX_AI_LOCATION=global
 openshell provider create --name gh-clankr --type github --credential GITHUB_TOKEN
 ```
 
-The GitHub credential key **must** be `GITHUB_TOKEN` or `GH_TOKEN` — the profile matches on the name.
+Replace project id and provider names with values that match **your** gateway
+and `honr.yaml` / Agent runtime Settings. The GitHub credential key **must** be
+`GITHUB_TOKEN` or `GH_TOKEN` — the profile matches on the name.
 
-> ⚠️ `gh-clankr` currently holds the bot's OAuth token, which reaches **all 9** of clankrshq's repos
-> (including forks of OpenShell and NemoClaw). Swapping it for a fine-grained PAT scoped to one repo
-> is a one-line provider recreate, and is the right move before agents run unattended.
+> ⚠️ On the example install, `gh-clankr` held the bot's OAuth token across many
+> repos. Prefer a fine-grained PAT scoped to the repos you actually dispatch
+> against before agents run unattended.
 
 ---
 

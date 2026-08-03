@@ -38,59 +38,79 @@ not a wedged run.
 ```bash
 gh extension install cli/gh-webhook   # once
 
-# Use the Workspace upstream (Settings → Workspace), not a hardcoded repo:
+# Use a product upstream you care about (placeholder — not a hardcoded repo):
 gh webhook forward \
-  --repo=<configured-upstream> \
+  --repo=<owner/name> \
   --events=pull_request,push \
   --url=http://127.0.0.1:8080/api/webhooks/github
 ```
 
 Leave that running while you merge a test PR. Only one forwarder per repo at a
-time. Dev-only — not for production delivery. Settings → Workspace shows the
-same command with your configured upstream filled in.
+time. Dev-only — not for production delivery. Settings → Forge shows the same
+placeholder template.
 
 ## Running real agents
 
-This spends real money and opens pull requests. Four things must be true.
+This spends real money and opens pull requests. Four **roles** must be satisfied
+on the host — the concrete tools below are examples, not the only stack.
 
-**1. The compute driver is up.**
+### 1. Compute driver
+
+OpenShell’s gateway needs a working Docker-compatible API (`docker info`
+succeeds). How you provide that is a **host choice**:
+
+| Driver | Typical setup |
+|---|---|
+| **podman** (machine) | `podman machine start`; CLI often via `docker` talking to podman’s socket |
+| **Colima** | `colima start`; point the gateway at Colima’s socket (e.g. `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` in the gateway’s env) |
+| **Docker Desktop / engine** | Ensure the daemon is up and the gateway process can reach its socket |
+
+`DOCKER_HOST`, `~/.config/openshell/gateway.env`, and similar knobs belong to
+the **gateway process**, not to honr Settings. Honr only needs the gateway to
+answer `openshell status`.
+
+The driver can stop on its own. The supervisor health-checks before claiming
+and pauses after an infrastructure failure rather than burning a card’s retry
+budget, but it cannot prevent the outage.
+
+### 2. OpenShell gateway
 
 ```bash
-podman machine start
-docker info            # the socket is a symlink to podman's
-```
-
-It stops on its own — three times in one session, historically. The supervisor
-health-checks before claiming and pauses 60s after an infrastructure failure
-rather than burning a card's retry budget, but it cannot prevent the outage.
-
-**2. The gateway is up.**
-
-```bash
-brew services start openshell
+# Example (Homebrew service) — use whatever starts *your* gateway:
+#   brew services start openshell
 openshell status       # expect Connected + Authenticated (mTLS transport)
 ```
 
-Port 17670, deliberately not 8080.
+Confirm in **Settings → OpenShell** (healthy / unhealthy, or an explicit error
+if the CLI is missing). Optional binary path override lives there when
+`openshell` is not on `PATH`.
 
-**3. Providers exist.**
+Default local gateway port is often `17670` — deliberately not honr’s `8080`.
+Your install may differ; trust `openshell status`, not a hardcoded URL.
+
+### 3. Providers
 
 ```bash
-openshell provider list        # expect a Vertex provider and a GitHub one
+openshell provider list        # expect your Vertex (or other) + GitHub providers
 ```
 
-See [`sandbox-stack.md`](sandbox-stack.md) for how to create them. The GitHub
-credential key **must** be named `GITHUB_TOKEN` or `GH_TOKEN` — the profile
-matches on the name.
+Provider **names** in `honr.yaml` / Settings Agent runtime must match what you
+registered on **this** gateway. See [`sandbox-stack.md`](sandbox-stack.md) for
+create recipes (worked example included). The GitHub credential key **must**
+be named `GITHUB_TOKEN` or `GH_TOKEN` — the profile matches on the name.
 
-**4. The image is built.**
+### 4. Sandbox image
+
+Build (or pull) the image your sandbox profile’s `--from` / `image` field
+references. For honr’s own Rust toolchain image:
 
 ```bash
 docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 ```
 
 From the repo root, not `sandbox/` — `Cargo.lock` and `web/package-lock.json`
-must be in context. Rebuild when `Cargo.lock` changes materially. ~3.7GB.
+must be in context when building that Containerfile. Other product repos may
+use a different image via Settings → Sandboxes.
 
 Then flip `execution.agents.enabled: true` in `honr.yaml` and **restart** —
 config is read once at startup, there is no hot reload and no runtime toggle.

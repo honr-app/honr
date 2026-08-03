@@ -5,7 +5,7 @@ import { Card } from "./dist-test/components/Card.js";
 import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -589,8 +589,68 @@ assert(settingsHtml.includes("Sandboxes"), "Settings should include Sandboxes se
 assert(settingsHtml.includes("data-testid=\"sandboxes-panel\""), "Settings should show Sandboxes panel");
 assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Forge (workspace id)");
+assert(settingsHtml.includes("OpenShell"), "Settings should include OpenShell section");
+assert(settingsHtml.includes("data-testid=\"settings-nav-openshell\""), "Settings should nav to OpenShell");
 assert(!settingsHtml.includes("data-testid=\"general-stub\""), "General stub must be gone");
 assert(!settingsHtml.includes("settings-stub-tag"), "Forge must not be a stub section");
+
+const openshellHtml = renderToString(
+  React.createElement(OpenShellPanelView, {
+    status: {
+      healthy: true,
+      binary: "openshell",
+      summary: "Connected\nAuthenticated (mTLS transport)",
+      cli_missing: false,
+    },
+    binaryPath: "",
+    onBinaryPathChange: () => {},
+    onRefresh: () => {},
+    onSaveBinary: () => {},
+  }),
+);
+assert(openshellHtml.includes("data-testid=\"openshell-panel\""), "OpenShell panel should render");
+assert(openshellHtml.includes("data-testid=\"openshell-health\""), "OpenShell health block");
+assert(openshellHtml.includes("Healthy"), "OpenShell healthy label");
+assert(openshellHtml.includes("data-testid=\"openshell-health-summary\""), "OpenShell status summary");
+assert(openshellHtml.includes("data-testid=\"openshell-field-binary\""), "OpenShell binary path field");
+assert(openshellHtml.includes("data-testid=\"openshell-ops-hint\""), "OpenShell host setup hint");
+
+const openshellMissingHtml = renderToString(
+  React.createElement(OpenShellPanelView, {
+    status: {
+      healthy: false,
+      binary: "/missing/openshell",
+      summary: "OpenShell CLI not found",
+      cli_missing: true,
+      error: "No such file",
+    },
+    binaryPath: "/missing/openshell",
+    onBinaryPathChange: () => {},
+    onRefresh: () => {},
+    onSaveBinary: () => {},
+  }),
+);
+assert(openshellMissingHtml.includes("CLI missing"), "OpenShell CLI-missing label");
+assert(
+  openshellMissingHtml.includes("data-cli-missing=\"true\""),
+  "OpenShell CLI-missing attribute",
+);
+
+const openshellUnhealthyHtml = renderToString(
+  React.createElement(OpenShellPanelView, {
+    status: {
+      healthy: false,
+      binary: "openshell",
+      summary: "gateway unreachable",
+      cli_missing: false,
+    },
+    binaryPath: "",
+    onBinaryPathChange: () => {},
+    onRefresh: () => {},
+    onSaveBinary: () => {},
+  }),
+);
+assert(openshellUnhealthyHtml.includes("Unhealthy"), "OpenShell unhealthy label");
 
 const workspaceHtml = renderToString(
   React.createElement(WorkspacePanelView, {

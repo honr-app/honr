@@ -31,6 +31,9 @@ pub const META_DEFAULT_SANDBOX_PROFILE_ID: &str = "default_sandbox_profile_id";
 /// JSON blob: optional [`crate::model::WorkspaceBinding`].
 pub const META_WORKSPACE_BINDING: &str = "workspace_binding";
 
+/// Optional OpenShell CLI path override (empty string means use PATH default).
+pub const META_OPENSHELL_BIN: &str = "openshell_bin";
+
 /// Fields without dedicated columns — portable JSON blob on `items.extras_json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ItemExtras {

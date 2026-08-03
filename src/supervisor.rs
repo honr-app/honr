@@ -56,7 +56,7 @@ type Active = Arc<std::sync::Mutex<std::collections::HashSet<ItemId>>>;
 type Cooldown = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
 
 pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
-    let os = Arc::new(OpenShell::default());
+    let os = Arc::new(board.openshell_client());
     if !cfg.agents.enabled {
         tracing::info!("execution.agents.enabled = false; board runs with no executor");
         tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
@@ -274,7 +274,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     let timeout_secs = cfg.agents.agent_timeout_secs as i64;
     let fleet = Fleet {
         board: board.clone(),
-        os: Arc::new(OpenShell::default()),
+        os: Arc::new(board.openshell_client()),
         agents: Arc::new(cfg.agents.clone()),
         in_flight: Arc::default(),
         active: Arc::default(),
@@ -314,9 +314,10 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         if fleet.cooldown.lock().unwrap().is_some_and(|t| std::time::Instant::now() < t) {
             continue;
         }
-        // The podman machine stops on its own. Claiming a card we can't run
-        // would strand it until the lease lapsed.
-        if !fleet.os.healthy().await {
+        // The compute driver / gateway stop on their own. Claiming a card we
+        // can't run would strand it until the lease lapsed. Uses the board's
+        // OpenShell binary (Settings override) so a path change is live.
+        if !board.openshell_client().healthy().await {
             tracing::warn!("openshell gateway unhealthy; not claiming");
             continue;
         }

@@ -2,7 +2,7 @@
 
 use super::codec::{
     item_from_row, item_to_row, parent_first, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
-    META_NEXT_ID, META_SANDBOX_PROFILES, META_WORKSPACE_BINDING,
+    META_NEXT_ID, META_OPENSHELL_BIN, META_SANDBOX_PROFILES, META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
@@ -58,6 +58,7 @@ impl SqliteBoardStore {
         let sandbox_profiles = self.load_sandbox_profiles().await?;
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
+        let openshell_bin = self.load_openshell_bin().await?;
         Ok(BoardState {
             next_id,
             items,
@@ -65,6 +66,7 @@ impl SqliteBoardStore {
             sandbox_profiles,
             default_sandbox_profile_id,
             workspace,
+            openshell_bin,
             agent_logs: BTreeMap::new(),
         })
     }
@@ -131,6 +133,12 @@ impl SqliteBoardStore {
                 .map_err(|e| StoreError::Query(format!("serialize workspace_binding: {e}")))?,
         };
         set_meta_tx(&mut tx, META_WORKSPACE_BINDING, &workspace_json).await?;
+        set_meta_tx(
+            &mut tx,
+            META_OPENSHELL_BIN,
+            state.openshell_bin.as_deref().unwrap_or(""),
+        )
+        .await?;
 
         tx.commit()
             .await
@@ -188,6 +196,14 @@ impl SqliteBoardStore {
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode workspace_binding: {e}"))),
         }
+    }
+
+    async fn load_openshell_bin(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .meta_get(META_OPENSHELL_BIN)
+            .await?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
     }
 }
 
