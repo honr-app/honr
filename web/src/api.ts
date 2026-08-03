@@ -1,4 +1,6 @@
 import type {
+  OpenShellSettings,
+  OpenShellStatus,
   SandboxProfile,
   SandboxProfilesOut,
   Snapshot,
@@ -105,6 +107,13 @@ export const api = {
     fetch("/api/workspace").then(jsonOrThrow),
   putWorkspace: (binding: WorkspaceBinding): Promise<WorkspaceBinding> =>
     put("/workspace", binding),
+
+  getOpenShell: (): Promise<OpenShellSettings> =>
+    fetch("/api/openshell").then(jsonOrThrow),
+  putOpenShell: (settings: OpenShellSettings): Promise<OpenShellSettings> =>
+    put("/openshell", settings),
+  getOpenShellStatus: (): Promise<OpenShellStatus> =>
+    fetch("/api/openshell/status").then(jsonOrThrow),
 };
 
 export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;

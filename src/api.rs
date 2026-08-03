@@ -72,6 +72,8 @@ pub fn routes() -> Router<SharedBoard> {
             post(set_default_sandbox_profile),
         )
         .route("/workspace", get(get_workspace).put(put_workspace))
+        .route("/openshell/status", get(openshell_status))
+        .route("/openshell", get(get_openshell).put(put_openshell))
 }
 
 #[derive(Serialize)]
@@ -137,7 +139,7 @@ async fn item_logs(
         .clone()
         .unwrap_or_else(|| format!("honr-card-{id}-a{}", item.run_failures + 1));
 
-    let os = crate::openshell::OpenShell::default();
+    let os = b.openshell_client();
     let openshell = if let Ok(logs) = os.logs(&env_name, 60).await {
         logs.lines().map(|s| s.to_string()).collect()
     } else {
@@ -441,6 +443,54 @@ async fn put_workspace(
     Json(req): Json<WorkspaceBinding>,
 ) -> ApiResult<WorkspaceBinding> {
     b.set_workspace_binding(req).map(Json).map_err(ApiError)
+}
+
+// ---------------------------------------------------------------- OpenShell connectivity
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenShellSettings {
+    /// Optional absolute/relative path to the `openshell` CLI. Empty/null → PATH default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenShellStatusOut {
+    pub healthy: bool,
+    pub binary: String,
+    pub summary: String,
+    pub cli_missing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Current Settings override (None when using PATH default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+}
+
+async fn get_openshell(AxState(b): AxState<SharedBoard>) -> Json<OpenShellSettings> {
+    Json(OpenShellSettings {
+        binary_path: b.openshell_bin_override(),
+    })
+}
+
+async fn put_openshell(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<OpenShellSettings>,
+) -> Json<OpenShellSettings> {
+    let binary_path = b.set_openshell_bin(req.binary_path);
+    Json(OpenShellSettings { binary_path })
+}
+
+async fn openshell_status(AxState(b): AxState<SharedBoard>) -> Json<OpenShellStatusOut> {
+    let st = b.openshell_client().gateway_status().await;
+    Json(OpenShellStatusOut {
+        healthy: st.healthy,
+        binary: st.binary,
+        summary: st.summary,
+        cli_missing: st.cli_missing,
+        error: st.error,
+        binary_path: b.openshell_bin_override(),
+    })
 }
 
 // ---------------------------------------------------------------- sandbox profiles
@@ -1562,5 +1612,103 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn openshell_status_reports_cli_missing_for_bad_binary() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-os-miss-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let Json(saved) = put_openshell(
+            AxState(b.clone()),
+            Json(OpenShellSettings {
+                binary_path: Some("/nonexistent/honr-openshell-missing-bin".into()),
+            }),
+        )
+        .await;
+        assert_eq!(
+            saved.binary_path.as_deref(),
+            Some("/nonexistent/honr-openshell-missing-bin")
+        );
+        let Json(st) = openshell_status(AxState(b.clone())).await;
+        assert!(!st.healthy);
+        assert!(st.cli_missing, "summary={}", st.summary);
+        assert!(
+            st.summary.contains("not found") || st.summary.contains("CLI"),
+            "summary={}",
+            st.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn openshell_status_healthy_when_binary_exits_zero() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-os-ok-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        // `true` ignores argv and exits 0 — stands in for a healthy gateway CLI.
+        let _ = put_openshell(
+            AxState(b.clone()),
+            Json(OpenShellSettings {
+                binary_path: Some("true".into()),
+            }),
+        )
+        .await;
+        let Json(st) = openshell_status(AxState(b.clone())).await;
+        assert!(st.healthy, "summary={}", st.summary);
+        assert!(!st.cli_missing);
+        assert_eq!(st.binary, "true");
+
+        // Clear override → default `openshell` name is what status reports as binary.
+        let _ = put_openshell(
+            AxState(b.clone()),
+            Json(OpenShellSettings {
+                binary_path: None,
+            }),
+        )
+        .await;
+        let Json(cfg) = get_openshell(AxState(b.clone())).await;
+        assert!(cfg.binary_path.is_none());
+        assert_eq!(b.openshell_bin(), crate::openshell::DEFAULT_BIN);
+    }
+
+    #[tokio::test]
+    async fn openshell_status_unhealthy_when_binary_exits_nonzero() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-os-bad-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let _ = put_openshell(
+            AxState(b.clone()),
+            Json(OpenShellSettings {
+                binary_path: Some("false".into()),
+            }),
+        )
+        .await;
+        let Json(st) = openshell_status(AxState(b.clone())).await;
+        assert!(!st.healthy);
+        assert!(!st.cli_missing);
     }
 }

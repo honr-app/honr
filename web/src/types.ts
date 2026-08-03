@@ -76,6 +76,21 @@ export interface WorkspaceBinding {
   beads_sync_repo?: string | null;
 }
 
+/** Settings → OpenShell binary override. */
+export interface OpenShellSettings {
+  binary_path?: string | null;
+}
+
+/** GET /api/openshell/status — gateway health for Settings. */
+export interface OpenShellStatus {
+  healthy: boolean;
+  binary: string;
+  summary: string;
+  cli_missing: boolean;
+  error?: string | null;
+  binary_path?: string | null;
+}
+
 /** GitHub-shaped PR end (base / head). */
 export interface PullRequestEnd {
   repo: string;
