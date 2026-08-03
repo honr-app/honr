@@ -1,0 +1,57 @@
+# honr — API (Rust) + UI (Vite/React)
+#
+#   make          build both (cargo binary + web/dist for :8080)
+#   make run      build both, then serve on :8080
+#   make dev-ui   Vite hot-reload on :5173 (proxies API to :8080)
+#   make test     cargo + web unit tests
+
+.PHONY: all build api ui install-ui run dev-ui test test-api test-ui clippy clean help
+
+all: build
+
+help:
+	@echo "Targets:"
+	@echo "  make / make build   Build API (release) and UI into web/dist"
+	@echo "  make api            cargo build --release"
+	@echo "  make ui             npm build → web/dist (served by the API)"
+	@echo "  make run            Build both, then cargo run --release"
+	@echo "  make dev-ui         Vite dev server (:5173 → :8080)"
+	@echo "  make test           cargo nextest/test + web tests"
+	@echo "  make clippy         cargo clippy -D warnings"
+	@echo "  make clean          cargo clean + remove web/dist"
+
+build: api ui
+
+api:
+	cargo build --release
+
+install-ui:
+	npm --prefix web install
+
+ui: install-ui
+	npm --prefix web run build
+
+run: build
+	cargo run --release
+
+dev-ui: install-ui
+	npm --prefix web run dev
+
+test: test-api test-ui
+
+test-api:
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run --offline; \
+	else \
+		cargo test --offline; \
+	fi
+
+test-ui: install-ui
+	npm --prefix web test
+
+clippy:
+	cargo clippy --all-targets --offline -- -D warnings
+
+clean:
+	cargo clean
+	rm -rf web/dist web/dist-test
