@@ -91,7 +91,7 @@ and claims it.
 A card is eligible for enqueue when it is `Backlog`, not parked, unblocked,
 has a definition of done, and is not parked. Lease expiry,
 park, halt, release, and request_changes all clear `awaiting_dispatch` — cockpit
-must dispatch again. Unpark only clears the hold; it does not start a run.
+must dispatch again. Unpark clears the hold and queues the supervisor (same as Start).
 
 **Approve Plan** materializes Tasks into Backlog; the Project itself never goes
 to Backlog. Approve Plan does not auto-dispatch.
@@ -103,7 +103,7 @@ to Backlog. Approve Plan does not auto-dispatch.
 | Send a reviewed card back with instructions | **Request changes** in the drawer. The note reaches the next run's briefing. |
 | Answer a blocked agent | **Needs you** — pick an option. Resets the card's retry budget. |
 | Stop a wedged run but keep context | **Park** — stops the agent, keeps sandbox + agy conversation, and **holds** the card until **Resume session** / `unpark`. |
-| Resume a parked card | **Resume session** / `unpark` — clears the hold; next claim uses `--conversation` when an id is still on the card. |
+| Resume a parked card | **Resume** / `unpark` — clears the hold and queues the supervisor; next claim uses `--conversation` when an id is still on the card. |
 | Throw away the LLM session | **Halt** — stops the agent and clears `conversation_id`; sandbox may still be reused for caches. |
 | Anything requiring a reason | Tell the cockpit. Steer, pin, park, halt and cut live there. |
 
@@ -112,10 +112,10 @@ and seen on the next claim (or on resume after park). Prefer **park** when the
 agent is stuck and you want the same conversation to continue.
 
 Park + resume (agy only): the supervisor persists `conversation_id` from
-stream-json. Park leaves it on the card and sets `parked` so dispatch will not
-reclaim until `unpark`. After resume, the next claim in a live sandbox runs
-`agy --conversation <id>` with a short resume prompt. Halt clears the id so the
-next claim starts fresh.
+stream-json. Park leaves it on the card and sets `parked` so the supervisor will
+not reclaim until `unpark`. Unpark queues dispatch; the next claim in a live
+sandbox runs `agy --conversation <id>` with a short resume prompt. Halt clears
+the id so the next claim starts fresh.
 
 Re-running a card resumes its existing branch and rebases onto **upstream**,
 not the fork's base — a fork's base freezes the moment it's created, and drifted
