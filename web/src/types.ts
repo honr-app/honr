@@ -106,6 +106,7 @@ export interface WorkItem {
   notes: Note[];
   project_prompt?: string | null;
   last_bounce_reason?: string | null;
+  last_conflict_files?: string[];
   release_target: string | null;
   environment: string | null;
   /** agy conversation id; park keeps it for resume, halt clears it. */
