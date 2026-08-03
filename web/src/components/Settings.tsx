@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import type {
+  AgentRuntimeConfig,
   OpenShellSettings,
   OpenShellStatus,
   SandboxProfile,
   WorkspaceBinding,
 } from "../types.js";
 
-type SettingsSection = "sandboxes" | "workspace" | "openshell";
+type SettingsSection = "sandboxes" | "workspace" | "agent-runtime" | "openshell";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "sandboxes", label: "Sandboxes" },
   // Nav label is Forge — "Workspace" implied a single work repo (upstream/fork).
   { id: "workspace", label: "Forge" },
+  { id: "agent-runtime", label: "Agent runtime" },
   { id: "openshell", label: "OpenShell" },
 ];
 
@@ -50,9 +52,20 @@ const emptyWorkspace = (): WorkspaceBinding => ({
   beads_sync_repo: "",
 });
 
+const emptyAgentRuntime = (): AgentRuntimeConfig => ({
+  enabled: false,
+  engine: "cursor",
+  providers: [],
+  vertex: { project: "", location: "global", model: "claude-opus-5" },
+  max_concurrent: 2,
+  per_card_budget_cents: null,
+  daily_budget_cents: null,
+  agent_timeout_secs: 1800,
+  max_attempts: 3,
+});
+
 /**
- * Settings shell — Sandboxes, Forge, and OpenShell connectivity.
- * Agent runtime lands via the generalization roadmap.
+ * Settings shell — Sandboxes, Forge, Agent runtime, and OpenShell connectivity.
  */
 export function Settings() {
   const [section, setSection] = useState<SettingsSection>("sandboxes");
@@ -64,8 +77,9 @@ export function Settings() {
         <p className="settings-lede">
           Control-plane preferences. Forge holds Issue sync — not a work repo.
           Each card’s <code>pull_request</code> (after report) holds remotes.
-          Sandboxes manages named profiles and the global default. OpenShell
-          shows gateway health on this host.
+          Sandboxes manages named profiles and the global default. Agent runtime
+          holds engine, Vertex, providers, and budgets. OpenShell shows gateway
+          health on this host.
         </p>
       </header>
 
@@ -91,6 +105,8 @@ export function Settings() {
             <SandboxesPanel />
           ) : section === "workspace" ? (
             <WorkspacePanel />
+          ) : section === "agent-runtime" ? (
+            <AgentRuntimePanel />
           ) : (
             <OpenShellPanel />
           )}
@@ -616,6 +632,334 @@ function WorkspacePanel() {
               beads_sync_repo: saved.beads_sync_repo ?? "",
             });
             setSavedHint("Saved. Forge + beads sync update board state.");
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+    />
+  );
+}
+
+/** Presentational Agent runtime form — exported for UI tests without fetch. */
+export function AgentRuntimePanelView({
+  draft,
+  busy,
+  error,
+  savedHint,
+  onDraftChange,
+  onSave,
+}: {
+  draft: AgentRuntimeConfig;
+  busy?: boolean;
+  error?: string | null;
+  savedHint?: string | null;
+  onDraftChange: (next: AgentRuntimeConfig) => void;
+  onSave: () => void;
+}) {
+  const providersText = draft.providers.join(", ");
+  return (
+    <section aria-labelledby="agent-runtime-title" data-testid="agent-runtime-panel">
+      <h2 id="agent-runtime-title">Agent runtime</h2>
+      <p className="dim">
+        Process knobs for OpenShell sandboxes: default engine, provider names,
+        Vertex project/location/model, concurrency and budgets. Seeded from{" "}
+        <code>honr.yaml</code>; edits persist on the Board and apply to the next
+        sandbox create. Image/policy live under Sandboxes. Host credential paths
+        stay documented overrides — not silent home assumptions.
+      </p>
+
+      {error && <div className="err">{error}</div>}
+      {savedHint && (
+        <p className="dim" data-testid="agent-runtime-saved-hint">
+          {savedHint}
+        </p>
+      )}
+
+      <form
+        className="sandbox-profile-form workspace-form"
+        data-testid="agent-runtime-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSave();
+        }}
+      >
+        <label className="agent-runtime-check">
+          <input
+            type="checkbox"
+            checked={draft.enabled}
+            disabled={busy}
+            onChange={(e) => onDraftChange({ ...draft, enabled: e.target.checked })}
+            data-testid="agent-runtime-field-enabled"
+          />
+          Agents enabled
+          <span className="dim sandbox-field-hint">
+            Turning agents on when the process started disabled still needs a
+            honr restart so the dispatch loop starts.
+          </span>
+        </label>
+
+        <label>
+          Default engine
+          <select
+            className="search-input"
+            value={draft.engine}
+            disabled={busy}
+            onChange={(e) => onDraftChange({ ...draft, engine: e.target.value })}
+            data-testid="agent-runtime-field-engine"
+          >
+            <option value="cursor">cursor</option>
+            <option value="agy">agy</option>
+            <option value="claude">claude</option>
+          </select>
+        </label>
+
+        <label>
+          OpenShell providers
+          <input
+            className="search-input"
+            value={providersText}
+            disabled={busy}
+            placeholder="vertex, gh-bot, cursor-honr — comma-separated"
+            onChange={(e) =>
+              onDraftChange({
+                ...draft,
+                providers: e.target.value
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              })
+            }
+            data-testid="agent-runtime-field-providers"
+          />
+          <span className="dim sandbox-field-hint">
+            Names must match local OpenShell gateway registrations.
+          </span>
+        </label>
+
+        <div className="sandbox-profile-form-row">
+          <label>
+            Vertex project
+            <input
+              className="search-input"
+              value={draft.vertex.project}
+              disabled={busy}
+              onChange={(e) =>
+                onDraftChange({
+                  ...draft,
+                  vertex: { ...draft.vertex, project: e.target.value },
+                })
+              }
+              data-testid="agent-runtime-field-vertex-project"
+            />
+          </label>
+          <label>
+            Vertex location
+            <input
+              className="search-input"
+              value={draft.vertex.location}
+              disabled={busy}
+              placeholder="global"
+              onChange={(e) =>
+                onDraftChange({
+                  ...draft,
+                  vertex: { ...draft.vertex, location: e.target.value },
+                })
+              }
+              data-testid="agent-runtime-field-vertex-location"
+            />
+          </label>
+        </div>
+
+        <label>
+          Vertex model
+          <input
+            className="search-input"
+            value={draft.vertex.model}
+            disabled={busy}
+            onChange={(e) =>
+              onDraftChange({
+                ...draft,
+                vertex: { ...draft.vertex, model: e.target.value },
+              })
+            }
+            data-testid="agent-runtime-field-vertex-model"
+          />
+        </label>
+
+        <div className="sandbox-profile-form-row">
+          <label>
+            Max concurrent
+            <input
+              className="search-input"
+              type="number"
+              min={1}
+              value={draft.max_concurrent}
+              disabled={busy}
+              onChange={(e) =>
+                onDraftChange({
+                  ...draft,
+                  max_concurrent: Math.max(1, Number(e.target.value) || 1),
+                })
+              }
+              data-testid="agent-runtime-field-max-concurrent"
+            />
+          </label>
+          <label>
+            Agent timeout (secs)
+            <input
+              className="search-input"
+              type="number"
+              min={1}
+              value={draft.agent_timeout_secs}
+              disabled={busy}
+              onChange={(e) =>
+                onDraftChange({
+                  ...draft,
+                  agent_timeout_secs: Math.max(1, Number(e.target.value) || 1),
+                })
+              }
+              data-testid="agent-runtime-field-timeout"
+            />
+          </label>
+        </div>
+
+        <div className="sandbox-profile-form-row">
+          <label>
+            Per-card budget (cents)
+            <input
+              className="search-input"
+              type="number"
+              min={0}
+              value={draft.per_card_budget_cents ?? ""}
+              disabled={busy}
+              placeholder="none"
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                onDraftChange({
+                  ...draft,
+                  per_card_budget_cents: v === "" ? null : Math.max(0, Number(v) || 0),
+                });
+              }}
+              data-testid="agent-runtime-field-per-card-budget"
+            />
+          </label>
+          <label>
+            Daily budget (cents)
+            <input
+              className="search-input"
+              type="number"
+              min={0}
+              value={draft.daily_budget_cents ?? ""}
+              disabled={busy}
+              placeholder="none"
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                onDraftChange({
+                  ...draft,
+                  daily_budget_cents: v === "" ? null : Math.max(0, Number(v) || 0),
+                });
+              }}
+              data-testid="agent-runtime-field-daily-budget"
+            />
+          </label>
+        </div>
+
+        <label>
+          Max attempts
+          <input
+            className="search-input"
+            type="number"
+            min={1}
+            value={draft.max_attempts}
+            disabled={busy}
+            onChange={(e) =>
+              onDraftChange({
+                ...draft,
+                max_attempts: Math.max(1, Number(e.target.value) || 1),
+              })
+            }
+            data-testid="agent-runtime-field-max-attempts"
+          />
+        </label>
+
+        <div className="btns">
+          <button
+            type="submit"
+            className="primary"
+            disabled={busy}
+            data-testid="agent-runtime-save"
+          >
+            Save
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function AgentRuntimePanel() {
+  const [draft, setDraft] = useState<AgentRuntimeConfig>(emptyAgentRuntime);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedHint, setSavedHint] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    return api
+      .getAgentRuntime()
+      .then((rt) => {
+        setDraft({
+          ...emptyAgentRuntime(),
+          ...rt,
+          vertex: { ...emptyAgentRuntime().vertex, ...(rt.vertex ?? {}) },
+          providers: rt.providers ?? [],
+        });
+        setError(null);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  if (loading && !error) {
+    return (
+      <section aria-labelledby="agent-runtime-title" data-testid="agent-runtime-panel">
+        <h2 id="agent-runtime-title">Agent runtime</h2>
+        <p className="dim">loading…</p>
+      </section>
+    );
+  }
+
+  return (
+    <AgentRuntimePanelView
+      draft={draft}
+      busy={busy}
+      error={error}
+      savedHint={savedHint}
+      onDraftChange={(next) => {
+        setSavedHint(null);
+        setDraft(next);
+      }}
+      onSave={() => {
+        setBusy(true);
+        setError(null);
+        setSavedHint(null);
+        api
+          .putAgentRuntime(draft)
+          .then((saved) => {
+            setDraft({
+              ...emptyAgentRuntime(),
+              ...saved,
+              vertex: { ...emptyAgentRuntime().vertex, ...(saved.vertex ?? {}) },
+              providers: saved.providers ?? [],
+            });
+            setSavedHint(
+              "Saved. Next sandbox create / agent_env use these providers, Vertex, and budgets.",
+            );
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));

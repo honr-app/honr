@@ -42,6 +42,9 @@ pub struct BoardState {
     /// Optional OpenShell CLI path override (Settings → OpenShell). Empty/None → `openshell` on PATH.
     #[serde(default)]
     pub openshell_bin: Option<String>,
+    /// Process agent knobs (Settings → Agent runtime). Seeded from yaml; Board SoT after.
+    #[serde(default)]
+    pub agent_runtime: Option<AgentRuntimeConfig>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
     /// Parent → child ids. Rebuilt after load; maintained on create/delete.
@@ -65,6 +68,7 @@ impl BoardState {
             default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
             workspace: self.workspace.clone(),
             openshell_bin: self.openshell_bin.clone(),
+            agent_runtime: self.agent_runtime.clone(),
             agent_logs: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
             ids_by_state: HashMap::new(),
@@ -525,6 +529,10 @@ impl Board {
             tracing::info!("seeded workspace binding from execution.agents.repo");
             board.flush();
         }
+        if board.seed_agent_runtime_if_empty() {
+            tracing::info!("seeded agent runtime from execution.agents");
+            board.flush();
+        }
         board.sync_beads_github_repository();
         board
     }
@@ -575,6 +583,10 @@ impl Board {
         }
         if board.seed_workspace_binding_if_empty() {
             tracing::info!("seeded workspace binding from execution.agents.repo");
+            board.flush();
+        }
+        if board.seed_agent_runtime_if_empty() {
+            tracing::info!("seeded agent runtime from execution.agents");
             board.flush();
         }
         board.sync_beads_github_repository();
@@ -2251,6 +2263,61 @@ impl Board {
         )
     }
 
+    // ------------------------------------------------ agent runtime (board state)
+
+    /// Seed Agent runtime from yaml when unset. Returns true when inserted.
+    pub fn seed_agent_runtime_if_empty(&self) -> bool {
+        self.seed_agent_runtime_from(&self.schema.execution.agents)
+    }
+
+    /// Same as [`Self::seed_agent_runtime_if_empty`] with an explicit AgentConfig.
+    pub fn seed_agent_runtime_from(&self, agents: &AgentConfig) -> bool {
+        let mut s = self.state.write().unwrap();
+        if s.agent_runtime.is_some() {
+            return false;
+        }
+        s.agent_runtime = Some(AgentRuntimeConfig {
+            enabled: agents.enabled,
+            engine: agents.engine.clone(),
+            providers: agents.providers.clone(),
+            vertex: AgentRuntimeVertex {
+                project: agents.vertex.project.clone(),
+                location: agents.vertex.location.clone(),
+                model: agents.vertex.model.clone(),
+            },
+            max_concurrent: agents.max_concurrent,
+            per_card_budget_cents: agents.per_card_budget_cents,
+            daily_budget_cents: agents.daily_budget_cents,
+            agent_timeout_secs: agents.agent_timeout_secs,
+            max_attempts: agents.max_attempts,
+        });
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// Durable Agent runtime (None until seeded or set via Settings).
+    pub fn agent_runtime(&self) -> Option<AgentRuntimeConfig> {
+        self.state.read().unwrap().agent_runtime.clone()
+    }
+
+    /// Persist Agent runtime from Settings. Board is SoT after save.
+    pub fn set_agent_runtime(&self, runtime: AgentRuntimeConfig) -> AgentRuntimeConfig {
+        let stored = runtime.normalized();
+        {
+            let mut s = self.state.write().unwrap();
+            s.agent_runtime = Some(stored.clone());
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    /// AgentConfig for supervisor / sandbox create: durable Settings overlay on
+    /// yaml (image/policy/cpu/memory/repo still come from yaml / profiles).
+    pub fn effective_agents(&self) -> AgentConfig {
+        self.agents_with_workspace(&self.schema.execution.agents)
+    }
+
     /// Push the beads sync repo into the attached BeadsClient (if any).
     pub fn sync_beads_github_repository(&self) {
         let repo = self.beads_github_repository();
@@ -2286,10 +2353,27 @@ impl Board {
         }
     }
 
-    /// AgentConfig from yaml as-is. Remotes for a run come from
-    /// [`Self::resolve_card_repo`] (name kept for call sites).
+    /// AgentConfig from yaml with durable Settings → Agent runtime overlay.
+    /// Remotes for a run still come from [`Self::resolve_card_repo`].
     pub fn agents_with_workspace(&self, yaml_agents: &AgentConfig) -> AgentConfig {
-        yaml_agents.clone()
+        let mut cfg = yaml_agents.clone();
+        let Some(rt) = self.agent_runtime() else {
+            return cfg;
+        };
+        cfg.enabled = rt.enabled;
+        cfg.engine = rt.engine;
+        cfg.providers = rt.providers;
+        cfg.vertex = crate::schema::VertexConfig {
+            project: rt.vertex.project,
+            location: rt.vertex.location,
+            model: rt.vertex.model,
+        };
+        cfg.max_concurrent = rt.max_concurrent;
+        cfg.per_card_budget_cents = rt.per_card_budget_cents;
+        cfg.daily_budget_cents = rt.daily_budget_cents;
+        cfg.agent_timeout_secs = rt.agent_timeout_secs;
+        cfg.max_attempts = rt.max_attempts;
+        cfg
     }
 
     /// Per-card work remotes for clone / push / rebase / PR-lookup.
@@ -4345,10 +4429,10 @@ fn check_split_relatedness(
             levels: self.schema.levels.clone(),
             goals,
             server_time: now,
-            agent_timeout_secs: self.schema.execution.agents.agent_timeout_secs,
+            agent_timeout_secs: self.effective_agents().agent_timeout_secs,
             seq: self.seq.load(Ordering::Relaxed),
-            default_engine: self.schema.execution.agents.engine.clone(),
-            default_model: self.schema.execution.agents.vertex.model.clone(),
+            default_engine: self.effective_agents().engine.clone(),
+            default_model: self.effective_agents().vertex.model.clone(),
         }
     }
 
@@ -4641,7 +4725,7 @@ fn check_split_relatedness(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Origin;
+    use crate::model::{AgentRuntimeConfig, AgentRuntimeVertex, Origin};
 
     /// Poll until `pred` succeeds. Prefer this over multi-second sleep loops —
     /// memory beads + Capture remotes usually settle within a few yields.
@@ -8649,6 +8733,63 @@ mod tests {
         };
         let overlaid = b.agents_with_workspace(&agents);
         assert!(overlaid.repo.upstream.is_empty());
+    }
+
+    #[test]
+    fn agent_runtime_seeds_from_yaml_and_overlays_effective_agents() {
+        let mut schema = Schema::default();
+        schema.execution.agents = AgentConfig {
+            enabled: true,
+            engine: "cursor".into(),
+            providers: vec!["vertex".into(), "gh".into()],
+            vertex: crate::schema::VertexConfig {
+                project: "yaml-proj".into(),
+                location: "global".into(),
+                model: "yaml-model".into(),
+            },
+            max_concurrent: 2,
+            agent_timeout_secs: 1800,
+            max_attempts: 3,
+            ..Default::default()
+        };
+        let b = Board::new(
+            schema,
+            std::env::temp_dir().join(format!(
+                "honr-test-agent-rt-seed-{}.json",
+                std::process::id()
+            )),
+        );
+        assert!(b.agent_runtime().is_none());
+        assert!(b.seed_agent_runtime_from(&b.schema.execution.agents.clone()));
+        let seeded = b.agent_runtime().expect("seeded");
+        assert_eq!(seeded.vertex.project, "yaml-proj");
+        assert_eq!(seeded.providers, vec!["vertex".to_string(), "gh".to_string()]);
+        assert!(!b.seed_agent_runtime_if_empty(), "second seed is a no-op");
+
+        b.set_agent_runtime(AgentRuntimeConfig {
+            enabled: true,
+            engine: "agy".into(),
+            providers: vec!["vertex".into(), "gh-bot".into()],
+            vertex: AgentRuntimeVertex {
+                project: "board-proj".into(),
+                location: "us-east5".into(),
+                model: "board-model".into(),
+            },
+            max_concurrent: 1,
+            per_card_budget_cents: Some(100),
+            daily_budget_cents: None,
+            agent_timeout_secs: 900,
+            max_attempts: 2,
+        });
+        let eff = b.effective_agents();
+        assert_eq!(eff.engine, "agy");
+        assert_eq!(eff.providers, vec!["vertex".to_string(), "gh-bot".to_string()]);
+        assert_eq!(eff.vertex.location, "us-east5");
+        assert_eq!(eff.vertex.project, "board-proj");
+        assert_eq!(eff.max_concurrent, 1);
+        assert_eq!(eff.agent_timeout_secs, 900);
+        // Image / policy still from yaml (sandbox profiles own create-spec).
+        assert_eq!(eff.image, b.schema.execution.agents.image);
     }
 
     #[test]

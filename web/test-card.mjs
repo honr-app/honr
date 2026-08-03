@@ -5,7 +5,7 @@ import { Card } from "./dist-test/components/Card.js";
 import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -503,8 +503,34 @@ assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Forge (workspace id)");
 assert(settingsHtml.includes("OpenShell"), "Settings should include OpenShell section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-openshell\""), "Settings should nav to OpenShell");
+assert(settingsHtml.includes("Agent runtime"), "Settings should include Agent runtime section");
+assert(settingsHtml.includes("data-testid=\"settings-nav-agent-runtime\""), "Settings should nav to Agent runtime");
 assert(!settingsHtml.includes("data-testid=\"general-stub\""), "General stub must be gone");
 assert(!settingsHtml.includes("settings-stub-tag"), "Forge must not be a stub section");
+
+const agentRuntimeHtml = renderToString(
+  React.createElement(AgentRuntimePanelView, {
+    draft: {
+      enabled: true,
+      engine: "agy",
+      providers: ["vertex", "gh-bot"],
+      vertex: { project: "demo", location: "us-east5", model: "claude-opus-5" },
+      max_concurrent: 1,
+      per_card_budget_cents: 200,
+      daily_budget_cents: null,
+      agent_timeout_secs: 1800,
+      max_attempts: 3,
+    },
+    onDraftChange: () => {},
+    onSave: () => {},
+  }),
+);
+assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-panel\""), "Agent runtime panel should render");
+assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-engine\""), "Agent runtime engine field");
+assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-providers\""), "Agent runtime providers field");
+assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-vertex-location\""), "Agent runtime Vertex location");
+assert(agentRuntimeHtml.includes("us-east5"), "Agent runtime shows configured location");
+assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-save\""), "Agent runtime save control");
 
 const openshellHtml = renderToString(
   React.createElement(OpenShellPanelView, {
