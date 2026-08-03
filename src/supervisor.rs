@@ -98,10 +98,17 @@ async fn sweeper_loop(
     }
 }
 
-/// How often to notice Halt / deadline-sweep while following *or* setting up.
-/// Keeps cancel latency short without hammering the board lock. Setup used to
-/// ignore this — a Halt mid-clone left `in_flight` stuck at `max_concurrent`.
-const WATCH_BOARD_POLL_SECS: u64 = 2;
+/// How often setup/watch loops re-check that the board still owns the card.
+/// Production: 2s is plenty (Halt is human-speed). Tests: 10ms so cancel
+/// coverage does not burn ~2s per case. Setup used to ignore the board —
+/// a Halt mid-clone left `in_flight` stuck at `max_concurrent`.
+fn watch_board_poll() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(10)
+    } else {
+        Duration::from_secs(2)
+    }
+}
 
 /// Board states in which this process may keep watching a sandbox.
 fn board_still_owns_run(state: State) -> bool {
@@ -128,7 +135,7 @@ fn ensure_board_owns_run(board: &SharedBoard, id: ItemId) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Run `fut`, aborting within about `WATCH_BOARD_POLL_SECS` if the board
+/// Run `fut`, aborting within about [`watch_board_poll`] if the board
 /// releases the card. Dropping `fut` cancels the underlying openshell exec
 /// (`kill_on_drop`), which is what frees `in_flight` after Halt during setup.
 async fn with_board_cancel<F, T>(board: &SharedBoard, id: ItemId, fut: F) -> anyhow::Result<T>
@@ -136,7 +143,7 @@ where
     F: Future<Output = anyhow::Result<T>>,
 {
     tokio::pin!(fut);
-    let mut poll = tokio::time::interval(Duration::from_secs(WATCH_BOARD_POLL_SECS));
+    let mut poll = tokio::time::interval(watch_board_poll());
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // First tick completes immediately; skip so we don't race the caller.
     poll.tick().await;
@@ -1010,7 +1017,7 @@ async fn watch_agent(
     });
     tokio::pin!(stream);
 
-    let mut poll = tokio::time::interval(Duration::from_secs(WATCH_BOARD_POLL_SECS));
+    let mut poll = tokio::time::interval(watch_board_poll());
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     poll.tick().await;
 
@@ -2365,9 +2372,8 @@ mod tests {
 
     #[test]
     fn board_poll_is_frequent_enough_to_notice_halt() {
-        const {
-            assert!(WATCH_BOARD_POLL_SECS <= 5);
-        }
+        assert!(watch_board_poll() <= Duration::from_secs(5));
+        assert!(watch_board_poll() <= Duration::from_millis(50));
     }
 
     #[test]
@@ -2424,15 +2430,15 @@ mod tests {
 
         let began = std::time::Instant::now();
         let err = with_board_cancel(&board, id, async {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Ok::<(), anyhow::Error>(())
+            // Never completes on its own — cancel must win when halt lands.
+            std::future::pending::<Result<(), anyhow::Error>>().await
         })
         .await
         .expect_err("must cancel when halted");
         halt.await.expect("halt task");
 
         assert!(
-            began.elapsed() < Duration::from_secs(5),
+            began.elapsed() < Duration::from_secs(2),
             "cancel must not wait out the setup future"
         );
         assert!(
@@ -2475,8 +2481,7 @@ mod tests {
         });
 
         let err = with_board_cancel(&board, id, async {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Ok::<(), anyhow::Error>(())
+            std::future::pending::<Result<(), anyhow::Error>>().await
         })
         .await
         .expect_err("must cancel when parked");
@@ -2518,8 +2523,7 @@ mod tests {
         });
 
         let err = with_board_cancel(&board, id, async {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Ok::<(), anyhow::Error>(())
+            std::future::pending::<Result<(), anyhow::Error>>().await
         })
         .await
         .expect_err("must cancel when retired");
@@ -2944,6 +2948,63 @@ mod tests {
         cfg
     }
 
+    /// In-process openshell for `process_verdict` tests — no bash spawn.
+    fn verdict_openshell(
+        kind: &str,
+        payload_path: impl AsRef<std::path::Path>,
+        pr_lookup_url: Option<&str>,
+        deny_download_substr: Option<&str>,
+    ) -> OpenShell {
+        let kind = kind.to_string();
+        let payload = payload_path.as_ref().to_path_buf();
+        let pr_url = pr_lookup_url.map(|s| s.to_string());
+        let deny = deny_download_substr.map(|s| s.to_string());
+        OpenShell::mock(
+            move |args| {
+                let ok = |stdout: String| crate::openshell::Output {
+                    code: 0,
+                    stdout,
+                    stderr: String::new(),
+                };
+                let fail = || crate::openshell::Output {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: "mock fail".into(),
+                };
+                match (
+                    args.first().map(String::as_str),
+                    args.get(1).map(String::as_str),
+                ) {
+                    (Some("sandbox"), Some("exec")) => {
+                        let script = args.last().map(String::as_str).unwrap_or("");
+                        if script.contains("gh pr list") {
+                            return match &pr_url {
+                                Some(url) => ok(format!("{PR_URL_MARK}{url}\n")),
+                                None => ok(String::new()),
+                            };
+                        }
+                        ok(format!("{}:{}\n", kind, payload.display()))
+                    }
+                    (Some("sandbox"), Some("download")) => {
+                        let remote = args.get(3).map(String::as_str).unwrap_or("");
+                        let dest = args.get(4).map(String::as_str).unwrap_or("");
+                        if deny.as_ref().is_some_and(|d| remote.contains(d.as_str())) {
+                            return fail();
+                        }
+                        let src = std::path::PathBuf::from(remote);
+                        if std::fs::copy(&src, dest).is_ok() {
+                            ok(String::new())
+                        } else {
+                            fail()
+                        }
+                    }
+                    _ => fail(),
+                }
+            },
+            Duration::from_secs(5),
+        )
+    }
+
     fn grant() -> ClaimGrant {
         let deadline = chrono::Utc::now() + chrono::Duration::seconds(1800);
         ClaimGrant {
@@ -3219,7 +3280,6 @@ mod tests {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let mock_bin = dir.join("fake_openshell.sh");
         let split_json_path = dir.join("split.json");
         std::fs::write(
             &split_json_path,
@@ -3232,34 +3292,11 @@ mod tests {
         )
         .unwrap();
 
-        let script_content = format!(
-            r#"#!/usr/bin/env bash
-if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
-    echo "split:{}"
-    exit 0
-elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
-    cp "{}" "$5"
-    exit 0
-fi
-exit 1
-"#,
-            split_json_path.display(),
-            split_json_path.display()
-        );
-        std::fs::write(&mock_bin, script_content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let os = verdict_openshell("split", &split_json_path, None, None);
         let cfg = repo_cfg();
-
         let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
             .await
             .unwrap();
-
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -3291,8 +3328,6 @@ exit 1
         let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
         let _ = board.transition(task.id, State::Running, "agent-1", None);
-
-        // No PR set on board initially
         assert!(board.get(task.id).unwrap().pr_url.is_none());
 
         let dir = std::env::temp_dir().join(format!(
@@ -3300,7 +3335,6 @@ exit 1
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let mock_bin = dir.join("fake_openshell_detected.sh");
         let split_json_path = dir.join("split.json");
         std::fs::write(
             &split_json_path,
@@ -3313,40 +3347,16 @@ exit 1
         )
         .unwrap();
 
-        let script_content = format!(
-            r#"#!/usr/bin/env bash
-if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
-    cmd="$*"
-    if echo "$cmd" | grep -q "gh pr list"; then
-        echo "HONR-PR-URL=https://github.com/shanemcd/honr/pull/99"
-        exit 0
-    else
-        echo "split:{}"
-        exit 0
-    fi
-elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
-    cp "{}" "$5"
-    exit 0
-fi
-exit 1
-"#,
-            split_json_path.display(),
-            split_json_path.display()
+        let os = verdict_openshell(
+            "split",
+            &split_json_path,
+            Some("https://github.com/shanemcd/honr/pull/99"),
+            None,
         );
-        std::fs::write(&mock_bin, script_content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
         let cfg = repo_cfg();
-
         let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
             .await
             .unwrap();
-
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -3387,7 +3397,6 @@ exit 1
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let mock_bin = dir.join("fake_openshell.sh");
         let split_json_path = dir.join("split.json");
         std::fs::write(
             &split_json_path,
@@ -3400,34 +3409,11 @@ exit 1
         )
         .unwrap();
 
-        let script_content = format!(
-            r#"#!/usr/bin/env bash
-if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
-    echo "split:{}"
-    exit 0
-elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
-    cp "{}" "$5"
-    exit 0
-fi
-exit 1
-"#,
-            split_json_path.display(),
-            split_json_path.display()
-        );
-        std::fs::write(&mock_bin, script_content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let os = verdict_openshell("split", &split_json_path, None, None);
         let cfg = repo_cfg();
-
         let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
             .await
             .unwrap();
-
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -3459,14 +3445,13 @@ exit 1
         ));
         let _ = std::fs::create_dir_all(&dir);
         let report_path = dir.join("report.json");
-        let plan_path = dir.join("plan.json");
         std::fs::write(
             &report_path,
             r#"{"added":3,"removed":0,"pr_url":"https://github.com/shanemcd/honr/pull/99"}"#,
         )
         .unwrap();
         std::fs::write(
-            &plan_path,
+            dir.join("plan.json"),
             r#"{
                 "summary": "webhook cut",
                 "tasks": [
@@ -3477,28 +3462,7 @@ exit 1
         )
         .unwrap();
 
-        let mock_bin = dir.join("fake_openshell.sh");
-        let script_content = format!(
-            r#"#!/usr/bin/env bash
-if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
-    echo "report:{}"
-    exit 0
-elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
-    cp "$4" "$5"
-    exit 0
-fi
-exit 1
-"#,
-            report_path.display()
-        );
-        std::fs::write(&mock_bin, script_content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let os = verdict_openshell("report", &report_path, None, None);
         let cfg = repo_cfg();
         let handled =
             process_verdict(&board, &os, &cfg, "agent-1", seed_id, "sandbox-1", "honr/card-ip")
@@ -3517,7 +3481,6 @@ exit 1
         assert_eq!(prop.tasks.len(), 2);
         assert_eq!(prop.tasks[0].key, "a");
         assert_eq!(prop.tasks[1].blocked_by_keys, vec!["a".to_string()]);
-        // Plan stays on the Initial plan card — Project.plan is unused.
         assert!(board.get(project.id).unwrap().plan.is_none());
     }
 
@@ -3548,30 +3511,7 @@ exit 1
         )
         .unwrap();
 
-        let mock_bin = dir.join("fake_openshell.sh");
-        let script_content = format!(
-            r#"#!/usr/bin/env bash
-if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then
-    echo "report:{}"
-    exit 0
-elif [ "$1" = "sandbox" ] && [ "$2" = "download" ]; then
-    case "$4" in
-      *plan.json) exit 1 ;;
-      *) cp "$4" "$5"; exit 0 ;;
-    esac
-fi
-exit 1
-"#,
-            report_path.display()
-        );
-        std::fs::write(&mock_bin, script_content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let os = OpenShell::new(mock_bin.to_string_lossy().to_string(), Duration::from_secs(5));
+        let os = verdict_openshell("report", &report_path, None, Some("plan.json"));
         let cfg = repo_cfg();
         let handled =
             process_verdict(&board, &os, &cfg, "agent-1", seed_id, "sandbox-1", "honr/card-ip2")
