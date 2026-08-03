@@ -33,3 +33,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "migrate", "chrono", "json"] }
