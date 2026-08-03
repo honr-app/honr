@@ -5,7 +5,7 @@
 #   make dev-ui   Vite hot-reload on :5173 (proxies API to :8080)
 #   make test     cargo + web unit tests
 
-.PHONY: all build api ui install-ui run dev-ui test test-api test-ui clippy clean help
+.PHONY: all build api ui install-ui run dev-ui test test-api test-ui clippy sandbox clean help
 
 all: build
 
@@ -16,6 +16,7 @@ help:
 	@echo "  make ui             npm build → web/dist (served by the API)"
 	@echo "  make run            Build both, then cargo run --release"
 	@echo "  make dev-ui         Vite dev server (:5173 → :8080)"
+	@echo "  make sandbox        Rebuild honr-sandbox:latest (warm crates/npm caches)"
 	@echo "  make test           cargo nextest/test + web tests"
 	@echo "  make clippy         cargo clippy -D warnings"
 	@echo "  make clean          cargo clean + remove web/dist"
@@ -51,6 +52,11 @@ test-ui: install-ui
 
 clippy:
 	cargo clippy --all-targets --offline -- -D warnings
+
+# Rebuild when Cargo.lock / web/package-lock.json change. New sandboxes pick
+# this up via --from; existing ones keep the create-time image.
+sandbox:
+	docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 
 clean:
 	cargo clean
