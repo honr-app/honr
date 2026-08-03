@@ -110,6 +110,8 @@ pub struct AgentConfig {
     /// `sandbox/Containerfile`.
     #[serde(default = "d_image")]
     pub image: String,
+    /// Host path to OpenShell policy YAML used only to **seed** / fall back when
+    /// the board catalog is empty. Catalog profiles store the YAML text itself.
     #[serde(default = "d_policy")]
     pub policy: String,
     #[serde(default)]

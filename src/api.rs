@@ -1323,7 +1323,7 @@ mod tests {
                 id: Some("default".into()),
                 name: "Default".into(),
                 image: "honr-sandbox:latest".into(),
-                policy: "sandbox/policy.yaml".into(),
+                policy: "version: 1\n# api-test\n".into(),
                 cpu: Some("2".into()),
                 memory: Some("4Gi".into()),
             }),
@@ -1334,6 +1334,11 @@ mod tests {
         };
         assert_eq!(created.id, "default");
         assert_eq!(created.image, "honr-sandbox:latest");
+        assert!(
+            created.policy.contains("version: 1"),
+            "policy should be inline YAML, got {:?}",
+            created.policy
+        );
 
         let Ok(Json(heavy)) = upsert_sandbox_profile(
             AxState(b.clone()),
@@ -1341,7 +1346,7 @@ mod tests {
                 id: Some("heavy".into()),
                 name: "Heavy".into(),
                 image: "honr-sandbox:heavy".into(),
-                policy: "sandbox/policy.yaml".into(),
+                policy: "version: 1\n# api-test\n".into(),
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
             }),
@@ -1359,7 +1364,7 @@ mod tests {
                 id: Some("heavy".into()),
                 name: "Heavy+".into(),
                 image: "honr-sandbox:heavy2".into(),
-                policy: "sandbox/policy.yaml".into(),
+                policy: "version: 1\n# api-test-updated\n".into(),
                 cpu: Some("8".into()),
                 memory: Some("32Gi".into()),
             }),

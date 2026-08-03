@@ -149,8 +149,6 @@ export function SandboxesPanelView({
                     </div>
                     <div className="dim sandbox-profile-meta">
                       {p.image}
-                      <span className="sep">·</span>
-                      {p.policy}
                       {(p.cpu || p.memory) && (
                         <>
                           <span className="sep">·</span>
@@ -246,15 +244,21 @@ export function SandboxesPanelView({
             />
           </label>
           <label>
-            Policy
-            <input
-              className="search-input"
+            Policy (YAML)
+            <textarea
+              className="sandbox-policy-textarea"
               value={draft.policy}
               disabled={busy}
               onChange={(e) => onDraftChange({ ...draft, policy: e.target.value })}
               required
+              rows={10}
+              spellCheck={false}
+              placeholder={"version: 1\nfilesystem_policy:\n  include_workdir: true\n"}
               data-testid="sandbox-field-policy"
             />
+            <span className="dim sandbox-field-hint">
+              Inline OpenShell policy YAML — not a path on the host.
+            </span>
           </label>
           <div className="sandbox-profile-form-row">
             <label>
@@ -364,7 +368,8 @@ function SandboxesPanel() {
           ...(editingId ? { id: draft.id.trim() } : {}),
           name: draft.name.trim(),
           image: draft.image.trim(),
-          policy: draft.policy.trim(),
+          // Keep YAML as typed (trailing newline is normal); server rejects empty.
+          policy: draft.policy,
           cpu: draft.cpu.trim() || null,
           memory: draft.memory.trim() || null,
         };

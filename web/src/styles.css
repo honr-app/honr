@@ -457,6 +457,19 @@ main > :first-child { flex: 1; min-width: 0; }
   width: 100%;
   color: var(--ink);
 }
+.sandbox-profile-form textarea.sandbox-policy-textarea {
+  width: 100%;
+  min-height: 140px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+  box-sizing: border-box;
+}
+.sandbox-field-hint {
+  font-size: 11px;
+  font-weight: 400;
+}
 .sandbox-profile-form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
