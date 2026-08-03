@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, money, since } from "../api.js";
 import type { BoardEvent, PlanTaskSpec, SandboxProfile, WorkItem } from "../types.js";
+import { cardPrUrl } from "../types.js";
 import { subscribeBoardEvents } from "../useBoard.js";
 import { ProjectSandboxPicker } from "./Settings.js";
 
@@ -839,12 +840,12 @@ export function DetailDrawer({
         </Section>
       )}
 
-      {(d.pr_url || d.environment) && (
+      {(cardPrUrl(d) || d.environment) && (
         <Section title="This run">
-          {d.pr_url && (
+          {cardPrUrl(d) && (
             <p>
-              <a className="pr-link" href={d.pr_url} target="_blank" rel="noreferrer">
-                ↗ {d.pr_url}
+              <a className="pr-link" href={cardPrUrl(d)!} target="_blank" rel="noreferrer">
+                ↗ {cardPrUrl(d)}
               </a>
             </p>
           )}
@@ -1383,9 +1384,9 @@ export function DetailDrawer({
               </ol>
             </div>
           )}
-          {d.pr_url && (
+          {cardPrUrl(d) && (
             <p>
-              <a className="pr-link" href={d.pr_url} target="_blank" rel="noreferrer">
+              <a className="pr-link" href={cardPrUrl(d)!} target="_blank" rel="noreferrer">
                 ↗ review the pull request
               </a>
             </p>

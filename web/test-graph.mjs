@@ -34,7 +34,7 @@ function makeItem(id, title, blockedBy = [], state = "backlog") {
     pinned: [],
     release_target: null,
     environment: null,
-    pr_url: null,
+    pull_request: null,
     created_at: new Date().toISOString(),
     entered_state_at: new Date().toISOString(),
     history: [],

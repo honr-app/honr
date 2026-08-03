@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://honr.dev/schemas/report.schema.json",
+  "title": "honr report.json",
+  "description": "Agent finish verdict. Persist forge facts on the card via url + GitHub-shaped base/head.",
+  "type": "object",
+  "required": ["url", "base", "head"],
+  "additionalProperties": true,
+  "properties": {
+    "url": {
+      "type": "string",
+      "description": "Pull request HTML URL (GitHub html_url)."
+    },
+    "pr_url": {
+      "type": "string",
+      "description": "Legacy alias for url — prefer url."
+    },
+    "base": {
+      "type": "object",
+      "required": ["repo", "ref"],
+      "additionalProperties": true,
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "PR target repository full_name (owner/name)."
+        },
+        "ref": {
+          "type": "string",
+          "description": "PR target branch name (base.ref)."
+        }
+      }
+    },
+    "head": {
+      "type": "object",
+      "required": ["repo", "ref"],
+      "additionalProperties": true,
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Head repository full_name (same as base for same-repo)."
+        },
+        "ref": {
+          "type": "string",
+          "description": "Head branch name (usually honr/card-N)."
+        }
+      }
+    },
+    "added": { "type": "integer", "minimum": 0 },
+    "removed": { "type": "integer", "minimum": 0 },
+    "gates": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

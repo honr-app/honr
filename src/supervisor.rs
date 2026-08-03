@@ -609,11 +609,13 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
 
     ensure_board_owns_run(board, id)?;
 
-    // Per-card remotes: pr_url → Workspace default → refuse.
+    // Per-card remotes from pull_request; None = first run (agent clones).
     let mut agents = (*f.agents).clone();
-    agents.repo = board
-        .resolve_card_repo(id)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    match board.resolve_card_repo(id) {
+        Ok(Some(repo)) => agents.repo = repo,
+        Ok(None) => agents.repo = Default::default(),
+        Err(e) => return Err(anyhow::anyhow!("{e}")),
+    }
     let cfg = &agents;
 
     let existing_env = board.get(id).and_then(|i| i.environment);
@@ -695,9 +697,11 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     let id = a.item_id;
     let branch = format!("honr/card-{id}");
     let mut agents = (*f.agents).clone();
-    agents.repo = board
-        .resolve_card_repo(id)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    match board.resolve_card_repo(id) {
+        Ok(Some(repo)) => agents.repo = repo,
+        Ok(None) => agents.repo = Default::default(),
+        Err(e) => return Err(anyhow::anyhow!("{e}")),
+    }
     let cfg = &agents;
     let result = async {
         let (run, spent) = watch_agent(
@@ -906,14 +910,34 @@ async fn run_inside(
             }
         }
 
-        let clone = with_board_cancel(
+        let _ = with_board_cancel(
             board,
             id,
-            exec_with_infra_retry(os, name, &clone_script(cfg, branch), short, "clone"),
+            ensure_report_schema_in_sandbox(os, name, short),
         )
-        .await?;
-        beat(0.03)?;
-        branch_state_of(&clone.stdout)
+        .await;
+
+        let branch_state = if cfg.repo.is_complete() {
+            let clone = with_board_cancel(
+                board,
+                id,
+                exec_with_infra_retry(os, name, &clone_script(cfg, branch), short, "clone"),
+            )
+            .await?;
+            beat(0.03)?;
+            branch_state_of(&clone.stdout)
+        } else {
+            // First run: Project prompt names the repo; agent clones.
+            let _ = with_board_cancel(
+                board,
+                id,
+                exec_with_infra_retry(os, name, &empty_workdir_script(), short, "workdir"),
+            )
+            .await?;
+            beat(0.03)?;
+            BranchState::Fresh
+        };
+        branch_state
     } else {
         beat(0.01)?;
         with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
@@ -927,14 +951,27 @@ async fn run_inside(
             }
         }
 
-        let refresh = with_board_cancel(
+        let _ = with_board_cancel(
             board,
             id,
-            exec_with_infra_retry(os, name, &refresh_script(cfg, branch), short, "refresh"),
+            ensure_report_schema_in_sandbox(os, name, short),
         )
-        .await?;
-        beat(0.03)?;
-        branch_state_of(&refresh.stdout)
+        .await;
+
+        let branch_state = if cfg.repo.is_complete() {
+            let refresh = with_board_cancel(
+                board,
+                id,
+                exec_with_infra_retry(os, name, &refresh_script(cfg, branch), short, "refresh"),
+            )
+            .await?;
+            beat(0.03)?;
+            branch_state_of(&refresh.stdout)
+        } else {
+            beat(0.03)?;
+            BranchState::Fresh
+        };
+        branch_state
     };
 
     // ---- the agent -------------------------------------------------------
@@ -947,14 +984,7 @@ async fn run_inside(
     let resume = is_reused
         && matches!(engine, "agy" | "cursor")
         && conversation_id.is_some();
-    let briefing_text = choose_briefing(
-        grant,
-        branch_state,
-        branch,
-        &cfg.repo.upstream,
-        &cfg.repo.base,
-        resume,
-    );
+    let briefing_text = choose_briefing(grant, branch_state, branch, &cfg.repo, resume);
     if resume {
         board.story(
             id,
@@ -1124,6 +1154,14 @@ struct RawSplitChild {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct ReportEnd {
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default, rename = "ref")]
+    git_ref: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct ReportFile {
     #[serde(default)]
     added: u32,
@@ -1131,8 +1169,34 @@ struct ReportFile {
     removed: u32,
     #[serde(default)]
     gates: Vec<String>,
+    /// Preferred: `url`. `pr_url` accepted as legacy alias.
+    #[serde(default, alias = "pr_url")]
+    url: Option<String>,
     #[serde(default)]
-    pr_url: Option<String>,
+    base: Option<ReportEnd>,
+    #[serde(default)]
+    head: Option<ReportEnd>,
+}
+
+fn report_end_to_model(end: &ReportEnd) -> Option<crate::model::PullRequestEnd> {
+    let repo = end.repo.as_deref()?.trim();
+    let git_ref = end.git_ref.as_deref().unwrap_or("main").trim();
+    if repo.is_empty() {
+        return None;
+    }
+    Some(crate::model::PullRequestEnd::new(repo, git_ref))
+}
+
+fn report_to_pull_request(rep: &ReportFile) -> Option<crate::model::PullRequest> {
+    let url = rep
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let base = rep.base.as_ref().and_then(report_end_to_model);
+    let head = rep.head.as_ref().and_then(report_end_to_model);
+    Some(crate::model::PullRequest { url, base, head })
 }
 
 /// Sidecar written by Initial plan agents — becomes Project Plan awaiting approval.
@@ -1408,7 +1472,7 @@ async fn process_verdict(
             // Check whether a PR already exists for the card (pr_url set or PR detected)
             let existing_pr = if let Some(url) = board
                 .get(id)
-                .and_then(|i| i.pr_url)
+                .and_then(|i| i.pr_url().map(|s| s.to_string()))
                 .filter(|s| !s.trim().is_empty())
             {
                 Some(url)
@@ -1475,8 +1539,8 @@ async fn process_verdict(
                 .map_err(|e| anyhow::anyhow!("invalid report.json: {e}"))?;
 
             // Stash PR early so an escalate on missing plan.json still surfaces it.
-            if let Some(url) = rep.pr_url.clone().filter(|s| !s.trim().is_empty()) {
-                board.set_pr_url(id, Some(url));
+            if let Some(pr) = report_to_pull_request(&rep) {
+                board.set_pull_request(id, Some(pr));
             }
 
             let is_initial = board.get(id).is_some_and(|i| i.is_initial_plan_task());
@@ -1517,27 +1581,46 @@ async fn process_verdict(
                 return Ok(true);
             }
 
-            let pr_url = if let Some(url) = board
-                .get(id)
-                .and_then(|i| i.pr_url)
-                .filter(|s| !s.trim().is_empty())
-            {
-                url
-            } else if let Some(url) = rep.pr_url.filter(|s| !s.trim().is_empty()) {
-                url
-            } else {
-                let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
-                parse_pr_url(&pr.stdout)
-                    .ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?
-            };
-            board.set_pr_url(id, Some(pr_url.clone()));
+            let mut pr = report_to_pull_request(&rep);
+            if pr.as_ref().is_none_or(|p| !p.has_forge_ends()) {
+                let url = pr
+                    .as_ref()
+                    .and_then(|p| p.url_str().map(|s| s.to_string()))
+                    .or_else(|| board.get(id).and_then(|i| i.pr_url().map(|s| s.to_string())));
+                if let Some(url) = url {
+                    if let Ok(out) = os.exec(name, &pr_view_binding_script(&url), short).await {
+                        if let Some(filled) = parse_pr_binding_line(&out.stdout) {
+                            pr = Some(filled);
+                        }
+                    }
+                }
+            }
+            if pr.as_ref().is_none_or(|p| p.url_str().is_none()) {
+                let looked = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
+                let url = parse_pr_url(&looked.stdout).ok_or_else(|| {
+                    anyhow::anyhow!("agent finished but opened no PR for {branch}")
+                })?;
+                if let Ok(out) = os.exec(name, &pr_view_binding_script(&url), short).await {
+                    pr = parse_pr_binding_line(&out.stdout)
+                        .or_else(|| Some(crate::model::PullRequest::from_url(url.clone())));
+                } else {
+                    pr = Some(crate::model::PullRequest::from_url(url));
+                }
+            }
+            let pr = pr.ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?;
+            let pr_url = pr.url.clone();
+            board.set_pull_request(id, Some(pr));
+            let mut finish_cfg = cfg.clone();
+            if let Ok(Some(repo)) = board.resolve_card_repo(id) {
+                finish_cfg.repo = repo;
+            }
             let gates = if rep.gates.is_empty() {
                 vec!["agent-reported".into()]
             } else {
                 rep.gates
             };
             let (added, removed) = if rep.added == 0 && rep.removed == 0 {
-                if let Ok(out) = os.exec(name, &diffstat_script(cfg), short).await {
+                if let Ok(out) = os.exec(name, &diffstat_script(&finish_cfg), short).await {
                     if out.ok() {
                         parse_diffstat(&out.stdout)
                     } else {
@@ -1551,7 +1634,7 @@ async fn process_verdict(
             };
             // Hollow Review after a conflict bounce: refuse report while GitHub
             // still says CONFLICTING. UNKNOWN/null is not a hard fail.
-            let mergeable = match os.exec(name, &pr_lookup_script(cfg, branch), short).await {
+            let mergeable = match os.exec(name, &pr_lookup_script(&finish_cfg, branch), short).await {
                 Ok(out) if out.ok() => parse_pr_mergeable(&out.stdout),
                 _ => PrMergeable::Unknown,
             };
@@ -1902,40 +1985,77 @@ pub fn parse_conflict_files(stdout: &str) -> Vec<String> {
 
 /// Clone, and **resume the card's branch if it already exists.**
 ///
+/// Empty workdir for first runs (no card pull_request yet). Agent clones.
+fn empty_workdir_script() -> String {
+    format!(
+        r#"set -e
+rm -rf {WORKDIR}
+mkdir -p {WORKDIR}
+echo {MARK_FRESH}"#
+    )
+}
+
+async fn ensure_report_schema_in_sandbox(
+    os: &OpenShell,
+    name: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let host = std::path::Path::new("docs/schemas/report.schema.json");
+    if !host.is_file() {
+        tracing::warn!("report.schema.json missing on host; agent will rely on briefing prose");
+        return Ok(());
+    }
+    let _ = os
+        .exec(
+            name,
+            &format!("mkdir -p {VERDICT_DIR}"),
+            timeout,
+        )
+        .await?;
+    // upload destination is a directory; place file then move into place.
+    os.upload(name, host.to_str().unwrap_or_default(), VERDICT_DIR)
+        .await?;
+    Ok(())
+}
+
 /// Always branching from base was wrong the moment a card could be re-run:
 /// the agent would start over from scratch and its push would be rejected as
 /// non-fast-forward against its own earlier work. That is precisely the
 /// "changes requested, go fix it" path.
 ///
 /// Not shallow. A rebase against base needs real history, and honr is small.
+/// Same-repo: clone base as origin. Cross-fork: clone head as origin + upstream remote.
 fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
-    let fork = &cfg.repo.fork;
-    let upstream = &cfg.repo.upstream;
-    let base = &cfg.repo.base;
+    let clone = cfg.repo.clone_target();
+    let upstream = cfg.repo.upstream.trim();
+    let base = cfg.repo.base.trim();
+    let base_ref = cfg.repo.base_ref();
+    let setup_upstream = if cfg.repo.uses_cross_fork() {
+        format!(
+            r#"git remote add upstream https://github.com/{upstream}.git
+git -c '{GIT_CRED}' fetch -q upstream {base}
+"#
+        )
+    } else {
+        format!("git -c '{GIT_CRED}' fetch -q origin {base}\n")
+    };
     format!(
         r#"set -e
 export GIT_TERMINAL_PROMPT=0
 rm -rf {WORKDIR}
-git -c '{GIT_CRED}' clone -q --branch {base} https://github.com/{fork}.git {WORKDIR}
+git -c '{GIT_CRED}' clone -q --branch {base} https://github.com/{clone}.git {WORKDIR}
 cd {WORKDIR}
 git config user.email "agent@honr.local"
 git config user.name "honr agent"
-# The fork's own base drifts the moment upstream moves, and nothing syncs it.
-# The PR targets upstream, so upstream is the only base worth rebasing onto.
-git remote add upstream https://github.com/{upstream}.git
-git -c '{GIT_CRED}' fetch -q upstream {base}
-if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
+{setup_upstream}if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
   git -c '{GIT_CRED}' fetch -q origin {branch}
   git checkout -q -B {branch} origin/{branch}
 else
-  git checkout -q -B {branch} upstream/{base}
+  git checkout -q -B {branch} {base_ref}
   echo {MARK_FRESH}
   exit 0
 fi
-# Rebase so the branch is reviewable against what it will actually merge into.
-# A conflict is not a supervisor failure — resolving it needs the semantics of
-# the change, so leave the branch alone and say so in the briefing.
-if git rebase -q upstream/{base} >/dev/null 2>&1; then
+if git rebase -q {base_ref} >/dev/null 2>&1; then
   echo {MARK_REBASED}
 else
   files=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ',' | sed 's/,$//')
@@ -1951,8 +2071,18 @@ fi"#
 /// Refresh an existing sandbox repository in-place (git fetch & rebase)
 /// without wiping the workdir or build caches.
 fn refresh_script(cfg: &AgentConfig, branch: &str) -> String {
-    let upstream = &cfg.repo.upstream;
-    let base = &cfg.repo.base;
+    let upstream = cfg.repo.upstream.trim();
+    let base = cfg.repo.base.trim();
+    let base_ref = cfg.repo.base_ref();
+    let fetch_base = if cfg.repo.uses_cross_fork() {
+        format!(
+            r#"git remote add upstream https://github.com/{upstream}.git 2>/dev/null || true
+git -c '{GIT_CRED}' fetch -q upstream {base}
+"#
+        )
+    } else {
+        format!("git -c '{GIT_CRED}' fetch -q origin {base}\n")
+    };
     format!(
         r#"set -e
 export GIT_TERMINAL_PROMPT=0
@@ -1963,21 +2093,19 @@ fi
 cd {WORKDIR}
 git config user.email "agent@honr.local"
 git config user.name "honr agent"
-git remote add upstream https://github.com/{upstream}.git 2>/dev/null || true
-git reset --hard >/dev/null 2>&1 || true
+{fetch_base}git reset --hard >/dev/null 2>&1 || true
 git clean -fd >/dev/null 2>&1 || true
-git -c '{GIT_CRED}' fetch -q upstream {base}
 if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
   git -c '{GIT_CRED}' fetch -q origin {branch}
   git checkout -q -B {branch} origin/{branch}
 elif git rev-parse --verify {branch} >/dev/null 2>&1; then
   git checkout -q {branch}
 else
-  git checkout -q -B {branch} upstream/{base}
+  git checkout -q -B {branch} {base_ref}
   echo {MARK_FRESH}
   exit 0
 fi
-if git rebase -q upstream/{base} >/dev/null 2>&1; then
+if git rebase -q {base_ref} >/dev/null 2>&1; then
   echo {MARK_REBASED}
 else
   files=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ',' | sed 's/,$//')
@@ -1992,8 +2120,18 @@ fi"#
 
 /// Standalone rebase script for cards in Review that need catching up onto base.
 pub fn rebase_script(cfg: &AgentConfig, branch: &str) -> String {
-    let upstream = &cfg.repo.upstream;
-    let base = &cfg.repo.base;
+    let upstream = cfg.repo.upstream.trim();
+    let base = cfg.repo.base.trim();
+    let base_ref = cfg.repo.base_ref();
+    let fetch_base = if cfg.repo.uses_cross_fork() {
+        format!(
+            r#"git remote add upstream https://github.com/{upstream}.git 2>/dev/null || true
+git -c '{GIT_CRED}' fetch -q upstream {base}
+"#
+        )
+    } else {
+        format!("git -c '{GIT_CRED}' fetch -q origin {base}\n")
+    };
     format!(
         r#"set -e
 export GIT_TERMINAL_PROMPT=0
@@ -2004,10 +2142,8 @@ fi
 cd {WORKDIR}
 git config user.email "agent@honr.local"
 git config user.name "honr agent"
-git remote add upstream https://github.com/{upstream}.git 2>/dev/null || true
-git reset --hard >/dev/null 2>&1 || true
+{fetch_base}git reset --hard >/dev/null 2>&1 || true
 git clean -fd >/dev/null 2>&1 || true
-git -c '{GIT_CRED}' fetch -q upstream {base}
 if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
   git -c '{GIT_CRED}' fetch -q origin {branch}
   git checkout -q -B {branch} origin/{branch}
@@ -2017,7 +2153,7 @@ else
   echo "branch {branch} missing" >&2
   exit 1
 fi
-if git rebase upstream/{base} >/dev/null 2>&1; then
+if git rebase {base_ref} >/dev/null 2>&1; then
   git -c '{GIT_CRED}' push -f origin {branch} >/dev/null 2>&1 || true
   echo {MARK_REBASED}
 else
@@ -2052,7 +2188,14 @@ pub async fn process_awaiting_rebases(
 
         let mut card_cfg = cfg.clone();
         match board.resolve_card_repo(item.id) {
-            Ok(repo) => card_cfg.repo = repo,
+            Ok(Some(repo)) => card_cfg.repo = repo,
+            Ok(None) => {
+                tracing::warn!(
+                    "rebase skipped for card #{}: no pull_request remotes yet",
+                    item.id
+                );
+                continue;
+            }
             Err(e) => {
                 tracing::warn!(
                     "rebase skipped for card #{}: cannot resolve remotes: {e}",
@@ -2102,19 +2245,13 @@ pub const CONFLICTING_PR_BOUNCE_REASON: &str =
 /// hollow Review after a conflict bounce is worse than bouncing again: the
 /// card looks finished while GitHub still cannot merge.
 fn pr_lookup_script(cfg: &AgentConfig, branch: &str) -> String {
-    let upstream = &cfg.repo.upstream;
-    let fork_owner = cfg
-        .repo
-        .fork
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .trim();
-    // Cross-fork PRs need owner:branch or gh looks on upstream only.
-    let head = if fork_owner.is_empty() {
-        branch.to_string()
-    } else {
+    let upstream = cfg.repo.upstream.trim();
+    // Cross-fork PRs need owner:branch; same-repo uses the branch alone.
+    let head = if cfg.repo.uses_cross_fork() {
+        let fork_owner = cfg.repo.fork.split('/').next().unwrap_or("").trim();
         format!("{fork_owner}:{branch}")
+    } else {
+        branch.to_string()
     };
     format!(
         r#"set -e
@@ -2127,6 +2264,50 @@ if [ -n "$row" ]; then
   if [ -n "$mergeable" ]; then echo "{PR_MERGEABLE_MARK}$mergeable"; fi
 fi"#
     )
+}
+
+/// Backfill base/head from GitHub when report only had a URL.
+fn pr_view_binding_script(pr_url: &str) -> String {
+    let url = pr_url.replace('\'', r#"'\''"#);
+    format!(
+        r#"set -e
+export GH_TOKEN=$GITHUB_TOKEN
+gh pr view '{url}' --json url,baseRefName,headRefName,baseRepository,headRepository \
+  --jq '"HONR-PR-BIND="+(.url//"")+"|"+(.baseRepository.nameWithOwner//"")+"|"+(.baseRefName//"")+"|"+(.headRepository.nameWithOwner//"")+"|"+(.headRefName//"")'"#
+    )
+}
+
+fn parse_pr_binding_line(stdout: &str) -> Option<crate::model::PullRequest> {
+    for line in stdout.lines() {
+        let Some(rest) = line.trim().strip_prefix("HONR-PR-BIND=") else {
+            continue;
+        };
+        let mut parts = rest.split('|');
+        let url = parts.next()?.trim();
+        let base_repo = parts.next()?.trim();
+        let base_ref = parts.next()?.trim();
+        let head_repo = parts.next()?.trim();
+        let head_ref = parts.next()?.trim();
+        if url.is_empty() || base_repo.is_empty() {
+            return None;
+        }
+        let head_repo = if head_repo.is_empty() {
+            base_repo
+        } else {
+            head_repo
+        };
+        let head_ref = if head_ref.is_empty() {
+            "main"
+        } else {
+            head_ref
+        };
+        return Some(crate::model::PullRequest {
+            url: url.to_string(),
+            base: Some(crate::model::PullRequestEnd::new(base_repo, base_ref)),
+            head: Some(crate::model::PullRequestEnd::new(head_repo, head_ref)),
+        });
+    }
+    None
 }
 
 /// Prefix so the URL is read from a line we chose, not guessed at.
@@ -2167,11 +2348,11 @@ fn parse_pr_url(stdout: &str) -> Option<String> {
 
 /// Script to run `git diff --numstat` against the base branch.
 fn diffstat_script(cfg: &AgentConfig) -> String {
-    let base = &cfg.repo.base;
+    let base_ref = cfg.repo.base_ref();
     format!(
         r#"set -e
 cd {WORKDIR}
-git diff --numstat upstream/{base}"#
+git diff --numstat {base_ref}"#
     )
 }
 
@@ -2225,18 +2406,41 @@ fn branch_state_of(stdout: &str) -> BranchState {
 /// cold text). A conflicted branch is different: the agent must be told to
 /// resolve conflicts even when the conversation id is reused — otherwise a
 /// hollow resume walks past CONFLICTS and reports into Review again.
+fn remotes_briefing_lines(repo: &crate::schema::RepoConfig) -> String {
+    if !repo.is_complete() {
+        return "\nNo card pull_request yet (first run). Clone into `/sandbox/repo` per the \
+Project prompt, open the PR, then finish with `/sandbox/.honr/report.json` including \
+`url`, `base`, and `head` (schema: `/sandbox/.honr/report.schema.json`).\n"
+            .into();
+    }
+    let base = repo.base.trim();
+    let upstream = repo.upstream.trim();
+    let clone = repo.clone_target();
+    if repo.uses_cross_fork() {
+        format!(
+            "\nRemotes for this run: `origin` is `{clone}` (push); rebase onto \
+`upstream/{base}` (PR target `{upstream}`). Never treat `origin/{base}` alone as the \
+merge base when head and base repos differ.\n"
+        )
+    } else {
+        format!(
+            "\nRemotes for this run: `origin` is `{upstream}` (clone and push). Rebase onto \
+`origin/{base}`. Open the PR against the same repo, base `{base}`.\n"
+        )
+    }
+}
+
 fn choose_briefing(
     grant: &ClaimGrant,
     branch: BranchState,
     branch_name: &str,
-    upstream: &str,
-    base: &str,
+    repo: &crate::schema::RepoConfig,
     resume: bool,
 ) -> String {
     if resume && branch != BranchState::Conflicted {
-        resume_briefing(grant, upstream, base)
+        resume_briefing(grant, repo)
     } else {
-        briefing(grant, branch, branch_name, upstream, base)
+        briefing(grant, branch, branch_name, repo)
     }
 }
 
@@ -2244,7 +2448,7 @@ fn choose_briefing(
 ///
 /// The model already has the cold briefing in session memory; re-dumping it
 /// would burn tokens and invite the agent to restart the card from scratch.
-fn resume_briefing(grant: &ClaimGrant, upstream: &str, base: &str) -> String {
+fn resume_briefing(grant: &ClaimGrant, repo: &crate::schema::RepoConfig) -> String {
     let mut b = String::new();
     b.push_str(
         "You were parked mid-run. The agent process was stopped; any in-flight tools \
@@ -2272,16 +2476,10 @@ fn resume_briefing(grant: &ClaimGrant, upstream: &str, base: &str) -> String {
             b.push_str(&format!("  - {n}\n"));
         }
     }
-    b.push_str(&format!(
-        "\nRemotes: `origin` is the fork (push); rebase onto `upstream/{base}` — never \
-         `origin/{base}` alone (fork base freezes at create time). PR target: `{upstream}` \
-         base `{base}`.\n",
-        upstream = upstream,
-        base = base,
-    ));
+    b.push_str(&remotes_briefing_lines(repo));
     b.push_str(
-        "\nWhen the work is done, write `/sandbox/.honr/report.json` (or escalate/split \
-         as before) and publish the PR on this card's branch.\n",
+        "\nWhen the work is done, write `/sandbox/.honr/report.json` (url/base/head per \
+         report.schema.json) and publish the PR on this card's branch.\n",
     );
     b
 }
@@ -2292,9 +2490,10 @@ fn briefing(
     grant: &ClaimGrant,
     branch: BranchState,
     branch_name: &str,
-    upstream: &str,
-    base: &str,
+    repo: &crate::schema::RepoConfig,
 ) -> String {
+    let upstream = repo.upstream.trim();
+    let base = repo.base.trim();
     let mut b = String::new();
     b.push_str("You are working on one card. Do exactly this card.\n\n");
 
@@ -2360,35 +2559,36 @@ fn briefing(
         }
     }
 
+    let base_ref = repo.base_ref();
     match branch {
-        BranchState::Fresh => b.push_str(
-            "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n",
-        ),
+        BranchState::Fresh => {
+            if repo.is_complete() {
+                b.push_str(
+                    "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n",
+                );
+            } else {
+                b.push_str(
+                    "\nFirst run: `/sandbox/repo` is empty. Clone the product repo per the Project \
+prompt, create the card branch, and do the work.\n",
+                );
+            }
+        }
         BranchState::Rebased => b.push_str(&format!(
             "\nThis card has been worked before. You are on its existing branch, already rebased \
-             onto `upstream/{base}` — review what is there and address the notes above rather \
+             onto `{base_ref}` — review what is there and address the notes above rather \
              than starting over.\n"
         )),
         BranchState::Conflicted => {
-            // upstream/<base>, not origin/<base>: the fork's base freezes at
-            // create time; the PR merges into upstream.
             b.push_str(&format!(
                 "\nThis card has been worked before and its branch CONFLICTS with the base. The \
              rebase was left un-applied, so you are on the branch as it was. Rebase onto \
-             `upstream/{base}` yourself and resolve the conflicts, keeping the intent of both \
+             `{base_ref}` yourself and resolve the conflicts, keeping the intent of both \
              sides. Do this before any other work.\n"
             ));
         }
     }
 
-    // Cross-fork remotes: never treat origin/<base> as the merge base.
-    b.push_str(&format!(
-        "\nRemotes: `origin` is the fork (push); rebase onto `upstream/{base}` — never \
-         `origin/{base}` alone (the fork's base freezes at create time). PRs target \
-         `{upstream}` base `{base}`.\n",
-        upstream = upstream,
-        base = base,
-    ));
+    b.push_str(&remotes_briefing_lines(repo));
 
     let is_initial_plan = crate::model::title_is_initial_plan(&grant.title);
 
@@ -2397,8 +2597,9 @@ fn briefing(
             "\nThis is the Project's **Initial plan** card. Propose the sibling Tasks that \
              should be created: write `/sandbox/.honr/plan.json` with a `summary` and `tasks` \
              (each: `key`, `title`, `intent`, `definition_of_done`, optional `blocked_by_keys`). \
-             Open **one** plan/docs PR against the upstream base as written rationale, then \
-             finish with `/sandbox/.honr/report.json` (and `pr_url`). The card goes to Review — \
+             Open **one** plan/docs PR against the product base as written rationale, then \
+             finish with `/sandbox/.honr/report.json` (`url`, `base`, `head` per \
+             `/sandbox/.honr/report.schema.json`). The card goes to Review — \
              cockpit **Approve** creates those Tasks from your plan.json (merge webhook is a \
              backup if Approve never ran; not via split.json).\n\
              Do **not** write `/sandbox/.honr/split.json` on this card.\n\
@@ -2407,14 +2608,21 @@ fn briefing(
              \n`bd` in the sandbox is a **read snapshot** — use `bd prime` / `bd show <id>` for \
              context. Do not rely on `bd remember` or `bd dep add` for durable state.\n",
         );
-        b.push_str(&format!(
-            "\nPublish: commit on `{branch}`, push to `origin`, open **one** PR against \
-             `{upstream}` base `{base}` (or update that PR). Write plan.json, then report.json, \
-             and exit. Leave `{base}` alone.\n",
-            branch = branch_name,
-            upstream = upstream,
-            base = base,
-        ));
+        if repo.is_complete() {
+            b.push_str(&format!(
+                "\nPublish: commit on `{branch}`, push to `origin`, open **one** PR against \
+             `{upstream}` base `{base}` (or update that PR). Write plan.json, then report.json \
+             with url/base/head, and exit. Leave `{base}` alone.\n",
+                branch = branch_name,
+                upstream = upstream,
+                base = base,
+            ));
+        } else {
+            b.push_str(
+                "\nPublish: after you clone, commit on the card branch, push, open one PR, write \
+plan.json then report.json with url/base/head, and exit.\n",
+            );
+        }
     } else {
         b.push_str(
             "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
@@ -2433,26 +2641,21 @@ fn briefing(
              context. Do not rely on `bd remember` or `bd dep add` for durable state.\n",
         );
 
-        b.push_str(&format!(
-            "\nWhen the work is done, write `/sandbox/.honr/report.json` \
-             with your diffstat (`added` and `removed` line counts matching `git diff --numstat` against `{base}`), \
-             optional `gates` passed, and `pr_url`.\n",
-            base = base,
-        ));
+        b.push_str(
+            "\nWhen the work is done, write `/sandbox/.honr/report.json` with `url`, `base`, \
+`head` (see `/sandbox/.honr/report.schema.json`), diffstat (`added`/`removed`), and optional \
+`gates`.\n",
+        );
         b.push_str(&format!(
             "\nRun the project's own checks before you finish — `cargo test --offline --locked` and \
              `cargo clippy --offline -- -D warnings`. Both work with no network; if either needs to \
              reach the network, something is wrong and you should say so rather than work around it.\n\
              \nWhen the work is done, publish it yourself:\n\
              \n  1. Commit on `{branch}`. Do not commit to any other branch.\n\
-               2. Push to `origin` (the fork). Force-push is fine on your own branch.\n\
-               3. Open a pull request against `{upstream}` base `{base}`, or update the existing \
-                  one if a PR for this branch is already open.\n\
-             \nThe PR is how a human reviews this, so it is part of the work, not an afterthought. \
-             Leave `{base}` alone.\n",
+               2. Push to `origin`. Force-push is fine on your own branch.\n\
+               3. Open or update a pull request against the product base (see Remotes above).\n\
+             \nThe PR is how a human reviews this, so it is part of the work, not an afterthought.\n",
             branch = branch_name,
-            upstream = upstream,
-            base = base,
         ));
     }
     b
@@ -2788,7 +2991,7 @@ mod tests {
     /// place that says how. If it stops saying it, nothing pushes at all.
     #[test]
     fn the_briefing_tells_the_agent_to_publish() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-7", "shanemcd/honr", "main");
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo());
         assert!(b.contains("honr/card-7"), "must name the branch: {b}");
         assert!(b.contains("shanemcd/honr"), "must name the PR target: {b}");
         assert!(b.to_lowercase().contains("push"), "{b}");
@@ -2809,7 +3012,7 @@ mod tests {
     /// on top of a branch that cannot merge.
     #[test]
     fn the_briefing_tells_the_agent_about_a_conflict() {
-        let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", "shanemcd/honr", "main");
+        let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", &cross_fork_repo());
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
         assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
         // Fork base freezes; rebase onto upstream, never origin/<base> as the target.
@@ -2818,7 +3021,7 @@ mod tests {
             "must say rebase onto upstream/<base>: {conflicted}"
         );
         assert!(
-            conflicted.contains("never") && conflicted.contains("origin/main"),
+            conflicted.to_lowercase().contains("never") && conflicted.contains("origin/main"),
             "must warn against rebasing onto the fork base: {conflicted}"
         );
         assert!(
@@ -2827,7 +3030,7 @@ mod tests {
             "must not instruct rebase onto the fork base: {conflicted}"
         );
 
-        let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", "shanemcd/honr", "main");
+        let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo());
         assert!(!fresh.contains("CONFLICTS"));
         assert!(fresh.contains("new branch"));
     }
@@ -2843,8 +3046,7 @@ mod tests {
             &g,
             BranchState::Conflicted,
             "honr/card-7",
-            "shanemcd/honr",
-            "main",
+            &cross_fork_repo(),
             true,
         );
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
@@ -2858,8 +3060,7 @@ mod tests {
             &g,
             BranchState::Rebased,
             "honr/card-7",
-            "shanemcd/honr",
-            "main",
+            &cross_fork_repo(),
             true,
         );
         assert!(parked.contains("parked mid-run"), "{parked}");
@@ -2902,7 +3103,7 @@ mod tests {
     fn steering_notes_reach_the_briefing() {
         let mut g = grant();
         g.notes = vec!["Changes requested: rebase onto latest, api.rs only.".into()];
-        let b = briefing(&g, BranchState::Rebased, "honr/card-7", "shanemcd/honr", "main");
+        let b = briefing(&g, BranchState::Rebased, "honr/card-7", &cross_fork_repo());
         assert!(b.contains("rebase onto latest, api.rs only."), "{b}");
         assert!(
             b.contains("BINDING"),
@@ -3015,13 +3216,13 @@ mod tests {
     fn resume_briefing_is_short_and_carries_notes() {
         let mut g = grant();
         g.notes = vec!["Parked: cargo test deadlocked on Board RwLock.".into()];
-        let b = resume_briefing(&g, "acme/widgets", "main");
+        let b = resume_briefing(&g, &crate::schema::RepoConfig { upstream: "acme/widgets".into(), fork: "acme/widgets".into(), base: "main".into() });
         assert!(b.contains("parked mid-run"), "{b}");
         assert!(b.contains("Board RwLock"), "{b}");
         assert!(b.contains("BINDING"), "{b}");
-        assert!(b.contains("upstream/main"), "{b}");
+        assert!(b.contains("origin/main"), "{b}");
         assert!(b.contains("acme/widgets"), "{b}");
-        assert!(!b.contains("origin/main alone") || b.contains("never"), "{b}");
+        assert!(b.contains("report.schema.json"), "{b}");
         assert!(!b.contains("Standing constraints"), "must not dump the cold briefing: {b}");
     }
 
@@ -3188,6 +3389,14 @@ mod tests {
 
     /// Cross-fork PRs need `owner:branch` as the head, or gh silently looks for
     /// the branch on upstream and fails.
+    fn cross_fork_repo() -> crate::schema::RepoConfig {
+        crate::schema::RepoConfig {
+            upstream: "shanemcd/honr".into(),
+            fork: "clankrshq/honr".into(),
+            base: "main".into(),
+        }
+    }
+
     fn repo_cfg() -> AgentConfig {
         let mut cfg = AgentConfig::default();
         cfg.repo.upstream = "shanemcd/honr".into();
@@ -3367,14 +3576,14 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_escalate_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", "shanemcd/honr", "main");
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", &cross_fork_repo());
         assert!(b.contains("/sandbox/.honr/escalate.json"), "briefing must mention /sandbox/.honr/escalate.json: {b}");
         assert!(!b.contains("`.honr/escalate.json`"), "briefing must omit WORKDIR .honr/escalate.json: {b}");
     }
 
     #[test]
     fn briefing_mentions_verdict_split_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", "shanemcd/honr", "main");
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", &cross_fork_repo());
         assert!(b.contains("/sandbox/.honr/split.json"), "briefing must mention /sandbox/.honr/split.json: {b}");
         assert!(!b.contains("`.honr/split.json`"), "briefing must omit WORKDIR .honr/split.json: {b}");
         assert!(
@@ -3399,7 +3608,7 @@ mod tests {
     fn briefing_initial_plan_requires_report_not_split() {
         let mut g = grant();
         g.title = crate::model::initial_plan_title("Test Project");
-        let b = briefing(&g, BranchState::Fresh, "honr/card-92", "shanemcd/honr", "main");
+        let b = briefing(&g, BranchState::Fresh, "honr/card-92", &cross_fork_repo());
         assert!(b.contains("Initial plan"), "briefing must identify Initial plan: {b}");
         assert!(
             b.contains("report.json"),
@@ -3445,7 +3654,7 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_report_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", "shanemcd/honr", "main");
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", &cross_fork_repo());
         assert!(b.contains("/sandbox/.honr/report.json"), "briefing must mention /sandbox/.honr/report.json: {b}");
         assert!(!b.contains("`.honr/report.json`"), "briefing must omit WORKDIR .honr/report.json: {b}");
         assert!(b.contains("diffstat"), "briefing must mention diffstat: {b}");
@@ -3491,19 +3700,30 @@ mod tests {
     }
 
     #[test]
-    fn report_file_deserializes_and_filters_pr_url() {
+    fn report_file_deserializes_url_base_head() {
         let json = r#"{
             "added": 10,
             "removed": 2,
             "gates": ["agent-reported"],
-            "pr_url": "https://github.com/shanemcd/honr/pull/42"
+            "url": "https://github.com/shanemcd/honr/pull/42",
+            "base": { "repo": "shanemcd/honr", "ref": "main" },
+            "head": { "repo": "clankrshq/honr", "ref": "honr/card-7" }
         }"#;
         let rep: ReportFile = serde_json::from_str(json).unwrap();
         assert_eq!(rep.added, 10);
-        assert_eq!(rep.removed, 2);
+        let pr = report_to_pull_request(&rep).expect("pull_request");
+        assert_eq!(pr.url, "https://github.com/shanemcd/honr/pull/42");
+        assert!(pr.has_forge_ends());
+        assert_eq!(pr.head.as_ref().unwrap().repo, "clankrshq/honr");
+
+        // Legacy pr_url alias still loads into url.
+        let legacy: ReportFile = serde_json::from_str(
+            r#"{"added":5,"removed":0,"pr_url":"https://github.com/shanemcd/honr/pull/9"}"#,
+        )
+        .unwrap();
         assert_eq!(
-            rep.pr_url.filter(|s| !s.trim().is_empty()),
-            Some("https://github.com/shanemcd/honr/pull/42".to_string())
+            legacy.url.as_deref(),
+            Some("https://github.com/shanemcd/honr/pull/9")
         );
 
         let json_empty_url = r#"{
@@ -3512,7 +3732,7 @@ mod tests {
             "pr_url": ""
         }"#;
         let rep_empty: ReportFile = serde_json::from_str(json_empty_url).unwrap();
-        assert_eq!(rep_empty.pr_url.filter(|s| !s.trim().is_empty()), None);
+        assert!(report_to_pull_request(&rep_empty).is_none());
     }
 
     #[tokio::test]
@@ -3567,7 +3787,7 @@ mod tests {
         assert!(handled);
         let item = board.get(task.id).unwrap();
         assert_eq!(item.state, State::NeedsHuman);
-        assert_eq!(item.pr_url.as_deref(), Some(pr_url));
+        assert_eq!(item.pr_url(), Some(pr_url));
         let esc = item.escalation.expect("escalation set");
         assert!(esc.question.contains("a PR already exists"));
     }
@@ -3593,7 +3813,7 @@ mod tests {
         let _ = board.transition(task.id, State::Backlog, "test", None);
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
         let _ = board.transition(task.id, State::Running, "agent-1", None);
-        assert!(board.get(task.id).unwrap().pr_url.is_none());
+        assert!(board.get(task.id).unwrap().pr_url().is_none());
 
         let dir = std::env::temp_dir().join(format!(
             "honr-test-split-pr-2-{}",
@@ -3628,7 +3848,7 @@ mod tests {
         let item = board.get(task.id).unwrap();
         assert_eq!(item.state, State::NeedsHuman);
         assert_eq!(
-            item.pr_url.as_deref(),
+            item.pr_url(),
             Some("https://github.com/shanemcd/honr/pull/99")
         );
         let esc = item.escalation.expect("escalation set");
@@ -3739,7 +3959,7 @@ mod tests {
         let seed = board.get(seed_id).unwrap();
         assert_eq!(seed.state, State::Review);
         assert_eq!(
-            seed.pr_url.as_deref(),
+            seed.pr_url(),
             Some("https://github.com/shanemcd/honr/pull/99")
         );
         let prop = seed.proposal.expect("proposal on Initial plan card");
@@ -3851,7 +4071,7 @@ mod tests {
         assert!(handled);
         let item = board.get(task.id).unwrap();
         assert_eq!(item.state, State::Backlog, "must not reach Review while CONFLICTING");
-        assert_eq!(item.pr_url.as_deref(), Some(pr_url));
+        assert_eq!(item.pr_url(), Some(pr_url));
         assert_eq!(
             item.last_bounce_reason.as_deref(),
             Some(CONFLICTING_PR_BOUNCE_REASON)
@@ -3921,7 +4141,7 @@ mod tests {
         assert!(handled);
         let item = board.get(task.id).unwrap();
         assert_eq!(item.state, State::Review);
-        assert_eq!(item.pr_url.as_deref(), Some(pr_url));
+        assert_eq!(item.pr_url(), Some(pr_url));
     }
 
     #[test]

@@ -43,7 +43,7 @@ const blockedItem = {
   pinned: [],
   release_target: null,
   environment: null,
-  pr_url: null,
+  pull_request: null,
   created_at: new Date().toISOString(),
   entered_state_at: new Date().toISOString(),
   history: [],
@@ -229,7 +229,7 @@ const projectItem = {
   pinned: [],
   release_target: null,
   environment: null,
-  pr_url: null,
+  pull_request: null,
   created_at: new Date().toISOString(),
   entered_state_at: new Date().toISOString(),
   history: [],
@@ -501,7 +501,7 @@ const upsertEv = {
     id: 7,
     title: "Updated Card Title Live",
     state: "review",
-    pr_url: "https://github.com/shanemcd/honr/pull/186",
+    pull_request: { url: "https://github.com/shanemcd/honr/pull/186" },
     notes: [
       { author: "human", text: "initial note" },
       { author: "agent", text: "PR opened" },
@@ -512,7 +512,7 @@ const upsertEv = {
 const updatedDetail = reduceDetail(detailInitial, upsertEv, 7);
 assert.strictEqual(updatedDetail.title, "Updated Card Title Live", "Upsert event for id 7 must update detail title live");
 assert.strictEqual(updatedDetail.state, "review", "Upsert event for id 7 must update detail state live");
-assert.strictEqual(updatedDetail.pr_url, "https://github.com/shanemcd/honr/pull/186", "Upsert event for id 7 must update pr_url live");
+assert.strictEqual(updatedDetail.pull_request?.url, "https://github.com/shanemcd/honr/pull/186", "Upsert event for id 7 must update pull_request.url live");
 assert.strictEqual(updatedDetail.notes.length, 2, "Upsert event for id 7 must update notes live");
 assert.strictEqual(updatedDetail.ancestry.length, 1, "reduceDetail must preserve existing detail ancestry");
 
@@ -587,40 +587,41 @@ const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
 assert(settingsHtml.includes("Sandboxes"), "Settings should include Sandboxes section");
 assert(settingsHtml.includes("data-testid=\"sandboxes-panel\""), "Settings should show Sandboxes panel");
-assert(settingsHtml.includes("Workspace"), "Settings should include Workspace section");
-assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Workspace");
+assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
+assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Forge (workspace id)");
 assert(!settingsHtml.includes("data-testid=\"general-stub\""), "General stub must be gone");
-assert(!settingsHtml.includes("settings-stub-tag"), "Workspace must not be a stub section");
+assert(!settingsHtml.includes("settings-stub-tag"), "Forge must not be a stub section");
 
 const workspaceHtml = renderToString(
   React.createElement(WorkspacePanelView, {
     draft: {
       forge: "github",
-      upstream: "acme/widget",
-      fork: "bot/widget",
-      base: "main",
       beads_sync_repo: "",
     },
     onDraftChange: () => {},
     onSave: () => {},
   }),
 );
-assert(workspaceHtml.includes("data-testid=\"workspace-panel\""), "Workspace panel should render");
-assert(workspaceHtml.includes("data-testid=\"workspace-form\""), "Workspace form should render");
-assert(workspaceHtml.includes("data-testid=\"workspace-field-upstream\""), "Upstream field");
-assert(workspaceHtml.includes("data-testid=\"workspace-field-fork\""), "Fork field");
-assert(workspaceHtml.includes("data-testid=\"workspace-field-base\""), "Base field");
+assert(workspaceHtml.includes("data-testid=\"workspace-panel\""), "Forge panel should render");
+assert(workspaceHtml.includes("data-testid=\"workspace-form\""), "Forge form should render");
 assert(workspaceHtml.includes("data-testid=\"workspace-field-beads\""), "Beads sync field");
-assert(workspaceHtml.includes("data-testid=\"workspace-field-forge\""), "Forge field");
+assert(workspaceHtml.includes("data-testid=\"workspace-field-forge\""), "Provider field");
+assert(!workspaceHtml.includes("data-testid=\"workspace-first-clone-defaults\""), "no first-clone defaults");
+assert(!workspaceHtml.includes("data-testid=\"workspace-field-upstream\""), "no upstream field");
+assert(!workspaceHtml.includes("data-testid=\"workspace-field-fork\""), "no fork field");
+assert(!workspaceHtml.includes("data-testid=\"workspace-field-base\""), "no base field");
 assert(workspaceHtml.includes("GitLab (future)"), "GitLab listed as future/disabled");
 assert(workspaceHtml.includes("data-testid=\"workspace-webhook-hint\""), "Webhook hint present");
-assert(workspaceHtml.includes("--repo=<owner/name>"), "Webhook hint is a repo placeholder template");
+assert(
+  workspaceHtml.includes("--repo=<owner/name>") || workspaceHtml.includes("--repo=&lt;owner/name&gt;"),
+  "Webhook hint is a repo placeholder template",
+);
 assert(!workspaceHtml.includes("shanemcd/honr"), "Webhook hint must not hardcode Shane repo");
 assert(
-  workspaceHtml.includes("pr_url") || workspaceHtml.includes("fallback for first clone"),
-  "Workspace copy must not claim install binding is the only work target",
+  (workspaceHtml.includes("pull_request") || workspaceHtml.includes("pr_url")) && workspaceHtml.includes("not"),
+  "Forge copy must say Settings is not the work repo",
 );
-assert(workspaceHtml.includes("data-testid=\"workspace-save\""), "Workspace save control");
+assert(workspaceHtml.includes("data-testid=\"workspace-save\""), "Forge save control");
 
 const fixtureProfiles = [
   {

@@ -754,14 +754,14 @@ mod tests {
 
         let Json(snap) = board(AxState(b.clone())).await;
         let on_the_card = serde_json::to_value(&snap).unwrap();
-        assert_eq!(on_the_card["items"][0]["pr_url"], "https://github.com/shanemcd/honr/pull/1");
+        assert_eq!(on_the_card["items"][0]["pull_request"]["url"], "https://github.com/shanemcd/honr/pull/1");
         assert_eq!(on_the_card["items"][0]["environment"], "honr-card-8-a1");
 
         let Ok(Json(detail)) = item_detail(AxState(b), Path(id)).await else {
             panic!("no detail for the card we just created");
         };
         let in_the_drawer = serde_json::to_value(&detail).unwrap();
-        assert_eq!(in_the_drawer["pr_url"], "https://github.com/shanemcd/honr/pull/1");
+        assert_eq!(in_the_drawer["pull_request"]["url"], "https://github.com/shanemcd/honr/pull/1");
         assert_eq!(in_the_drawer["environment"], "honr-card-8-a1");
     }
 
@@ -1506,7 +1506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_get_put_persists_and_drives_effective_repo() {
+    async fn workspace_get_put_persists_forge_and_beads_only() {
         let path = std::env::temp_dir().join(format!(
             "honr-test-api-ws-{}.json",
             std::time::SystemTime::now()
@@ -1522,16 +1522,12 @@ mod tests {
 
         let Json(empty) = get_workspace(AxState(b.clone())).await;
         assert_eq!(empty.forge, "github");
-        assert!(empty.upstream.is_empty());
-        assert!(empty.fork.is_empty());
+        assert!(empty.beads_sync_repo.is_none());
 
         let Ok(Json(saved)) = put_workspace(
             AxState(b.clone()),
             Json(WorkspaceBinding {
                 forge: "github".into(),
-                upstream: "acme/widget".into(),
-                fork: "bot/widget".into(),
-                base: "develop".into(),
                 beads_sync_repo: Some("acme/widget-beads".into()),
             }),
         )
@@ -1539,37 +1535,27 @@ mod tests {
         else {
             panic!("put workspace");
         };
-        assert_eq!(saved.upstream, "acme/widget");
-        assert_eq!(saved.fork, "bot/widget");
-        assert_eq!(saved.base, "develop");
         assert_eq!(
             saved.beads_sync_repo.as_deref(),
             Some("acme/widget-beads")
         );
-
         let Json(got) = get_workspace(AxState(b.clone())).await;
         assert_eq!(got, saved);
 
-        let repo = b.effective_agent_repo().expect("complete binding");
-        assert_eq!(repo.upstream, "acme/widget");
-        assert_eq!(repo.fork, "bot/widget");
-        assert_eq!(repo.base, "develop");
+        // Work remotes are yaml-only; Settings forge does not supply them.
+        assert!(b.yaml_work_repo().is_none());
         assert_eq!(
             b.workspace_binding()
                 .and_then(|w| w.beads_repo())
                 .as_deref(),
             Some("acme/widget-beads")
         );
-
         // Unsupported forge is refused.
         assert!(
             put_workspace(
                 AxState(b.clone()),
                 Json(WorkspaceBinding {
                     forge: "gitlab".into(),
-                    upstream: "x/y".into(),
-                    fork: "a/b".into(),
-                    base: "main".into(),
                     beads_sync_repo: None,
                 }),
             )

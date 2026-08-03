@@ -66,16 +66,27 @@ export interface SandboxProfilesOut {
   default_sandbox_profile_id: string | null;
 }
 
-/** Per-install forge/repo binding (Settings → Workspace). */
+/**
+ * Per-install forge binding (Settings → Forge).
+ * Work remotes live on each card's `pull_request` after the agent reports.
+ */
 export interface WorkspaceBinding {
   forge: string;
-  /** `owner/name` PRs target. */
-  upstream: string;
-  /** `owner/name` the agent clones and pushes to. */
-  fork: string;
-  base: string;
-  /** Beads ↔ GitHub Issues sync target; empty/null → use upstream. */
+  /** Beads ↔ GitHub Issues sync target (independent of work remotes). */
   beads_sync_repo?: string | null;
+}
+
+/** GitHub-shaped PR end (base / head). */
+export interface PullRequestEnd {
+  repo: string;
+  ref: string;
+}
+
+/** Card pull request — url + optional base/head forge facts. */
+export interface PullRequest {
+  url: string;
+  base?: PullRequestEnd | null;
+  head?: PullRequestEnd | null;
 }
 
 export type PlanStatus = "empty" | "awaiting_approval" | "approved";
@@ -148,12 +159,23 @@ export interface WorkItem {
   engine?: string | null;
   beads_id?: string | null;
   github_issue_url?: string | null;
-  pr_url: string | null;
+  pull_request?: PullRequest | null;
+  /** @deprecated legacy wire — prefer pull_request.url */
+  pr_url?: string | null;
   plan?: PlanArtifact | null;
   proposal?: TaskProposal | null;
   created_at: string;
   entered_state_at: string;
   history: Transition[];
+}
+
+/** PR HTML URL from card (`pull_request.url`, else legacy `pr_url`). */
+export function cardPrUrl(item: {
+  pull_request?: PullRequest | null;
+  pr_url?: string | null;
+}): string | null {
+  const u = item.pull_request?.url?.trim() || item.pr_url?.trim();
+  return u ? u : null;
 }
 
 export interface ChunkSummary { count: number; text: string }

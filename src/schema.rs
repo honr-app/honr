@@ -58,16 +58,17 @@ impl Default for ExecutionConfig {
     }
 }
 
-/// Where code comes from and where it goes back.
+/// Resolved remotes for one card run (from card `pull_request` base/head).
 ///
-/// The agent clones the **fork** and opens a PR against **upstream**. The bot
-/// account has no write access to upstream, so a cross-fork PR is its only
-/// route in — the trust boundary is GitHub's, not ours to enforce.
+/// `upstream` = PR base repo; `fork` = head/push repo (same as upstream for
+/// same-repo). Yaml `execution.agents.repo` is legacy/optional. Containment is
+/// forge token permissions; branching policy is Project `project_prompt`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoConfig {
     /// `owner/name` that PRs target.
     pub upstream: String,
-    /// `owner/name` the agent clones and pushes to.
+    /// Optional distinct push remote (`owner/name`). Empty → same-repo.
+    #[serde(default)]
     pub fork: String,
     #[serde(default = "d_base")]
     pub base: String,
@@ -82,11 +83,37 @@ impl Default for RepoConfig {
 }
 
 impl RepoConfig {
+    /// Usable when the PR-target repo is known. Fork is optional.
     pub fn is_complete(&self) -> bool {
-        !self.upstream.trim().is_empty() && !self.fork.trim().is_empty()
+        !self.upstream.trim().is_empty()
     }
 
-    /// Normalize empty base to `main`.
+    /// Distinct push remote configured (cross-fork workflow).
+    pub fn uses_cross_fork(&self) -> bool {
+        let f = self.fork.trim();
+        let u = self.upstream.trim();
+        !f.is_empty() && !u.is_empty() && f != u
+    }
+
+    /// Clone and push target: fork when cross-fork, else upstream.
+    pub fn clone_target(&self) -> &str {
+        if self.uses_cross_fork() {
+            self.fork.trim()
+        } else {
+            self.upstream.trim()
+        }
+    }
+
+    /// Git ref to rebase onto / start from (`upstream/<base>` or `origin/<base>`).
+    pub fn base_ref(&self) -> String {
+        if self.uses_cross_fork() {
+            format!("upstream/{}", self.base.trim())
+        } else {
+            format!("origin/{}", self.base.trim())
+        }
+    }
+
+    /// Normalize empty base to `main`; trim owner/name fields.
     pub fn normalized(mut self) -> Self {
         if self.base.trim().is_empty() {
             self.base = d_base();
@@ -194,10 +221,10 @@ impl AgentConfig {
     /// Refuse to run rather than half-run. Every one of these presents as a
     /// hang if it's wrong at exec time, so check it at startup instead.
     ///
-    /// Work remotes (`repo.upstream`/`fork`) are **not** required here: they
-    /// resolve per card from `pr_url` and optional Workspace defaults (see
+    /// Work remotes (`repo.upstream`, optional `fork`) are **not** required
+    /// here: they resolve per card from `pr_url` and yaml (see
     /// `Board::resolve_card_repo`). An incomplete install default only fails
-    /// when a card has no `pr_url` and no Workspace/yaml seed.
+    /// when a card has no `pr_url` and no yaml upstream.
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
