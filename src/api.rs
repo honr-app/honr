@@ -455,7 +455,10 @@ async fn get_sandbox_profile(
 
 #[derive(Deserialize)]
 pub struct UpsertSandboxProfileReq {
-    pub id: String,
+    /// Omit or leave empty on create — board derives a slug from `name`.
+    /// Pass the existing id when editing.
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub image: String,
     pub policy: String,
@@ -471,7 +474,7 @@ async fn upsert_sandbox_profile(
 ) -> ApiResult<SandboxProfile> {
     Ok(Json(
         b.upsert_sandbox_profile(SandboxProfile {
-            id: req.id,
+            id: req.id.unwrap_or_default(),
             name: req.name,
             image: req.image,
             policy: req.policy,
@@ -1317,7 +1320,7 @@ mod tests {
         let Ok(Json(created)) = upsert_sandbox_profile(
             AxState(b.clone()),
             Json(UpsertSandboxProfileReq {
-                id: "default".into(),
+                id: Some("default".into()),
                 name: "Default".into(),
                 image: "honr-sandbox:latest".into(),
                 policy: "sandbox/policy.yaml".into(),
@@ -1335,7 +1338,7 @@ mod tests {
         let Ok(Json(heavy)) = upsert_sandbox_profile(
             AxState(b.clone()),
             Json(UpsertSandboxProfileReq {
-                id: "heavy".into(),
+                id: Some("heavy".into()),
                 name: "Heavy".into(),
                 image: "honr-sandbox:heavy".into(),
                 policy: "sandbox/policy.yaml".into(),
@@ -1353,7 +1356,7 @@ mod tests {
         let Ok(Json(updated)) = upsert_sandbox_profile(
             AxState(b.clone()),
             Json(UpsertSandboxProfileReq {
-                id: "heavy".into(),
+                id: Some("heavy".into()),
                 name: "Heavy+".into(),
                 image: "honr-sandbox:heavy2".into(),
                 policy: "sandbox/policy.yaml".into(),
@@ -1438,5 +1441,46 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_profiles_create_omits_id_and_returns_slug() {
+        let b = sandbox_profiles_board();
+
+        let Ok(Json(created)) = upsert_sandbox_profile(
+            AxState(b.clone()),
+            Json(UpsertSandboxProfileReq {
+                id: None,
+                name: "Heavy CI".into(),
+                image: "img:ci".into(),
+                policy: "policy.yaml".into(),
+                cpu: None,
+                memory: None,
+            }),
+        )
+        .await
+        else {
+            panic!("create without id");
+        };
+        assert_eq!(created.id, "heavy-ci");
+        assert_eq!(created.name, "Heavy CI");
+
+        // Empty string id is also treated as auto-slug.
+        let Ok(Json(second)) = upsert_sandbox_profile(
+            AxState(b.clone()),
+            Json(UpsertSandboxProfileReq {
+                id: Some("".into()),
+                name: "Heavy CI".into(),
+                image: "img:ci2".into(),
+                policy: "policy.yaml".into(),
+                cpu: None,
+                memory: None,
+            }),
+        )
+        .await
+        else {
+            panic!("create colliding name");
+        };
+        assert_eq!(second.id, "heavy-ci-2");
     }
 }

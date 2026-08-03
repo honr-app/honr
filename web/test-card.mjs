@@ -642,7 +642,7 @@ const createFormHtml = renderToString(
     profiles: fixtureProfiles,
     defaultId: "default",
     editingId: "",
-    draft: { id: "ci", name: "CI", image: "img:ci", policy: "p.yaml", cpu: "", memory: "" },
+    draft: { id: "", name: "CI", image: "img:ci", policy: "p.yaml", cpu: "", memory: "" },
     onDraftChange: () => {},
     onStartCreate: () => {},
     onStartEdit: () => {},
@@ -652,8 +652,29 @@ const createFormHtml = renderToString(
   }),
 );
 assert(createFormHtml.includes("data-testid=\"sandbox-profile-form\""), "Create/edit form should render");
-assert(createFormHtml.includes("data-testid=\"sandbox-field-id\""), "Form should include id field");
+assert(!createFormHtml.includes("data-testid=\"sandbox-field-id\""),
+  "Create form must not require an Id field (server slugs from name)");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-name\""), "Create form should include name");
 assert(createFormHtml.includes("data-testid=\"sandbox-save\""), "Form should include save");
+
+const editFormHtml = renderToString(
+  React.createElement(SandboxesPanelView, {
+    profiles: fixtureProfiles,
+    defaultId: "default",
+    editingId: "default",
+    draft: { id: "default", name: "Default", image: "img", policy: "p.yaml", cpu: "", memory: "" },
+    onDraftChange: () => {},
+    onStartCreate: () => {},
+    onStartEdit: () => {},
+    onCancelEdit: () => {},
+    onSave: () => {},
+    onSetDefault: () => {},
+  }),
+);
+assert(editFormHtml.includes("data-testid=\"sandbox-field-id\""),
+  "Edit form may show id read-only");
+assert(editFormHtml.includes("disabled") || editFormHtml.includes("readonly"),
+  "Edit id field should be non-editable");
 
 const pickerHtml = renderToString(
   React.createElement(ProjectSandboxPicker, {

@@ -211,17 +211,18 @@ export function SandboxesPanelView({
           }}
         >
           <h3>{isCreate ? "Create profile" : `Edit ${editingId}`}</h3>
-          <label>
-            Id
-            <input
-              className="search-input"
-              value={draft.id}
-              disabled={!isCreate || busy}
-              onChange={(e) => onDraftChange({ ...draft, id: e.target.value })}
-              required
-              data-testid="sandbox-field-id"
-            />
-          </label>
+          {!isCreate && (
+            <label>
+              Id
+              <input
+                className="search-input"
+                value={draft.id}
+                disabled
+                readOnly
+                data-testid="sandbox-field-id"
+              />
+            </label>
+          )}
           <label>
             Name
             <input
@@ -360,7 +361,7 @@ function SandboxesPanel() {
       }}
       onSave={() => {
         const body = {
-          id: draft.id.trim(),
+          ...(editingId ? { id: draft.id.trim() } : {}),
           name: draft.name.trim(),
           image: draft.image.trim(),
           policy: draft.policy.trim(),
