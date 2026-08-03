@@ -86,8 +86,9 @@ impl RemoteCapture {
 ///
 /// [`BeadsClient::new`] defaults to [`Remotes::Capture`] under `cargo test`
 /// and [`Remotes::Live`] in the real binary — ambient `gh` auth used to turn
-/// temp-dir unit tests into real shanemcd/honr Issues. Assert on the capture
-/// when you care about the remote edge; the ignored live e2e uses `Live`.
+/// temp-dir unit tests into real Issues on whatever `GITHUB_REPOSITORY` /
+/// Workspace binding resolves. Assert on the capture when you care about the
+/// remote edge; the ignored live e2e uses `Live`.
 #[derive(Clone, Debug, Default)]
 pub enum Remotes {
     /// Shell out to `bd` (production).
@@ -159,6 +160,12 @@ pub struct BeadsIssue {
 
 impl BeadsIssue {
     pub fn github_issue_url(&self) -> Option<String> {
+        self.github_issue_url_for_repo(resolve_github_repository(None).as_deref())
+    }
+
+    /// Resolve a GitHub Issue URL. Numeric / `gh-N` refs need an `owner/repo`;
+    /// without one we refuse rather than inventing a default host repo.
+    pub fn github_issue_url_for_repo(&self, repo: Option<&str>) -> Option<String> {
         let candidates = [
             self.issue_url.as_deref(),
             self.url.as_deref(),
@@ -172,19 +179,40 @@ impl BeadsIssue {
             }
             if let Some(num) = trimmed.strip_prefix("gh-") {
                 if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
-                    let repo = std::env::var("GITHUB_REPOSITORY")
-                        .unwrap_or_else(|_| "shanemcd/honr".to_string());
+                    let repo = repo?.trim();
+                    if repo.is_empty() {
+                        return None;
+                    }
                     return Some(format!("https://github.com/{repo}/issues/{num}"));
                 }
             }
             if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
-                let repo = std::env::var("GITHUB_REPOSITORY")
-                    .unwrap_or_else(|_| "shanemcd/honr".to_string());
+                let repo = repo?.trim();
+                if repo.is_empty() {
+                    return None;
+                }
                 return Some(format!("https://github.com/{repo}/issues/{trimmed}"));
             }
         }
         None
     }
+}
+
+/// Resolve `owner/repo` for Issue URL construction / `bd github` env.
+///
+/// Order: `GITHUB_REPOSITORY` env → caller-configured Workspace / yaml value.
+/// Never invents a hard-coded install default.
+pub fn resolve_github_repository(configured: Option<&str>) -> Option<String> {
+    if let Ok(repo) = std::env::var("GITHUB_REPOSITORY") {
+        let t = repo.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    configured
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// In-process beads graph for unit tests. Avoids `bd init` / Dolt / process
@@ -230,6 +258,9 @@ pub struct BeadsClient {
     backend: BeadsBackend,
     /// Counts [`Self::create_linked_sync`] calls (tests assert cockpit paths skip it).
     create_sync_calls: Arc<AtomicU64>,
+    /// Workspace / yaml beads sync target (`owner/repo`). Env still wins via
+    /// [`resolve_github_repository`].
+    github_repository: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl std::fmt::Debug for BeadsClient {
@@ -271,6 +302,7 @@ impl BeadsClient {
             dolt_push: Arc::new(DoltPushDebouncer::default()),
             backend,
             create_sync_calls: Arc::new(AtomicU64::new(0)),
+            github_repository: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -284,7 +316,26 @@ impl BeadsClient {
             dolt_push: Arc::new(DoltPushDebouncer::default()),
             backend: BeadsBackend::Cli,
             create_sync_calls: Arc::new(AtomicU64::new(0)),
+            github_repository: Arc::new(std::sync::RwLock::new(None)),
         }
+    }
+
+    /// Set the Workspace / yaml beads sync repo (`owner/repo`). Cleared with `None`.
+    pub fn set_github_repository(&self, repo: Option<String>) {
+        *self
+            .github_repository
+            .write()
+            .expect("github_repository lock") = repo.filter(|s| !s.trim().is_empty());
+    }
+
+    /// Env → client-configured Workspace value. Never invents a default.
+    pub fn resolved_github_repository(&self) -> Option<String> {
+        let configured = self
+            .github_repository
+            .read()
+            .expect("github_repository lock")
+            .clone();
+        resolve_github_repository(configured.as_deref())
     }
 
     /// How many times [`Self::create_linked_sync`] has run on this client.
@@ -992,11 +1043,11 @@ impl BeadsClient {
         match self.gate_remote(RemoteOp::GithubPush(ids.clone())) {
             RemoteGate::Skip => {
                 if self.db_ready() {
-                    let repo = std::env::var("GITHUB_REPOSITORY")
-                        .unwrap_or_else(|_| "shanemcd/honr".to_string());
-                    for id in &ids {
-                        let url = format!("https://github.com/{repo}/issues/{id}");
-                        let _ = self.set_external_ref(id, &url).await;
+                    if let Some(repo) = self.resolved_github_repository() {
+                        for id in &ids {
+                            let url = format!("https://github.com/{repo}/issues/{id}");
+                            let _ = self.set_external_ref(id, &url).await;
+                        }
                     }
                 }
                 return Ok(());
@@ -1037,8 +1088,13 @@ impl BeadsClient {
             RemoteGate::Proceed => {}
         }
 
-        let repo_full = std::env::var("GITHUB_REPOSITORY")
-            .unwrap_or_else(|_| "shanemcd/honr".to_string());
+        let Some(repo_full) = self.resolved_github_repository() else {
+            return Err(
+                "beads github sync needs a Workspace beads_sync_repo/upstream \
+                 or GITHUB_REPOSITORY (no default host repo)"
+                    .into(),
+            );
+        };
 
         let mut cmd = Command::new("sh");
         cmd.env("BEADS_DIR", &self.beads_dir);
@@ -1560,28 +1616,52 @@ mod tests {
 
         assert_eq!(issue.github_issue_url(), None);
 
-        issue.external_ref = Some("https://github.com/shanemcd/honr/issues/100".into());
+        issue.external_ref = Some("https://github.com/example/repo/issues/100".into());
         assert_eq!(
             issue.github_issue_url(),
-            Some("https://github.com/shanemcd/honr/issues/100".into())
+            Some("https://github.com/example/repo/issues/100".into())
         );
 
+        // Numeric / gh-N refs refuse without a configured repo (no Shane default).
         issue.external_ref = Some("gh-101".into());
+        assert_eq!(issue.github_issue_url_for_repo(None), None);
         assert_eq!(
-            issue.github_issue_url(),
-            Some("https://github.com/shanemcd/honr/issues/101".into())
+            issue.github_issue_url_for_repo(Some("acme/widgets")),
+            Some("https://github.com/acme/widgets/issues/101".into())
         );
 
         issue.external_ref = Some("102".into());
+        assert_eq!(issue.github_issue_url_for_repo(None), None);
         assert_eq!(
-            issue.github_issue_url(),
-            Some("https://github.com/shanemcd/honr/issues/102".into())
+            issue.github_issue_url_for_repo(Some("acme/widgets")),
+            Some("https://github.com/acme/widgets/issues/102".into())
         );
 
-        issue.issue_url = Some("https://github.com/shanemcd/honr/issues/103".into());
+        issue.issue_url = Some("https://github.com/example/repo/issues/103".into());
         assert_eq!(
             issue.github_issue_url(),
-            Some("https://github.com/shanemcd/honr/issues/103".into())
+            Some("https://github.com/example/repo/issues/103".into())
+        );
+    }
+
+    #[test]
+    fn resolve_github_repository_never_invents_default() {
+        // Cannot clear ambient env reliably in parallel tests; assert the
+        // configured path and that empty configured + empty-looking values
+        // do not produce a hard-coded owner/repo.
+        assert_eq!(
+            resolve_github_repository(Some("acme/widgets")),
+            std::env::var("GITHUB_REPOSITORY")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| Some("acme/widgets".into()))
+        );
+        let from_none = resolve_github_repository(None);
+        assert!(
+            from_none.as_deref() != Some("shanemcd/honr")
+                || std::env::var("GITHUB_REPOSITORY").as_deref() == Ok("shanemcd/honr"),
+            "must not invent shanemcd/honr when unset: {from_none:?}"
         );
     }
 

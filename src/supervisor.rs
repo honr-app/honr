@@ -62,11 +62,24 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
         tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
         return;
     }
-    if let Err(e) = cfg.agents.validate() {
+    // Workspace binding (board SoT, yaml seed) must be complete before agents run.
+    let agents = match board.agents_with_workspace(&cfg.agents) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!("agents enabled but Workspace binding incomplete: {e}");
+            tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
+            return;
+        }
+    };
+    if let Err(e) = agents.validate() {
         tracing::error!("agents enabled but misconfigured: {e}");
         tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
         return;
     }
+    let cfg = ExecutionConfig {
+        agents,
+        ..cfg
+    };
     // The sweeper starts *inside* `dispatch_loop`, once reconciliation has
     // finished. A card that was mid-run when honr died has not been
     // heartbeaten since, so a sweep that lands first requeues a run that is

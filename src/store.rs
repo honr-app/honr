@@ -9,7 +9,7 @@ use crate::db::SqliteBoardStore;
 use crate::events::BoardEvent;
 use crate::machine::{self, TransitionError};
 use crate::model::*;
-use crate::schema::{AgentConfig, Level, Schema};
+use crate::schema::{AgentConfig, Level, RepoConfig, Schema};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,9 @@ pub struct BoardState {
     /// Global default profile id. Projects may override via `sandbox_profile_id`.
     #[serde(default)]
     pub default_sandbox_profile_id: Option<String>,
+    /// Per-install forge/repo binding. Seeded from yaml; Board is SoT after.
+    #[serde(default)]
+    pub workspace: Option<WorkspaceBinding>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
 }
@@ -49,6 +52,7 @@ impl BoardState {
             stories: self.stories.clone(),
             sandbox_profiles: self.sandbox_profiles.clone(),
             default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
+            workspace: self.workspace.clone(),
             agent_logs: BTreeMap::new(),
         }
     }
@@ -380,6 +384,11 @@ impl Board {
             tracing::info!("seeded sandbox profile catalog from execution.agents");
             board.flush();
         }
+        if board.seed_workspace_binding_if_empty() {
+            tracing::info!("seeded workspace binding from execution.agents.repo");
+            board.flush();
+        }
+        board.sync_beads_github_repository();
         board
     }
 
@@ -426,6 +435,11 @@ impl Board {
             tracing::info!("seeded sandbox profile catalog from execution.agents");
             board.flush();
         }
+        if board.seed_workspace_binding_if_empty() {
+            tracing::info!("seeded workspace binding from execution.agents.repo");
+            board.flush();
+        }
+        board.sync_beads_github_repository();
         Ok(board)
     }
 
@@ -1313,7 +1327,8 @@ impl Board {
         };
         match beads.show(beads_id).await {
             Ok(show_issue) => {
-                if let Some(url) = show_issue.github_issue_url() {
+                let repo = self.beads_github_repository();
+                if let Some(url) = show_issue.github_issue_url_for_repo(repo.as_deref()) {
                     self.set_github_issue_url(id, &url);
                     true
                 } else {
@@ -1903,6 +1918,164 @@ impl Board {
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         true
+    }
+
+    // ------------------------------------------------ workspace binding (board state)
+
+    /// Seed Workspace from YAML `execution.agents.repo` when unbound.
+    /// Returns true when a binding was written. After seed, Board is SoT;
+    /// yaml remains bootstrap/fallback only.
+    pub fn seed_workspace_binding_if_empty(&self) -> bool {
+        self.seed_workspace_binding_from(&self.schema.execution.agents)
+    }
+
+    /// Same as [`Self::seed_workspace_binding_if_empty`] with an explicit AgentConfig.
+    pub fn seed_workspace_binding_from(&self, agents: &AgentConfig) -> bool {
+        let mut s = self.state.write().unwrap();
+        if s.workspace.as_ref().is_some_and(|w| w.is_complete()) {
+            return false;
+        }
+        if agents.repo.upstream.trim().is_empty() || agents.repo.fork.trim().is_empty() {
+            return false;
+        }
+        let mut binding = WorkspaceBinding::from_repo_config(&agents.repo);
+        // Env bridge: honor GITHUB_REPOSITORY as beads sync target when set.
+        if let Ok(repo) = std::env::var("GITHUB_REPOSITORY") {
+            let repo = repo.trim().to_string();
+            if !repo.is_empty() {
+                binding.beads_sync_repo = Some(repo);
+            }
+        }
+        s.workspace = Some(binding);
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        true
+    }
+
+    pub fn workspace_binding(&self) -> Option<WorkspaceBinding> {
+        self.state.read().unwrap().workspace.clone()
+    }
+
+    /// Replace the durable Workspace binding. Empty upstream/fork are stored
+    /// (so Settings can clear) but agents will fail closed until complete.
+    /// Wired to REST in the follow-on `settings-workspace` card.
+    #[allow(dead_code)]
+    pub fn set_workspace_binding(&self, binding: WorkspaceBinding) -> Result<WorkspaceBinding, String> {
+        let forge = binding.forge.trim();
+        if forge.is_empty() {
+            return Err("workspace forge must not be empty".into());
+        }
+        if forge != "github" {
+            return Err(format!(
+                "workspace forge {forge:?} is not supported yet (only github)"
+            ));
+        }
+        let stored = WorkspaceBinding {
+            forge: forge.to_string(),
+            upstream: binding.upstream.trim().to_string(),
+            fork: binding.fork.trim().to_string(),
+            base: {
+                let b = binding.base.trim();
+                if b.is_empty() {
+                    "main".into()
+                } else {
+                    b.to_string()
+                }
+            },
+            beads_sync_repo: binding
+                .beads_sync_repo
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        };
+        {
+            let mut s = self.state.write().unwrap();
+            s.workspace = Some(stored.clone());
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        self.sync_beads_github_repository();
+        Ok(stored)
+    }
+
+    /// Push the beads sync repo into the attached BeadsClient (if any).
+    pub fn sync_beads_github_repository(&self) {
+        let repo = self.beads_github_repository();
+        if let Some(beads) = &self.beads {
+            beads.set_github_repository(repo);
+        }
+    }
+
+    /// Effective beads Issue repo: `GITHUB_REPOSITORY` env → workspace
+    /// `beads_sync_repo` / upstream → yaml upstream. Never invents a default.
+    pub fn beads_github_repository(&self) -> Option<String> {
+        crate::beads::resolve_github_repository(self.configured_beads_repo().as_deref())
+    }
+
+    fn configured_beads_repo(&self) -> Option<String> {
+        if let Some(ws) = self.workspace_binding() {
+            if let Some(r) = ws.beads_repo() {
+                return Some(r);
+            }
+        }
+        let upstream = self.schema.execution.agents.repo.upstream.trim();
+        if upstream.is_empty() {
+            None
+        } else {
+            Some(upstream.to_string())
+        }
+    }
+
+    /// Effective clone/PR repo: durable Workspace if complete, else yaml.
+    /// Errors name the missing Workspace fields (fail closed for agents).
+    pub fn effective_agent_repo(&self) -> Result<RepoConfig, String> {
+        if let Some(ws) = self.workspace_binding() {
+            if ws.is_complete() {
+                return Ok(ws.to_repo_config());
+            }
+            let mut missing = Vec::new();
+            if ws.upstream.trim().is_empty() {
+                missing.push("upstream");
+            }
+            if ws.fork.trim().is_empty() {
+                missing.push("fork");
+            }
+            // Incomplete board binding still allows yaml fallback (migration).
+            let yaml = &self.schema.execution.agents.repo;
+            if !yaml.upstream.trim().is_empty() && !yaml.fork.trim().is_empty() {
+                return Ok(yaml.clone());
+            }
+            return Err(format!(
+                "Workspace binding incomplete: missing {}. \
+                 Set them under Settings → Workspace, or seed via execution.agents.repo in honr.yaml.",
+                missing.join(" and ")
+            ));
+        }
+        let yaml = &self.schema.execution.agents.repo;
+        if !yaml.upstream.trim().is_empty() && !yaml.fork.trim().is_empty() {
+            return Ok(yaml.clone());
+        }
+        let mut missing = Vec::new();
+        if yaml.upstream.trim().is_empty() {
+            missing.push("upstream");
+        }
+        if yaml.fork.trim().is_empty() {
+            missing.push("fork");
+        }
+        Err(format!(
+            "Workspace binding incomplete: missing {}. \
+             Set them under Settings → Workspace, or seed via execution.agents.repo in honr.yaml.",
+            if missing.is_empty() {
+                "upstream and fork".to_string()
+            } else {
+                missing.join(" and ")
+            }
+        ))
+    }
+
+    /// Overlay durable Workspace repo onto a cloned AgentConfig for dispatch.
+    pub fn agents_with_workspace(&self, yaml_agents: &AgentConfig) -> Result<AgentConfig, String> {
+        let mut agents = yaml_agents.clone();
+        agents.repo = self.effective_agent_repo()?;
+        Ok(agents)
     }
 
     /// Upgrade catalog entries that still store a host path as `policy`.
@@ -4092,6 +4265,12 @@ mod tests {
         }
     }
 
+    /// Capture remotes invent Issue URLs only when a repo is configured
+    /// (env / Workspace / client) — never via a Shane hardcode.
+    fn bind_test_github_repo(client: &crate::beads::BeadsClient) {
+        client.set_github_repository(Some("test-owner/test-repo".into()));
+    }
+
     /// A board with one leaf sitting in Backlog, claimed by `agent`.
     fn claimed_leaf() -> (Board, ItemId) {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nowrite.json"));
@@ -4870,6 +5049,7 @@ mod tests {
             crate::beads::Remotes::Capture(crate::beads::RemoteCapture::new()),
         );
         beads_client.init_stealth().await.expect("stealth init");
+        bind_test_github_repo(&beads_client);
 
         let mut board_raw = Board::new(Schema::default(), board_file);
         board_raw.beads = Some(beads_client.clone());
@@ -5553,6 +5733,7 @@ mod tests {
             crate::beads::Remotes::Capture(remote_cap.clone()),
         );
         beads_client.init_stealth().await.expect("stealth init");
+        bind_test_github_repo(&beads_client);
 
         let mut board_raw = Board::new(Schema::default(), board_file);
         board_raw.beads = Some(beads_client);
@@ -5893,6 +6074,7 @@ mod tests {
             crate::beads::Remotes::Capture(remote_cap.clone()),
         );
         beads_client.init_stealth().await.expect("stealth init");
+        bind_test_github_repo(&beads_client);
 
         let mut board_raw = Board::new(Schema::default(), board_file);
         board_raw.beads = Some(beads_client.clone());
@@ -5976,6 +6158,7 @@ mod tests {
             crate::beads::Remotes::Capture(remote_cap.clone()),
         );
         beads_client.init_stealth().await.expect("stealth init");
+        bind_test_github_repo(&beads_client);
 
         let mut board_raw = Board::new(Schema::default(), board_file);
         board_raw.beads = Some(beads_client.clone());
@@ -6089,6 +6272,7 @@ mod tests {
             crate::beads::Remotes::Capture(remote_cap.clone()),
         );
         beads_client.init_stealth().await.expect("stealth init");
+        bind_test_github_repo(&beads_client);
 
         let mut board_raw = Board::new(Schema::default(), board_file);
         board_raw.beads = Some(beads_client.clone());
@@ -6642,6 +6826,7 @@ mod tests {
             crate::beads::Remotes::Capture(remote_cap.clone()),
         );
         beads_client.init_stealth().await.expect("stealth init");
+        bind_test_github_repo(&beads_client);
 
         let mut board_raw = Board::new(Schema::default(), board_file);
         board_raw.beads = Some(beads_client.clone());
@@ -6726,6 +6911,7 @@ mod tests {
             crate::beads::Remotes::Capture(remote_cap.clone()),
         );
         beads_client.init_stealth().await.expect("stealth init");
+        bind_test_github_repo(&beads_client);
 
         let mut board_raw = Board::new(Schema::default(), board_file);
         board_raw.beads = Some(beads_client.clone());
@@ -7657,6 +7843,150 @@ mod tests {
         // Second seed is a no-op.
         assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
         assert_eq!(b.list_sandbox_profiles().len(), 1);
+    }
+
+    fn agents_with_repo() -> AgentConfig {
+        AgentConfig {
+            enabled: true,
+            providers: vec!["vertex".into(), "gh".into()],
+            repo: crate::schema::RepoConfig {
+                upstream: "acme/widgets".into(),
+                fork: "bot/widgets".into(),
+                base: "main".into(),
+            },
+            vertex: crate::schema::VertexConfig {
+                project: "demo".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn workspace_binding_seeds_from_yaml_when_unbound() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-ws-seed-{}.json",
+                std::process::id()
+            )),
+        );
+        assert!(b.workspace_binding().is_none());
+        assert!(b.seed_workspace_binding_from(&agents_with_repo()));
+        let ws = b.workspace_binding().expect("seeded");
+        assert!(ws.is_complete());
+        assert_eq!(ws.upstream, "acme/widgets");
+        assert_eq!(ws.fork, "bot/widgets");
+        assert_eq!(ws.base, "main");
+        assert_eq!(ws.forge, "github");
+        assert_eq!(ws.beads_repo().as_deref(), Some("acme/widgets"));
+        // Second seed is a no-op once complete.
+        assert!(!b.seed_workspace_binding_from(&agents_with_repo()));
+        let repo = b.effective_agent_repo().expect("effective");
+        assert_eq!(repo.upstream, "acme/widgets");
+        assert_eq!(repo.fork, "bot/widgets");
+    }
+
+    #[test]
+    fn workspace_binding_fail_closed_names_missing_fields() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-ws-fail-{}.json",
+                std::process::id()
+            )),
+        );
+        let err = b.effective_agent_repo().expect_err("empty must fail");
+        assert!(
+            err.contains("Workspace binding incomplete"),
+            "must name Workspace: {err}"
+        );
+        assert!(err.contains("upstream"), "{err}");
+        assert!(err.contains("fork"), "{err}");
+
+        b.set_workspace_binding(WorkspaceBinding {
+            forge: "github".into(),
+            upstream: String::new(),
+            fork: String::new(),
+            base: "main".into(),
+            beads_sync_repo: None,
+        })
+        .expect("store incomplete");
+        let err = b.effective_agent_repo().expect_err("still incomplete");
+        assert!(err.contains("Workspace binding incomplete"), "{err}");
+        assert!(err.contains("upstream") && err.contains("fork"), "{err}");
+
+        // agents_with_workspace refuses the same way.
+        let agents = AgentConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let err = b.agents_with_workspace(&agents).expect_err("overlay");
+        assert!(err.contains("Workspace"), "{err}");
+    }
+
+    #[test]
+    fn workspace_binding_beads_url_uses_configured_repo_not_shane_default() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-ws-beads-url-{}.json",
+                std::process::id()
+            )),
+        );
+        b.seed_workspace_binding_from(&agents_with_repo());
+        let issue = crate::beads::BeadsIssue {
+            id: "bd-1".into(),
+            title: "t".into(),
+            description: None,
+            status: "open".into(),
+            priority: 2,
+            issue_type: "task".into(),
+            owner: None,
+            created_at: None,
+            updated_at: None,
+            external_ref: Some("42".into()),
+            external_id: None,
+            issue_url: None,
+            url: None,
+            parent: None,
+        };
+        // Explicit repo argument — never invents shanemcd/honr.
+        assert_eq!(
+            issue.github_issue_url_for_repo(Some("acme/widgets")).as_deref(),
+            Some("https://github.com/acme/widgets/issues/42")
+        );
+        assert_eq!(issue.github_issue_url_for_repo(None), None);
+        // Board beads helper resolves Workspace upstream when env is unset.
+        if std::env::var("GITHUB_REPOSITORY").is_err() {
+            assert_eq!(b.beads_github_repository().as_deref(), Some("acme/widgets"));
+        }
+    }
+
+    #[test]
+    fn workspace_binding_persists_in_json_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-ws-persist-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("honr.json");
+        {
+            let mut schema = Schema::default();
+            schema.execution.agents = agents_with_repo();
+            let b = Board::new(schema, path.clone());
+            assert!(b.seed_workspace_binding_if_empty());
+            b.dirty.store(true, Ordering::Relaxed);
+            b.flush();
+        }
+        let restored = Board::load_or_new(Schema::default(), path);
+        let ws = restored.workspace_binding().expect("restored workspace");
+        assert_eq!(ws.upstream, "acme/widgets");
+        assert_eq!(ws.fork, "bot/widgets");
+        // load_or_new must not wipe a complete binding when yaml is empty.
+        assert!(!restored.seed_workspace_binding_if_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
