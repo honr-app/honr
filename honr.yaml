@@ -32,7 +32,7 @@ execution:
     # Needs a Rust toolchain to build honr: docker build -f sandbox/Containerfile .
     image: honr-sandbox:latest
     policy: sandbox/policy.yaml
-    providers: [vertex, gh-clankr]
+    providers: [vertex, gh-clankr, cursor-honr]
 
     # The agent clones the fork and opens a PR against upstream. The bot has no
     # write access to upstream, so a cross-fork PR is its only way in.
