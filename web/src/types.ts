@@ -173,7 +173,8 @@ export type BoardEvent =
   | { type: "upsert"; seq: number; item: WorkItem }
   | { type: "story"; seq: number; goal: number; at: string; text: string }
   | { type: "delete"; seq: number; id: number }
-  | { type: "main_advanced"; seq: number; ref_name: string; commit_sha?: string | null };
+  | { type: "main_advanced"; seq: number; ref_name: string; commit_sha?: string | null }
+  | { type: "reset"; seq: number };
 
 /** Normalize legacy `ready` wire values to `backlog`. */
 export function normState(s: State): Exclude<State, "ready"> {
