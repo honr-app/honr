@@ -3267,14 +3267,50 @@ fn check_split_relatedness(
     }
 
     /// Notify connected subscribers that the main branch advanced (via push or PR merge).
+    ///
+    /// Review cards with open PRs get a rebase dispatch. Claimed/Running cards get a
+    /// steer note telling the agent to fetch and rebase onto upstream/main — the
+    /// supervisor does not touch the live worktree itself.
     pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
         tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
         self.record_and_send(BoardEvent::MainAdvanced {
             seq: self.next_seq(),
             ref_name: ref_name.to_string(),
-            commit_sha,
+            commit_sha: commit_sha.clone(),
         });
         self.trigger_rebase_for_all_behind_siblings();
+        self.steer_live_cards_on_main_advanced(ref_name, commit_sha.as_deref());
+    }
+
+    /// Binding note for live runs when main moves under them.
+    fn main_advanced_steer_note(ref_name: &str, commit_sha: Option<&str>) -> String {
+        let where_main = match commit_sha {
+            Some(sha) if !sha.is_empty() => format!("{ref_name} @ {sha}"),
+            _ => ref_name.to_string(),
+        };
+        format!(
+            "Main advanced ({where_main}). First action: fetch upstream main and rebase \
+             this card's branch onto upstream/main, then continue the card."
+        )
+    }
+
+    /// Steer every Claimed/Running card so the next resume briefing carries the
+    /// rebase instruction. Does not park/unpark — that is a separate card.
+    fn steer_live_cards_on_main_advanced(&self, ref_name: &str, commit_sha: Option<&str>) {
+        let note = Self::main_advanced_steer_note(ref_name, commit_sha);
+        let live_ids: Vec<ItemId> = {
+            let s = self.state.read().unwrap();
+            s.items
+                .values()
+                .filter(|i| matches!(i.state, State::Claimed | State::Running))
+                .map(|i| i.id)
+                .collect()
+        };
+        for id in live_ids {
+            if let Err(e) = self.steer(id, note.clone()) {
+                tracing::warn!("main-advanced steer failed for #{id}: {e}");
+            }
+        }
     }
 
     /// Identify open sibling PRs in Review that are behind main for a given item's parent.
@@ -7082,6 +7118,102 @@ mod tests {
         let t2_updated = b.get(t2.id).unwrap();
         assert!(t2_updated.rebase_requested, "t2 rebase_requested should be true");
         assert!(t2_updated.awaiting_dispatch, "t2 awaiting_dispatch should be true");
+    }
+
+    #[test]
+    fn notify_main_advanced_steers_running_cards_with_fetch_rebase_note() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-steer-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(None, "Steer Main Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let running = b
+            .create(
+                Some(project.id),
+                "Live Task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let claimed = b
+            .create(
+                Some(project.id),
+                "Claimed Task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let backlog = b
+            .create(
+                Some(project.id),
+                "Idle Task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+
+        for id in [running.id, claimed.id, backlog.id] {
+            b.transition(id, State::Shaping, "test", None).unwrap();
+            b.transition(id, State::Backlog, "test", None).unwrap();
+        }
+        b.transition(running.id, State::Claimed, "agent", None).unwrap();
+        b.transition(running.id, State::Running, "agent", None).unwrap();
+        b.transition(claimed.id, State::Claimed, "agent", None).unwrap();
+
+        b.notify_main_advanced("refs/heads/main", Some("abcdeadbeef".into()));
+
+        let running_after = b.get(running.id).unwrap();
+        assert_eq!(running_after.state, State::Running, "steer must not move the card");
+        let note = running_after
+            .notes
+            .last()
+            .expect("Running card should have a steer note");
+        assert!(
+            note.text.contains("abcdeadbeef"),
+            "steer note should include commit sha: {}",
+            note.text
+        );
+        assert!(
+            note.text.contains("fetch") && note.text.contains("upstream/main"),
+            "steer note should mention fetch/rebase onto upstream/main: {}",
+            note.text
+        );
+        assert!(
+            note.text.to_lowercase().contains("rebase"),
+            "steer note should mention rebase: {}",
+            note.text
+        );
+
+        let claimed_after = b.get(claimed.id).unwrap();
+        assert!(
+            claimed_after
+                .notes
+                .iter()
+                .any(|n| n.text.contains("abcdeadbeef") && n.text.contains("upstream/main")),
+            "Claimed cards should also be steered: {:?}",
+            claimed_after.notes
+        );
+
+        let backlog_after = b.get(backlog.id).unwrap();
+        assert!(
+            backlog_after.notes.is_empty(),
+            "Backlog cards must not get a main-advanced steer: {:?}",
+            backlog_after.notes
+        );
     }
 
     #[test]
