@@ -1,13 +1,15 @@
 //! SQLite `BoardStore` — row-level board persistence and one-shot JSON import.
 
 use super::codec::{
-    item_from_row, item_to_row, parent_first, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
-    META_NEXT_ID, META_OPENSHELL_BIN, META_SANDBOX_PROFILES, META_WORKSPACE_BINDING,
+    item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME, META_DEFAULT_SANDBOX_PROFILE_ID,
+    META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_BIN, META_SANDBOX_PROFILES,
+    META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
 use crate::model::{ItemId, SandboxProfile, WorkItem, WorkspaceBinding};
+use crate::model::AgentRuntimeConfig;
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -59,6 +61,7 @@ impl SqliteBoardStore {
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
         let openshell_bin = self.load_openshell_bin().await?;
+        let agent_runtime = self.load_agent_runtime().await?;
         let mut state = BoardState {
             next_id,
             items,
@@ -67,6 +70,7 @@ impl SqliteBoardStore {
             default_sandbox_profile_id,
             workspace,
             openshell_bin,
+            agent_runtime,
             agent_logs: BTreeMap::new(),
             ..Default::default()
         };
@@ -144,6 +148,12 @@ impl SqliteBoardStore {
             state.openshell_bin.as_deref().unwrap_or(""),
         )
         .await?;
+        let agent_runtime_json = match &state.agent_runtime {
+            None => String::new(),
+            Some(rt) => serde_json::to_string(rt)
+                .map_err(|e| StoreError::Query(format!("serialize agent_runtime: {e}")))?,
+        };
+        set_meta_tx(&mut tx, META_AGENT_RUNTIME, &agent_runtime_json).await?;
 
         tx.commit()
             .await
@@ -209,6 +219,15 @@ impl SqliteBoardStore {
             .await?
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_agent_runtime(&self) -> Result<Option<AgentRuntimeConfig>, StoreError> {
+        match self.meta_get(META_AGENT_RUNTIME).await? {
+            None => Ok(None),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(None),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode agent_runtime: {e}"))),
+        }
     }
 }
 
@@ -846,9 +865,34 @@ mod tests {
                 .contains("sqlite-roundtrip"),
             "policy YAML must round-trip"
         );
-        let ws = again.workspace.expect("workspace round-trip");
+        let ws = again.workspace.as_ref().expect("workspace round-trip");
         assert_eq!(ws.forge, "github");
         assert_eq!(ws.beads_sync_repo.as_deref(), Some("acme/beads-mirror"));
+
+        // Round-trip Agent runtime meta.
+        let mut with_rt = again;
+        with_rt.agent_runtime = Some(crate::model::AgentRuntimeConfig {
+            enabled: true,
+            engine: "agy".into(),
+            providers: vec!["vertex".into(), "gh".into()],
+            vertex: crate::model::AgentRuntimeVertex {
+                project: "demo-proj".into(),
+                location: "us-east5".into(),
+                model: "claude-opus-5".into(),
+            },
+            max_concurrent: 1,
+            per_card_budget_cents: Some(200),
+            daily_budget_cents: None,
+            agent_timeout_secs: 900,
+            max_attempts: 3,
+        });
+        store.save_board_state(&with_rt).await.expect("save runtime");
+        let rt_again = store.load_board_state().await.expect("reload runtime");
+        let rt = rt_again.agent_runtime.expect("agent_runtime round-trip");
+        assert!(rt.enabled);
+        assert_eq!(rt.engine, "agy");
+        assert_eq!(rt.vertex.location, "us-east5");
+        assert_eq!(rt.providers, vec!["vertex".to_string(), "gh".to_string()]);
     }
 
     #[tokio::test]

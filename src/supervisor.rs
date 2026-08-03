@@ -57,13 +57,13 @@ type Cooldown = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
 
 pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     let os = Arc::new(board.openshell_client());
-    if !cfg.agents.enabled {
+    // Durable Settings overlay (seeded from yaml at board load).
+    let agents = board.effective_agents();
+    if !agents.enabled {
         tracing::info!("execution.agents.enabled = false; board runs with no executor");
         tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
         return;
     }
-    // Optional Workspace/yaml defaults overlay; work remotes resolve per card.
-    let agents = board.agents_with_workspace(&cfg.agents);
     if let Err(e) = agents.validate() {
         tracing::error!("agents enabled but misconfigured: {e}");
         tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
@@ -234,7 +234,6 @@ fn is_infrastructure(err: &str) -> bool {
 struct Fleet {
     board: SharedBoard,
     os: Arc<OpenShell>,
-    agents: Arc<AgentConfig>,
     in_flight: Arc<AtomicU64>,
     /// Which cards this process is actively supervising.
     ///
@@ -246,8 +245,6 @@ struct Fleet {
     /// that reads labels, and it cross-checks them against the card.
     active: Active,
     cooldown: Cooldown,
-    /// Fixed run budget in seconds (`agents.agent_timeout_secs`).
-    timeout_secs: i64,
 }
 
 impl Fleet {
@@ -293,7 +290,7 @@ impl Fleet {
                         // after `max_attempts` this becomes a human's problem
                         // instead of an overnight loop.
                         if let Err(e2) =
-                            f.board.record_run_failure(id, &msg, f.agents.max_attempts)
+                            f.board.record_run_failure(id, &msg, f.board.effective_agents().max_attempts)
                         {
                             tracing::error!("#{id}: could not record failure: {e2}");
                         }
@@ -311,11 +308,9 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     let fleet = Fleet {
         board: board.clone(),
         os: Arc::new(board.openshell_client()),
-        agents: Arc::new(cfg.agents.clone()),
         in_flight: Arc::default(),
         active: Arc::default(),
         cooldown: Arc::default(),
-        timeout_secs,
     };
 
     // Pick up whatever survived the last process before anything else — the
@@ -339,10 +334,13 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         // Only awaiting_dispatch cards are claimed (Start / MCP dispatch / Project
         // auto mode). Adoption and in-flight runs are independent of that queue.
 
-        if fleet.in_flight.load(Ordering::Relaxed) as usize >= fleet.agents.max_concurrent {
+        // Live Settings → Agent runtime (providers / budgets / timeout / model).
+        let agents = board.effective_agents();
+
+        if fleet.in_flight.load(Ordering::Relaxed) as usize >= agents.max_concurrent {
             continue;
         }
-        if let Some(daily) = fleet.agents.daily_budget_cents {
+        if let Some(daily) = agents.daily_budget_cents {
             if daily > 0 && SPENT_TODAY.load(Ordering::Relaxed) >= daily {
                 continue;
             }
@@ -373,8 +371,8 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         let grant = match board.claim(
             item.id,
             &agent_id,
-            Some(fleet.agents.vertex.model.clone()),
-            fleet.timeout_secs,
+            Some(agents.vertex.model.clone()),
+            agents.agent_timeout_secs as i64,
         ) {
             Ok(g) => g,
             Err(e) => {
@@ -704,8 +702,8 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
 
     ensure_board_owns_run(board, id)?;
 
-    // Per-card remotes from pull_request; None = first run (agent clones).
-    let mut agents = (*f.agents).clone();
+    // Live Settings → Agent runtime; per-card remotes from pull_request.
+    let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
         Ok(Some(repo)) => agents.repo = repo,
         Ok(None) => agents.repo = Default::default(),
@@ -791,7 +789,7 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     let (board, os) = (&f.board, &f.os);
     let id = a.item_id;
     let branch = format!("honr/card-{id}");
-    let mut agents = (*f.agents).clone();
+    let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
         Ok(Some(repo)) => agents.repo = repo,
         Ok(None) => agents.repo = Default::default(),
@@ -1099,7 +1097,12 @@ async fn run_inside(
         );
     }
     if engine == "agy" {
-        with_board_cancel(board, id, setup_agy_auth(os, name, &cfg.vertex.project)).await?;
+        with_board_cancel(
+            board,
+            id,
+            setup_agy_auth(os, name, &cfg.vertex.project, &cfg.vertex.location),
+        )
+        .await?;
     }
     let start = with_board_cancel(board, id, async {
         os.exec(
@@ -1966,11 +1969,25 @@ async fn stop_agent(os: &OpenShell, name: &str) {
     let _ = os.exec(name, &script, Duration::from_secs(30)).await;
 }
 
-async fn setup_agy_auth(os: &OpenShell, name: &str, project: &str) -> anyhow::Result<()> {
+/// Build the antigravity-cli settings JSON for `agy` auth in the sandbox.
+/// Exposed for unit tests so a non-`global` location is asserted without OpenShell.
+pub(crate) fn agy_auth_settings_json(project: &str, location: &str) -> String {
+    format!(
+        r#"{{"enableTelemetry":false,"gcp":{{"project":"{project}","location":"{location}"}}}}"#
+    )
+}
+
+async fn setup_agy_auth(
+    os: &OpenShell,
+    name: &str,
+    project: &str,
+    location: &str,
+) -> anyhow::Result<()> {
+    let settings = agy_auth_settings_json(project, location);
     let script = format!(
         r#"set -e
 mkdir -p /sandbox/.gemini/antigravity-cli
-echo '{{"enableTelemetry":false,"gcp":{{"project":"{project}","location":"global"}}}}' > /sandbox/.gemini/antigravity-cli/settings.json
+echo '{settings}' > /sandbox/.gemini/antigravity-cli/settings.json
 "#
     );
     let _ = os.exec(name, &script, Duration::from_secs(10)).await;
@@ -4405,6 +4422,80 @@ mod tests {
         assert_eq!(over_spec.policy.as_deref(), Some(heavy_policy));
         assert_eq!(over_spec.cpu.as_deref(), Some("8"));
         assert_eq!(over_spec.memory.as_deref(), Some("16Gi"));
+    }
+
+    #[test]
+    fn agy_auth_settings_json_uses_configured_location_not_hardcoded_global() {
+        let j = agy_auth_settings_json("my-gcp-proj", "us-east5");
+        assert!(
+            j.contains(r#""location":"us-east5""#),
+            "expected configured location in {j}"
+        );
+        assert!(
+            j.contains(r#""project":"my-gcp-proj""#),
+            "expected project in {j}"
+        );
+        assert!(
+            !j.contains(r#""location":"global""#),
+            "must not hardcode global when location is set: {j}"
+        );
+    }
+
+    #[test]
+    fn durable_providers_and_vertex_flow_into_sandbox_spec_and_agent_env() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-agent-rt-spec-{}.json",
+            std::process::id()
+        ));
+        let mut schema = crate::schema::Schema::default();
+        schema.execution.agents.providers = vec!["yaml-only".into()];
+        schema.execution.agents.vertex.project = "yaml-proj".into();
+        schema.execution.agents.vertex.location = "global".into();
+        schema.execution.agents.vertex.model = "yaml-model".into();
+        let board = crate::store::Board::new(schema, path);
+        assert!(board.seed_agent_runtime_if_empty());
+
+        board.set_agent_runtime(crate::model::AgentRuntimeConfig {
+            enabled: true,
+            engine: "claude".into(),
+            providers: vec!["vertex".into(), "gh-settings".into()],
+            vertex: crate::model::AgentRuntimeVertex {
+                project: "settings-proj".into(),
+                location: "us-central1".into(),
+                model: "settings-model".into(),
+            },
+            max_concurrent: 1,
+            per_card_budget_cents: None,
+            daily_budget_cents: None,
+            agent_timeout_secs: 1800,
+            max_attempts: 3,
+        });
+
+        let cfg = board.effective_agents();
+        assert_eq!(cfg.providers, vec!["vertex".to_string(), "gh-settings".to_string()]);
+        assert_eq!(cfg.vertex.location, "us-central1");
+
+        let resolved = crate::model::ResolvedSandboxCreate {
+            image: "img:1".into(),
+            policy: "version: 1\n".into(),
+            cpu: None,
+            memory: None,
+            profile_id: None,
+        };
+        let spec = sandbox_spec_for_card(1, "honr-card-1-a1", &cfg, &resolved);
+        assert_eq!(spec.providers, vec!["vertex".to_string(), "gh-settings".to_string()]);
+
+        let env = agent_env(&cfg);
+        let loc = env
+            .iter()
+            .find(|(k, _)| k == "CLOUD_ML_REGION")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(loc, Some("us-central1"));
+        let model = env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_MODEL")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(model, Some("settings-model"));
     }
 }
 
