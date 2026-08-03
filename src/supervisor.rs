@@ -99,7 +99,16 @@ async fn sweeper_loop(
         for id in board.sweep_leases() {
             tracing::info!("run deadline exceeded on #{id}; requeued");
         }
-        let _ = reconcile(&os, &board, &active).await;
+        // Periodic sweep: do not reopen Backlog cards (that loops). Detach
+        // leaves Claimed|Running; only startup reconcile repairs old damage.
+        let _ = reconcile(
+            &os,
+            &board,
+            &active,
+            cfg.agents.agent_timeout_secs as i64,
+            false,
+        )
+        .await;
         let _ = process_awaiting_rebases(&board, &os, &cfg.agents).await;
     }
 }
@@ -125,6 +134,27 @@ fn board_still_owns_run(state: State) -> bool {
 /// the card — not because the work failed.
 fn is_supervisor_cancel(err: &str) -> bool {
     err.contains("run cancelled:")
+}
+
+/// The log follower died because honr was interrupted — not because the agent
+/// finished. `follow_script` is an `openshell exec` of `tail -f --pid=…`; Ctrl-C
+/// kills that exec with -1/130/143 while the setsid agent inside the sandbox
+/// keeps going. Treating that as a card failure bounced the card to Backlog so
+/// restart could not re-adopt.
+fn is_supervisor_detach(err: &str) -> bool {
+    matches!(agent_exit_code(err), Some(-1 | 130 | 143))
+}
+
+/// Parse `finish()`'s `"agent exited {code}: …"` (first occurrence).
+fn agent_exit_code(err: &str) -> Option<i32> {
+    const P: &str = "agent exited ";
+    let i = err.find(P)?;
+    let rest = &err[i + P.len()..];
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    token.parse().ok()
 }
 
 /// Bail if Halt / deadline sweep / cut already moved the card off Claimed|Running.
@@ -242,6 +272,12 @@ impl Fleet {
                         // burn retry budget or release again — just let
                         // finalize stop the agent and free the slot below.
                         tracing::info!("#{id}: {msg}");
+                    } else if is_supervisor_detach(&msg) {
+                        // Honr is going away; leave Claimed/Running + sandbox so
+                        // the next process can adopt. Do not count a failure.
+                        tracing::info!(
+                            "#{id}: supervisor detached ({msg}); leaving run for re-adoption"
+                        );
                     } else if is_infrastructure(&msg) {
                         // Not the card's fault. Give it back untouched and stop
                         // dispatching for a while rather than spending the
@@ -300,8 +336,8 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     loop {
         tick.tick().await;
 
-        // Only awaiting_dispatch cards are claimed (cockpit Start / MCP dispatch).
-        // Adoption and in-flight runs are independent of that queue.
+        // Only awaiting_dispatch cards are claimed (Start / MCP dispatch / Project
+        // auto mode). Adoption and in-flight runs are independent of that queue.
 
         if fleet.in_flight.load(Ordering::Relaxed) as usize >= fleet.agents.max_concurrent {
             continue;
@@ -322,7 +358,10 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
             continue;
         }
 
-        // Only cards the cockpit explicitly dispatched. Backlog alone is inert.
+        // Projects with auto mode queue their claimable Backlog leaves; others
+        // stay inert until Start / MCP dispatch.
+        board.auto_enqueue_all();
+
         let awaiting = board.list_awaiting_dispatch();
         let Some(item) = awaiting.into_iter().find(|i| {
             !fleet.active.lock().unwrap().contains(&i.id) && board.may_claim(i.id)
@@ -426,7 +465,7 @@ const GATEWAY_POLL: Duration = Duration::from_secs(5);
 async fn reconcile_once_reachable(
     os: &OpenShell,
     board: &SharedBoard,
-    _timeout_secs: i64,
+    timeout_secs: i64,
     grace: Duration,
 ) -> Vec<Adoption> {
     let deadline = std::time::Instant::now() + grace;
@@ -455,7 +494,16 @@ async fn reconcile_once_reachable(
     }
     // Startup: nothing is supervised yet, so empty `active` is correct — a
     // Claimed/Running card with a dead agent process should be requeued.
-    reconcile(os, board, &Active::default()).await
+    // `reopen_backlog`: repair cards that old detach-as-failure left in Backlog
+    // with a live sandbox (e.g. #145 after Ctrl-C).
+    reconcile(
+        os,
+        board,
+        &Active::default(),
+        timeout_secs,
+        true,
+    )
+    .await
 }
 
 /// Match live sandboxes back to the board, before anything else touches them.
@@ -464,10 +512,15 @@ async fn reconcile_once_reachable(
 /// still creating the sandbox / starting the agent). Do **not** requeue those —
 /// the periodic sweeper used to race dispatch and bounce cards every few
 /// seconds with a misleading "honr restarted" reason.
+///
+/// `reopen_backlog` is startup-only. Reopening on every sweeper tick would
+/// loop Backlog → Claimed → (dead agent) → Backlog forever.
 async fn reconcile(
     os: &OpenShell,
     board: &SharedBoard,
     active: &Active,
+    timeout_secs: i64,
+    reopen_backlog: bool,
 ) -> Vec<Adoption> {
     let Ok(ours) = os.list_ours().await else {
         tracing::warn!("could not list sandboxes; skipping reconciliation");
@@ -490,12 +543,20 @@ async fn reconcile(
             continue;
         }
 
-        if let Some(item) = adoptable(card.as_ref(), &sb.name) {
-            // This process is already watching (or still setting up) the card —
-            // do not adopt again or requeue; that raced dispatch every sweep.
-            if active.lock().unwrap().contains(&id) {
-                continue;
+        if active.lock().unwrap().contains(&id) {
+            continue;
+        }
+
+        let card = if reopen_backlog {
+            match prepare_for_adoption(board, card.as_ref(), &sb.name, timeout_secs) {
+                Some(item) => Some(item),
+                None => card,
             }
+        } else {
+            card
+        };
+
+        if let Some(item) = adoptable(card.as_ref(), &sb.name) {
             // Fixed deadline already passed — bounce without resetting the clock.
             if item
                 .run_deadline_at
@@ -533,6 +594,37 @@ async fn reconcile(
         }
     }
     adopted
+}
+
+/// If a Backlog card still owns this sandbox (prior detach-as-failure), reopen
+/// Claimed so [`adoptable`] accepts it. Returns the refreshed item when reopened.
+fn prepare_for_adoption(
+    board: &SharedBoard,
+    item: Option<&WorkItem>,
+    sandbox: &str,
+    timeout_secs: i64,
+) -> Option<WorkItem> {
+    let item = item?;
+    if item.state != State::Backlog || item.parked {
+        return None;
+    }
+    if item.environment.as_deref() != Some(sandbox) {
+        return None;
+    }
+    let agent_id = format!("sandbox-{}", item.id);
+    match board.reopen_for_adoption(item.id, &agent_id, timeout_secs) {
+        Ok(it) => {
+            tracing::info!(
+                "#{}: reopened from Backlog for adoption of {sandbox}",
+                item.id
+            );
+            Some(it)
+        }
+        Err(e) => {
+            tracing::warn!("#{}: could not reopen for adoption: {e}", item.id);
+            None
+        }
+    }
 }
 
 /// Ask a sandbox what its agent is doing, and take over if there is one.
@@ -729,12 +821,21 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
 /// the run produced, including the sandbox name, and taking the board would
 /// make it easy to clear that again on the way out.
 async fn finalize(os: &OpenShell, id: ItemId, name: &str, result: &anyhow::Result<()>) {
-    stop_agent(os, name).await;
     match result {
         Ok(_) => {
+            stop_agent(os, name).await;
             tracing::info!("#{id}: keeping sandbox {name} for review/reclaim");
         }
+        Err(e) if is_supervisor_detach(&e.to_string()) => {
+            // Leave the setsid agent alone — restart will adopt it.
+            tracing::info!("#{id}: detaching from {name} without stopping the agent: {e}");
+        }
+        Err(e) if is_supervisor_cancel(&e.to_string()) => {
+            stop_agent(os, name).await;
+            tracing::info!("#{id}: run cancelled; stopped agent in {name}");
+        }
         Err(e) => {
+            stop_agent(os, name).await;
             tracing::error!("#{id}: keeping sandbox {name} for inspection: {e}");
         }
     }
@@ -2773,6 +2874,19 @@ mod tests {
         assert!(!is_infrastructure(
             "run cancelled: card left Backlog (deadline exceeded or halted)"
         ));
+    }
+
+    #[test]
+    fn ctrl_c_follower_exit_is_detach_not_failure() {
+        assert!(is_supervisor_detach(
+            "agent exited -1: dbox_policies_to_inline(), 0);\\n..."
+        ));
+        assert!(is_supervisor_detach("agent exited 130: interrupted"));
+        assert!(is_supervisor_detach("agent exited 143: killed"));
+        assert!(!is_supervisor_detach("agent exited 1: panic"));
+        assert!(!is_supervisor_detach("clone failed: CONNECT tunnel 403"));
+        assert!(!is_supervisor_cancel("agent exited -1: noise"));
+        assert!(!is_infrastructure("agent exited -1: noise"));
     }
 
     /// Halt mid-setup used to leave `in_flight` stuck: clone/create ignored the

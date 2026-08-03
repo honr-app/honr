@@ -573,6 +573,8 @@ function Swimlane({
   const [viewMode, setViewMode] = useState<"columns" | "graph">("columns");
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
+  const [autoBusy, setAutoBusy] = useState(false);
+  const autoOn = goal.auto_dispatch === true;
   const story = p.stories.get(goal.id) ?? goal.story;
   const q = filterQuery.toLowerCase().trim();
 
@@ -612,6 +614,20 @@ function Swimlane({
     }
   };
 
+  const toggleAuto = async (e: MouseEvent) => {
+    e.stopPropagation();
+    if (autoBusy || archived) return;
+    setAutoBusy(true);
+    try {
+      await api.setAutoDispatch(goal.id, !autoOn);
+      p.onChanged?.();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setAutoBusy(false);
+    }
+  };
+
   const planLabel = planStatusLabel(goal.plan_status, goal);
   const reviewCount =
     goal.columns.find((c) => c.column === "review")?.summary.count ??
@@ -639,6 +655,29 @@ function Swimlane({
         >
           {goal.title}
         </h2>
+        {!archived && (
+          <button
+            type="button"
+            className={`auto-switch ${autoOn ? "on" : ""}`}
+            disabled={autoBusy}
+            onClick={toggleAuto}
+            title={
+              autoOn
+                ? "Auto on — claimable Backlog starts on its own. Click to pause."
+                : "Auto off — Backlog waits for Start. Click to play."
+            }
+            aria-pressed={autoOn}
+            aria-label={autoOn ? "Pause auto dispatch" : "Play auto dispatch"}
+          >
+            <span className="auto-switch-track" aria-hidden>
+              <span className="auto-switch-end play">▶</span>
+              <span className="auto-switch-knob">
+                {autoOn ? "❚❚" : "▶"}
+              </span>
+              <span className="auto-switch-end pause">❚❚</span>
+            </span>
+          </button>
+        )}
         {archived && (
           <span className="pill" title="Soft-retired — history only">
             Archived

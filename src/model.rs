@@ -733,6 +733,12 @@ pub struct WorkItem {
     #[serde(default)]
     pub sandbox_profile_id: Option<String>,
 
+    /// When true on a Project, the supervisor continuously queues claimable
+    /// Backlog leaves under it (`awaiting_dispatch`). Tasks ignore this field.
+    /// Default off — Backlog stays inert until Start/dispatch.
+    #[serde(default)]
+    pub auto_dispatch: bool,
+
     /// The bounce reason if this card was returned to Backlog due to an infra or execution bounce.
     #[serde(default)]
     pub last_bounce_reason: Option<String>,
@@ -825,6 +831,7 @@ impl WorkItem {
             notes: Vec::new(),
             project_prompt: None,
             sandbox_profile_id: None,
+            auto_dispatch: false,
             last_bounce_reason: None,
             last_conflict_files: Vec::new(),
             release_target: None,

@@ -161,6 +161,8 @@ export interface WorkItem {
   project_prompt?: string | null;
   /** Project-only: override sandbox profile; null/unset inherits global default. */
   sandbox_profile_id?: string | null;
+  /** Project auto mode — supervisor queues claimable Backlog leaves. */
+  auto_dispatch?: boolean;
   last_bounce_reason?: string | null;
   last_conflict_files?: string[];
   release_target: string | null;
@@ -213,6 +215,8 @@ export interface GoalView {
   budget_cents: number | null;
   agents_live: number;
   needs_you: number;
+  /** Project auto mode — supervisor queues claimable Backlog leaves. */
+  auto_dispatch?: boolean;
   ready_to_dispatch?: ReadyCard[];
   /** `no_plan` | `awaiting_approval` | `approved_vN` */
   plan_status: string;

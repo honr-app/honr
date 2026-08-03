@@ -204,6 +204,9 @@ pub struct GoalView {
     pub budget_cents: Option<u64>,
     pub agents_live: usize,
     pub needs_you: usize,
+    /// Project auto mode — supervisor queues claimable Backlog leaves.
+    #[serde(default)]
+    pub auto_dispatch: bool,
     /// `no_plan` | `awaiting_approval` | `approved_vN`
     pub plan_status: String,
     /// Soft-retired Project — hidden from the default cockpit, available via
@@ -1876,6 +1879,53 @@ impl Board {
         self.emit(&item);
     }
 
+    /// Backlog → Claimed so restart can adopt a sandbox that survived Ctrl-C.
+    ///
+    /// Older supervisors treated follower exit -1 as a card failure and bounced
+    /// Running → Backlog while leaving the setsid agent alive. `environment`
+    /// still names that sandbox; this re-opens the lease without a full claim
+    /// briefing (adoption only needs Claimed + lease + deadline).
+    pub fn reopen_for_adoption(
+        &self,
+        id: ItemId,
+        agent_id: &str,
+        timeout_secs: i64,
+    ) -> Result<WorkItem, String> {
+        let now = Utc::now();
+        let deadline = now + Duration::seconds(timeout_secs.max(1));
+        let item = {
+            let mut s = self.state.write().unwrap();
+            let parked = s.items.get(&id).is_some_and(|it| it.parked);
+            if parked {
+                return Err(format!("#{id} is parked"));
+            }
+            let state = s.items.get(&id).map(|it| it.state);
+            if state != Some(State::Backlog) {
+                return Err(format!("#{id} is not Backlog (reopen needs Backlog)"));
+            }
+            Self::transition_locked(
+                &mut s,
+                id,
+                State::Claimed,
+                "supervisor",
+                Some("reopened for sandbox re-adoption after supervisor restart".into()),
+            )
+            .map_err(|e| e.to_string())?;
+            let it = s.items.get_mut(&id).unwrap();
+            it.awaiting_dispatch = false;
+            it.run_deadline_at = Some(deadline);
+            it.lease = Some(Lease {
+                agent_id: agent_id.to_string(),
+                granted_at: now,
+                last_heartbeat: now,
+                expires_at: deadline,
+            });
+            it.clone()
+        };
+        self.emit(&item);
+        Ok(item)
+    }
+
     /// Which sandbox this card is running in. Written before the agent starts,
     /// so a honr that dies mid-run can still find the sandbox on restart.
     pub fn set_environment(&self, id: ItemId, sandbox: Option<String>) {
@@ -2598,6 +2648,107 @@ impl Board {
         };
         self.emit(&item);
         Ok(item)
+    }
+
+    /// Play/pause Project auto mode. On: queue claimable Backlog leaves now.
+    /// Off: clear `awaiting_dispatch` on still-Backlog leaves (does not halt runners).
+    pub fn set_auto_dispatch(&self, id: ItemId, enabled: bool) -> Result<WorkItem, String> {
+        let (title, changed, item) = {
+            let mut s = self.state.write().unwrap();
+            let it = s.items.get_mut(&id).ok_or("no such item")?;
+            if it.level.as_deref() != Some("Project") && !it.is_project() {
+                return Err("auto mode is only for Projects".into());
+            }
+            let changed = it.auto_dispatch != enabled;
+            if changed {
+                it.auto_dispatch = enabled;
+            }
+            let title = it.title.clone();
+            let mut out = it.clone();
+            Self::populate_blockers(&s, &mut out);
+            (title, changed, out)
+        };
+        if !changed {
+            return Ok(item);
+        }
+        self.emit(&item);
+        if enabled {
+            self.story(
+                id,
+                format!("{title}: auto mode on — claimable Backlog will start on its own."),
+            );
+            self.auto_enqueue_project(id);
+        } else {
+            let cleared = self.clear_awaiting_under_project(id);
+            self.story(
+                id,
+                format!(
+                    "{title}: auto mode off — cleared {cleared} queued Backlog card(s); \
+                     in-flight runs continue."
+                ),
+            );
+        }
+        self.get(id).ok_or_else(|| "no such item".into())
+    }
+
+    /// Clear `awaiting_dispatch` on Backlog leaves under a Project. Returns count cleared.
+    fn clear_awaiting_under_project(&self, project_id: ItemId) -> usize {
+        let ids: Vec<ItemId> = {
+            let s = self.state.read().unwrap();
+            s.items
+                .values()
+                .filter(|i| i.parent == Some(project_id))
+                .filter(|i| i.state == State::Backlog && i.awaiting_dispatch)
+                .map(|i| i.id)
+                .collect()
+        };
+        for id in &ids {
+            let _ = self.clear_dispatch(*id);
+        }
+        ids.len()
+    }
+
+    /// Queue every claimable Backlog leaf under Projects with `auto_dispatch`.
+    /// Called each supervisor tick — skips cards already awaiting.
+    pub fn auto_enqueue_all(&self) {
+        let project_ids: Vec<ItemId> = {
+            let s = self.state.read().unwrap();
+            s.items
+                .values()
+                .filter(|i| i.auto_dispatch && i.state != State::Retired)
+                .filter(|i| i.level.as_deref() == Some("Project") || i.is_project())
+                .map(|i| i.id)
+                .collect()
+        };
+        for pid in project_ids {
+            self.auto_enqueue_project(pid);
+        }
+    }
+
+    /// Enqueue claimable Backlog leaves under one Project (already-queued skipped).
+    pub fn auto_enqueue_project(&self, project_id: ItemId) {
+        let candidates: Vec<ItemId> = {
+            let s = self.state.read().unwrap();
+            let Some(project) = s.items.get(&project_id) else {
+                return;
+            };
+            if !project.auto_dispatch {
+                return;
+            }
+            s.items
+                .values()
+                .filter(|i| i.parent == Some(project_id))
+                .filter(|i| i.state == State::Backlog && !i.awaiting_dispatch && !i.parked)
+                .filter(|i| i.level.as_deref() != Some("Project"))
+                .filter(|i| !Self::has_children(&s, i.id))
+                .filter(|i| i.definition_of_done.is_some())
+                .filter(|i| Self::unresolved_blockers(&s, i).is_empty())
+                .map(|i| i.id)
+                .collect()
+        };
+        for id in candidates {
+            let _ = self.enqueue_dispatch(id);
+        }
     }
 
     /// Beads "ready" tasks (`issue_type=task` only), mapped back to board items when present.
@@ -4274,6 +4425,7 @@ fn check_split_relatedness(
             budget_cents: goal.budget_cents,
             agents_live,
             needs_you,
+            auto_dispatch: goal.auto_dispatch,
             plan_status,
             archived,
             columns,
@@ -4870,6 +5022,93 @@ mod tests {
     }
 
     #[test]
+    fn project_auto_dispatch_queues_and_pauses() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-auto-dispatch.json"),
+        );
+        let project = b
+            .create(None, "goal", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        let ready = b
+            .create(
+                Some(project.id),
+                "ready",
+                "do it",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("ready");
+        let parked = b
+            .create(
+                Some(project.id),
+                "parked",
+                "wait",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("parked");
+        let blocked = b
+            .create(
+                Some(project.id),
+                "blocked",
+                "later",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("blocked");
+        for id in [ready.id, parked.id, blocked.id] {
+            let _ = b.transition(id, State::Shaping, "t", None);
+            let _ = b.transition(id, State::Backlog, "t", None);
+        }
+        b.set_blocked_by(blocked.id, vec![ready.id]);
+        {
+            let mut s = b.state.write().unwrap();
+            s.items.get_mut(&parked.id).unwrap().parked = true;
+        }
+
+        // Retire the seeded Initial plan so it does not join the auto queue.
+        if let Some(ip) = b.initial_plan_of(project.id) {
+            let _ = b.transition(ip.id, State::Retired, "t", Some("test".into()));
+        }
+
+        assert!(b.list_awaiting_dispatch().is_empty());
+        let proj = b.set_auto_dispatch(project.id, true).expect("auto on");
+        assert!(proj.auto_dispatch);
+        let awaiting = b.list_awaiting_dispatch();
+        assert_eq!(awaiting.len(), 1, "only the unblocked unparked leaf");
+        assert_eq!(awaiting[0].id, ready.id);
+        assert!(!b.get(parked.id).unwrap().awaiting_dispatch);
+        assert!(!b.get(blocked.id).unwrap().awaiting_dispatch);
+
+        // Idempotent — already queued stays queued, no second phantom.
+        b.auto_enqueue_all();
+        assert_eq!(b.list_awaiting_dispatch().len(), 1);
+
+        let snap = b.snapshot();
+        let goal = snap.goals.iter().find(|g| g.id == project.id).expect("goal");
+        assert!(goal.auto_dispatch);
+
+        let proj = b.set_auto_dispatch(project.id, false).expect("auto off");
+        assert!(!proj.auto_dispatch);
+        assert!(
+            b.list_awaiting_dispatch().is_empty(),
+            "pause clears queued Backlog"
+        );
+        assert!(!b.get(ready.id).unwrap().awaiting_dispatch);
+
+        let err = b.set_auto_dispatch(ready.id, true).unwrap_err();
+        assert!(err.contains("Projects"), "{err}");
+    }
+
+    #[test]
     fn halt_clears_conversation_and_environment() {
         let (b, id) = claimed_leaf();
         b.set_environment(id, Some("honr-card-1-a1".into()));
@@ -4888,6 +5127,26 @@ mod tests {
         let it = b.record_run_failure(id, "sandbox would not start", 3).expect("recorded");
         assert_eq!(it.state, State::Backlog);
         assert_eq!(it.run_failures, 1);
+    }
+
+    /// Ctrl-C used to bounce Running → Backlog while the sandbox agent lived;
+    /// restart must be able to Claim again without a full dispatch claim.
+    #[test]
+    fn reopen_for_adoption_from_backlog_with_environment() {
+        let (b, id) = claimed_leaf();
+        b.set_environment(id, Some("honr-card-1-a1".into()));
+        b.record_run_failure(id, "agent exited -1: follower died", 3)
+            .expect("failed into backlog");
+        assert_eq!(b.get(id).unwrap().state, State::Backlog);
+
+        let it = b
+            .reopen_for_adoption(id, "sandbox-1", 3600)
+            .expect("reopened");
+        assert_eq!(it.state, State::Claimed);
+        assert_eq!(it.environment.as_deref(), Some("honr-card-1-a1"));
+        assert!(it.lease.is_some());
+        assert!(it.run_deadline_at.is_some());
+        assert!(!it.awaiting_dispatch);
     }
 
     /// The whole point: without this a card that fails early spends nothing,
