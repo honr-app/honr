@@ -3269,8 +3269,9 @@ fn check_split_relatedness(
     /// Notify connected subscribers that the main branch advanced (via push or PR merge).
     ///
     /// Review cards with open PRs get a rebase dispatch. Claimed/Running cards get a
-    /// steer note telling the agent to fetch and rebase onto upstream/main — the
-    /// supervisor does not touch the live worktree itself.
+    /// steer note telling the agent to fetch and rebase onto upstream/main, then a
+    /// park+unpark so the supervisor re-claims with that note — the supervisor does
+    /// not touch the live worktree itself.
     pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
         tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
         self.record_and_send(BoardEvent::MainAdvanced {
@@ -3294,8 +3295,10 @@ fn check_split_relatedness(
         )
     }
 
-    /// Steer every Claimed/Running card so the next resume briefing carries the
-    /// rebase instruction. Does not park/unpark — that is a separate card.
+    /// Steer every Claimed/Running card, then park+unpark so the resume briefing
+    /// carries the rebase instruction. Steer alone does not inject mid-turn.
+    /// Already-parked cards are left alone (no second park/unpark). Sandbox
+    /// environment and conversation_id are preserved through the bounce.
     fn steer_live_cards_on_main_advanced(&self, ref_name: &str, commit_sha: Option<&str>) {
         let note = Self::main_advanced_steer_note(ref_name, commit_sha);
         let live_ids: Vec<ItemId> = {
@@ -3309,6 +3312,22 @@ fn check_split_relatedness(
         for id in live_ids {
             if let Err(e) = self.steer(id, note.clone()) {
                 tracing::warn!("main-advanced steer failed for #{id}: {e}");
+            }
+            // Skip park/unpark for cards already parked — steer may have been a
+            // no-op on a weird state, and a second park would be wrong.
+            let already_parked = {
+                let s = self.state.read().unwrap();
+                s.items.get(&id).is_some_and(|i| i.parked)
+            };
+            if already_parked {
+                continue;
+            }
+            if let Err(e) = self.park(id, Some("main advanced".into())) {
+                tracing::warn!("main-advanced park failed for #{id}: {e}");
+                continue;
+            }
+            if let Err(e) = self.unpark(id) {
+                tracing::warn!("main-advanced unpark failed for #{id}: {e}");
             }
         }
     }
@@ -7177,28 +7196,30 @@ mod tests {
         b.notify_main_advanced("refs/heads/main", Some("abcdeadbeef".into()));
 
         let running_after = b.get(running.id).unwrap();
-        assert_eq!(running_after.state, State::Running, "steer must not move the card");
-        let note = running_after
-            .notes
-            .last()
-            .expect("Running card should have a steer note");
-        assert!(
-            note.text.contains("abcdeadbeef"),
-            "steer note should include commit sha: {}",
-            note.text
+        assert_eq!(
+            running_after.state,
+            State::Backlog,
+            "park+unpark must bounce the card to Backlog for resume"
         );
         assert!(
-            note.text.contains("fetch") && note.text.contains("upstream/main"),
-            "steer note should mention fetch/rebase onto upstream/main: {}",
-            note.text
+            running_after.awaiting_dispatch,
+            "unpark must queue the supervisor"
         );
+        assert!(!running_after.parked, "unpark clears the park hold");
         assert!(
-            note.text.to_lowercase().contains("rebase"),
-            "steer note should mention rebase: {}",
-            note.text
+            running_after.notes.iter().any(|n| {
+                n.text.contains("abcdeadbeef")
+                    && n.text.contains("fetch")
+                    && n.text.contains("upstream/main")
+                    && n.text.to_lowercase().contains("rebase")
+            }),
+            "Running card should have a fetch/rebase steer note with sha: {:?}",
+            running_after.notes
         );
 
         let claimed_after = b.get(claimed.id).unwrap();
+        assert_eq!(claimed_after.state, State::Backlog);
+        assert!(claimed_after.awaiting_dispatch);
         assert!(
             claimed_after
                 .notes
@@ -7214,6 +7235,76 @@ mod tests {
             "Backlog cards must not get a main-advanced steer: {:?}",
             backlog_after.notes
         );
+    }
+
+    #[test]
+    fn notify_main_advanced_parks_and_unparks_running_so_steer_takes_effect() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-park-unpark-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Park Unpark Main Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let running = b
+            .create(
+                Some(project.id),
+                "Live Task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.transition(running.id, State::Shaping, "test", None).unwrap();
+        b.transition(running.id, State::Backlog, "test", None).unwrap();
+        b.transition(running.id, State::Claimed, "agent", None).unwrap();
+        b.transition(running.id, State::Running, "agent", None).unwrap();
+        b.set_environment(running.id, Some("honr-card-150-sandbox".into()));
+        b.set_conversation_id(running.id, Some("conv-main-adv".into()));
+
+        b.notify_main_advanced("refs/heads/main", Some("def456abc".into()));
+
+        let after = b.get(running.id).unwrap();
+        assert_eq!(after.state, State::Backlog);
+        assert!(
+            after.awaiting_dispatch,
+            "unpark must leave the card queued for the supervisor"
+        );
+        assert!(!after.parked);
+        assert_eq!(
+            after.environment.as_deref(),
+            Some("honr-card-150-sandbox"),
+            "sandbox environment must survive park+unpark"
+        );
+        assert_eq!(
+            after.conversation_id.as_deref(),
+            Some("conv-main-adv"),
+            "conversation_id must survive park+unpark"
+        );
+        assert!(
+            after.notes.iter().any(|n| {
+                n.text.contains("def456abc")
+                    && n.text.contains("upstream/main")
+                    && n.text.to_lowercase().contains("rebase")
+            }),
+            "notes must include the main-advanced steer: {:?}",
+            after.notes
+        );
+        // Board path only: no supervisor/openshell mid-run git rebase — the
+        // agent rebases on resume from the steer note.
     }
 
     #[test]
