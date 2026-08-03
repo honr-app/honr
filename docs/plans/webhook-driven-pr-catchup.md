@@ -12,6 +12,11 @@ To prevent merging stale PRs or encountering late merge failures, `honr` needs t
    - True rebase conflict: transition card to `Ready` with conflict context (conflicting files and failure reason).
    - Second conflict on overlapping files: detect repeated conflict on the same files, classify as a decomposition failure, and escalate to a human checkpoint (`NeedsHuman` state with escalation choices).
 
+### Standing Invariants & Operational Rules
+- **Merging is a human action**: Approving in `honr` surfaces the PR; `honr` never auto-merges PRs.
+- **Invariant & Security Preservation**: Do not weaken `machine.rs` state machine invariants, supervisor budget enforcement, or `sandbox/policy.yaml`.
+- **Webhook Ingress Only**: Ingress is strictly via GitHub webhooks (`POST /api/webhooks/github`). Do not introduce outbound runner polling.
+
 ---
 
 ## Architectural Changes & Design
