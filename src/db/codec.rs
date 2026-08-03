@@ -206,9 +206,17 @@ pub struct ItemRow<'a> {
     pub plan_json: Option<String>,
     pub proposal_json: Option<String>,
     pub extras_json: String,
+    /// Denormalized: non-retired children (maintained on flush / upsert).
+    pub non_retired_child_count: i64,
+    /// Denormalized: unresolved blockers (maintained on flush / upsert).
+    pub open_blocker_count: i64,
 }
 
-pub fn item_to_row(item: &WorkItem) -> Result<ItemRow<'_>, StoreError> {
+pub fn item_to_row(
+    item: &WorkItem,
+    non_retired_child_count: i64,
+    open_blocker_count: i64,
+) -> Result<ItemRow<'_>, StoreError> {
     Ok(ItemRow {
         id: item.id,
         parent_id: item.parent,
@@ -234,6 +242,8 @@ pub fn item_to_row(item: &WorkItem) -> Result<ItemRow<'_>, StoreError> {
         plan_json: json_opt_str(&item.plan)?,
         proposal_json: json_opt_str(&item.proposal)?,
         extras_json: json_str(&ItemExtras::from_item(item))?,
+        non_retired_child_count,
+        open_blocker_count,
     })
 }
 
