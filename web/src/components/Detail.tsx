@@ -1438,7 +1438,7 @@ export function DetailDrawer({
         <Section title="Interrupt Active Run">
           <p className="dim" style={{ marginBottom: 8 }}>
             Park stops the agent, keeps the sandbox and conversation, and holds the
-            card until you Resume. Halt discards the LLM session.
+            card until you Resume. Halt discards the session and deletes the sandbox.
           </p>
           {!confirmHalt ? (
             <div className="btns">
@@ -1452,7 +1452,7 @@ export function DetailDrawer({
                 style={{ background: "var(--needs-you-bg)", color: "var(--needs-human)", borderColor: "var(--needs-human)" }}
                 onClick={() => setConfirmHalt(true)}
               >
-                Halt (discard session)
+                Halt (discard session + sandbox)
               </button>
             </div>
           ) : (
@@ -1468,11 +1468,11 @@ export function DetailDrawer({
               }}
             >
               <div style={{ color: "var(--needs-human)", fontSize: "12px", fontWeight: 600 }}>
-                Halt #{d.id} and discard the session?
+                Halt #{d.id} — discard session and delete sandbox?
               </div>
               <div style={{ color: "var(--needs-human)", fontSize: "11px" }}>
-                The agent stops and the conversation is thrown away. The sandbox may
-                still be kept for caches. Prefer Park if you want to resume later.
+                The agent stops, the conversation is thrown away, and the sandbox is
+                deleted. Prefer Park if you want to resume later.
               </div>
               <div className="btns">
                 <button
