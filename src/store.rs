@@ -1877,24 +1877,20 @@ impl Board {
         true
     }
 
-    #[allow(dead_code)] // REST/MCP in api-supervisor
     pub fn list_sandbox_profiles(&self) -> Vec<SandboxProfile> {
         let s = self.state.read().unwrap();
         s.sandbox_profiles.values().cloned().collect()
     }
 
-    #[allow(dead_code)] // REST/MCP in api-supervisor
     pub fn default_sandbox_profile_id(&self) -> Option<String> {
         self.state.read().unwrap().default_sandbox_profile_id.clone()
     }
 
-    #[allow(dead_code)] // REST/MCP in api-supervisor
     pub fn get_sandbox_profile(&self, id: &str) -> Option<SandboxProfile> {
         self.state.read().unwrap().sandbox_profiles.get(id).cloned()
     }
 
     /// Insert or replace a profile by id. Does not change the global default.
-    #[allow(dead_code)] // REST/MCP in api-supervisor
     pub fn upsert_sandbox_profile(
         &self,
         profile: SandboxProfile,
@@ -1927,7 +1923,6 @@ impl Board {
         Ok(stored)
     }
 
-    #[allow(dead_code)] // REST/MCP in api-supervisor
     pub fn set_default_sandbox_profile(&self, id: &str) -> Result<(), String> {
         let mut s = self.state.write().unwrap();
         if !s.sandbox_profiles.contains_key(id) {
@@ -1940,7 +1935,6 @@ impl Board {
     }
 
     /// Assign a Project's sandbox profile override. `None` clears (inherit global default).
-    #[allow(dead_code)] // REST/MCP in api-supervisor
     pub fn set_project_sandbox_profile(
         &self,
         project_id: ItemId,
@@ -1979,7 +1973,6 @@ impl Board {
 
     /// Delete a profile. Refused while it is the global default or assigned to
     /// any Project — reassign / clear those first.
-    #[allow(dead_code)] // REST/MCP in api-supervisor
     pub fn delete_sandbox_profile(&self, id: &str) -> Result<(), String> {
         let mut s = self.state.write().unwrap();
         if !s.sandbox_profiles.contains_key(id) {
@@ -2008,6 +2001,38 @@ impl Board {
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Resolve create knobs for a card at sandbox create.
+    ///
+    /// Order: Project `sandbox_profile_id` → board `default_sandbox_profile_id`
+    /// → YAML `execution.agents` image/policy/cpu/memory. Missing catalog
+    /// entries fall through to the next step (YAML is always last resort).
+    pub fn resolve_sandbox_create(&self, item_id: ItemId) -> ResolvedSandboxCreate {
+        let item = match self.get(item_id) {
+            Some(i) => i,
+            None => return ResolvedSandboxCreate::from_agents(&self.schema.execution.agents),
+        };
+        let project = if item.is_project() {
+            Some(item)
+        } else {
+            item.parent.and_then(|pid| self.get(pid))
+        };
+        let override_id = project.as_ref().and_then(|p| p.sandbox_profile_id.clone());
+
+        let s = self.state.read().unwrap();
+        if let Some(ref oid) = override_id {
+            if let Some(p) = s.sandbox_profiles.get(oid) {
+                return ResolvedSandboxCreate::from_profile(p);
+            }
+        }
+        if let Some(ref did) = s.default_sandbox_profile_id {
+            if let Some(p) = s.sandbox_profiles.get(did) {
+                return ResolvedSandboxCreate::from_profile(p);
+            }
+        }
+        drop(s);
+        ResolvedSandboxCreate::from_agents(&self.schema.execution.agents)
     }
 
     // ------------------------------------------------------- the agent verbs
@@ -7380,5 +7405,72 @@ mod tests {
         assert!(!restored.seed_sandbox_profiles_from(&agents_for_seed()));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resolve_sandbox_create_project_override_then_default_then_yaml() {
+        let mut schema = Schema::default();
+        schema.execution.agents = AgentConfig {
+            image: "yaml-img".into(),
+            policy: "sandbox/yaml.yaml".into(),
+            cpu: Some("1".into()),
+            memory: Some("1Gi".into()),
+            ..Default::default()
+        };
+        let b = Board::new(
+            schema,
+            std::env::temp_dir().join(format!(
+                "honr-test-sbx-resolve-store-{}.json",
+                std::process::id()
+            )),
+        );
+        // Empty catalog → YAML.
+        let project = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = b
+            .create(
+                Some(project.id),
+                "T",
+                "do",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let yaml = b.resolve_sandbox_create(task.id);
+        assert!(yaml.profile_id.is_none());
+        assert_eq!(yaml.image, "yaml-img");
+
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "def-img".into(),
+            policy: "sandbox/def.yaml".into(),
+            cpu: Some("2".into()),
+            memory: None,
+        })
+        .unwrap();
+        b.set_default_sandbox_profile("default").unwrap();
+        let def = b.resolve_sandbox_create(task.id);
+        assert_eq!(def.profile_id.as_deref(), Some("default"));
+        assert_eq!(def.image, "def-img");
+
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "alt".into(),
+            name: "Alt".into(),
+            image: "alt-img".into(),
+            policy: "sandbox/alt.yaml".into(),
+            cpu: None,
+            memory: Some("8Gi".into()),
+        })
+        .unwrap();
+        b.set_project_sandbox_profile(project.id, Some("alt".into()))
+            .unwrap();
+        let over = b.resolve_sandbox_create(task.id);
+        assert_eq!(over.profile_id.as_deref(), Some("alt"));
+        assert_eq!(over.image, "alt-img");
+        assert_eq!(over.memory.as_deref(), Some("8Gi"));
     }
 }

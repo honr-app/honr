@@ -1,7 +1,7 @@
 //! The human face. Thin: every handler here delegates straight to `Board`, so
 //! the pixels and the agent API can't drift apart.
 
-use crate::model::{ItemId, State, WorkItem};
+use crate::model::{ItemId, SandboxProfile, State, WorkItem};
 use crate::store::{AncestryLine, SharedBoard};
 
 use axum::extract::{Path, State as AxState};
@@ -54,6 +54,22 @@ pub fn routes() -> Router<SharedBoard> {
         .route(
             "/items/{id}/materialize-proposal",
             post(materialize_proposal_heal),
+        )
+        .route(
+            "/items/{id}/sandbox-profile",
+            post(set_item_sandbox_profile),
+        )
+        .route(
+            "/sandbox-profiles",
+            get(list_sandbox_profiles).post(upsert_sandbox_profile),
+        )
+        .route(
+            "/sandbox-profiles/{id}",
+            get(get_sandbox_profile).delete(delete_sandbox_profile),
+        )
+        .route(
+            "/sandbox-profiles/{id}/default",
+            post(set_default_sandbox_profile),
         )
 }
 
@@ -409,6 +425,98 @@ async fn delete_item(
 ) -> ApiResult<serde_json::Value> {
     b.delete_item(id).map_err(ApiError)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------- sandbox profiles
+
+#[derive(Serialize)]
+pub struct SandboxProfilesOut {
+    pub profiles: Vec<SandboxProfile>,
+    pub default_sandbox_profile_id: Option<String>,
+}
+
+async fn list_sandbox_profiles(
+    AxState(b): AxState<SharedBoard>,
+) -> Json<SandboxProfilesOut> {
+    Json(SandboxProfilesOut {
+        profiles: b.list_sandbox_profiles(),
+        default_sandbox_profile_id: b.default_sandbox_profile_id(),
+    })
+}
+
+async fn get_sandbox_profile(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> ApiResult<SandboxProfile> {
+    b.get_sandbox_profile(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError(format!("no sandbox profile `{id}`")))
+}
+
+#[derive(Deserialize)]
+pub struct UpsertSandboxProfileReq {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub policy: String,
+    #[serde(default)]
+    pub cpu: Option<String>,
+    #[serde(default)]
+    pub memory: Option<String>,
+}
+
+async fn upsert_sandbox_profile(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<UpsertSandboxProfileReq>,
+) -> ApiResult<SandboxProfile> {
+    Ok(Json(
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: req.id,
+            name: req.name,
+            image: req.image,
+            policy: req.policy,
+            cpu: req.cpu,
+            memory: req.memory,
+        })
+        .map_err(ApiError)?,
+    ))
+}
+
+async fn delete_sandbox_profile(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    b.delete_sandbox_profile(&id).map_err(ApiError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn set_default_sandbox_profile(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> ApiResult<SandboxProfilesOut> {
+    b.set_default_sandbox_profile(&id).map_err(ApiError)?;
+    Ok(Json(SandboxProfilesOut {
+        profiles: b.list_sandbox_profiles(),
+        default_sandbox_profile_id: b.default_sandbox_profile_id(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SetProjectSandboxProfileReq {
+    /// `null` / omitted / empty clears the override (inherit global default).
+    #[serde(default)]
+    pub sandbox_profile_id: Option<String>,
+}
+
+async fn set_item_sandbox_profile(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+    Json(req): Json<SetProjectSandboxProfileReq>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(
+        b.set_project_sandbox_profile(id, req.sandbox_profile_id)
+            .map_err(ApiError)?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1181,5 +1289,154 @@ mod tests {
         assert_eq!(t2_card.state, State::Review);
         assert!(t2_card.rebase_requested);
         assert!(t2_card.awaiting_dispatch);
+    }
+
+    fn sandbox_profiles_board() -> SharedBoard {
+        std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-api-sbx-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ))
+    }
+
+    #[tokio::test]
+    async fn sandbox_profiles_list_create_update_default_and_project_assign() {
+        use crate::model::Origin;
+
+        let b = sandbox_profiles_board();
+
+        let Json(empty) = list_sandbox_profiles(AxState(b.clone())).await;
+        assert!(empty.profiles.is_empty());
+        assert!(empty.default_sandbox_profile_id.is_none());
+
+        let Ok(Json(created)) = upsert_sandbox_profile(
+            AxState(b.clone()),
+            Json(UpsertSandboxProfileReq {
+                id: "default".into(),
+                name: "Default".into(),
+                image: "honr-sandbox:latest".into(),
+                policy: "sandbox/policy.yaml".into(),
+                cpu: Some("2".into()),
+                memory: Some("4Gi".into()),
+            }),
+        )
+        .await
+        else {
+            panic!("create default profile");
+        };
+        assert_eq!(created.id, "default");
+        assert_eq!(created.image, "honr-sandbox:latest");
+
+        let Ok(Json(heavy)) = upsert_sandbox_profile(
+            AxState(b.clone()),
+            Json(UpsertSandboxProfileReq {
+                id: "heavy".into(),
+                name: "Heavy".into(),
+                image: "honr-sandbox:heavy".into(),
+                policy: "sandbox/policy.yaml".into(),
+                cpu: Some("8".into()),
+                memory: Some("16Gi".into()),
+            }),
+        )
+        .await
+        else {
+            panic!("create heavy profile");
+        };
+        assert_eq!(heavy.id, "heavy");
+
+        // Update via upsert.
+        let Ok(Json(updated)) = upsert_sandbox_profile(
+            AxState(b.clone()),
+            Json(UpsertSandboxProfileReq {
+                id: "heavy".into(),
+                name: "Heavy+".into(),
+                image: "honr-sandbox:heavy2".into(),
+                policy: "sandbox/policy.yaml".into(),
+                cpu: Some("8".into()),
+                memory: Some("32Gi".into()),
+            }),
+        )
+        .await
+        else {
+            panic!("update heavy profile");
+        };
+        assert_eq!(updated.name, "Heavy+");
+        assert_eq!(updated.memory.as_deref(), Some("32Gi"));
+
+        let Ok(Json(listed)) =
+            set_default_sandbox_profile(AxState(b.clone()), Path("default".into())).await
+        else {
+            panic!("set default");
+        };
+        assert_eq!(
+            listed.default_sandbox_profile_id.as_deref(),
+            Some("default")
+        );
+        assert_eq!(listed.profiles.len(), 2);
+
+        let Ok(Json(got)) =
+            get_sandbox_profile(AxState(b.clone()), Path("heavy".into())).await
+        else {
+            panic!("get heavy");
+        };
+        assert_eq!(got.image, "honr-sandbox:heavy2");
+
+        let project = b
+            .create(None, "Sbx Proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let Ok(Json(assigned)) = set_item_sandbox_profile(
+            AxState(b.clone()),
+            Path(project.id),
+            Json(SetProjectSandboxProfileReq {
+                sandbox_profile_id: Some("heavy".into()),
+            }),
+        )
+        .await
+        else {
+            panic!("assign project profile");
+        };
+        assert_eq!(assigned.sandbox_profile_id.as_deref(), Some("heavy"));
+
+        let Ok(Json(cleared)) = set_item_sandbox_profile(
+            AxState(b.clone()),
+            Path(project.id),
+            Json(SetProjectSandboxProfileReq {
+                sandbox_profile_id: None,
+            }),
+        )
+        .await
+        else {
+            panic!("clear project profile");
+        };
+        assert!(cleared.sandbox_profile_id.is_none());
+
+        // Task assign must fail (Projects only).
+        let task = b
+            .create(
+                Some(project.id),
+                "task",
+                "do",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        assert!(
+            set_item_sandbox_profile(
+                AxState(b.clone()),
+                Path(task.id),
+                Json(SetProjectSandboxProfileReq {
+                    sandbox_profile_id: Some("default".into()),
+                }),
+            )
+            .await
+            .is_err()
+        );
     }
 }
