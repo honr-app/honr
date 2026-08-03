@@ -260,8 +260,8 @@ webhooks, or clone URLs in DoDs above.
 - `sandbox_profile_id` (exists).
 - `engine` (exists).
 - `project_prompt` / Plan (exists) — standing policy including quality gates for *this* codebase.
-- **`upstream` / `fork` / `base` work binding** (#175 — elevate from “later”).
-- Card-level learning via `pr_url` once a PR exists (derived, not a separate Settings field).
+- **`upstream` / `fork` / `base` work remotes** — derived per card from `pr_url`
+  (+ Workspace fork-owner default); not a Project struct field.
 
 ### (C) May remain code defaults with clear override
 
