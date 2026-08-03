@@ -55,6 +55,7 @@ export interface SandboxProfile {
   id: string;
   name: string;
   image: string;
+  /** Inline OpenShell policy YAML text (not a host filesystem path). */
   policy: string;
   cpu?: string | null;
   memory?: string | null;

@@ -319,6 +319,8 @@ pub struct SandboxProfile {
     pub name: String,
     /// Passed to `openshell sandbox create --from`.
     pub image: String,
+    /// Inline OpenShell policy YAML text (not a host filesystem path).
+    /// The supervisor writes a temp file from this at sandbox create.
     pub policy: String,
     #[serde(default)]
     pub cpu: Option<String>,
@@ -352,6 +354,7 @@ pub fn slugify_sandbox_profile_id(name: &str) -> String {
 }
 
 /// Create knobs after Project override → global default → YAML resolution.
+/// `policy` is always YAML **content** ready to materialize as a temp file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSandboxCreate {
     pub image: String,
@@ -376,11 +379,45 @@ impl ResolvedSandboxCreate {
     pub fn from_agents(agents: &crate::schema::AgentConfig) -> Self {
         Self {
             image: agents.image.clone(),
-            policy: agents.policy.clone(),
+            // honr.yaml still names a path for bootstrap; profiles store content.
+            policy: resolve_policy_yaml(&agents.policy),
             cpu: agents.cpu.clone(),
             memory: agents.memory.clone(),
             profile_id: None,
         }
+    }
+}
+
+/// Heuristic: already-inline YAML vs a short host path from older boards / YAML.
+pub fn is_inline_policy_yaml(s: &str) -> bool {
+    let t = s.trim();
+    t.contains('\n') || t.starts_with('#') || t.starts_with("version:")
+}
+
+/// Turn `execution.agents.policy` (path or already-inline YAML) into content.
+///
+/// Profiles persist the YAML text. The host path in honr.yaml is seed/fallback
+/// only — never the board's source of truth after catalog seed.
+pub fn resolve_policy_yaml(path_or_yaml: &str) -> String {
+    if is_inline_policy_yaml(path_or_yaml) {
+        return path_or_yaml.to_string();
+    }
+    match std::fs::read_to_string(path_or_yaml) {
+        Ok(content) if !content.trim().is_empty() => content,
+        Ok(_) => format!("# empty policy file at {path_or_yaml}\nversion: 1\n"),
+        Err(_) => format!("# could not read policy at {path_or_yaml}\nversion: 1\n"),
+    }
+}
+
+/// If a stored profile still holds a host path (pre–inline-policy boards),
+/// replace it with file contents when the path is readable.
+pub fn migrate_profile_policy_to_inline(policy: &str) -> Option<String> {
+    if is_inline_policy_yaml(policy) {
+        return None;
+    }
+    match std::fs::read_to_string(policy) {
+        Ok(content) if !content.trim().is_empty() => Some(content),
+        _ => None,
     }
 }
 

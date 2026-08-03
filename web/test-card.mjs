@@ -596,7 +596,7 @@ const fixtureProfiles = [
     id: "default",
     name: "Default",
     image: "img:1",
-    policy: "policy.yaml",
+    policy: "version: 1\n# default\n",
     cpu: "2",
     memory: "4Gi",
   },
@@ -604,7 +604,7 @@ const fixtureProfiles = [
     id: "heavy",
     name: "Heavy",
     image: "img:heavy",
-    policy: "policy.yaml",
+    policy: "version: 1\n# heavy\n",
     cpu: "8",
     memory: "16Gi",
   },
@@ -636,13 +636,22 @@ assert(!sandboxesHtml.includes("data-testid=\"sandbox-destroy\""),
   "Sandboxes panel must not offer live OpenShell sandbox destroy");
 assert(!/destroy sandbox|delete environment|openshell.*delete/i.test(sandboxesHtml),
   "Sandboxes panel must not offer live OpenShell sandbox destroy controls");
+// List meta should not dump full YAML or imply a host path field.
+assert(!sandboxesHtml.includes("version: 1"), "Profile list should not dump inline policy YAML");
 
 const createFormHtml = renderToString(
   React.createElement(SandboxesPanelView, {
     profiles: fixtureProfiles,
     defaultId: "default",
     editingId: "",
-    draft: { id: "", name: "CI", image: "img:ci", policy: "p.yaml", cpu: "", memory: "" },
+    draft: {
+      id: "",
+      name: "CI",
+      image: "img:ci",
+      policy: "version: 1\nfilesystem_policy:\n  include_workdir: true\n",
+      cpu: "",
+      memory: "",
+    },
     onDraftChange: () => {},
     onStartCreate: () => {},
     onStartEdit: () => {},
@@ -655,6 +664,11 @@ assert(createFormHtml.includes("data-testid=\"sandbox-profile-form\""), "Create/
 assert(!createFormHtml.includes("data-testid=\"sandbox-field-id\""),
   "Create form must not require an Id field (server slugs from name)");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-name\""), "Create form should include name");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-policy\""), "Form should include policy field");
+assert(createFormHtml.includes("<textarea"), "Policy control should be a textarea for inline YAML");
+assert(/not a path on the host/i.test(createFormHtml), "Policy hint must not ask for a host filesystem path");
+assert(!/policy path|path to.*policy|host path/i.test(createFormHtml),
+  "Settings must not ask for a host filesystem policy path");
 assert(createFormHtml.includes("data-testid=\"sandbox-save\""), "Form should include save");
 
 const editFormHtml = renderToString(
@@ -662,7 +676,14 @@ const editFormHtml = renderToString(
     profiles: fixtureProfiles,
     defaultId: "default",
     editingId: "default",
-    draft: { id: "default", name: "Default", image: "img", policy: "p.yaml", cpu: "", memory: "" },
+    draft: {
+      id: "default",
+      name: "Default",
+      image: "img",
+      policy: "version: 1\n# default\n",
+      cpu: "",
+      memory: "",
+    },
     onDraftChange: () => {},
     onStartCreate: () => {},
     onStartEdit: () => {},

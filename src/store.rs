@@ -347,7 +347,13 @@ impl Board {
                         );
                     }
                     *board.state.write().unwrap() = state;
-                    if healed > 0 || renamed > 0 {
+                    let migrated = board.migrate_sandbox_policies_to_inline();
+                    if healed > 0 || renamed > 0 || migrated > 0 {
+                        if migrated > 0 {
+                            tracing::info!(
+                                "migrated {migrated} sandbox profile polic(ies) from host path to inline YAML"
+                            );
+                        }
                         board.dirty.store(true, Ordering::Relaxed);
                         board.flush();
                     }
@@ -391,7 +397,13 @@ impl Board {
         let mut board = Self::new(schema, json_path);
         board.store = Some(store);
         *board.state.write().unwrap() = state;
-        if healed > 0 || renamed > 0 {
+        let migrated = board.migrate_sandbox_policies_to_inline();
+        if healed > 0 || renamed > 0 || migrated > 0 {
+            if migrated > 0 {
+                tracing::info!(
+                    "migrated {migrated} sandbox profile polic(ies) from host path to inline YAML"
+                );
+            }
             board.dirty.store(true, Ordering::Relaxed);
             board.flush();
         }
@@ -1847,7 +1859,8 @@ impl Board {
 
     /// Seed one profile from YAML AgentConfig when the catalog is empty.
     /// Returns true when a profile was inserted. YAML remains fallback only
-    /// after the catalog is populated.
+    /// after the catalog is populated. Policy is stored as YAML **content**
+    /// (file at `agents.policy` is read once at seed).
     pub fn seed_sandbox_profiles_if_empty(&self) -> bool {
         self.seed_sandbox_profiles_from(&self.schema.execution.agents)
     }
@@ -1866,7 +1879,7 @@ impl Board {
                 id: id.clone(),
                 name: "Default".into(),
                 image: agents.image.clone(),
-                policy: agents.policy.clone(),
+                policy: resolve_policy_yaml(&agents.policy),
                 cpu: agents.cpu.clone(),
                 memory: agents.memory.clone(),
             },
@@ -1875,6 +1888,24 @@ impl Board {
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         true
+    }
+
+    /// Upgrade catalog entries that still store a host path as `policy`.
+    /// Returns how many profiles were rewritten.
+    pub fn migrate_sandbox_policies_to_inline(&self) -> usize {
+        let mut s = self.state.write().unwrap();
+        let mut n = 0usize;
+        for profile in s.sandbox_profiles.values_mut() {
+            if let Some(content) = migrate_profile_policy_to_inline(&profile.policy) {
+                profile.policy = content;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            drop(s);
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        n
     }
 
     pub fn list_sandbox_profiles(&self) -> Vec<SandboxProfile> {
@@ -1903,12 +1934,15 @@ impl Board {
         if profile.image.trim().is_empty() {
             return Err("sandbox profile image must not be empty".into());
         }
+        // Empty-check with trim, but keep the YAML text as submitted (trailing
+        // newline is normal for policy files / textareas).
         if profile.policy.trim().is_empty() {
             return Err("sandbox profile policy must not be empty".into());
         }
         let name = profile.name.trim().to_string();
         let image = profile.image.trim().to_string();
-        let policy = profile.policy.trim().to_string();
+        // Keep YAML as submitted (trailing newline is normal for policy textareas).
+        let policy = profile.policy;
         let cpu = profile.cpu.filter(|c| !c.trim().is_empty());
         let memory = profile.memory.filter(|m| !m.trim().is_empty());
         let mut s = self.state.write().unwrap();
@@ -7499,10 +7533,12 @@ mod tests {
         assert_eq!(updated2.last_conflict_files, vec!["src/store.rs"]);
     }
 
+    const SEED_POLICY_YAML: &str = "version: 1\n# seed-policy\nfilesystem_policy:\n  include_workdir: true\n";
+
     fn agents_for_seed() -> AgentConfig {
         AgentConfig {
             image: "seed-image:test".into(),
-            policy: "sandbox/seed-policy.yaml".into(),
+            policy: SEED_POLICY_YAML.into(),
             cpu: Some("4".into()),
             memory: Some("8Gi".into()),
             ..Default::default()
@@ -7522,13 +7558,38 @@ mod tests {
         let p = &profiles[0];
         assert_eq!(p.id, "default");
         assert_eq!(p.image, "seed-image:test");
-        assert_eq!(p.policy, "sandbox/seed-policy.yaml");
+        assert_eq!(p.policy, SEED_POLICY_YAML);
         assert_eq!(p.cpu.as_deref(), Some("4"));
         assert_eq!(p.memory.as_deref(), Some("8Gi"));
         assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
         // Second seed is a no-op.
         assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
         assert_eq!(b.list_sandbox_profiles().len(), 1);
+    }
+
+    #[test]
+    fn sandbox_profiles_seed_reads_policy_file_contents() {
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-sbx-seed-file-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("policy.yaml");
+        let yaml = "version: 1\n# from-file\n";
+        std::fs::write(&path, yaml).unwrap();
+
+        let b = Board::new(Schema::default(), dir.join("board.json"));
+        let agents = AgentConfig {
+            image: "from-file:1".into(),
+            policy: path.to_string_lossy().into(),
+            ..Default::default()
+        };
+        assert!(b.seed_sandbox_profiles_from(&agents));
+        assert_eq!(b.list_sandbox_profiles()[0].policy, yaml);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -7543,7 +7604,7 @@ mod tests {
                 id: "heavy".into(),
                 name: "Heavy".into(),
                 image: "heavy:latest".into(),
-                policy: "sandbox/policy.yaml".into(),
+                policy: SEED_POLICY_YAML.into(),
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
             })
@@ -7589,7 +7650,7 @@ mod tests {
             id: "alt".into(),
             name: "Alt".into(),
             image: "alt:latest".into(),
-            policy: "sandbox/policy.yaml".into(),
+            policy: SEED_POLICY_YAML.into(),
             cpu: None,
             memory: None,
         })
@@ -7637,7 +7698,7 @@ mod tests {
             id: "ci".into(),
             name: "CI".into(),
             image: "ci:1".into(),
-            policy: "sandbox/policy.yaml".into(),
+            policy: SEED_POLICY_YAML.into(),
             cpu: Some("1".into()),
             memory: None,
         })
@@ -7660,16 +7721,25 @@ mod tests {
         assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
         // Catalog already populated — must not re-seed over existing profiles.
         assert!(!restored.seed_sandbox_profiles_from(&agents_for_seed()));
+        assert!(
+            crate::model::is_inline_policy_yaml(
+                &restored.get_sandbox_profile("ci").unwrap().policy
+            ),
+            "persisted policy must remain inline YAML"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn resolve_sandbox_create_project_override_then_default_then_yaml() {
+        let yaml_policy = "version: 1\n# yaml-fallback\n";
+        let def_policy = "version: 1\n# default-profile\n";
+        let alt_policy = "version: 1\n# alt-profile\n";
         let mut schema = Schema::default();
         schema.execution.agents = AgentConfig {
             image: "yaml-img".into(),
-            policy: "sandbox/yaml.yaml".into(),
+            policy: yaml_policy.into(),
             cpu: Some("1".into()),
             memory: Some("1Gi".into()),
             ..Default::default()
@@ -7681,7 +7751,7 @@ mod tests {
                 std::process::id()
             )),
         );
-        // Empty catalog → YAML.
+        // Empty catalog → YAML (inline content from agents.policy).
         let project = b
             .create(None, "P", "why", None, Origin::Human, true, None)
             .unwrap();
@@ -7699,12 +7769,13 @@ mod tests {
         let yaml = b.resolve_sandbox_create(task.id);
         assert!(yaml.profile_id.is_none());
         assert_eq!(yaml.image, "yaml-img");
+        assert_eq!(yaml.policy, yaml_policy);
 
         b.upsert_sandbox_profile(SandboxProfile {
             id: "default".into(),
             name: "Default".into(),
             image: "def-img".into(),
-            policy: "sandbox/def.yaml".into(),
+            policy: def_policy.into(),
             cpu: Some("2".into()),
             memory: None,
         })
@@ -7713,12 +7784,13 @@ mod tests {
         let def = b.resolve_sandbox_create(task.id);
         assert_eq!(def.profile_id.as_deref(), Some("default"));
         assert_eq!(def.image, "def-img");
+        assert_eq!(def.policy, def_policy);
 
         b.upsert_sandbox_profile(SandboxProfile {
             id: "alt".into(),
             name: "Alt".into(),
             image: "alt-img".into(),
-            policy: "sandbox/alt.yaml".into(),
+            policy: alt_policy.into(),
             cpu: None,
             memory: Some("8Gi".into()),
         })
@@ -7728,6 +7800,7 @@ mod tests {
         let over = b.resolve_sandbox_create(task.id);
         assert_eq!(over.profile_id.as_deref(), Some("alt"));
         assert_eq!(over.image, "alt-img");
+        assert_eq!(over.policy, alt_policy);
         assert_eq!(over.memory.as_deref(), Some("8Gi"));
     }
 
@@ -7744,7 +7817,7 @@ mod tests {
                 id: String::new(),
                 name: "Heavy CI".into(),
                 image: "img:ci".into(),
-                policy: "policy.yaml".into(),
+                policy: SEED_POLICY_YAML.into(),
                 cpu: None,
                 memory: None,
             })
@@ -7758,7 +7831,7 @@ mod tests {
                 id: String::new(),
                 name: "Default".into(),
                 image: "img:2".into(),
-                policy: "p.yaml".into(),
+                policy: SEED_POLICY_YAML.into(),
                 cpu: None,
                 memory: None,
             })
@@ -7771,7 +7844,7 @@ mod tests {
                 id: "".into(),
                 name: "!!!".into(),
                 image: "img:x".into(),
-                policy: "p.yaml".into(),
+                policy: SEED_POLICY_YAML.into(),
                 cpu: None,
                 memory: None,
             })
@@ -7781,5 +7854,35 @@ mod tests {
         // Seeded default still present and untouched.
         assert!(b.get_sandbox_profile("default").is_some());
         assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn migrate_sandbox_policies_path_to_inline_yaml() {
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-sbx-migrate-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy_path = dir.join("legacy.yaml");
+        let yaml = "version: 1\n# legacy-migrated\n";
+        std::fs::write(&policy_path, yaml).unwrap();
+
+        let b = Board::new(Schema::default(), dir.join("board.json"));
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "legacy".into(),
+            name: "Legacy".into(),
+            image: "img:1".into(),
+            policy: policy_path.to_string_lossy().into(),
+            cpu: None,
+            memory: None,
+        })
+        .unwrap();
+        assert_eq!(b.migrate_sandbox_policies_to_inline(), 1);
+        assert_eq!(b.get_sandbox_profile("legacy").unwrap().policy, yaml);
+        assert_eq!(b.migrate_sandbox_policies_to_inline(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
