@@ -143,6 +143,12 @@ pub struct NeedsYou {
     pub blocked_secs: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
+pub struct ReadyCard {
+    pub id: ItemId,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct GoalDigest {
     pub goal_id: ItemId,
@@ -155,6 +161,7 @@ pub struct GoalDigest {
     pub running_stalled: usize,
     pub backlog: usize,
     pub in_review: usize,
+    pub ready_to_dispatch: Vec<ReadyCard>,
     pub latest_story: Option<String>,
 }
 
@@ -3119,6 +3126,24 @@ fn check_split_relatedness(
                 let warn_secs =
                     (self.schema.execution.agents.agent_timeout_secs as i64).max(1) / 10;
 
+                let mut ready_items: Vec<&&WorkItem> = members
+                    .iter()
+                    .filter(|i| i.state == State::Backlog)
+                    .filter(|i| i.level.as_deref() != Some("Project"))
+                    .filter(|i| !Self::has_children(&s, i.id))
+                    .filter(|i| Self::unresolved_blockers(&s, i).is_empty())
+                    .filter(|i| !i.parked)
+                    .filter(|i| !i.awaiting_dispatch)
+                    .collect();
+                ready_items.sort_by_key(|i| i.entered_state_at);
+                let ready_to_dispatch = ready_items
+                    .into_iter()
+                    .map(|i| ReadyCard {
+                        id: i.id,
+                        title: i.title.clone(),
+                    })
+                    .collect();
+
                 Some(GoalDigest {
                     goal_id: gid,
                     goal: goal.title.clone(),
@@ -3138,6 +3163,7 @@ fn check_split_relatedness(
                         .count(),
                     backlog: members.iter().filter(|i| i.state == State::Backlog).count(),
                     in_review: members.iter().filter(|i| i.state == State::Review).count(),
+                    ready_to_dispatch,
                     latest_story: s.stories.get(&gid).and_then(|v| v.last()).map(|l| l.text.clone()),
                 })
             })
@@ -4320,6 +4346,48 @@ mod tests {
             b.snapshot().goals.iter().any(|g| g.id == keep.id && !g.archived),
             "active Project still listed"
         );
+    }
+
+    #[test]
+    fn board_digest_lists_ready_to_dispatch_cards() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-digest-ready-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(None, "Test Project", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let initial_id = b
+            .children_of(project.id)
+            .into_iter()
+            .next()
+            .expect("seeded initial plan");
+
+        let digest_before = b.digest();
+        let goal_before = digest_before
+            .goals
+            .iter()
+            .find(|g| g.goal_id == project.id)
+            .expect("goal");
+        assert_eq!(goal_before.ready_to_dispatch.len(), 1);
+        assert_eq!(goal_before.ready_to_dispatch[0].id, initial_id);
+        assert_eq!(
+            goal_before.ready_to_dispatch[0].title,
+            "Initial Plan for Test Project"
+        );
+
+
+        b.enqueue_dispatch(initial_id).expect("dispatch");
+        let digest_dispatched = b.digest();
+        let goal_dispatched = digest_dispatched
+            .goals
+            .iter()
+            .find(|g| g.goal_id == project.id)
+            .expect("goal");
+        assert!(goal_dispatched.ready_to_dispatch.is_empty());
     }
 
     #[test]

@@ -199,6 +199,35 @@ main > :first-child { flex: 1; min-width: 0; }
 
 .cockpit-needs { margin: 0; }
 .cockpit-needs-list { display: flex; flex-direction: column; gap: 10px; }
+
+.cockpit-ready { margin: 0; }
+.cockpit-ready-list { display: flex; flex-direction: column; gap: 10px; }
+.cockpit-ready-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.cockpit-ready-main { flex: 1; min-width: 220px; }
+.cockpit-ready-title {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 14px;
+  text-align: left;
+}
+.cockpit-ready-title .id { color: var(--accent); }
+.cockpit-ready-title:hover { color: var(--accent); }
+.cockpit-ready-intent { margin: 4px 0 0; font-size: 12px; color: var(--dim); }
+.cockpit-ready-actions { display: flex; align-items: center; gap: 8px; }
+
 .cockpit-need {
   display: flex;
   flex-wrap: wrap;
