@@ -645,16 +645,8 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
         }
     };
 
-    let spec = SandboxSpec {
-        name: name.clone(),
-        from: cfg.image.clone(),
-        providers: cfg.providers.clone(),
-        policy: Some(cfg.policy.clone()),
-        env: agent_env(cfg),
-        labels: vec![(LABEL_ITEM.to_string(), id.to_string())],
-        cpu: cfg.cpu.clone(),
-        memory: cfg.memory.clone(),
-    };
+    let resolved = board.resolve_sandbox_create(id);
+    let spec = sandbox_spec_for_card(id, &name, cfg, &resolved);
 
     let result = run_inside(
         board, os, cfg, &agent_id, &grant, &name, &branch, &spec, is_reused,
@@ -662,6 +654,25 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     .await;
     finalize(os, id, &name, &result).await;
     result
+}
+
+/// Build the OpenShell create spec from a resolved profile (or YAML fallback).
+fn sandbox_spec_for_card(
+    id: ItemId,
+    name: &str,
+    cfg: &AgentConfig,
+    resolved: &crate::model::ResolvedSandboxCreate,
+) -> SandboxSpec {
+    SandboxSpec {
+        name: name.to_string(),
+        from: resolved.image.clone(),
+        providers: cfg.providers.clone(),
+        policy: Some(resolved.policy.clone()),
+        env: agent_env(cfg),
+        labels: vec![(LABEL_ITEM.to_string(), id.to_string())],
+        cpu: resolved.cpu.clone(),
+        memory: resolved.memory.clone(),
+    }
 }
 
 /// Take over a run this process did not start: join it at the watch step, with
@@ -3549,6 +3560,90 @@ mod tests {
         assert!(script.contains("git rebase upstream/main"), "script: {script}");
         assert!(script.contains("git diff --name-only --diff-filter=U"), "script: {script}");
         assert!(script.contains(MARK_CONFLICT_FILES), "script: {script}");
+    }
+
+    /// Project override wins over the global default; unset Project inherits
+    /// the default when the supervisor builds create knobs.
+    #[test]
+    fn sandbox_create_uses_project_override_over_default() {
+        use crate::model::{Origin, SandboxProfile};
+
+        let mut schema = crate::schema::Schema::default();
+        schema.execution.agents.image = "yaml-image:fallback".into();
+        schema.execution.agents.policy = "sandbox/yaml-policy.yaml".into();
+        schema.execution.agents.cpu = Some("1".into());
+        schema.execution.agents.memory = Some("1Gi".into());
+
+        let board = Arc::new(crate::store::Board::new(
+            schema,
+            std::env::temp_dir().join(format!(
+                "honr-test-sbx-resolve-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+
+        board
+            .upsert_sandbox_profile(SandboxProfile {
+                id: "default".into(),
+                name: "Default".into(),
+                image: "default-image:1".into(),
+                policy: "sandbox/default.yaml".into(),
+                cpu: Some("2".into()),
+                memory: Some("4Gi".into()),
+            })
+            .unwrap();
+        board
+            .upsert_sandbox_profile(SandboxProfile {
+                id: "heavy".into(),
+                name: "Heavy".into(),
+                image: "heavy-image:1".into(),
+                policy: "sandbox/heavy.yaml".into(),
+                cpu: Some("8".into()),
+                memory: Some("16Gi".into()),
+            })
+            .unwrap();
+        board.set_default_sandbox_profile("default").unwrap();
+
+        let project = board
+            .create(None, "Sbx Proj", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "do it",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+
+        // Unset Project → global default.
+        let unset = board.resolve_sandbox_create(task.id);
+        let unset_spec =
+            sandbox_spec_for_card(task.id, "honr-card-test", &board.schema.execution.agents, &unset);
+        assert_eq!(unset.profile_id.as_deref(), Some("default"));
+        assert_eq!(unset_spec.from, "default-image:1");
+        assert_eq!(unset_spec.policy.as_deref(), Some("sandbox/default.yaml"));
+        assert_eq!(unset_spec.cpu.as_deref(), Some("2"));
+        assert_eq!(unset_spec.memory.as_deref(), Some("4Gi"));
+
+        // Project override beats default.
+        board
+            .set_project_sandbox_profile(project.id, Some("heavy".into()))
+            .unwrap();
+        let over = board.resolve_sandbox_create(task.id);
+        let over_spec =
+            sandbox_spec_for_card(task.id, "honr-card-test", &board.schema.execution.agents, &over);
+        assert_eq!(over.profile_id.as_deref(), Some("heavy"));
+        assert_eq!(over_spec.from, "heavy-image:1");
+        assert_eq!(over_spec.policy.as_deref(), Some("sandbox/heavy.yaml"));
+        assert_eq!(over_spec.cpu.as_deref(), Some("8"));
+        assert_eq!(over_spec.memory.as_deref(), Some("16Gi"));
     }
 }
 

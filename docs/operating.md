@@ -77,6 +77,21 @@ config is read once at startup, there is no hot reload and no runtime toggle.
 > once already, swept in by `git add -A`, which would have made a fresh clone
 > spend money on startup.
 
+## Sandbox profile resolution
+
+When the supervisor creates an OpenShell sandbox for a card, create knobs
+(`--from` image, policy, cpu, memory) resolve in this order:
+
+1. **Project override** — `sandbox_profile_id` on the containing Project, if set
+   and present in the board profile catalog
+2. **Global default** — `default_sandbox_profile_id` on durable board state
+3. **YAML fallback** — `execution.agents` `image` / `policy` / `cpu` / `memory`
+   in `honr.yaml` (also used to seed the catalog when it is empty at load)
+
+Profiles are managed via Settings (REST: `/api/sandbox-profiles`). Process
+knobs (auth, repo, engine, budgets, concurrency) stay in YAML and are not
+part of a profile.
+
 ## What dispatch decides, and when
 
 Cockpit decides what starts. A Backlog card is inert until someone calls
