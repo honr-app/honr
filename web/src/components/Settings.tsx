@@ -62,6 +62,8 @@ const emptyAgentRuntime = (): AgentRuntimeConfig => ({
   daily_budget_cents: null,
   agent_timeout_secs: 1800,
   max_attempts: 3,
+  branch_prefix: "honr",
+  quality_gates: [],
 });
 
 /**
@@ -662,10 +664,11 @@ export function AgentRuntimePanelView({
       <h2 id="agent-runtime-title">Agent runtime</h2>
       <p className="dim">
         Process knobs for OpenShell sandboxes: default engine, provider names,
-        Vertex project/location/model, concurrency and budgets. Seeded from{" "}
-        <code>honr.yaml</code>; edits persist on the Board and apply to the next
-        sandbox create. Image/policy live under Sandboxes. Host credential paths
-        stay documented overrides — not silent home assumptions.
+        Vertex project/location/model, branch prefix, quality gates, concurrency
+        and budgets. Seeded from <code>honr.yaml</code>; edits persist on the
+        Board and apply to the next sandbox create. Image/policy live under
+        Sandboxes. Host credential paths stay documented overrides — not silent
+        home assumptions.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -865,6 +868,48 @@ export function AgentRuntimePanelView({
         </div>
 
         <label>
+          Branch prefix
+          <input
+            className="search-input"
+            value={draft.branch_prefix}
+            disabled={busy}
+            placeholder="honr"
+            onChange={(e) => onDraftChange({ ...draft, branch_prefix: e.target.value })}
+            data-testid="agent-runtime-field-branch-prefix"
+          />
+          <span className="dim sandbox-field-hint">
+            Branches are <code>{"{prefix}/card-{id}"}</code>; sandboxes{" "}
+            <code>{"{prefix}-card-{id}-a{n}"}</code>. Default <code>honr</code>.
+          </span>
+        </label>
+
+        <label>
+          Quality gates
+          <textarea
+            className="search-input"
+            rows={3}
+            value={(draft.quality_gates ?? []).join("\n")}
+            disabled={busy}
+            placeholder={"cargo test --offline --locked\ncargo clippy --offline -- -D warnings"}
+            onChange={(e) =>
+              onDraftChange({
+                ...draft,
+                quality_gates: e.target.value
+                  .split("\n")
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              })
+            }
+            data-testid="agent-runtime-field-quality-gates"
+          />
+          <span className="dim sandbox-field-hint">
+            One shell command per line, injected into agent briefings. Leave empty
+            so non-Rust Projects are not told to run cargo — put per-repo gates in
+            the Project prompt instead.
+          </span>
+        </label>
+
+        <label>
           Max attempts
           <input
             className="search-input"
@@ -914,6 +959,8 @@ function AgentRuntimePanel() {
           ...rt,
           vertex: { ...emptyAgentRuntime().vertex, ...(rt.vertex ?? {}) },
           providers: rt.providers ?? [],
+          quality_gates: rt.quality_gates ?? [],
+          branch_prefix: rt.branch_prefix || "honr",
         });
         setError(null);
       })
@@ -956,9 +1003,11 @@ function AgentRuntimePanel() {
               ...saved,
               vertex: { ...emptyAgentRuntime().vertex, ...(saved.vertex ?? {}) },
               providers: saved.providers ?? [],
+              quality_gates: saved.quality_gates ?? [],
+              branch_prefix: saved.branch_prefix || "honr",
             });
             setSavedHint(
-              "Saved. Next sandbox create / agent_env use these providers, Vertex, and budgets.",
+              "Saved. Next sandbox create / agent_env use these providers, Vertex, budgets, prefix, and gates.",
             );
           })
           .catch((e) => setError(String(e)))

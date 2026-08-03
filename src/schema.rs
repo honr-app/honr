@@ -187,6 +187,16 @@ pub struct AgentConfig {
     /// nothing, so without a count it requeues forever.
     #[serde(default = "d_max_attempts")]
     pub max_attempts: u32,
+    /// Git branch / sandbox name stem. Branches are `{prefix}/card-{id}`;
+    /// sandboxes are `{slug}-card-{id}-a{n}`. Default `honr`.
+    #[serde(default = "d_branch_prefix")]
+    pub branch_prefix: String,
+    /// Shell commands the briefing lists as mandatory pre-publish checks.
+    /// Empty → briefing does not invent cargo (or any other toolchain). Prefer
+    /// naming gates in Project `project_prompt` for per-repo installs; this
+    /// list is the install-wide Settings / yaml default.
+    #[serde(default)]
+    pub quality_gates: Vec<String>,
 }
 
 fn d_image() -> String { "honr-sandbox:latest".into() }
@@ -195,6 +205,37 @@ fn d_engine() -> String { "cursor".into() }
 fn d_concurrent() -> usize { 2 }
 fn d_agent_timeout() -> u64 { 1800 }
 fn d_max_attempts() -> u32 { 3 }
+fn d_branch_prefix() -> String { "honr".into() }
+
+/// Normalize a branch prefix: trim, strip surrounding `/`, fall back to `honr`.
+pub fn normalize_branch_prefix(prefix: &str) -> String {
+    let p = prefix.trim().trim_matches('/');
+    if p.is_empty() {
+        d_branch_prefix()
+    } else {
+        p.to_string()
+    }
+}
+
+/// OpenShell-safe slug of the branch prefix (`/` → `-`).
+pub fn sandbox_prefix_slug(prefix: &str) -> String {
+    normalize_branch_prefix(prefix).replace('/', "-")
+}
+
+/// Card feature branch: `{prefix}/card-{id}`.
+pub fn card_branch_name(prefix: &str, id: impl std::fmt::Display) -> String {
+    format!("{}/card-{}", normalize_branch_prefix(prefix), id)
+}
+
+/// Sandbox name: `{slug}-card-{id}-a{attempt}`.
+pub fn card_sandbox_name(prefix: &str, id: impl std::fmt::Display, attempt: u32) -> String {
+    format!("{}-card-{}-a{}", sandbox_prefix_slug(prefix), id, attempt)
+}
+
+/// Prefix match stem for reconcile keep: `{slug}-card-{id}-`.
+pub fn card_sandbox_stem(prefix: &str, id: impl std::fmt::Display) -> String {
+    format!("{}-card-{}-", sandbox_prefix_slug(prefix), id)
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -213,6 +254,8 @@ impl Default for AgentConfig {
             daily_budget_cents: None,
             agent_timeout_secs: d_agent_timeout(),
             max_attempts: d_max_attempts(),
+            branch_prefix: d_branch_prefix(),
+            quality_gates: Vec::new(),
         }
     }
 }
@@ -380,6 +423,18 @@ mod tests {
         s.execution.agents.validate().expect("shipped agent config is valid");
         let db = s.board.database.parsed().expect("board.database.url parses");
         assert_eq!(db.backend(), crate::db::DatabaseBackend::Sqlite);
+    }
+
+    #[test]
+    fn card_branch_and_sandbox_names_use_prefix() {
+        assert_eq!(card_branch_name("honr", 7), "honr/card-7");
+        assert_eq!(card_branch_name("acme", 7), "acme/card-7");
+        assert_eq!(card_sandbox_name("honr", 7, 2), "honr-card-7-a2");
+        assert_eq!(card_sandbox_name("acme", 7, 1), "acme-card-7-a1");
+        assert_eq!(card_branch_name("  /acme/  ", 3), "acme/card-3");
+        assert_eq!(card_sandbox_name("acme/widgets", 3, 1), "acme-widgets-card-3-a1");
+        assert_eq!(card_branch_name("", 1), "honr/card-1");
+        assert_eq!(card_sandbox_stem("honr", 9), "honr-card-9-");
     }
 
     #[test]
