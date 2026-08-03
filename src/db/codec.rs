@@ -34,6 +34,9 @@ pub const META_WORKSPACE_BINDING: &str = "workspace_binding";
 /// Optional OpenShell CLI path override (empty string means use PATH default).
 pub const META_OPENSHELL_BIN: &str = "openshell_bin";
 
+/// JSON blob: optional [`crate::model::AgentRuntimeConfig`].
+pub const META_AGENT_RUNTIME: &str = "agent_runtime";
+
 /// Fields without dedicated columns — portable JSON blob on `items.extras_json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ItemExtras {

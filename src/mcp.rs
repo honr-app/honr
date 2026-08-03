@@ -862,7 +862,7 @@ impl Cockpit {
                        ends at agent_timeout_secs; heartbeats do not extend that deadline."
     )]
     fn claim(&self, Parameters(a): Parameters<ClaimArg>) -> Out<crate::store::ClaimGrant> {
-        let timeout = self.board.schema.execution.agents.agent_timeout_secs as i64;
+        let timeout = self.board.effective_agents().agent_timeout_secs as i64;
         let grant = self
             .board
             .claim(a.item_id, &a.agent_id, a.model, timeout)

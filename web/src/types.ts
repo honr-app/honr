@@ -81,6 +81,25 @@ export interface OpenShellSettings {
   binary_path?: string | null;
 }
 
+/** Settings → Agent runtime (process knobs; seeded from honr.yaml). */
+export interface AgentRuntimeVertex {
+  project: string;
+  location: string;
+  model: string;
+}
+
+export interface AgentRuntimeConfig {
+  enabled: boolean;
+  engine: string;
+  providers: string[];
+  vertex: AgentRuntimeVertex;
+  max_concurrent: number;
+  per_card_budget_cents?: number | null;
+  daily_budget_cents?: number | null;
+  agent_timeout_secs: number;
+  max_attempts: number;
+}
+
 /** GET /api/openshell/status — gateway health for Settings. */
 export interface OpenShellStatus {
   healthy: boolean;

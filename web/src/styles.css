@@ -568,6 +568,15 @@ main > :first-child { flex: 1; min-width: 0; }
   background: var(--panel);
   padding: 6px;
 }
+.agent-runtime-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+.agent-runtime-check input[type="checkbox"] {
+  margin-top: 3px;
+}
 .workspace-webhook-hint {
   margin-top: 18px;
   padding-top: 14px;

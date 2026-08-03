@@ -401,6 +401,135 @@ pub struct PlanTaskBrief {
     pub current: bool,
 }
 
+/// Vertex knobs for Settings → Agent runtime (durable board state).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeVertex {
+    #[serde(default)]
+    pub project: String,
+    #[serde(default = "default_runtime_location")]
+    pub location: String,
+    #[serde(default = "default_runtime_model")]
+    pub model: String,
+}
+
+fn default_runtime_location() -> String {
+    "global".into()
+}
+fn default_runtime_model() -> String {
+    "claude-opus-5".into()
+}
+
+impl Default for AgentRuntimeVertex {
+    fn default() -> Self {
+        Self {
+            project: String::new(),
+            location: default_runtime_location(),
+            model: default_runtime_model(),
+        }
+    }
+}
+
+/// Per-install agent process knobs (Settings → Agent runtime).
+///
+/// Seeded from `honr.yaml` `execution.agents`; Board is source of truth after.
+/// Image / policy / cpu / memory stay on sandbox profiles; work remotes stay
+/// on card `pull_request` / yaml repo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentRuntimeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Primary agent CLI (`cursor`, `agy`, or `claude`).
+    #[serde(default = "default_runtime_engine")]
+    pub engine: String,
+    /// OpenShell `--provider` names (must match local gateway registrations).
+    #[serde(default)]
+    pub providers: Vec<String>,
+    #[serde(default)]
+    pub vertex: AgentRuntimeVertex,
+    #[serde(default = "default_runtime_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(default)]
+    pub per_card_budget_cents: Option<u64>,
+    #[serde(default)]
+    pub daily_budget_cents: Option<u64>,
+    #[serde(default = "default_runtime_timeout")]
+    pub agent_timeout_secs: u64,
+    #[serde(default = "default_runtime_attempts")]
+    pub max_attempts: u32,
+}
+
+fn default_runtime_engine() -> String {
+    "cursor".into()
+}
+fn default_runtime_concurrent() -> usize {
+    2
+}
+fn default_runtime_timeout() -> u64 {
+    1800
+}
+fn default_runtime_attempts() -> u32 {
+    3
+}
+
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            engine: default_runtime_engine(),
+            providers: Vec::new(),
+            vertex: AgentRuntimeVertex::default(),
+            max_concurrent: default_runtime_concurrent(),
+            per_card_budget_cents: None,
+            daily_budget_cents: None,
+            agent_timeout_secs: default_runtime_timeout(),
+            max_attempts: default_runtime_attempts(),
+        }
+    }
+}
+
+impl AgentRuntimeConfig {
+    /// Trim string fields; drop blank provider names.
+    pub fn normalized(mut self) -> Self {
+        self.engine = self.engine.trim().to_string();
+        if self.engine.is_empty() {
+            self.engine = default_runtime_engine();
+        }
+        self.providers = self
+            .providers
+            .into_iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        self.vertex.project = self.vertex.project.trim().to_string();
+        self.vertex.location = {
+            let loc = self.vertex.location.trim();
+            if loc.is_empty() {
+                default_runtime_location()
+            } else {
+                loc.to_string()
+            }
+        };
+        self.vertex.model = {
+            let m = self.vertex.model.trim();
+            if m.is_empty() {
+                default_runtime_model()
+            } else {
+                m.to_string()
+            }
+        };
+        if self.max_concurrent == 0 {
+            self.max_concurrent = 1;
+        }
+        if self.agent_timeout_secs == 0 {
+            self.agent_timeout_secs = default_runtime_timeout();
+        }
+        if self.max_attempts == 0 {
+            self.max_attempts = default_runtime_attempts();
+        }
+        self
+    }
+}
+
 /// Per-install forge identity + beads Issue sync (Settings → Forge).
 /// Work remotes are **not** stored here — they live on each card's
 /// [`PullRequest`] after the agent reports. See `docs/generalization.md`.

@@ -2,6 +2,7 @@
 //! the pixels and the agent API can't drift apart.
 
 use crate::model::{ItemId, SandboxProfile, State, WorkItem, WorkspaceBinding};
+use crate::model::AgentRuntimeConfig;
 use crate::store::{AncestryLine, SharedBoard};
 
 use axum::extract::{Path, State as AxState};
@@ -73,6 +74,7 @@ pub fn routes() -> Router<SharedBoard> {
             post(set_default_sandbox_profile),
         )
         .route("/workspace", get(get_workspace).put(put_workspace))
+        .route("/agent-runtime", get(get_agent_runtime).put(put_agent_runtime))
         .route("/openshell/status", get(openshell_status))
         .route("/openshell", get(get_openshell).put(put_openshell))
 }
@@ -111,8 +113,9 @@ async fn item_detail(
     Path(id): Path<ItemId>,
 ) -> ApiResult<ItemDetail> {
     let item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
-    let default_engine = b.schema.execution.agents.engine.clone();
-    let default_model = b.schema.execution.agents.vertex.model.clone();
+    let agents = b.effective_agents();
+    let default_engine = agents.engine.clone();
+    let default_model = agents.vertex.model.clone();
     Ok(Json(ItemDetail {
         ancestry: b.ancestry(id),
         children: b.children_of(id),
@@ -461,6 +464,45 @@ async fn put_workspace(
     Json(req): Json<WorkspaceBinding>,
 ) -> ApiResult<WorkspaceBinding> {
     b.set_workspace_binding(req).map(Json).map_err(ApiError)
+}
+
+// ---------------------------------------------------------------- agent runtime
+
+/// GET returns durable Agent runtime, seeding from yaml when unset so Settings
+/// always has something to edit.
+async fn get_agent_runtime(AxState(b): AxState<SharedBoard>) -> Json<AgentRuntimeConfig> {
+    if b.agent_runtime().is_none() {
+        let _ = b.seed_agent_runtime_if_empty();
+    }
+    Json(
+        b.agent_runtime()
+            .unwrap_or_else(|| runtime_from_yaml(&b.schema.execution.agents)),
+    )
+}
+
+async fn put_agent_runtime(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<AgentRuntimeConfig>,
+) -> Json<AgentRuntimeConfig> {
+    Json(b.set_agent_runtime(req))
+}
+
+fn runtime_from_yaml(agents: &crate::schema::AgentConfig) -> AgentRuntimeConfig {
+    AgentRuntimeConfig {
+        enabled: agents.enabled,
+        engine: agents.engine.clone(),
+        providers: agents.providers.clone(),
+        vertex: crate::model::AgentRuntimeVertex {
+            project: agents.vertex.project.clone(),
+            location: agents.vertex.location.clone(),
+            model: agents.vertex.model.clone(),
+        },
+        max_concurrent: agents.max_concurrent,
+        per_card_budget_cents: agents.per_card_budget_cents,
+        daily_budget_cents: agents.daily_budget_cents,
+        agent_timeout_secs: agents.agent_timeout_secs,
+        max_attempts: agents.max_attempts,
+    }
 }
 
 // ---------------------------------------------------------------- OpenShell connectivity
@@ -1728,5 +1770,63 @@ mod tests {
         let Json(st) = openshell_status(AxState(b.clone())).await;
         assert!(!st.healthy);
         assert!(!st.cli_missing);
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_get_put_persists_and_overlays_effective_agents() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-agent-rt-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut schema = crate::schema::Schema::default();
+        schema.execution.agents.enabled = true;
+        schema.execution.agents.engine = "cursor".into();
+        schema.execution.agents.providers = vec!["yaml-provider".into()];
+        schema.execution.agents.vertex.project = "yaml-proj".into();
+        schema.execution.agents.vertex.location = "global".into();
+        schema.execution.agents.vertex.model = "yaml-model".into();
+        let b = std::sync::Arc::new(crate::store::Board::new(schema, path));
+
+        let Json(seeded) = get_agent_runtime(AxState(b.clone())).await;
+        assert_eq!(seeded.engine, "cursor");
+        assert_eq!(seeded.providers, vec!["yaml-provider".to_string()]);
+        assert_eq!(seeded.vertex.project, "yaml-proj");
+
+        let Json(saved) = put_agent_runtime(
+            AxState(b.clone()),
+            Json(crate::model::AgentRuntimeConfig {
+                enabled: true,
+                engine: "agy".into(),
+                providers: vec!["vertex".into(), "gh-bot".into()],
+                vertex: crate::model::AgentRuntimeVertex {
+                    project: "settings-proj".into(),
+                    location: "us-east5".into(),
+                    model: "claude-opus-5".into(),
+                },
+                max_concurrent: 1,
+                per_card_budget_cents: Some(150),
+                daily_budget_cents: Some(2000),
+                agent_timeout_secs: 600,
+                max_attempts: 2,
+            }),
+        )
+        .await;
+        assert_eq!(saved.engine, "agy");
+        assert_eq!(saved.vertex.location, "us-east5");
+        assert_eq!(saved.providers, vec!["vertex".to_string(), "gh-bot".to_string()]);
+
+        let Json(again) = get_agent_runtime(AxState(b.clone())).await;
+        assert_eq!(again, saved);
+
+        let effective = b.effective_agents();
+        assert_eq!(effective.engine, "agy");
+        assert_eq!(effective.providers, vec!["vertex".to_string(), "gh-bot".to_string()]);
+        assert_eq!(effective.vertex.location, "us-east5");
+        assert_eq!(effective.vertex.project, "settings-proj");
+        assert_eq!(effective.agent_timeout_secs, 600);
+        assert_eq!(effective.per_card_budget_cents, Some(150));
     }
 }

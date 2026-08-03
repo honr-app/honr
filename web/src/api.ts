@@ -1,4 +1,5 @@
 import type {
+  AgentRuntimeConfig,
   OpenShellSettings,
   OpenShellStatus,
   SandboxProfile,
@@ -110,6 +111,11 @@ export const api = {
     fetch("/api/workspace").then(jsonOrThrow),
   putWorkspace: (binding: WorkspaceBinding): Promise<WorkspaceBinding> =>
     put("/workspace", binding),
+
+  getAgentRuntime: (): Promise<AgentRuntimeConfig> =>
+    fetch("/api/agent-runtime").then(jsonOrThrow),
+  putAgentRuntime: (settings: AgentRuntimeConfig): Promise<AgentRuntimeConfig> =>
+    put("/agent-runtime", settings),
 
   getOpenShell: (): Promise<OpenShellSettings> =>
     fetch("/api/openshell").then(jsonOrThrow),
