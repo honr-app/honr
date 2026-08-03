@@ -130,6 +130,13 @@ pub struct ListReadyArg {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct BeadsReadyArg {
+    /// Optional parent epic/bead id to restrict ready tasks to a single project/epic.
+    #[serde(default)]
+    pub parent: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClaimArg {
     pub item_id: ItemId,
     pub agent_id: String,
@@ -267,6 +274,11 @@ pub struct ListReadyOut {
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
 pub struct SplitOut {
     pub items: Vec<ItemId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct BeadsReadyOut {
+    pub items: Vec<crate::beads::BeadsIssue>,
 }
 
 // ---------------------------------------------------------------- the server
@@ -708,6 +720,21 @@ impl Cockpit {
     // =============================================================== worker
 
     #[tool(
+        name = "beads_ready",
+        description = "Query beads for task-only ready work (epics excluded). Use this when \
+                       asking beads 'what's next' for claimable tasks. Optional parent filters \
+                       ready tasks to a specific epic."
+    )]
+    async fn beads_ready(&self, Parameters(a): Parameters<BeadsReadyArg>) -> Out<BeadsReadyOut> {
+        let items = self
+            .board
+            .list_ready_beads(a.parent.as_deref())
+            .await
+            .map_err(bad)?;
+        Ok(ToolJson(BeadsReadyOut { items }))
+    }
+
+    #[tool(
         name = "list_ready",
         description = "WORKER VERB / cockpit alias. Lists Backlog leaves filtered by capabilities. \
                        Not a start queue — cockpit must dispatch before the supervisor claims."
@@ -851,6 +878,9 @@ impl ServerHandler for Cockpit {
         .with_instructions(
                 "honr — an agent orchestration board. You are the cockpit: the human's liaison, \
                  not a dashboard reader.\n\n\
+                 When querying beads for available work or 'what's next', use beads_ready \
+                 (or bd ready --exclude-type=epic with optional --parent=<epic>). Epics are \
+                 containers, not claimable work.\n\n\
                  Start with board_snapshot. Triage in this order, because urgency differs:\n\
                  1. Needs You — an agent is stopped and burning nothing while it waits. Every \
                     minute costs throughput. Resolve these first.\n\
@@ -1258,5 +1288,40 @@ mod tests {
 
         let ack = cockpit.approve_review(Parameters(IdArg { id: t1.id })).expect("approve_review");
         assert_eq!(ack.0.note, format!("approved — dispatch #{} next", t2.id));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_beads_ready_excludes_epics() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-mcp-beads-ready-{}.json",
+            std::process::id()
+        ));
+        let beads_dir = test_dir.join(".beads");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&beads_dir).unwrap();
+
+        let mut board = Board::new(Schema::default(), test_dir.join("board.json"));
+        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
+        beads_client.init_stealth().await.expect("init stealth");
+        board.beads = Some(beads_client.clone());
+        let board = Arc::new(board);
+
+        let epic = beads_client
+            .create_linked("Project Epic", 0, "epic", Some("Epic desc"), None, &[], None)
+            .await
+            .expect("create epic");
+        let task = beads_client
+            .create_linked("Task Item", 1, "task", Some("Task desc"), Some(&epic.id), &[], None)
+            .await
+            .expect("create task");
+
+        let cockpit = Cockpit::new(board);
+        let res = cockpit
+            .beads_ready(Parameters(BeadsReadyArg { parent: None }))
+            .await
+            .expect("beads_ready should succeed");
+
+        assert!(res.0.items.iter().any(|i| i.id == task.id), "ready should include task");
+        assert!(!res.0.items.iter().any(|i| i.issue_type == "epic"), "ready MUST NOT include epics");
     }
 }

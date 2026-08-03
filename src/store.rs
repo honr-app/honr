@@ -1717,11 +1717,9 @@ impl Board {
     }
 
     /// Beads "ready" tasks (`issue_type=task` only), mapped back to board items when present.
-    #[allow(dead_code)]
-    pub async fn list_ready_beads(&self) -> Result<Vec<crate::beads::BeadsIssue>, String> {
+    pub async fn list_ready_beads(&self, parent: Option<&str>) -> Result<Vec<crate::beads::BeadsIssue>, String> {
         if let Some(b) = &self.beads {
-            let ready = b.list_ready().await?;
-            Ok(ready.into_iter().filter(|i| i.issue_type == "task").collect())
+            b.list_ready_focused(parent).await
         } else {
             Err("beads client not initialized".into())
         }
@@ -4768,7 +4766,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             if let Some(p) = board.get(project.id) {
                 if let Some(ref bid) = p.beads_id {
-                    if crate::beads::BeadsClient::is_real_id(bid) {
+                    if crate::beads::BeadsClient::is_real_id(bid) && p.github_issue_url.is_some() {
                         real_project_id = Some(bid.clone());
                         break;
                     }

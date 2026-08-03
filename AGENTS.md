@@ -29,7 +29,7 @@ for beads workflow context when needed.
 ## Quick Reference
 
 ```bash
-bd ready              # Find available work
+bd ready --exclude-type=epic  # Find available task work (excludes non-claimable epics; add --parent=<epic> to scope)
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work atomically
 bd close <id>         # Complete work
@@ -77,6 +77,7 @@ bd close <id>         # Complete work
 ### Rules
 
 - Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- When asking beads what's next, use `bd ready --exclude-type=epic` (and optional `--parent=<epic>`) or `beads_ready` MCP tool — epics are non-claimable work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
@@ -124,7 +125,7 @@ Use Beads (`bd`) for durable task tracking in repositories that include it. Use 
 ### Quick Reference
 
 ```bash
-bd ready                # Find available work
+bd ready --exclude-type=epic  # Find available task work (excludes non-claimable epics)
 bd show <id>            # View issue details
 bd update <id> --claim  # Claim work
 bd close <id>           # Complete work
