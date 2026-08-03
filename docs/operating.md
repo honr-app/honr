@@ -9,6 +9,24 @@ cargo run           # :8080 — API, SSE, MCP, and web/dist if built
 No podman, no gateway, no credentials needed. Agents are off by default.
 `HONR_PORT` overrides the port. State is `honr.json` in the working directory.
 
+### Local GitHub webhooks (`gh webhook forward`)
+
+Ingress is `POST /api/webhooks/github`. For a merged PR into the default branch,
+honr emits `MainAdvanced` and, when a Review/NeedsHuman card's `pr_url` matches,
+moves that card to Done (beads close + `github_push` closes the linked Issue).
+
+```bash
+gh extension install cli/gh-webhook   # once
+
+gh webhook forward \
+  --repo=shanemcd/honr \
+  --events=pull_request,push \
+  --url=http://127.0.0.1:8080/api/webhooks/github
+```
+
+Leave that running while you merge a test PR. Only one forwarder per repo at a
+time. Dev-only — not for production delivery.
+
 ## Running real agents
 
 This spends real money and opens pull requests. Four things must be true.

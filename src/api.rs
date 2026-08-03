@@ -51,6 +51,10 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/items/{id}/request-changes", post(request_changes))
         .route("/items/{id}/cut", post(cut_scope))
         .route("/items/{id}/dispatch", post(dispatch_item))
+        .route(
+            "/items/{id}/materialize-proposal",
+            post(materialize_proposal_heal),
+        )
 }
 
 #[derive(Serialize)]
@@ -322,6 +326,30 @@ async fn dispatch_item(
     Ok(Json(b.enqueue_dispatch(id).map_err(ApiError)?))
 }
 
+/// Heal: create sibling Tasks from a Done card's proposal (e.g. merged before
+/// materialize-on-Done was wired).
+async fn materialize_proposal_heal(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+) -> ApiResult<Vec<ItemId>> {
+    let before: std::collections::HashSet<_> = b
+        .get(id)
+        .and_then(|i| i.parent)
+        .map(|p| b.children_of(p))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let made = b.materialize_pending_proposal(id).map_err(ApiError)?;
+    if let Some(parent) = b.get(id).and_then(|i| i.parent) {
+        for cid in b.children_of(parent) {
+            if !before.contains(&cid) {
+                b.schedule_beads_mirror(cid);
+            }
+        }
+    }
+    Ok(Json(made.into_iter().map(|i| i.id).collect()))
+}
+
 #[derive(Deserialize)]
 pub struct AnswerReq {
     choice: String,
@@ -405,6 +433,8 @@ pub struct GithubCommit {
 pub struct GithubPullRequest {
     pub merged: Option<bool>,
     pub merge_commit_sha: Option<String>,
+    pub html_url: Option<String>,
+    pub number: Option<u64>,
     pub base: Option<GithubBranchRef>,
 }
 
@@ -416,6 +446,7 @@ pub struct GithubBranchRef {
 #[derive(Debug, Deserialize)]
 pub struct GithubRepository {
     pub default_branch: Option<String>,
+    pub full_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -426,6 +457,23 @@ pub struct WebhookResponse {
     pub ref_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
+    /// Board cards moved to Done because their `pr_url` matched a merged PR.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed_item_ids: Vec<u64>,
+}
+
+fn resolve_merged_pr_url(payload: &GithubWebhookPayload) -> Option<String> {
+    let pr = payload.pull_request.as_ref()?;
+    if let Some(url) = pr.html_url.as_ref().map(|u| u.trim()).filter(|u| !u.is_empty()) {
+        return Some(url.to_string());
+    }
+    let number = pr.number?;
+    let full_name = payload
+        .repository
+        .as_ref()
+        .and_then(|r| r.full_name.as_deref())
+        .filter(|s| !s.is_empty())?;
+    Some(format!("https://github.com/{full_name}/pull/{number}"))
 }
 
 async fn github_webhook(
@@ -444,6 +492,7 @@ async fn github_webhook(
             main_advanced: false,
             ref_name: None,
             commit_sha: None,
+            completed_item_ids: Vec::new(),
         }));
     }
 
@@ -469,13 +518,41 @@ async fn github_webhook(
     };
 
     let is_pr_main_merge = if let Some(pr) = &payload.pull_request {
-        let is_closed_or_merged = payload.action.as_deref() == Some("closed") || pr.merged == Some(true);
+        let is_closed_or_merged =
+            payload.action.as_deref() == Some("closed") || pr.merged == Some(true);
         let merged = pr.merged == Some(true);
-        let base_is_main = pr.base.as_ref().and_then(|b| b.r#ref.as_deref()).is_some_and(is_main_ref);
+        let base_is_main = pr
+            .base
+            .as_ref()
+            .and_then(|b| b.r#ref.as_deref())
+            .is_some_and(is_main_ref);
         is_closed_or_merged && merged && base_is_main
     } else {
         false
     };
+
+    let mut completed_item_ids = Vec::new();
+    if is_pr_main_merge {
+        if let Some(pr_url) = resolve_merged_pr_url(&payload) {
+            let number = payload
+                .pull_request
+                .as_ref()
+                .and_then(|pr| pr.number);
+            if let Some(id) = b.complete_for_merged_pr(&pr_url, number) {
+                completed_item_ids.push(id);
+                // Done materializes Initial plan / split proposals — push new cards.
+                if let Some(parent) = b.get(id).and_then(|i| i.parent) {
+                    for cid in b.children_of(parent) {
+                        if b.get(cid).is_some_and(|c| {
+                            !c.is_initial_plan_task() && c.github_issue_url.is_none()
+                        }) {
+                            b.schedule_beads_mirror(cid);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if is_push_main || is_pr_main_merge {
         let ref_name = payload
@@ -510,6 +587,7 @@ async fn github_webhook(
             main_advanced: true,
             ref_name: Some(ref_name),
             commit_sha,
+            completed_item_ids,
         }))
     } else {
         Ok(Json(WebhookResponse {
@@ -517,6 +595,7 @@ async fn github_webhook(
             main_advanced: false,
             ref_name: None,
             commit_sha: None,
+            completed_item_ids,
         }))
     }
 }
@@ -799,5 +878,235 @@ mod tests {
             }
             other => panic!("expected MainAdvanced event, got {other:?}"),
         }
+    }
+
+    fn review_card_with_pr(b: &SharedBoard, pr_url: &str) -> u64 {
+        use crate::model::{Origin, State};
+        let p = b
+            .create(None, "Webhook Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Impl",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "human", None);
+        let _ = b.transition(t.id, State::Backlog, "human", None);
+        let _ = b.transition(t.id, State::Claimed, "agent", None);
+        let _ = b.transition(t.id, State::Running, "agent", None);
+        let _ = b.transition(t.id, State::Review, "agent", None);
+        b.set_pr_url(t.id, Some(pr_url.to_string()));
+        t.id
+    }
+
+    #[tokio::test]
+    async fn github_webhook_merged_pr_completes_matching_review_card() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-complete-{}.json",
+                std::process::id()
+            )),
+        ));
+        let mut rx = b.subscribe();
+
+        let pr_url = "https://github.com/shanemcd/honr/pull/4242";
+        let id = review_card_with_pr(&b, pr_url);
+        // Drain create/transition noise.
+        while rx.try_recv().is_ok() {}
+
+        let pr_payload = serde_json::json!({
+            "action": "closed",
+            "pull_request": {
+                "merged": true,
+                "html_url": pr_url,
+                "number": 4242,
+                "merge_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "base": { "ref": "main" }
+            },
+            "repository": {
+                "default_branch": "main",
+                "full_name": "shanemcd/honr"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(pr_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ok");
+        assert!(resp.main_advanced);
+        assert_eq!(resp.completed_item_ids, vec![id]);
+        assert_eq!(b.get(id).unwrap().state, State::Done);
+
+        let mut saw_main = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, crate::events::BoardEvent::MainAdvanced { .. }) {
+                saw_main = true;
+            }
+        }
+        assert!(saw_main, "MainAdvanced should still fire on merge");
+    }
+
+    #[tokio::test]
+    async fn github_webhook_closed_unmerged_pr_does_not_complete_card() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-unmerged-{}.json",
+                std::process::id()
+            )),
+        ));
+        let pr_url = "https://github.com/shanemcd/honr/pull/4243";
+        let id = review_card_with_pr(&b, pr_url);
+
+        let pr_payload = serde_json::json!({
+            "action": "closed",
+            "pull_request": {
+                "merged": false,
+                "html_url": pr_url,
+                "number": 4243,
+                "base": { "ref": "main" }
+            },
+            "repository": {
+                "default_branch": "main",
+                "full_name": "shanemcd/honr"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(pr_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ignored");
+        assert!(!resp.main_advanced);
+        assert!(resp.completed_item_ids.is_empty());
+        assert_eq!(b.get(id).unwrap().state, State::Review);
+    }
+
+    #[tokio::test]
+    async fn github_webhook_merged_pr_no_matching_card_still_advances_main() {
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-nomatch-{}.json",
+                std::process::id()
+            )),
+        ));
+        let mut rx = b.subscribe();
+
+        let pr_payload = serde_json::json!({
+            "action": "closed",
+            "pull_request": {
+                "merged": true,
+                "html_url": "https://github.com/shanemcd/honr/pull/99999",
+                "number": 99999,
+                "merge_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "base": { "ref": "main" }
+            },
+            "repository": {
+                "default_branch": "main",
+                "full_name": "shanemcd/honr"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(pr_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ok");
+        assert!(resp.main_advanced);
+        assert!(resp.completed_item_ids.is_empty());
+        assert!(matches!(
+            rx.try_recv().expect("MainAdvanced"),
+            crate::events::BoardEvent::MainAdvanced { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn github_webhook_merged_pr_complete_is_idempotent() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-idempotent-{}.json",
+                std::process::id()
+            )),
+        ));
+        let pr_url = "https://github.com/shanemcd/honr/pull/4244";
+        let id = review_card_with_pr(&b, pr_url);
+
+        let pr_payload = serde_json::json!({
+            "action": "closed",
+            "pull_request": {
+                "merged": true,
+                "number": 4244,
+                "merge_commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                "base": { "ref": "main" }
+            },
+            "repository": {
+                "default_branch": "main",
+                "full_name": "shanemcd/honr"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request".parse().unwrap());
+
+        let Json(resp1) = github_webhook(
+            AxState(b.clone()),
+            headers.clone(),
+            Json(serde_json::from_value(pr_payload.clone()).unwrap()),
+        )
+        .await
+        .expect("first");
+        assert_eq!(resp1.completed_item_ids, vec![id]);
+        assert_eq!(b.get(id).unwrap().state, State::Done);
+
+        let Json(resp2) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(pr_payload).unwrap()),
+        )
+        .await
+        .expect("second");
+        assert!(resp2.main_advanced);
+        assert!(
+            resp2.completed_item_ids.is_empty(),
+            "already-Done card must not re-complete"
+        );
+        assert_eq!(b.get(id).unwrap().state, State::Done);
     }
 }

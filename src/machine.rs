@@ -59,6 +59,8 @@ pub fn allowed(from: State, to: State) -> bool {
         (NeedsHuman, Done) => true,
         (Running, Done) => true,
         (Review, Backlog) => true,
+        // Approved too early, or Done should wait for GitHub merge — return to Review.
+        (Done, Review) => true,
 
         _ => false,
     }
@@ -162,6 +164,7 @@ mod tests {
     #[test]
     fn done_is_terminal_but_retire_is_always_available() {
         assert!(!allowed(Done, Backlog));
+        assert!(allowed(Done, Review), "un-approve / wait-for-merge");
         assert!(allowed(Done, Retired));
         assert!(allowed(Running, Retired));
         assert!(!allowed(Retired, Retired));
