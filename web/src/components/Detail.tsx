@@ -1457,11 +1457,12 @@ export function DetailDrawer({
           <p className="dim" style={{ marginBottom: 8 }}>
             Agent is stopped. Sandbox
             {d.environment ? ` ${d.environment}` : ""} and conversation are kept.
-            Unpark, then Start to resume the same conversation.
+            Resume queues the supervisor to continue
+            {d.conversation_id ? " the same conversation" : ""}.
           </p>
           <div className="btns">
             <button className="primary" onClick={() => act(api.unpark(d.id))}>
-              Unpark
+              Resume
             </button>
           </div>
         </Section>

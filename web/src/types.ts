@@ -111,7 +111,7 @@ export interface WorkItem {
   environment: string | null;
   /** agy conversation id; park keeps it for resume, halt clears it. */
   conversation_id?: string | null;
-  /** Park hold: Backlog but not dispatchable until unpark. */
+  /** Park hold: Backlog; unpark clears this and queues dispatch. */
   parked?: boolean;
   /** Cockpit asked supervisor to start this Backlog card. */
   awaiting_dispatch?: boolean;

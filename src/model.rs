@@ -462,12 +462,12 @@ pub struct WorkItem {
     /// the next claim can `--conversation` resume; halt clears it.
     #[serde(default)]
     pub conversation_id: Option<String>,
-    /// Set by park: card is Backlog but must not be dispatched until the human
-    /// explicitly unparks. Dispatch is always explicit; park only adds a hold.
+    /// Set by park: card is Backlog but must not be claimed until unpark.
+    /// Unpark clears this and queues dispatch.
     #[serde(default)]
     pub parked: bool,
-    /// Cockpit asked the supervisor to start this Backlog card. Cleared on
-    /// claim, bounce to Backlog, or cancel. Nothing auto-sets this.
+    /// Supervisor should claim this Backlog card. Set by Start / dispatch, or
+    /// by unpark (resume). Cleared on claim, bounce to Backlog, or cancel.
     #[serde(default)]
     pub awaiting_dispatch: bool,
     /// Indicates that main advanced and this card's PR branch needs a rebase.

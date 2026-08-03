@@ -685,24 +685,24 @@ impl Cockpit {
     #[tool(
         name = "park",
         description = "Stop the agent and return the card to Backlog, keep the sandbox and agy \
-                       conversation, and hold the card until unpark. Does not auto-reclaim — \
-                       after unpark you must dispatch again. Prefer this when a run is wedged. \
-                       Optional reason becomes a binding note on resume."
+                       conversation, and hold the card until unpark. Prefer this when a run is \
+                       wedged. Optional reason becomes a binding note on resume. Unpark queues \
+                       the supervisor to resume (no separate dispatch)."
     )]
     fn park(&self, Parameters(a): Parameters<ReasonArg>) -> Out<Ack> {
         self.board.park(a.id, a.reason).map_err(bad)?;
-        self.ack(a.id, "agent parked; held until unpark + dispatch")
+        self.ack(a.id, "agent parked; unpark to resume")
     }
 
     #[tool(
         name = "unpark",
-        description = "Clear a park hold on a Backlog card. Does not start a run — call dispatch \
-                       next. If a conversation id is still on the card, the next claim resumes \
-                       that agy session."
+        description = "Clear a park hold and queue the card for the supervisor (same as Start). \
+                       If a conversation id is still on the card, the next claim resumes that \
+                       agy session."
     )]
     fn unpark(&self, Parameters(a): Parameters<IdArg>) -> Out<Ack> {
         self.board.unpark(a.id).map_err(bad)?;
-        self.ack(a.id, "park cleared; dispatch to start")
+        self.ack(a.id, "unparked and queued for resume")
     }
 
     #[tool(
@@ -961,7 +961,7 @@ impl ServerHandler for Cockpit {
                  Backlog cards do not auto-start. Use dispatch (or the UI Start button) when the \
                  human wants a run. Park/halt/lease expiry/request_changes all return to Backlog \
                  without reclaim — dispatch again. Prefer park over halt when a run is wedged — \
-                 park keeps the sandbox and agy session; unpark then dispatch to resume. Prefer \
+                 park keeps the sandbox and agy session; unpark queues resume. Prefer \
                  steer for a soft note that can wait. Standing policy belongs in the Project \
                  project_prompt (edit via update); task inputs are the Plan. Initial plan and \
                  impl splits write a proposal on the card → Review; Approve creates sibling \

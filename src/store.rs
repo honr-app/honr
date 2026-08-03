@@ -330,8 +330,8 @@ impl Board {
 
     /// Whether the supervisor may claim this Backlog card right now.
     ///
-    /// Parked cards are never claimable until unparked — and unpark alone does
-    /// not start a run; the cockpit must still `dispatch`.
+    /// Parked cards are never claimable until unparked (which also queues
+    /// dispatch — Resume is Start).
     pub fn may_claim(&self, id: ItemId) -> bool {
         !self.state.read().unwrap().items.get(&id).is_some_and(|it| it.parked)
     }
@@ -2659,15 +2659,17 @@ fn check_split_relatedness(
             id,
             format!(
                 "{title}: parked — agent stopped, sandbox kept;{session} \
-                 dispatch again after unpark to resume."
+                 unpark to resume."
             ),
         );
         Ok(item)
     }
 
-    /// Clear the park hold. Does not start a run — cockpit must `dispatch`.
+    /// Clear the park hold and queue the card for the supervisor — same as Start.
+    /// Park exists to pause without amnesia; making the human click Start again
+    /// after Resume is just ceremony.
     pub fn unpark(&self, id: ItemId) -> Result<WorkItem, String> {
-        let item = {
+        {
             let mut s = self.state.write().unwrap();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
             if it.state != State::Backlog {
@@ -2677,16 +2679,15 @@ fn check_split_relatedness(
                 return Err("that card is not parked".into());
             }
             it.parked = false;
-            it.clone()
-        };
-        self.emit(&item);
+        }
+        let item = self.enqueue_dispatch(id)?;
         self.story(
             id,
             format!(
-                "{}: unparked — still in Backlog; dispatch to start{}.",
+                "{}: unparked and queued — supervisor will resume{}.",
                 item.title,
                 if item.conversation_id.is_some() {
-                    " (same conversation kept)"
+                    " the same conversation"
                 } else {
                     ""
                 }
@@ -3723,7 +3724,10 @@ mod tests {
         );
         let resumed = b.unpark(id).expect("unpark");
         assert!(!resumed.parked);
-        assert!(!resumed.awaiting_dispatch, "unpark must not auto-dispatch");
+        assert!(
+            resumed.awaiting_dispatch,
+            "unpark should queue the supervisor (same as Start)"
+        );
         assert!(b.may_claim(id), "unpark restores claimability");
     }
 
