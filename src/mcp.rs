@@ -960,9 +960,11 @@ impl ServerHandler for Cockpit {
                  Otherwise summarise and let them walk away.\n\n\
                  Backlog cards do not auto-start. Use dispatch (or the UI Start button) when the \
                  human wants a run. Park/halt/lease expiry/request_changes all return to Backlog \
-                 without reclaim — dispatch again. Prefer park over halt when a run is wedged — \
+                 without reclaim — dispatch again.                  Prefer park over halt when a run is wedged — \
                  park keeps the sandbox and agy session; unpark queues resume. Prefer \
-                 steer for a soft note that can wait. Standing policy belongs in the Project \
+                 steer for a soft note that can wait (steer alone does not inject \
+                 mid-turn; MainAdvanced auto park+unparks live cards so a main-advance \
+                 rebase note takes effect on resume). Standing policy belongs in the Project \
                  project_prompt (edit via update); task inputs are the Plan. Initial plan and \
                  impl splits write a proposal on the card → Review; Approve creates sibling \
                  Tasks. Read item_detail's proposal/Plan before approving; a card that passes \
