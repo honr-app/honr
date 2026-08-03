@@ -5,7 +5,7 @@ import { Card } from "./dist-test/components/Card.js";
 import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
-import { Settings } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -570,7 +570,7 @@ const pingPayload = JSON.stringify({ type: "ping" });
 const parsedPing = JSON.parse(pingPayload);
 assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
-// Test 17: App chrome — Board | Settings sidebar + Settings shell placeholders
+// Test 17: App chrome — Board | Settings sidebar + Settings Sandboxes panel
 const sidebarHtml = renderToString(
   React.createElement(PrimarySidebar, {
     view: "board",
@@ -586,13 +586,88 @@ assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should exp
 const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
 assert(settingsHtml.includes("Sandboxes"), "Settings should include Sandboxes section");
-assert(
-  settingsHtml.includes("data-testid=\"sandboxes-placeholder\""),
-  "Settings should show Sandboxes placeholder",
-);
+assert(settingsHtml.includes("data-testid=\"sandboxes-panel\""), "Settings should show Sandboxes panel");
 assert(settingsHtml.includes("General"), "Settings should include at least one stub section");
 assert(settingsHtml.includes("data-testid=\"general-stub\"") || settingsHtml.includes("soon"),
   "Settings stub section should be marked as placeholder");
+
+const fixtureProfiles = [
+  {
+    id: "default",
+    name: "Default",
+    image: "img:1",
+    policy: "policy.yaml",
+    cpu: "2",
+    memory: "4Gi",
+  },
+  {
+    id: "heavy",
+    name: "Heavy",
+    image: "img:heavy",
+    policy: "policy.yaml",
+    cpu: "8",
+    memory: "16Gi",
+  },
+];
+
+const sandboxesHtml = renderToString(
+  React.createElement(SandboxesPanelView, {
+    profiles: fixtureProfiles,
+    defaultId: "default",
+    editingId: null,
+    draft: { id: "", name: "", image: "", policy: "", cpu: "", memory: "" },
+    onDraftChange: () => {},
+    onStartCreate: () => {},
+    onStartEdit: () => {},
+    onCancelEdit: () => {},
+    onSave: () => {},
+    onSetDefault: () => {},
+  }),
+);
+assert(sandboxesHtml.includes("data-testid=\"sandboxes-panel\""), "Sandboxes panel should render");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-list\""), "Sandboxes panel should list profiles");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-default\""), "Should list default profile");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-heavy\""), "Should list heavy profile");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-default-badge\""), "Default profile should be badged");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-set-default-heavy\""), "Non-default should offer Set default");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Sandboxes panel should support create");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Sandboxes panel should support edit");
+assert(!sandboxesHtml.includes("data-testid=\"sandbox-destroy\""),
+  "Sandboxes panel must not offer live OpenShell sandbox destroy");
+assert(!/destroy sandbox|delete environment|openshell.*delete/i.test(sandboxesHtml),
+  "Sandboxes panel must not offer live OpenShell sandbox destroy controls");
+
+const createFormHtml = renderToString(
+  React.createElement(SandboxesPanelView, {
+    profiles: fixtureProfiles,
+    defaultId: "default",
+    editingId: "",
+    draft: { id: "ci", name: "CI", image: "img:ci", policy: "p.yaml", cpu: "", memory: "" },
+    onDraftChange: () => {},
+    onStartCreate: () => {},
+    onStartEdit: () => {},
+    onCancelEdit: () => {},
+    onSave: () => {},
+    onSetDefault: () => {},
+  }),
+);
+assert(createFormHtml.includes("data-testid=\"sandbox-profile-form\""), "Create/edit form should render");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-id\""), "Form should include id field");
+assert(createFormHtml.includes("data-testid=\"sandbox-save\""), "Form should include save");
+
+const pickerHtml = renderToString(
+  React.createElement(ProjectSandboxPicker, {
+    projectId: 42,
+    value: null,
+    profiles: fixtureProfiles,
+    defaultId: "default",
+    onChange: () => {},
+  }),
+);
+assert(pickerHtml.includes("data-testid=\"project-sandbox-picker\""), "Project sandbox picker should render");
+assert(pickerHtml.includes("data-testid=\"project-sandbox-select-42\""), "Project sandbox select should render");
+assert(pickerHtml.includes("Global default"), "Unset option should be labeled as global default");
+assert(pickerHtml.includes("Heavy"), "Picker should list catalog profiles");
 
 // Board view still mounts Cockpit (regression: chrome must not replace it).
 const emptyCockpitHtml = renderToString(

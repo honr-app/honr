@@ -50,6 +50,21 @@ export interface BlockerSummary {
   state: State;
 }
 
+/** Named OpenShell create-spec from the board catalog (Settings → Sandboxes). */
+export interface SandboxProfile {
+  id: string;
+  name: string;
+  image: string;
+  policy: string;
+  cpu?: string | null;
+  memory?: string | null;
+}
+
+export interface SandboxProfilesOut {
+  profiles: SandboxProfile[];
+  default_sandbox_profile_id: string | null;
+}
+
 export type PlanStatus = "empty" | "awaiting_approval" | "approved";
 
 export interface PlanTaskSpec {
@@ -105,6 +120,8 @@ export interface WorkItem {
   diff_removed: number;
   notes: Note[];
   project_prompt?: string | null;
+  /** Project-only: override sandbox profile; null/unset inherits global default. */
+  sandbox_profile_id?: string | null;
   last_bounce_reason?: string | null;
   last_conflict_files?: string[];
   release_target: string | null;
