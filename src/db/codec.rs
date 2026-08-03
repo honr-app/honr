@@ -22,6 +22,12 @@ pub const META_JSON_IMPORTED: &str = "json_imported";
 /// Meta key for the board's next item id allocator.
 pub const META_NEXT_ID: &str = "next_id";
 
+/// JSON blob: `BTreeMap<String, SandboxProfile>` catalog.
+pub const META_SANDBOX_PROFILES: &str = "sandbox_profiles";
+
+/// Global default sandbox profile id (empty string means unset).
+pub const META_DEFAULT_SANDBOX_PROFILE_ID: &str = "default_sandbox_profile_id";
+
 /// Fields without dedicated columns — portable JSON blob on `items.extras_json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ItemExtras {
@@ -45,6 +51,8 @@ pub struct ItemExtras {
     pub diff_removed: u32,
     #[serde(default)]
     pub project_prompt: Option<String>,
+    #[serde(default)]
+    pub sandbox_profile_id: Option<String>,
     #[serde(default)]
     pub last_bounce_reason: Option<String>,
     #[serde(default)]
@@ -76,6 +84,7 @@ impl ItemExtras {
             diff_added: item.diff_added,
             diff_removed: item.diff_removed,
             project_prompt: item.project_prompt.clone(),
+            sandbox_profile_id: item.sandbox_profile_id.clone(),
             last_bounce_reason: item.last_bounce_reason.clone(),
             last_conflict_files: item.last_conflict_files.clone(),
             release_target: item.release_target.clone(),
@@ -98,6 +107,7 @@ impl ItemExtras {
         item.diff_added = self.diff_added;
         item.diff_removed = self.diff_removed;
         item.project_prompt = self.project_prompt;
+        item.sandbox_profile_id = self.sandbox_profile_id;
         item.last_bounce_reason = self.last_bounce_reason;
         item.last_conflict_files = self.last_conflict_files;
         item.release_target = self.release_target;
@@ -336,6 +346,7 @@ pub fn item_from_row(row: &SqliteRow) -> Result<WorkItem, StoreError> {
         diff_removed: 0,
         notes,
         project_prompt: None,
+        sandbox_profile_id: None,
         last_bounce_reason: None,
         last_conflict_files: Vec::new(),
         release_target: None,
