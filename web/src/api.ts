@@ -64,6 +64,9 @@ export const api = {
   approvePlan: (id: number): Promise<number[]> => post(`/items/${id}/approve-plan`),
   /** Queue a Backlog card for the supervisor to claim. Explicit start. */
   dispatch: (id: number): Promise<WorkItem> => post(`/items/${id}/dispatch`),
+  /** Play/pause Project auto mode (queue claimable Backlog leaves). */
+  setAutoDispatch: (id: number, enabled: boolean): Promise<WorkItem> =>
+    post(`/items/${id}/auto-dispatch`, { enabled }),
   requestChanges: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/request-changes`, { text }),
   transition: (id: number, to: string, reason?: string): Promise<WorkItem> =>

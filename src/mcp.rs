@@ -62,6 +62,14 @@ pub struct AnswerArg {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AutoDispatchArg {
+    /// Project id (`#167` is `167`).
+    pub id: ItemId,
+    /// `true` = play (auto-queue Backlog); `false` = pause (clear queue).
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateProjectArg {
     /// Short and distinct — you cannot chunk what you cannot name.
     pub title: String,
@@ -243,6 +251,8 @@ pub struct GoalLine {
     pub progress: String,
     pub spend: String,
     pub needs_you: usize,
+    /// Project auto mode (play) — claimable Backlog queues itself.
+    pub auto_dispatch: bool,
     /// One chunked line per column — smaller than a list *and* answers the
     /// column's question.
     pub columns: Vec<String>,
@@ -350,6 +360,8 @@ impl Cockpit {
                     format!("{} blocked on you", g.needs_you)
                 } else if g.agents_live > 0 {
                     format!("{} agents working", g.agents_live)
+                } else if g.auto_dispatch {
+                    "auto".into()
                 } else {
                     "idle".into()
                 },
@@ -364,6 +376,7 @@ impl Cockpit {
                     None => format!("${:.2}", g.spend_cents as f64 / 100.0),
                 },
                 needs_you: g.needs_you,
+                auto_dispatch: g.auto_dispatch,
                 columns: g
                     .columns
                     .iter()
@@ -670,14 +683,34 @@ impl Cockpit {
     #[tool(
         name = "dispatch",
         description = "Queue a Backlog card for the supervisor to claim and start a sandbox run. \
-                       Nothing auto-starts from Backlog — call this (or the UI Start button) \
-                       when the human wants work to begin. Requires unblocked and unparked. \
-                       Does not start immediately if max_concurrent or budget is saturated; \
-                       the supervisor drains the queue."
+                       Normally Backlog is inert until this (or UI Start); Projects with auto \
+                       mode on queue themselves. Requires unblocked and unparked. Does not start \
+                       immediately if max_concurrent or budget is saturated; the supervisor \
+                       drains the queue."
     )]
     fn dispatch(&self, Parameters(a): Parameters<IdArg>) -> Out<Ack> {
         self.board.enqueue_dispatch(a.id).map_err(bad)?;
         self.ack(a.id, "queued for dispatch")
+    }
+
+    #[tool(
+        name = "set_auto_dispatch",
+        description = "Play/pause Project auto mode. When enabled, claimable Backlog leaves under \
+                       that Project are queued automatically each supervisor tick. Pause clears \
+                       the queue but does not halt in-flight runs. Project cards only."
+    )]
+    fn set_auto_dispatch(&self, Parameters(a): Parameters<AutoDispatchArg>) -> Out<Ack> {
+        self.board
+            .set_auto_dispatch(a.id, a.enabled)
+            .map_err(bad)?;
+        self.ack(
+            a.id,
+            if a.enabled {
+                "auto mode on"
+            } else {
+                "auto mode off"
+            },
+        )
     }
 
     #[tool(
@@ -958,9 +991,10 @@ impl ServerHandler for Cockpit {
                  Interrupt the human for four things only: irreversible actions, budget breach, \
                  an ambiguity blocking several items, and repeated failure on the same card. \
                  Otherwise summarise and let them walk away.\n\n\
-                 Backlog cards do not auto-start. Use dispatch (or the UI Start button) when the \
-                 human wants a run. Park/halt/lease expiry/request_changes all return to Backlog \
-                 without reclaim — dispatch again.                  Prefer park over halt when a run is wedged — \
+                 Backlog cards do not auto-start unless the Project's auto mode is on \
+                 (swimlane play/pause or set_auto_dispatch). Otherwise use dispatch (or Start). \
+                 Park/halt/lease expiry/request_changes return to Backlog without reclaim — \
+                 dispatch again (or wait for auto). Prefer park over halt when a run is wedged — \
                  park keeps the sandbox and agy session; halt deletes the sandbox; unpark queues resume. Prefer \
                  steer for a soft note that can wait (steer alone does not inject \
                  mid-turn; MainAdvanced auto park+unparks live cards so a main-advance \

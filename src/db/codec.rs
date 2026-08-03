@@ -60,6 +60,8 @@ pub struct ItemExtras {
     #[serde(default)]
     pub sandbox_profile_id: Option<String>,
     #[serde(default)]
+    pub auto_dispatch: bool,
+    #[serde(default)]
     pub last_bounce_reason: Option<String>,
     #[serde(default)]
     pub last_conflict_files: Vec<String>,
@@ -94,6 +96,7 @@ impl ItemExtras {
             diff_removed: item.diff_removed,
             project_prompt: item.project_prompt.clone(),
             sandbox_profile_id: item.sandbox_profile_id.clone(),
+            auto_dispatch: item.auto_dispatch,
             last_bounce_reason: item.last_bounce_reason.clone(),
             last_conflict_files: item.last_conflict_files.clone(),
             release_target: item.release_target.clone(),
@@ -118,6 +121,7 @@ impl ItemExtras {
         item.diff_removed = self.diff_removed;
         item.project_prompt = self.project_prompt;
         item.sandbox_profile_id = self.sandbox_profile_id;
+        item.auto_dispatch = self.auto_dispatch;
         item.last_bounce_reason = self.last_bounce_reason;
         item.last_conflict_files = self.last_conflict_files;
         item.release_target = self.release_target;
@@ -369,6 +373,7 @@ pub fn item_from_row(row: &SqliteRow) -> Result<WorkItem, StoreError> {
         notes,
         project_prompt: None,
         sandbox_profile_id: None,
+        auto_dispatch: false,
         last_bounce_reason: None,
         last_conflict_files: Vec::new(),
         release_target: None,

@@ -51,6 +51,7 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/items/{id}/request-changes", post(request_changes))
         .route("/items/{id}/cut", post(cut_scope))
         .route("/items/{id}/dispatch", post(dispatch_item))
+        .route("/items/{id}/auto-dispatch", post(set_auto_dispatch))
         .route(
             "/items/{id}/materialize-proposal",
             post(materialize_proposal_heal),
@@ -335,12 +336,29 @@ async fn unpark(
     Ok(Json(b.unpark(id).map_err(ApiError)?))
 }
 
-/// Queue a Backlog card for the supervisor to claim. Explicit start — nothing auto-dispatches.
+/// Queue a Backlog card for the supervisor to claim. Explicit start — unless
+/// the containing Project has auto mode on.
 async fn dispatch_item(
     AxState(b): AxState<SharedBoard>,
     Path(id): Path<ItemId>,
 ) -> ApiResult<WorkItem> {
     Ok(Json(b.enqueue_dispatch(id).map_err(ApiError)?))
+}
+
+#[derive(Deserialize)]
+pub struct AutoDispatchReq {
+    enabled: bool,
+}
+
+/// Play/pause Project auto mode — continuously queue claimable Backlog leaves.
+async fn set_auto_dispatch(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+    Json(req): Json<AutoDispatchReq>,
+) -> ApiResult<WorkItem> {
+    Ok(Json(
+        b.set_auto_dispatch(id, req.enabled).map_err(ApiError)?,
+    ))
 }
 
 /// Heal: create sibling Tasks from a Done card's proposal (e.g. merged before

@@ -141,22 +141,29 @@ part of a profile.
 
 ## What dispatch decides, and when
 
-Cockpit decides what starts. A Backlog card is inert until someone calls
-`dispatch` (MCP tool or UI **Start**), which sets `awaiting_dispatch`.
+By default, cockpit decides what starts. A Backlog card is inert until someone
+calls `dispatch` (MCP tool or UI **Start**), which sets `awaiting_dispatch`.
 
-`dispatch_loop` polls every 3 seconds and passes four gates in order: in-flight
-below `max_concurrent`, spend below the daily ceiling, not in an infrastructure
-cooldown, gateway healthy. Then it takes the **oldest** Backlog card with
-`awaiting_dispatch` that is claimable and not already being run by this process,
-and claims it.
+**Project auto mode** (swimlane play/pause, or MCP `set_auto_dispatch`) is the
+exception: when on, each supervisor tick queues every claimable Backlog leaf
+under that Project. Pause clears `awaiting_dispatch` on still-Backlog cards but
+does **not** halt Claimed/Running agents. Auto does not approve Review, answer
+Needs You, or unpark.
+
+`dispatch_loop` polls every 3 seconds: first auto-enqueues for Projects with
+auto on, then passes four gates in order — in-flight below `max_concurrent`,
+spend below the daily ceiling, not in an infrastructure cooldown, gateway
+healthy. Then it takes the **oldest** Backlog card with `awaiting_dispatch` that
+is claimable and not already being run by this process, and claims it.
 
 A card is eligible for enqueue when it is `Backlog`, not parked, unblocked,
-has a definition of done, and is not parked. Lease expiry,
-park, halt, release, and request_changes all clear `awaiting_dispatch` — cockpit
-must dispatch again. Unpark clears the hold and queues the supervisor (same as Start).
+has a definition of done. Lease expiry, park, halt, release, and request_changes
+all clear `awaiting_dispatch` — with auto off, cockpit must dispatch again; with
+auto on, the next tick re-queues claimable cards. Unpark clears the hold and
+queues the supervisor (same as Start).
 
 **Approve Plan** materializes Tasks into Backlog; the Project itself never goes
-to Backlog. Approve Plan does not auto-dispatch.
+to Backlog. Approve Plan does not auto-dispatch (unless Project auto is already on).
 
 ## Steering a card
 
@@ -167,6 +174,7 @@ to Backlog. Approve Plan does not auto-dispatch.
 | Stop a wedged run but keep context | **Park** — stops the agent, keeps sandbox + agy conversation, and **holds** the card until **Resume session** / `unpark`. |
 | Resume a parked card | **Resume** / `unpark` — clears the hold and queues the supervisor; next claim uses `--conversation` when an id is still on the card. |
 | Throw away the run | **Halt** — stops the agent, clears `conversation_id`, and deletes the sandbox. Next dispatch starts clean. |
+| Auto-start claimable Backlog under a Project | Swimlane **Auto** play/pause (or `set_auto_dispatch`). Pause clears the queue; runners keep going. |
 | Anything requiring a reason | Tell the cockpit. Steer, pin, park, halt and cut live there. |
 
 Manual `steer` on a *running* card does not inject mid-turn: the note is stored
