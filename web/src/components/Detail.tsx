@@ -752,8 +752,9 @@ export function DetailDrawer({
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <span className="pill">{d.state}</span>
           {d.level && <span className="pill">{d.level}</span>}
-          <span className="pill">{resolvedEngine}</span>
-          {resolvedModel && <span className="pill">{resolvedModel}</span>}
+          {/* Engine only — same as the card face. Model falls back into the
+              label when no engine is configured; never a second claude-opus-5 chip. */}
+          <span className="pill">{resolvedEngine || resolvedModel || "?"}</span>
           <span className="pill">{money(d.cost_cents)}</span>
           {d.beads_id && (
             <span
