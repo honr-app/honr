@@ -413,7 +413,7 @@ export function ProjectSandboxPicker({
       {error && <div className="err">{error}</div>}
       <select
         className="search-input"
-        style={{ width: "100%", background: "#0f172a", color: "#f8fafc", padding: "6px" }}
+        style={{ width: "100%", background: "var(--panel)", color: "var(--ink)", padding: "6px" }}
         value={value ?? ""}
         disabled={busy}
         data-testid={`project-sandbox-select-${projectId}`}

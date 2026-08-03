@@ -53,7 +53,7 @@ export function PlanEditor({
         <div
           key={idx}
           style={{
-            border: "1px solid #1e293b",
+            border: "1px solid var(--line-strong)",
             borderRadius: 6,
             padding: 8,
             display: "flex",
@@ -628,8 +628,8 @@ export function DetailDrawer({
       {confirmArchive && (
         <div
           style={{
-            background: "#1e1b4b",
-            border: "1px solid #4338ca",
+            background: "var(--accent-fill)",
+            border: "1px solid var(--accent)",
             borderRadius: "6px",
             padding: "10px 12px",
             marginBottom: "12px",
@@ -638,10 +638,10 @@ export function DetailDrawer({
             gap: "8px",
           }}
         >
-          <div style={{ color: "#c7d2fe", fontSize: "12px", fontWeight: 600 }}>
+          <div style={{ color: "var(--accent-fill)", fontSize: "12px", fontWeight: 600 }}>
             📦 Archive #{d.id} "{d.title}"?
           </div>
-          <div style={{ color: "#a5b4fc", fontSize: "11px" }}>
+          <div style={{ color: "var(--accent)", fontSize: "11px" }}>
             This item and its subtree will be retired, not deleted. Archived Projects leave the cockpit; history stays in state.
           </div>
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
@@ -649,8 +649,8 @@ export function DetailDrawer({
               style={{
                 fontSize: "11px",
                 padding: "4px 12px",
-                background: "#4f46e5",
-                color: "#ffffff",
+                background: "var(--accent)",
+                color: "#fff",
                 border: "none",
                 borderRadius: "4px",
                 cursor: "pointer",
@@ -672,8 +672,8 @@ export function DetailDrawer({
               style={{
                 fontSize: "11px",
                 padding: "4px 12px",
-                background: "#334155",
-                color: "#cbd5e1",
+                background: "var(--panel-2)",
+                color: "var(--dim)",
                 border: "none",
                 borderRadius: "4px",
                 cursor: "pointer",
@@ -689,8 +689,8 @@ export function DetailDrawer({
       {confirmDelete && (
         <div
           style={{
-            background: "#450a0a",
-            border: "1px solid #991b1b",
+            background: "var(--needs-you-bg)",
+            border: "1px solid var(--needs-human)",
             borderRadius: "6px",
             padding: "10px 12px",
             marginBottom: "12px",
@@ -699,10 +699,10 @@ export function DetailDrawer({
             gap: "8px",
           }}
         >
-          <div style={{ color: "#fca5a5", fontSize: "12px", fontWeight: 600 }}>
+          <div style={{ color: "var(--needs-human)", fontSize: "12px", fontWeight: 600 }}>
             ⚠️ Permanently delete #{d.id} "{d.title}"?
           </div>
-          <div style={{ color: "#f87171", fontSize: "11px" }}>
+          <div style={{ color: "var(--needs-human)", fontSize: "11px" }}>
             This will remove the item and any child tasks permanently. This action cannot be undone.
           </div>
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
@@ -710,8 +710,8 @@ export function DetailDrawer({
               style={{
                 fontSize: "11px",
                 padding: "4px 12px",
-                background: "#dc2626",
-                color: "#ffffff",
+                background: "var(--needs-human)",
+                color: "#fff",
                 border: "none",
                 borderRadius: "4px",
                 cursor: "pointer",
@@ -733,8 +733,8 @@ export function DetailDrawer({
               style={{
                 fontSize: "11px",
                 padding: "4px 12px",
-                background: "#334155",
-                color: "#cbd5e1",
+                background: "var(--panel-2)",
+                color: "var(--dim)",
                 border: "none",
                 borderRadius: "4px",
                 cursor: "pointer",
@@ -757,7 +757,7 @@ export function DetailDrawer({
           {d.beads_id && (
             <span
               className="pill beads"
-              style={{ color: "#38bdf8", background: "#0c4a6e", border: "1px solid #0284c7" }}
+              style={{ color: "var(--accent)", background: "var(--accent-fill)", border: "1px solid var(--accent)" }}
               title={`Beads Task ID: ${d.beads_id} (Dolt version-controlled issue store on refs/dolt/data)`}
             >
               🔗 {d.beads_id}
@@ -769,7 +769,7 @@ export function DetailDrawer({
               href={d.github_issue_url}
               target="_blank"
               rel="noreferrer"
-              style={{ textDecoration: "none", color: "#38bdf8", background: "#0c4a6e", border: "1px solid #0284c7" }}
+              style={{ textDecoration: "none", color: "var(--accent)", background: "var(--accent-fill)", border: "1px solid var(--accent)" }}
               title={`View on GitHub Issues: ${d.github_issue_url}`}
             >
               🐙 GitHub Issue
@@ -783,9 +783,9 @@ export function DetailDrawer({
             style={{
               fontSize: "11px",
               padding: "3px 10px",
-              background: "#15803d",
-              color: "#ffffff",
-              border: "1px solid #166534",
+              background: "var(--ok)",
+              color: "#fff",
+              border: "1px solid var(--ok)",
               borderRadius: "4px",
               cursor: "pointer",
               fontWeight: 600,
@@ -898,14 +898,14 @@ export function DetailDrawer({
                 onScroll={handleScroll}
                 className="terminal-pane"
                 style={{
-                  background: "#080c14",
-                  border: "1px solid #1e293b",
+                  background: "var(--panel-inset)",
+                  border: "1px solid var(--line-strong)",
                   borderRadius: "6px",
                   padding: "10px",
                   fontFamily: "'JetBrains Mono', monospace, monospace",
                   fontSize: "11px",
                   lineHeight: "1.4",
-                  color: logTab === "claude" ? "#a7f3d0" : "#38bdf8",
+                  color: logTab === "claude" ? "var(--ok)" : "var(--accent)",
                   maxHeight: "220px",
                   overflowY: "auto",
                   whiteSpace: "pre-wrap",
@@ -921,14 +921,14 @@ export function DetailDrawer({
                           style={{
                             color:
                               parsed.type === "tool"
-                                ? "#38bdf8"
+                                ? "var(--accent)"
                                 : parsed.type === "result"
-                                ? "#a7f3d0"
+                                ? "var(--ok)"
                                 : parsed.type === "error"
-                                ? "#f87171"
+                                ? "var(--needs-human)"
                                 : parsed.type === "thinking"
-                                ? "#94a3b8"
-                                : "#f8fafc",
+                                ? "var(--dim)"
+                                : "var(--ink)",
                             fontWeight: parsed.type === "tool" ? "600" : "normal",
                             fontStyle: parsed.type === "thinking" ? "italic" : "normal",
                           }}
@@ -947,8 +947,8 @@ export function DetailDrawer({
                             style={{
                               marginTop: "8px",
                               paddingTop: "6px",
-                              borderTop: "1px dashed #334155",
-                              color: "#fbbf24",
+                              borderTop: "1px dashed var(--line)",
+                              color: "var(--review)",
                               fontStyle: "italic",
                               display: "flex",
                               alignItems: "center",
@@ -961,7 +961,7 @@ export function DetailDrawer({
                                 width: "6px",
                                 height: "6px",
                                 borderRadius: "50%",
-                                background: "#fbbf24",
+                                background: "var(--review)",
                               }}
                             />
                             ⚡ {statusText}
@@ -980,12 +980,12 @@ export function DetailDrawer({
                       key={i}
                       style={{
                         color: l.includes("ALLOWED")
-                          ? "#4ade80"
+                          ? "var(--ok)"
                           : l.includes("HTTP:")
-                          ? "#38bdf8"
+                          ? "var(--accent)"
                           : l.includes("ERR") || l.includes("WARN")
-                          ? "#fbbf24"
-                          : "#94a3b8",
+                          ? "var(--review)"
+                          : "var(--dim)",
                       }}
                     >
                       {l}
@@ -1004,8 +1004,8 @@ export function DetailDrawer({
                     right: "12px",
                     fontSize: "10px",
                     padding: "3px 8px",
-                    background: "#0284c7",
-                    color: "#ffffff",
+                    background: "var(--accent)",
+                    color: "#fff",
                     border: "none",
                     borderRadius: "4px",
                     cursor: "pointer",
@@ -1081,7 +1081,7 @@ export function DetailDrawer({
                 </label>
                 <select
                   className="search-input"
-                  style={{ width: "100%", background: "#0f172a", color: "#f8fafc", padding: "6px" }}
+                  style={{ width: "100%", background: "var(--panel)", color: "var(--ink)", padding: "6px" }}
                   value={editEngine}
                   onChange={(e) => setEditEngine(e.target.value)}
                 >
@@ -1302,7 +1302,7 @@ export function DetailDrawer({
               <label className="section-title" style={{ display: "block", marginBottom: 2 }}>Agent Engine</label>
               <select
                 className="search-input"
-                style={{ width: "100%", background: "#0f172a", color: "#f8fafc", padding: "6px" }}
+                style={{ width: "100%", background: "var(--panel)", color: "var(--ink)", padding: "6px" }}
                 value={editEngine}
                 onChange={(e) => setEditEngine(e.target.value)}
               >
@@ -1402,7 +1402,7 @@ export function DetailDrawer({
           <div className="btns">
             <button
               className="primary"
-              style={{ background: "#15803d", borderColor: "#166534", fontWeight: 600 }}
+              style={{ background: "var(--ok)", borderColor: "var(--ok)", fontWeight: 600 }}
               onClick={() => act(api.approve(d.id))}
             >
               {d.proposal && d.proposal.tasks.length > 0
@@ -1448,7 +1448,7 @@ export function DetailDrawer({
                 Park (keep session)
               </button>
               <button
-                style={{ background: "#7f1d1d", color: "#fca5a5", borderColor: "#991b1b" }}
+                style={{ background: "var(--needs-you-bg)", color: "var(--needs-human)", borderColor: "var(--needs-human)" }}
                 onClick={() => setConfirmHalt(true)}
               >
                 Halt (discard session)
@@ -1457,8 +1457,8 @@ export function DetailDrawer({
           ) : (
             <div
               style={{
-                background: "#450a0a",
-                border: "1px solid #7f1d1d",
+                background: "var(--needs-you-bg)",
+                border: "1px solid var(--needs-human)",
                 borderRadius: "6px",
                 padding: "10px 12px",
                 display: "flex",
@@ -1466,16 +1466,16 @@ export function DetailDrawer({
                 gap: "8px",
               }}
             >
-              <div style={{ color: "#fca5a5", fontSize: "12px", fontWeight: 600 }}>
+              <div style={{ color: "var(--needs-human)", fontSize: "12px", fontWeight: 600 }}>
                 Halt #{d.id} and discard the session?
               </div>
-              <div style={{ color: "#f87171", fontSize: "11px" }}>
+              <div style={{ color: "var(--needs-human)", fontSize: "11px" }}>
                 The agent stops and the conversation is thrown away. The sandbox may
                 still be kept for caches. Prefer Park if you want to resume later.
               </div>
               <div className="btns">
                 <button
-                  style={{ background: "#7f1d1d", color: "#fca5a5", borderColor: "#991b1b" }}
+                  style={{ background: "var(--needs-you-bg)", color: "var(--needs-human)", borderColor: "var(--needs-human)" }}
                   onClick={() => {
                     setConfirmHalt(false);
                     act(api.halt(d.id, "halted by human"));
@@ -1598,9 +1598,9 @@ export const Head = ({
           style={{
             fontSize: "11px",
             padding: "3px 8px",
-            background: "#1e1b4b",
-            color: "#818cf8",
-            border: "1px solid #3730a3",
+            background: "var(--accent-fill)",
+            color: "var(--accent)",
+            border: "1px solid var(--accent)",
             borderRadius: "4px",
             cursor: "pointer",
             fontWeight: 600,
@@ -1616,9 +1616,9 @@ export const Head = ({
           style={{
             fontSize: "11px",
             padding: "3px 8px",
-            background: "#450a0a",
-            color: "#f87171",
-            border: "1px solid #7f1d1d",
+            background: "var(--needs-you-bg)",
+            color: "var(--needs-human)",
+            border: "1px solid var(--needs-human)",
             borderRadius: "4px",
             cursor: "pointer",
             fontWeight: 600,
