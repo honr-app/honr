@@ -77,6 +77,23 @@ pub struct CreateProjectArg {
     pub project_prompt: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateArg {
+    pub id: ItemId,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub definition_of_done: Option<String>,
+    /// Agent CLI engine for the next claim (`agy`, `claude`, `cursor`).
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// Standing instructions — Project cards only.
+    #[serde(default)]
+    pub project_prompt: Option<String>,
+}
+
 fn default_above_line() -> bool {
     true
 }
@@ -617,6 +634,39 @@ impl Cockpit {
     fn steer(&self, Parameters(a): Parameters<TextArg>) -> Out<Ack> {
         self.board.steer(a.id, a.text).map_err(bad)?;
         self.ack(a.id, "note will reach the agent on its next turn")
+    }
+
+    #[tool(
+        name = "update",
+        description = "Edit fields on a card. Use `engine` to choose the sandbox CLI for the \
+                       next claim (`agy`, `claude`, or `cursor`) — set before dispatch. \
+                       `project_prompt` only applies to Project cards."
+    )]
+    fn update(&self, Parameters(a): Parameters<UpdateArg>) -> Out<Ack> {
+        if a.title.is_none()
+            && a.intent.is_none()
+            && a.definition_of_done.is_none()
+            && a.engine.is_none()
+            && a.project_prompt.is_none()
+        {
+            return Err(bad("update needs at least one field"));
+        }
+        let item = self
+            .board
+            .update_item(
+                a.id,
+                a.title,
+                a.intent,
+                a.definition_of_done,
+                a.engine,
+                a.project_prompt,
+            )
+            .map_err(bad)?;
+        let note = match item.engine.as_deref() {
+            Some(e) => format!("updated (engine={e})"),
+            None => "updated".into(),
+        };
+        self.ack(a.id, note)
     }
 
     #[tool(
