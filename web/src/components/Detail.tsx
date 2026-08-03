@@ -981,7 +981,7 @@ export function DetailDrawer({
       )}
 
       {/* Plan lives on Initial plan — editable until Approve freezes it. */}
-      {d.title === "Initial plan" && (
+      {(d.title === "Initial plan" || d.title.startsWith("Initial Plan for ")) && (
         <Section title="Proposed Tasks">
           <p className="dim" style={{ marginBottom: 8 }}>
             {d.state === "done"
