@@ -4,6 +4,7 @@
 //! engine still reads the tree (parent edges) for containment; task↔task
 //! ordering lives in dependency edges (blocks / relates-to), usually via beads.
 
+use crate::db::BoardDatabaseConfig;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -194,11 +195,20 @@ impl AgentConfig {
     }
 }
 
+/// Top-level `board:` stanza — persistence and related control-plane settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BoardConfig {
+    #[serde(default)]
+    pub database: BoardDatabaseConfig,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Schema {
     pub levels: Vec<Level>,
     #[serde(default)]
     pub execution: ExecutionConfig,
+    #[serde(default)]
+    pub board: BoardConfig,
 }
 
 impl Schema {
@@ -320,5 +330,24 @@ mod tests {
         assert!(!s.levels.is_empty(), "levels should be declared");
         assert!(s.levels.iter().any(|l| l.claimable), "something must be claimable");
         s.execution.agents.validate().expect("shipped agent config is valid");
+        let db = s.board.database.parsed().expect("board.database.url parses");
+        assert_eq!(db.backend(), crate::db::DatabaseBackend::Sqlite);
+    }
+
+    #[test]
+    fn board_database_accepts_postgres_url_in_yaml() {
+        let raw = r#"
+levels:
+  - name: Project
+    claimable: false
+  - name: Task
+    claimable: true
+board:
+  database:
+    url: postgres://honr:honr@127.0.0.1:5432/honr
+"#;
+        let s: Schema = serde_yaml::from_str(raw).expect("yaml");
+        let db = s.board.database.parsed().expect("postgres url");
+        assert_eq!(db.backend(), crate::db::DatabaseBackend::Postgres);
     }
 }

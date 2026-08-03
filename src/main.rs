@@ -2,6 +2,7 @@
 
 mod api;
 mod beads;
+mod db;
 mod events;
 mod machine;
 mod mcp;
@@ -38,12 +39,34 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let schema = Schema::load("honr.yaml").unwrap_or_else(|e| {
+    let mut schema = Schema::load("honr.yaml").unwrap_or_else(|e| {
         tracing::warn!("could not read honr.yaml ({e}); falling back to defaults");
         Schema::default()
     });
+    db::apply_database_url_override(&mut schema.board.database);
+    match schema.board.database.parsed() {
+        Ok(url) => {
+            tracing::info!(%url, backend = %url.backend(), "board database configured");
+            // Apply migrations early so the store surface is real; Board still
+            // flushes honr.json until the cutover Task attaches this pool.
+            if url.backend() == db::DatabaseBackend::Sqlite {
+                match db::SqliteBoardStore::connect(url.as_str()).await {
+                    Ok(store) => {
+                        let _: &dyn db::BoardStore = &store;
+                        tracing::info!(
+                            "board database migrations applied (JSON flush remains primary)"
+                        );
+                        drop(store);
+                    }
+                    Err(e) => tracing::warn!("board database open/migrate skipped: {e}"),
+                }
+            }
+        }
+        Err(e) => tracing::warn!("board.database.url invalid ({e}); ignoring until cutover"),
+    }
     let exec_cfg = schema.execution.clone();
 
+    // Persistence cutover (DB-backed Board) is a later Task; JSON flush remains.
     let board: SharedBoard = Arc::new(Board::load_or_new(schema, PathBuf::from("honr.json")));
 
     // Ensure the beads graph DB exists beside the board (identity + deps) and heal placeholders.
