@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, money, since } from "../api.js";
-import type { BoardEvent, PlanTaskSpec, WorkItem } from "../types.js";
+import type { BoardEvent, PlanTaskSpec, SandboxProfile, WorkItem } from "../types.js";
 import { subscribeBoardEvents } from "../useBoard.js";
+import { ProjectSandboxPicker } from "./Settings.js";
 
 interface Detail extends WorkItem {
   ancestry: { level: string; title: string; intent: string }[];
@@ -499,6 +500,10 @@ export function DetailDrawer({
   const [editDod, setEditDod] = useState("");
   const [editEngine, setEditEngine] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
+  const [sandboxProfiles, setSandboxProfiles] = useState<SandboxProfile[]>([]);
+  const [defaultSandboxProfileId, setDefaultSandboxProfileId] = useState<string | null>(null);
+  const [sandboxPickerBusy, setSandboxPickerBusy] = useState(false);
+  const [sandboxPickerErr, setSandboxPickerErr] = useState<string | null>(null);
   const [planTasks, setPlanTasks] = useState<EditPlanTask[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
@@ -564,9 +569,22 @@ export function DetailDrawer({
     setConfirmArchive(false);
     setConfirmHalt(false);
     setPlanTasks([]);
+    setSandboxPickerErr(null);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  useEffect(() => {
+    if (!d || d.level !== "Project") return;
+    api
+      .listSandboxProfiles()
+      .then((out) => {
+        setSandboxProfiles(out.profiles);
+        setDefaultSandboxProfileId(out.default_sandbox_profile_id);
+        setSandboxPickerErr(null);
+      })
+      .catch((e) => setSandboxPickerErr(String(e)));
+  }, [d?.id, d?.level]);
 
   useEffect(() => {
     if (!id) return;
@@ -1072,6 +1090,26 @@ export function DetailDrawer({
                   <option value="cursor">Cursor Agent (cursor)</option>
                 </select>
               </div>
+              <ProjectSandboxPicker
+                projectId={d.id}
+                value={d.sandbox_profile_id}
+                profiles={sandboxProfiles}
+                defaultId={defaultSandboxProfileId}
+                busy={sandboxPickerBusy}
+                error={sandboxPickerErr}
+                onChange={(next) => {
+                  setSandboxPickerBusy(true);
+                  setSandboxPickerErr(null);
+                  api
+                    .setProjectSandboxProfile(d.id, next)
+                    .then(() => {
+                      load();
+                      onChanged();
+                    })
+                    .catch((e) => setSandboxPickerErr(String(e)))
+                    .finally(() => setSandboxPickerBusy(false));
+                }}
+              />
               <div className="btns">
                 <button
                   onClick={() =>

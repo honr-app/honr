@@ -1,4 +1,9 @@
-import type { Snapshot, WorkItem } from "./types";
+import type {
+  SandboxProfile,
+  SandboxProfilesOut,
+  Snapshot,
+  WorkItem,
+} from "./types";
 
 async function jsonOrThrow(r: Response) {
   const body = await r.json().catch(() => ({}));
@@ -67,6 +72,25 @@ export const api = {
     post(`/items/${id}/cut`, { reason }),
   deleteItem: (id: number): Promise<void> =>
     fetch(`/api/items/${id}`, { method: "DELETE" }).then(jsonOrThrow),
+
+  listSandboxProfiles: (): Promise<SandboxProfilesOut> =>
+    fetch("/api/sandbox-profiles").then(jsonOrThrow),
+  upsertSandboxProfile: (profile: {
+    id: string;
+    name: string;
+    image: string;
+    policy: string;
+    cpu?: string | null;
+    memory?: string | null;
+  }): Promise<SandboxProfile> => post("/sandbox-profiles", profile),
+  setDefaultSandboxProfile: (id: string): Promise<SandboxProfilesOut> =>
+    post(`/sandbox-profiles/${encodeURIComponent(id)}/default`),
+  /** Project only. Pass `null` (or omit) to inherit the global default. */
+  setProjectSandboxProfile: (
+    id: number,
+    sandbox_profile_id: string | null,
+  ): Promise<WorkItem> =>
+    post(`/items/${id}/sandbox-profile`, { sandbox_profile_id }),
 };
 
 export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
