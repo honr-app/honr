@@ -280,24 +280,6 @@ pub fn parse_github_pr_url(url: &str) -> Option<(String, u64)> {
     Some((format!("{owner}/{repo}"), n))
 }
 
-/// Bot push target for a given upstream: keep Workspace fork when its repo
-/// name matches; otherwise `{fork_owner}/{upstream_repo}`.
-pub fn derive_fork_for_upstream(workspace_fork: &str, upstream: &str) -> String {
-    let fork = workspace_fork.trim();
-    let upstream = upstream.trim();
-    let fork_owner = fork.split('/').next().unwrap_or("").trim();
-    let fork_repo = fork.split('/').nth(1).unwrap_or("").trim();
-    let up_repo = upstream.split('/').nth(1).unwrap_or("").trim();
-    if fork_owner.is_empty() || up_repo.is_empty() {
-        return fork.to_string();
-    }
-    if fork_repo == up_repo {
-        fork.to_string()
-    } else {
-        format!("{fork_owner}/{up_repo}")
-    }
-}
-
 impl Board {
     pub fn new(schema: Schema, path: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(1024);
@@ -372,6 +354,7 @@ impl Board {
             }
         }
         for (id, item) in state.items.iter_mut() {
+            item.migrate_legacy_pr_url();
             if item.beads_id.is_none() {
                 item.beads_id = Some(format!("bd-honr-{id}"));
             }
@@ -1329,7 +1312,7 @@ impl Board {
 
         let issue_type = if is_project { "epic" } else { "task" };
         let parent = parent_beads.as_deref();
-        let meta = crate::beads::BeadsClient::honr_metadata(id, item.pr_url.as_deref());
+        let meta = crate::beads::BeadsClient::honr_metadata(id, item.pr_url());
 
         match beads
             .create_linked(
@@ -1792,33 +1775,51 @@ impl Board {
         self.emit(&item);
     }
 
-    /// The PR an agent opened. Set before `report`, so the card arrives in
-    /// Review with somewhere to go.
-    pub fn set_pr_url(&self, id: ItemId, url: Option<String>) {
+    /// Replace the card's [`crate::model::PullRequest`] (url + optional base/head).
+    pub fn set_pull_request(&self, id: ItemId, pr: Option<crate::model::PullRequest>) {
         let item = {
             let mut s = self.state.write().unwrap();
-            let Some(it) = s.items.get_mut(&id) else { return };
-            it.pr_url = url;
+            let Some(it) = s.items.get_mut(&id) else {
+                return;
+            };
+            it.pull_request = pr;
+            it.legacy_pr_url = None;
             it.clone()
         };
         self.emit(&item);
 
         if let (Some(beads), Some(bid)) = (self.beads.clone(), item.beads_id.clone()) {
             if crate::beads::BeadsClient::is_real_id(&bid) {
-                let meta =
-                    crate::beads::BeadsClient::honr_metadata(id, item.pr_url.as_deref());
+                let meta = crate::beads::BeadsClient::honr_metadata(id, item.pr_url());
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
                         if let Err(e) = beads
                             .update_fields(&bid, None, None, Some(&meta))
                             .await
                         {
-                            tracing::warn!(%bid, error = %e, "beads pr_url metadata sync failed");
+                            tracing::warn!(%bid, error = %e, "beads pull_request metadata sync failed");
                         }
                     });
                 }
             }
         }
+    }
+
+    /// Set or clear `pull_request.url`, preserving base/head when present.
+    pub fn set_pr_url(&self, id: ItemId, url: Option<String>) {
+        let url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        let next = {
+            let cur = self.get(id).and_then(|i| i.pull_request);
+            match (url, cur) {
+                (None, _) => None,
+                (Some(u), Some(mut pr)) => {
+                    pr.url = u;
+                    Some(pr)
+                }
+                (Some(u), None) => Some(crate::model::PullRequest::from_url(u)),
+            }
+        };
+        self.set_pull_request(id, next);
     }
 
     pub fn set_blocked_by(&self, id: ItemId, blockers: Vec<ItemId>) {
@@ -1961,9 +1962,8 @@ impl Board {
 
     // ------------------------------------------------ workspace binding (board state)
 
-    /// Seed Workspace from YAML `execution.agents.repo` when unbound.
-    /// Returns true when a binding was written. After seed, Board is SoT;
-    /// yaml remains bootstrap/fallback only.
+    /// Seed Forge binding (beads sync) from env / yaml when unbound.
+    /// Work remotes stay in yaml `execution.agents.repo` only — not Settings.
     pub fn seed_workspace_binding_if_empty(&self) -> bool {
         self.seed_workspace_binding_from(&self.schema.execution.agents)
     }
@@ -1971,21 +1971,26 @@ impl Board {
     /// Same as [`Self::seed_workspace_binding_if_empty`] with an explicit AgentConfig.
     pub fn seed_workspace_binding_from(&self, agents: &AgentConfig) -> bool {
         let mut s = self.state.write().unwrap();
-        if s.workspace.as_ref().is_some_and(|w| w.is_complete()) {
+        if s.workspace.as_ref().is_some_and(|w| w.has_beads_sync()) {
             return false;
         }
-        if agents.repo.upstream.trim().is_empty() || agents.repo.fork.trim().is_empty() {
-            return false;
-        }
-        let mut binding = WorkspaceBinding::from_repo_config(&agents.repo);
-        // Env bridge: honor GITHUB_REPOSITORY as beads sync target when set.
-        if let Ok(repo) = std::env::var("GITHUB_REPOSITORY") {
-            let repo = repo.trim().to_string();
-            if !repo.is_empty() {
-                binding.beads_sync_repo = Some(repo);
+        let mut beads = std::env::var("GITHUB_REPOSITORY")
+            .ok()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty());
+        if beads.is_none() {
+            let up = agents.repo.upstream.trim();
+            if !up.is_empty() {
+                beads = Some(up.to_string());
             }
         }
-        s.workspace = Some(binding);
+        let Some(beads_sync_repo) = beads else {
+            return false;
+        };
+        s.workspace = Some(WorkspaceBinding {
+            forge: "github".into(),
+            beads_sync_repo: Some(beads_sync_repo),
+        });
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         true
@@ -1995,32 +2000,20 @@ impl Board {
         self.state.read().unwrap().workspace.clone()
     }
 
-    /// Replace the durable Workspace binding. Empty upstream/fork are stored
-    /// (optional install defaults). Agents resolve remotes per card via
-    /// [`Self::resolve_card_repo`] — incomplete defaults do not disable
-    /// `agents.enabled`. REST: `GET`/`PUT /api/workspace` (Settings → Workspace).
+    /// Replace the durable Forge binding (provider + beads sync). REST:
+    /// `GET`/`PUT /api/workspace` (Settings → Forge).
     pub fn set_workspace_binding(&self, binding: WorkspaceBinding) -> Result<WorkspaceBinding, String> {
         let forge = binding.forge.trim();
         if forge.is_empty() {
-            return Err("workspace forge must not be empty".into());
+            return Err("forge provider must not be empty".into());
         }
         if forge != "github" {
             return Err(format!(
-                "workspace forge {forge:?} is not supported yet (only github)"
+                "forge {forge:?} is not supported yet (only github)"
             ));
         }
         let stored = WorkspaceBinding {
             forge: forge.to_string(),
-            upstream: binding.upstream.trim().to_string(),
-            fork: binding.fork.trim().to_string(),
-            base: {
-                let b = binding.base.trim();
-                if b.is_empty() {
-                    "main".into()
-                } else {
-                    b.to_string()
-                }
-            },
             beads_sync_repo: binding
                 .beads_sync_repo
                 .map(|s| s.trim().to_string())
@@ -2043,8 +2036,8 @@ impl Board {
         }
     }
 
-    /// Effective beads Issue repo: `GITHUB_REPOSITORY` env → workspace
-    /// `beads_sync_repo` / upstream → yaml upstream. Never invents a default.
+    /// Effective beads Issue repo: `GITHUB_REPOSITORY` env → Settings beads
+    /// sync → yaml upstream. Never invents a default.
     pub fn beads_github_repository(&self) -> Option<String> {
         crate::beads::resolve_github_repository(self.configured_beads_repo().as_deref())
     }
@@ -2055,22 +2048,13 @@ impl Board {
                 return Some(r);
             }
         }
-        let upstream = self.schema.execution.agents.repo.upstream.trim();
-        if upstream.is_empty() {
-            None
-        } else {
-            Some(upstream.to_string())
-        }
+        // Legacy yaml upstream as beads fallback only — not a work-remote binding.
+        self.yaml_work_repo().map(|r| r.upstream)
     }
 
-    /// Optional install-wide work-remote default: durable Workspace if complete,
-    /// else yaml `execution.agents.repo`. Not required for `agents.enabled`.
-    pub fn workspace_default_repo(&self) -> Option<RepoConfig> {
-        if let Some(ws) = self.workspace_binding() {
-            if ws.is_complete() {
-                return Some(ws.to_repo_config().normalized());
-            }
-        }
+    /// Legacy yaml `execution.agents.repo` when upstream is set. Not used for
+    /// work remotes once a card has [`crate::model::PullRequest`] facts.
+    pub fn yaml_work_repo(&self) -> Option<RepoConfig> {
         let yaml = &self.schema.execution.agents.repo;
         if yaml.is_complete() {
             Some(yaml.clone().normalized())
@@ -2079,79 +2063,46 @@ impl Board {
         }
     }
 
-    /// Install default remotes (Workspace / yaml). Errors when neither is complete.
-    /// Prefer [`Self::resolve_card_repo`] for clone/push/rebase/PR-lookup.
-    pub fn effective_agent_repo(&self) -> Result<RepoConfig, String> {
-        self.workspace_default_repo().ok_or_else(|| {
-            "Workspace default incomplete: missing upstream and/or fork. \
-             Set optional defaults under Settings → Workspace (or execution.agents.repo), \
-             or open/report a card pr_url so remotes can be derived."
-                .into()
-        })
-    }
-
-    /// Overlay optional Workspace/yaml default onto AgentConfig. Always succeeds —
-    /// empty remotes are filled later via [`Self::resolve_card_repo`].
+    /// AgentConfig from yaml as-is. Remotes for a run come from
+    /// [`Self::resolve_card_repo`] (name kept for call sites).
     pub fn agents_with_workspace(&self, yaml_agents: &AgentConfig) -> AgentConfig {
-        let mut agents = yaml_agents.clone();
-        if let Some(repo) = self.workspace_default_repo() {
-            agents.repo = repo;
-        }
-        agents
+        yaml_agents.clone()
     }
 
     /// Per-card work remotes for clone / push / rebase / PR-lookup.
     ///
-    /// Order: card `pr_url` (upstream from URL; fork = Workspace fork owner +
-    /// upstream repo name, or full Workspace fork when repo names match) →
-    /// optional Workspace/yaml default → refuse with a clear error.
-    /// No per-Project repo field — the card's PR URL is the multi-repo signal.
-    pub fn resolve_card_repo(&self, item_id: ItemId) -> Result<RepoConfig, String> {
+    /// - `Ok(Some(repo))` from `pull_request` base/head (or URL-only same-repo stub)
+    /// - `Ok(None)` first run — no remotes; supervisor skips pre-clone
+    /// - `Err` malformed URL
+    ///
+    /// Does **not** require yaml and does not invent a bot fork.
+    pub fn resolve_card_repo(&self, item_id: ItemId) -> Result<Option<RepoConfig>, String> {
         let item = self
             .get(item_id)
             .ok_or_else(|| format!("no such item #{item_id}"))?;
-        let default = self.workspace_default_repo();
 
-        if let Some(url) = item.pr_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            if let Some((upstream, _)) = parse_github_pr_url(url) {
-                let base = default
-                    .as_ref()
-                    .map(|r| r.base.clone())
-                    .filter(|b| !b.trim().is_empty())
-                    .unwrap_or_else(|| "main".into());
-                let Some(def) = default.as_ref() else {
-                    return Err(format!(
-                        "card #{item_id} has pr_url ({upstream}) but no Workspace fork default \
-                         to derive the push target. Set Settings → Workspace fork \
-                         (bot owner/name), or execution.agents.repo.fork in honr.yaml."
-                    ));
-                };
-                if def.fork.trim().is_empty() {
-                    return Err(format!(
-                        "card #{item_id} has pr_url ({upstream}) but Workspace fork is empty. \
-                         Set Settings → Workspace fork so the bot push target can be derived."
-                    ));
-                }
-                let fork = derive_fork_for_upstream(&def.fork, &upstream);
-                return Ok(RepoConfig {
-                    upstream,
-                    fork,
-                    base,
-                }
-                .normalized());
+        if let Some(pr) = item.pull_request.as_ref() {
+            if let Some(repo) = pr.to_repo_config() {
+                return Ok(Some(repo));
             }
-            return Err(format!(
-                "card #{item_id} pr_url is not a parseable GitHub pull URL: {url}"
-            ));
+            if let Some(url) = pr.url_str() {
+                if let Some((upstream, _)) = parse_github_pr_url(url) {
+                    return Ok(Some(
+                        RepoConfig {
+                            upstream: upstream.clone(),
+                            fork: upstream,
+                            base: "main".into(),
+                        }
+                        .normalized(),
+                    ));
+                }
+                return Err(format!(
+                    "card #{item_id} pull_request.url is not a parseable GitHub pull URL: {url}"
+                ));
+            }
         }
 
-        if let Some(repo) = self.workspace_default_repo() {
-            return Ok(repo);
-        }
-        // Same error surface as effective_agent_repo for operators.
-        self.effective_agent_repo().map_err(|e| {
-            format!("card #{item_id}: no pr_url and {e}")
-        })
+        Ok(None)
     }
 
     /// Upgrade catalog entries that still store a host path as `policy`.
@@ -2788,7 +2739,7 @@ fn check_split_relatedness(
             );
         }
 
-        if let Some(ref pr_url) = card.pr_url.as_ref().filter(|s| !s.trim().is_empty()) {
+        if let Some(pr_url) = card.pr_url() {
             let msg = format!(
                 "cannot propose split on card #{id}: a PR already exists ({pr_url}); \
                  split and publish are mutually exclusive"
@@ -3539,7 +3490,7 @@ fn check_split_relatedness(
         let item = self
             .transition(id, State::Done, "human", Some("approved".into()))
             .map_err(|e| e.to_string())?;
-        let story = match item.pr_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        let story = match item.pr_url().filter(|u| !u.trim().is_empty()) {
             Some(url) => format!("{} approved — Done ({}).", item.title, url),
             None => format!("{} approved — no PR; marked Done.", item.title),
         };
@@ -3644,8 +3595,10 @@ fn check_split_relatedness(
         for id in live_ids {
             let base = self
                 .resolve_card_repo(id)
+                .ok()
+                .flatten()
                 .map(|r| r.base)
-                .unwrap_or_else(|_| "main".into());
+                .unwrap_or_else(|| "main".into());
             let note = Self::main_advanced_steer_note(ref_name, commit_sha, &base);
             if let Err(e) = self.steer(id, note.clone()) {
                 tracing::warn!("main-advanced steer failed for #{id}: {e}");
@@ -3680,12 +3633,7 @@ fn check_split_relatedness(
                     continue;
                 }
                 if let Some(child) = s.items.get(&child_id) {
-                    if child.state == State::Review
-                        && child
-                            .pr_url
-                            .as_ref()
-                            .is_some_and(|u| !u.trim().is_empty())
-                    {
+                    if child.state == State::Review && child.pr_url().is_some() {
                         results.push(child.clone());
                     }
                 }
@@ -3709,12 +3657,7 @@ fn check_split_relatedness(
         for parent_id in parents_with_done {
             for child_id in s.items.values().filter(|i| i.parent == Some(parent_id)).map(|i| i.id) {
                 if let Some(child) = s.items.get(&child_id) {
-                    if child.state == State::Review
-                        && child
-                            .pr_url
-                            .as_ref()
-                            .is_some_and(|u| !u.trim().is_empty())
-                    {
+                    if child.state == State::Review && child.pr_url().is_some() {
                         results.push(child.clone());
                     }
                 }
@@ -3736,8 +3679,8 @@ fn check_split_relatedness(
                     it.state
                 ));
             }
-            if it.pr_url.as_ref().is_none_or(|u| u.trim().is_empty()) {
-                return Err(format!("card #{id} has no PR URL to rebase"));
+            if it.pr_url().is_none() {
+                return Err(format!("card #{id} has no pull_request.url to rebase"));
             }
             it.rebase_requested = true;
             it.awaiting_dispatch = true;
@@ -3963,8 +3906,7 @@ fn check_split_relatedness(
                 .values()
                 .find(|i| {
                     matches!(i.state, State::Review | State::NeedsHuman)
-                        && i.pr_url
-                            .as_deref()
+                        && i.pr_url()
                             .is_some_and(|u| Self::normalize_pr_url(u) == needle)
                 })
                 .map(|i| i.id)?
@@ -7947,7 +7889,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_binding_seeds_from_yaml_when_unbound() {
+    fn workspace_binding_seeds_beads_from_yaml_when_unbound() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -7958,21 +7900,28 @@ mod tests {
         assert!(b.workspace_binding().is_none());
         assert!(b.seed_workspace_binding_from(&agents_with_repo()));
         let ws = b.workspace_binding().expect("seeded");
-        assert!(ws.is_complete());
-        assert_eq!(ws.upstream, "acme/widgets");
-        assert_eq!(ws.fork, "bot/widgets");
-        assert_eq!(ws.base, "main");
+        assert!(ws.has_beads_sync());
         assert_eq!(ws.forge, "github");
         assert_eq!(ws.beads_repo().as_deref(), Some("acme/widgets"));
-        // Second seed is a no-op once complete.
+        // Second seed is a no-op once beads sync is set.
         assert!(!b.seed_workspace_binding_from(&agents_with_repo()));
-        let repo = b.effective_agent_repo().expect("effective");
+        // Work remotes still come from yaml, not Settings.
+        let mut schema = Schema::default();
+        schema.execution.agents = agents_with_repo();
+        let b2 = Board::new(
+            schema,
+            std::env::temp_dir().join(format!(
+                "honr-test-ws-yaml-repo-{}.json",
+                std::process::id()
+            )),
+        );
+        let repo = b2.yaml_work_repo().expect("yaml work repo");
         assert_eq!(repo.upstream, "acme/widgets");
         assert_eq!(repo.fork, "bot/widgets");
     }
 
     #[test]
-    fn workspace_default_optional_agents_overlay_does_not_require_complete() {
+    fn agents_overlay_is_yaml_passthrough_without_workspace_remotes() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -7980,23 +7929,16 @@ mod tests {
                 std::process::id()
             )),
         );
-        let err = b.effective_agent_repo().expect_err("empty must fail");
-        assert!(
-            err.contains("Workspace default incomplete") || err.contains("upstream"),
-            "must name missing defaults: {err}"
-        );
+        assert!(b.yaml_work_repo().is_none(), "empty yaml has no work remotes");
 
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
-            upstream: String::new(),
-            fork: String::new(),
-            base: "main".into(),
-            beads_sync_repo: None,
+            beads_sync_repo: Some("acme/beads".into()),
         })
-        .expect("store incomplete");
-        assert!(b.effective_agent_repo().is_err());
+        .expect("forge binding");
+        // Settings beads does not invent work remotes.
+        assert!(b.yaml_work_repo().is_none());
 
-        // Overlay always succeeds — remotes filled per card later.
         let agents = AgentConfig {
             enabled: true,
             ..Default::default()
@@ -8006,9 +7948,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_card_repo_uses_pr_url_not_workspace_upstream() {
+    fn resolve_card_repo_url_only_is_same_repo_stub() {
+        let mut schema = Schema::default();
+        schema.execution.agents = agents_with_repo();
+        // yaml default upstream differs from PR target — PR wins.
+        schema.execution.agents.repo.upstream = "acme/default".into();
+        schema.execution.agents.repo.fork = "bot/default".into();
+        schema.execution.agents.repo.base = "develop".into();
         let b = Board::new(
-            Schema::default(),
+            schema,
             std::env::temp_dir().join(format!(
                 "honr-test-resolve-pr-{}.json",
                 std::process::id()
@@ -8016,9 +7964,6 @@ mod tests {
         );
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
-            upstream: "acme/default".into(),
-            fork: "bot/default".into(),
-            base: "develop".into(),
             beads_sync_repo: Some("acme/beads".into()),
         })
         .unwrap();
@@ -8042,23 +7987,23 @@ mod tests {
             Some("https://github.com/other/widgets/pull/99".into()),
         );
 
-        let repo = b.resolve_card_repo(t.id).expect("resolve");
+        let repo = b.resolve_card_repo(t.id).expect("resolve").expect("bound");
+        // URL alone → same-repo stub until base/head reported.
         assert_eq!(repo.upstream, "other/widgets");
-        assert_eq!(repo.fork, "bot/widgets", "derive fork owner from Workspace");
-        assert_eq!(repo.base, "develop");
-        assert_ne!(repo.upstream, "acme/default");
+        assert_eq!(repo.fork, "other/widgets");
+        assert!(!repo.uses_cross_fork());
+        assert_eq!(repo.base, "main");
     }
 
     #[test]
-    fn resolve_card_repo_without_pr_uses_workspace_default() {
+    fn resolve_card_repo_uses_pull_request_base_head() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-resolve-ws-{}.json",
+                "honr-test-resolve-prbind-{}.json",
                 std::process::id()
             )),
         );
-        b.seed_workspace_binding_from(&agents_with_repo());
         let p = b
             .create(None, "P", "why", None, Origin::Human, true, None)
             .unwrap();
@@ -8073,17 +8018,27 @@ mod tests {
                 None,
             )
             .unwrap();
-        let repo = b.resolve_card_repo(t.id).unwrap();
-        assert_eq!(repo.upstream, "acme/widgets");
+        b.set_pull_request(
+            t.id,
+            Some(crate::model::PullRequest {
+                url: "https://github.com/other/widgets/pull/3".into(),
+                base: Some(crate::model::PullRequestEnd::new("other/widgets", "develop")),
+                head: Some(crate::model::PullRequestEnd::new("bot/widgets", "honr/card-1")),
+            }),
+        );
+        let repo = b.resolve_card_repo(t.id).unwrap().unwrap();
+        assert_eq!(repo.upstream, "other/widgets");
         assert_eq!(repo.fork, "bot/widgets");
+        assert_eq!(repo.base, "develop");
+        assert!(repo.uses_cross_fork());
     }
 
     #[test]
-    fn resolve_card_repo_refuses_without_pr_or_default() {
+    fn resolve_card_repo_first_run_is_unbound() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-resolve-refuse-{}.json",
+                "honr-test-resolve-unbound-{}.json",
                 std::process::id()
             )),
         );
@@ -8101,12 +8056,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        let err = b.resolve_card_repo(t.id).expect_err("refuse");
-        assert!(err.contains("pr_url") || err.contains("Workspace"), "{err}");
+        assert!(b.resolve_card_repo(t.id).unwrap().is_none());
     }
 
     #[test]
-    fn parse_github_pr_url_and_derive_fork() {
+    fn parse_github_pr_url_ok() {
         assert_eq!(
             parse_github_pr_url("https://github.com/Acme/Widgets/pull/42"),
             Some(("Acme/Widgets".into(), 42))
@@ -8116,14 +8070,6 @@ mod tests {
             Some(("acme/widgets".into(), 7))
         );
         assert_eq!(parse_github_pr_url("not-a-url"), None);
-        assert_eq!(
-            derive_fork_for_upstream("bot/honr", "shanemcd/honr"),
-            "bot/honr"
-        );
-        assert_eq!(
-            derive_fork_for_upstream("bot/honr", "acme/widgets"),
-            "bot/widgets"
-        );
     }
 
     #[test]
@@ -8137,10 +8083,7 @@ mod tests {
         );
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
-            upstream: "workspace/only".into(),
-            fork: "bot/only".into(),
-            base: "main".into(),
-            beads_sync_repo: None,
+            beads_sync_repo: Some("workspace/beads".into()),
         })
         .unwrap();
 
@@ -8182,10 +8125,10 @@ mod tests {
             Some(c)
         );
         assert_eq!(b.get(c).unwrap().state, State::Done);
-        // Workspace.upstream was never consulted.
+        // Settings beads sync was never consulted for PR completion.
         assert_eq!(
-            b.workspace_binding().unwrap().upstream,
-            "workspace/only"
+            b.workspace_binding().unwrap().beads_sync_repo.as_deref(),
+            Some("workspace/beads")
         );
     }
 
@@ -8221,7 +8164,7 @@ mod tests {
             Some("https://github.com/acme/widgets/issues/42")
         );
         assert_eq!(issue.github_issue_url_for_repo(None), None);
-        // Board beads helper resolves Workspace upstream when env is unset.
+        // Board beads helper resolves Settings beads (seeded from yaml upstream).
         if std::env::var("GITHUB_REPOSITORY").is_err() {
             assert_eq!(b.beads_github_repository().as_deref(), Some("acme/widgets"));
         }
@@ -8246,11 +8189,18 @@ mod tests {
         }
         let restored = Board::load_or_new(Schema::default(), path);
         let ws = restored.workspace_binding().expect("restored workspace");
-        assert_eq!(ws.upstream, "acme/widgets");
-        assert_eq!(ws.fork, "bot/widgets");
-        // load_or_new must not wipe a complete binding when yaml is empty.
+        assert_eq!(ws.beads_sync_repo.as_deref(), Some("acme/widgets"));
         assert!(!restored.seed_workspace_binding_if_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_binding_legacy_json_migrates_upstream_to_beads() {
+        let raw = r#"{"forge":"github","upstream":"old/work","fork":"bot/work","base":"main"}"#;
+        let ws: WorkspaceBinding = serde_json::from_str(raw).expect("legacy");
+        assert_eq!(ws.beads_sync_repo.as_deref(), Some("old/work"));
+        assert!(serde_json::to_string(&ws).unwrap().contains("beads_sync_repo"));
+        assert!(!serde_json::to_string(&ws).unwrap().contains("\"upstream\""));
     }
 
     #[test]

@@ -1,13 +1,12 @@
 # Investigation: generalize honr beyond this stack
 
-**Status:** Multi-repo forge model **implemented** (card #175 / PR #247+): work
-remotes resolve per card from `pr_url` → optional Workspace/yaml default →
-refuse. Settings Workspace upstream/fork are optional install defaults (not
-required for `agents.enabled`). No per-Project repo field — the card's PR URL
-is the multi-repo signal; fork owner is derived from the Workspace fork default.
-GitLab remains a named future seam only. Remaining Plan Tasks (#171–#174): Agent
-runtime Settings, OpenShell ops surface, briefing quality-gate agnosticism,
-second-repo proof.
+**Status:** Report-driven forge binding: each card stores `pull_request`
+(`url` + GitHub-shaped `base`/`head`) from `report.json` (schema at
+`docs/schemas/report.schema.json`). First clone is prompt-only — supervisor
+does not pre-clone without card remotes. Settings → Forge is **provider +
+beads sync only**. Yaml `execution.agents.repo` is legacy/optional. Remaining
+Plan Tasks (#171–#174): Agent runtime Settings, OpenShell ops surface,
+briefing quality-gate agnosticism, second-repo proof.
 
 **Goal:** a fresh install can drive **any GitHub-hosted repo** (and eventually
 **many** on one board) with configurable OpenShell/runtime, without hardcoding

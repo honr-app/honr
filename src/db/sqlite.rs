@@ -614,9 +614,6 @@ mod tests {
         state.default_sandbox_profile_id = Some("default".into());
         state.workspace = Some(crate::model::WorkspaceBinding {
             forge: "github".into(),
-            upstream: "acme/widgets".into(),
-            fork: "bot/widgets".into(),
-            base: "develop".into(),
             beads_sync_repo: Some("acme/beads-mirror".into()),
         });
         store.save_board_state(&state).await.expect("save");
@@ -639,9 +636,7 @@ mod tests {
             "policy YAML must round-trip"
         );
         let ws = again.workspace.expect("workspace round-trip");
-        assert_eq!(ws.upstream, "acme/widgets");
-        assert_eq!(ws.fork, "bot/widgets");
-        assert_eq!(ws.base, "develop");
+        assert_eq!(ws.forge, "github");
         assert_eq!(ws.beads_sync_repo.as_deref(), Some("acme/beads-mirror"));
     }
 

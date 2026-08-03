@@ -288,15 +288,102 @@ mod initial_plan_title_tests {
 
 /// Default standing instructions seeded on every new Project (`project_prompt`).
 /// Replaces the old pin soup for policy the agent must always see.
+/// Branching / which repo to clone is Project-specific — put it in this prompt.
 pub const DEFAULT_PROJECT_PROMPT: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
 Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/policy.yaml; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
-Finish via /sandbox/.honr/report.json with a real PR (implementation and Initial plan).\n\
+Name the product repo and branching model in this Project prompt (same-repo feature branch vs fork).\n\
+First run: clone into /sandbox/repo yourself, open the PR, finish via report.json including base/head \
+(see /sandbox/.honr/report.schema.json). Later runs reuse that card binding.\n\
 Initial plan: also write /sandbox/.honr/plan.json (proposed Tasks); human Approve creates them.\n\
 If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape); card goes to Review — Approve creates siblings. Never nest under a Task.\n\
-When a fork is involved: origin is the fork (push); rebase onto upstream/<base>, never origin/<base> alone — the fork's base freezes at create time.\n\
 ";
+
+/// One end of a pull request (GitHub `base` / `head`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct PullRequestEnd {
+    /// `owner/name` (`full_name`).
+    pub repo: String,
+    /// Branch name (GitHub JSON field `ref`).
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+}
+
+impl PullRequestEnd {
+    pub fn new(repo: impl Into<String>, git_ref: impl Into<String>) -> Self {
+        Self {
+            repo: repo.into().trim().to_string(),
+            git_ref: {
+                let r = git_ref.into().trim().to_string();
+                if r.is_empty() {
+                    "main".into()
+                } else {
+                    r
+                }
+            },
+        }
+    }
+
+    pub fn is_usable(&self) -> bool {
+        !self.repo.trim().is_empty() && !self.git_ref.trim().is_empty()
+    }
+}
+
+/// Pull request on a card — forge facts for resume/clone/rebase.
+/// Shape matches `report.json` / GitHub base&head naming. URL lives here, not
+/// as a top-level `pr_url` field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct PullRequest {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<PullRequestEnd>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<PullRequestEnd>,
+}
+
+impl PullRequest {
+    pub fn from_url(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into().trim().to_string(),
+            base: None,
+            head: None,
+        }
+    }
+
+    pub fn url_str(&self) -> Option<&str> {
+        let u = self.url.trim();
+        if u.is_empty() {
+            None
+        } else {
+            Some(u)
+        }
+    }
+
+    /// Base+head present — enough to clone without inventing a fork.
+    pub fn has_forge_ends(&self) -> bool {
+        self.base.as_ref().is_some_and(PullRequestEnd::is_usable)
+            && self.head.as_ref().is_some_and(PullRequestEnd::is_usable)
+    }
+
+    pub fn to_repo_config(&self) -> Option<crate::schema::RepoConfig> {
+        let base = self.base.as_ref().filter(|b| b.is_usable())?;
+        let head = self
+            .head
+            .as_ref()
+            .filter(|h| h.is_usable())
+            .unwrap_or(base);
+        Some(
+            crate::schema::RepoConfig {
+                upstream: base.repo.clone(),
+                fork: head.repo.clone(),
+                base: base.git_ref.clone(),
+            }
+            .normalized(),
+        )
+    }
+
+}
 
 /// One Task row as shown to an agent from the Project Plan.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -312,22 +399,15 @@ pub struct PlanTaskBrief {
     pub current: bool,
 }
 
-/// Per-install forge/repo binding. Seeded once from `execution.agents.repo`
-/// (and env); Board is source of truth afterward. See `docs/generalization.md`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Per-install forge identity + beads Issue sync (Settings → Forge).
+/// Work remotes are **not** stored here — they live on each card's
+/// [`PullRequest`] after the agent reports. See `docs/generalization.md`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkspaceBinding {
     /// Forge provider. Only `github` is implemented; `gitlab` is a future seam.
     #[serde(default = "default_forge")]
     pub forge: String,
-    /// `owner/name` that PRs target.
-    #[serde(default)]
-    pub upstream: String,
-    /// `owner/name` the agent clones and pushes to.
-    #[serde(default)]
-    pub fork: String,
-    #[serde(default = "default_workspace_base")]
-    pub base: String,
-    /// Beads ↔ GitHub Issues sync target (`owner/name`). Empty → use `upstream`.
+    /// Beads ↔ GitHub Issues sync target (`owner/name`).
     #[serde(default)]
     pub beads_sync_repo: Option<String>,
 }
@@ -336,75 +416,71 @@ fn default_forge() -> String {
     "github".into()
 }
 
-fn default_workspace_base() -> String {
-    "main".into()
-}
-
 impl Default for WorkspaceBinding {
     fn default() -> Self {
         Self {
             forge: default_forge(),
-            upstream: String::new(),
-            fork: String::new(),
-            base: default_workspace_base(),
             beads_sync_repo: None,
         }
     }
 }
 
+impl<'de> Deserialize<'de> for WorkspaceBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default = "default_forge")]
+            forge: String,
+            #[serde(default)]
+            beads_sync_repo: Option<String>,
+            /// Legacy install-wide work upstream — migrate into beads when unset.
+            #[serde(default)]
+            upstream: Option<String>,
+            /// Ignored legacy field from a brief Settings experiment.
+            #[serde(default)]
+            #[allow(dead_code)]
+            branching_prompt: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let beads = raw
+            .beads_sync_repo
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                raw.upstream
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
+        let forge = {
+            let f = raw.forge.trim();
+            if f.is_empty() {
+                default_forge()
+            } else {
+                f.to_string()
+            }
+        };
+        Ok(Self {
+            forge,
+            beads_sync_repo: beads,
+        })
+    }
+}
+
 impl WorkspaceBinding {
-    /// True when upstream and fork are both non-empty (usable as install default).
-    /// Agents do not require this — work remotes resolve per card from `pr_url`
-    /// (see `Board::resolve_card_repo`).
-    pub fn is_complete(&self) -> bool {
-        !self.upstream.trim().is_empty() && !self.fork.trim().is_empty()
+    /// True when beads sync repo is set (Settings has something useful).
+    pub fn has_beads_sync(&self) -> bool {
+        self.beads_sync_repo
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
     }
 
     /// Repo used for beads Issue URL construction / `bd github` env.
     pub fn beads_repo(&self) -> Option<String> {
-        let explicit = self
-            .beads_sync_repo
+        self.beads_sync_repo
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty());
-        if let Some(r) = explicit {
-            return Some(r.to_string());
-        }
-        let upstream = self.upstream.trim();
-        if upstream.is_empty() {
-            None
-        } else {
-            Some(upstream.to_string())
-        }
-    }
-
-    pub fn to_repo_config(&self) -> crate::schema::RepoConfig {
-        crate::schema::RepoConfig {
-            upstream: self.upstream.trim().to_string(),
-            fork: self.fork.trim().to_string(),
-            base: {
-                let b = self.base.trim();
-                if b.is_empty() {
-                    default_workspace_base()
-                } else {
-                    b.to_string()
-                }
-            },
-        }
-    }
-
-    pub fn from_repo_config(repo: &crate::schema::RepoConfig) -> Self {
-        Self {
-            forge: default_forge(),
-            upstream: repo.upstream.clone(),
-            fork: repo.fork.clone(),
-            base: if repo.base.trim().is_empty() {
-                default_workspace_base()
-            } else {
-                repo.base.clone()
-            },
-            beads_sync_repo: None,
-        }
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
     }
 }
 
@@ -692,10 +768,13 @@ pub struct WorkItem {
     /// Associated GitHub Issue URL (e.g. `https://github.com/owner/repo/issues/8`).
     #[serde(default)]
     pub github_issue_url: Option<String>,
-    /// The pull request the agent opened. Review is a real PR: approving here
-    /// surfaces it, merging stays a human action.
-    #[serde(default)]
-    pub pr_url: Option<String>,
+    /// Pull request the agent opened (url + base/head). Approving surfaces it;
+    /// merging stays a human action. Legacy top-level `pr_url` migrates here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequest>,
+    /// Legacy wire field — read on load, never written.
+    #[serde(default, rename = "pr_url", skip_serializing)]
+    pub legacy_pr_url: Option<String>,
 
     /// Plan artifact — Projects only (Phase 1). Source of truth for Approve Plan.
     #[serde(default)]
@@ -754,7 +833,8 @@ impl WorkItem {
             rebase_requested: false,
             beads_id: None,
             github_issue_url: None,
-            pr_url: None,
+            pull_request: None,
+            legacy_pr_url: None,
             plan: None,
             proposal: None,
             created_at: now,
@@ -765,6 +845,27 @@ impl WorkItem {
 
     pub fn is_project(&self) -> bool {
         self.parent.is_none() && self.level.as_deref() != Some("Task")
+    }
+
+    /// PR HTML URL, if any (`pull_request.url`).
+    pub fn pr_url(&self) -> Option<&str> {
+        self.pull_request.as_ref().and_then(PullRequest::url_str)
+    }
+
+    /// Fold legacy top-level `pr_url` into [`Self::pull_request`].
+    pub fn migrate_legacy_pr_url(&mut self) {
+        let Some(url) = self.legacy_pr_url.take() else {
+            return;
+        };
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        match &mut self.pull_request {
+            Some(pr) if pr.url.trim().is_empty() => pr.url = url,
+            None => self.pull_request = Some(PullRequest::from_url(url)),
+            Some(_) => {}
+        }
     }
 
     pub fn is_initial_plan_task(&self) -> bool {

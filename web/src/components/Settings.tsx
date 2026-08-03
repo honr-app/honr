@@ -6,7 +6,8 @@ type SettingsSection = "sandboxes" | "workspace";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "sandboxes", label: "Sandboxes" },
-  { id: "workspace", label: "Workspace" },
+  // Nav label is Forge — "Workspace" implied a single work repo (upstream/fork).
+  { id: "workspace", label: "Forge" },
 ];
 
 type ProfileDraft = {
@@ -40,9 +41,6 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
 
 const emptyWorkspace = (): WorkspaceBinding => ({
   forge: "github",
-  upstream: "",
-  fork: "",
-  base: "main",
   beads_sync_repo: "",
 });
 
@@ -58,8 +56,8 @@ export function Settings() {
       <header className="settings-hero">
         <h1>Settings</h1>
         <p className="settings-lede">
-          Control-plane preferences. Workspace holds optional forge defaults and
-          beads sync; card <code>pr_url</code> drives multi-repo work remotes.
+          Control-plane preferences. Forge holds Issue sync — not a work repo.
+          Each card’s <code>pull_request</code> (after report) holds remotes.
           Sandboxes manages named profiles and the global default.
         </p>
       </header>
@@ -448,7 +446,7 @@ export function ProjectSandboxPicker({
   );
 }
 
-/** Presentational Workspace form — exported for UI tests without fetch. */
+/** Presentational Forge form — exported for UI tests without fetch. */
 export function WorkspacePanelView({
   draft,
   busy,
@@ -464,16 +462,14 @@ export function WorkspacePanelView({
   onDraftChange: (next: WorkspaceBinding) => void;
   onSave: () => void;
 }) {
-  const incomplete = !draft.upstream.trim() || !draft.fork.trim();
-
   return (
     <section aria-labelledby="workspace-title" data-testid="workspace-panel">
-      <h2 id="workspace-title">Workspace</h2>
+      <h2 id="workspace-title">Forge</h2>
       <p className="dim">
-        Optional install defaults for forge remotes and beads Issue sync.
-        Seeded from <code>honr.yaml</code> on first boot. Work remotes for a
-        card come from its <code>pr_url</code> when set (multi-repo); these
-        fields are a fallback for first clone, not the only work target.
+        Where beads mirrors Issues, and which forge provider you use. This is
+        not the product repo agents open PRs against — that comes from each
+        card’s <code>pull_request</code> (url / base / head) after the agent
+        reports.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -492,7 +488,7 @@ export function WorkspacePanelView({
         }}
       >
         <label>
-          Forge
+          Provider
           <select
             className="search-input"
             value={draft.forge}
@@ -507,72 +503,22 @@ export function WorkspacePanelView({
           </select>
         </label>
         <label>
-          Upstream
-          <input
-            className="search-input"
-            value={draft.upstream}
-            disabled={busy}
-            placeholder="owner/name"
-            onChange={(e) => onDraftChange({ ...draft, upstream: e.target.value })}
-            data-testid="workspace-field-upstream"
-          />
-          <span className="dim sandbox-field-hint">
-            Optional default PR target (<code>owner/name</code>). Cards with a
-            <code> pr_url</code> use that upstream instead.
-          </span>
-        </label>
-        <label>
-          Fork
-          <input
-            className="search-input"
-            value={draft.fork}
-            disabled={busy}
-            placeholder="owner/name"
-            onChange={(e) => onDraftChange({ ...draft, fork: e.target.value })}
-            data-testid="workspace-field-fork"
-          />
-          <span className="dim sandbox-field-hint">
-            Optional default fork (bot <code>owner/name</code>). For other
-            upstreams, the bot owner is reused with that repo name.
-          </span>
-        </label>
-        <label>
-          Base branch
-          <input
-            className="search-input"
-            value={draft.base}
-            disabled={busy}
-            placeholder="main"
-            onChange={(e) => onDraftChange({ ...draft, base: e.target.value })}
-            data-testid="workspace-field-base"
-          />
-        </label>
-        <label>
           Beads sync repo
           <input
             className="search-input"
             value={draft.beads_sync_repo ?? ""}
             disabled={busy}
-            placeholder="defaults to upstream"
+            placeholder="owner/name — where Issues are mirrored"
             onChange={(e) =>
               onDraftChange({ ...draft, beads_sync_repo: e.target.value })
             }
             data-testid="workspace-field-beads"
           />
           <span className="dim sandbox-field-hint">
-            Explicit beads ↔ GitHub Issues mirror (<code>owner/name</code>).
-            Empty falls back to the Workspace upstream default when set.
+            Explicit beads ↔ GitHub Issues mirror. Independent of which product
+            repos agents open PRs against.
           </span>
         </label>
-
-        {incomplete && (
-          <p className="dim" data-testid="workspace-incomplete-hint">
-            Defaults incomplete — first clone needs upstream and fork here (or
-            in yaml), or a card <code>pr_url</code> after the first PR. Agents
-            can still start; per-card resolve fails closed when remotes are
-            missing.
-          </p>
-        )}
 
         <div className="btns">
           <button type="submit" className="primary" disabled={busy} data-testid="workspace-save">
@@ -584,9 +530,8 @@ export function WorkspacePanelView({
       <aside className="workspace-webhook-hint" data-testid="workspace-webhook-hint">
         <h3>Local webhook forward</h3>
         <p className="dim">
-          Point <code>gh webhook forward</code> at each upstream you care about
-          (template — not a single hard-coded repo). Cards complete on{" "}
-          <code>pr_url</code> match:
+          Run one forwarder per product upstream you care about. Cards complete
+          on <code>pull_request.url</code> match, not on these Settings fields:
         </p>
         <pre data-testid="workspace-webhook-example">{`gh webhook forward \\
   --repo=<owner/name> \\
@@ -611,9 +556,6 @@ function WorkspacePanel() {
       .then((ws) => {
         setDraft({
           forge: ws.forge || "github",
-          upstream: ws.upstream ?? "",
-          fork: ws.fork ?? "",
-          base: ws.base || "main",
           beads_sync_repo: ws.beads_sync_repo ?? "",
         });
         setError(null);
@@ -629,7 +571,7 @@ function WorkspacePanel() {
   if (loading && !error) {
     return (
       <section aria-labelledby="workspace-title" data-testid="workspace-panel">
-        <h2 id="workspace-title">Workspace</h2>
+        <h2 id="workspace-title">Forge</h2>
         <p className="dim">loading…</p>
       </section>
     );
@@ -651,9 +593,6 @@ function WorkspacePanel() {
         setSavedHint(null);
         const body: WorkspaceBinding = {
           forge: draft.forge.trim() || "github",
-          upstream: draft.upstream.trim(),
-          fork: draft.fork.trim(),
-          base: draft.base.trim() || "main",
           beads_sync_repo: (draft.beads_sync_repo ?? "").trim() || null,
         };
         api
@@ -661,12 +600,9 @@ function WorkspacePanel() {
           .then((saved) => {
             setDraft({
               forge: saved.forge,
-              upstream: saved.upstream,
-              fork: saved.fork,
-              base: saved.base,
               beads_sync_repo: saved.beads_sync_repo ?? "",
             });
-            setSavedHint("Saved. Binding is board state — used after reload.");
+            setSavedHint("Saved. Forge + beads sync update board state.");
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));

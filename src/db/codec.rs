@@ -71,6 +71,9 @@ pub struct ItemExtras {
     #[serde(default)]
     pub github_issue_url: Option<String>,
     #[serde(default)]
+    pub pull_request: Option<crate::model::PullRequest>,
+    /// Legacy extras field — migrated into `pull_request` on apply.
+    #[serde(default)]
     pub pr_url: Option<String>,
 }
 
@@ -95,7 +98,8 @@ impl ItemExtras {
             conversation_id: item.conversation_id.clone(),
             beads_id: item.beads_id.clone(),
             github_issue_url: item.github_issue_url.clone(),
-            pr_url: item.pr_url.clone(),
+            pull_request: item.pull_request.clone(),
+            pr_url: None,
         }
     }
 
@@ -118,7 +122,9 @@ impl ItemExtras {
         item.conversation_id = self.conversation_id;
         item.beads_id = self.beads_id;
         item.github_issue_url = self.github_issue_url;
-        item.pr_url = self.pr_url;
+        item.pull_request = self.pull_request;
+        item.legacy_pr_url = self.pr_url;
+        item.migrate_legacy_pr_url();
     }
 }
 
@@ -360,7 +366,8 @@ pub fn item_from_row(row: &SqliteRow) -> Result<WorkItem, StoreError> {
         rebase_requested: rebase_requested != 0,
         beads_id: None,
         github_issue_url: None,
-        pr_url: None,
+        pull_request: None,
+        legacy_pr_url: None,
         plan,
         proposal,
         created_at: parse_dt(&created_at, "created_at")?,
