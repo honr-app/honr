@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Cockpit } from "./components/Cockpit";
 import { DetailDrawer } from "./components/Detail";
 import { PrimarySidebar, type AppView } from "./components/PrimarySidebar";
@@ -6,12 +6,23 @@ import { Settings } from "./components/Settings";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
 import { money } from "./api";
 import type { WorkItem } from "./types";
+import {
+  applyTheme,
+  resolveInitialTheme,
+  toggleTheme,
+  type Theme,
+} from "./theme";
 
 export default function App() {
   const b = useBoard();
   const now = useNow();
   const [open, setOpen] = useState<number | null>(null);
   const [view, setView] = useState<AppView>("board");
+  const [theme, setTheme] = useState<Theme>(() => resolveInitialTheme());
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
 
   const { goalOf, breadcrumbOf } = useMemo(() => buildLookups(b.items), [b.items]);
 
@@ -42,6 +53,15 @@ export default function App() {
           <span className={b.connected ? "conn ok" : "conn off"}>
             {b.connected ? "live" : "reconnecting…"}
           </span>
+          <button
+            type="button"
+            className="theme-toggle"
+            title={theme === "light" ? "Switch to dark" : "Switch to light"}
+            aria-label={theme === "light" ? "Switch to dark theme" : "Switch to light theme"}
+            onClick={() => setTheme((t) => toggleTheme(t))}
+          >
+            {theme === "light" ? "Dark" : "Light"}
+          </button>
         </div>
       </header>
 
