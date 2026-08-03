@@ -1,36 +1,155 @@
 # Investigation: generalize honr beyond this stack
 
-**Status:** Tasks `workspace-binding` and `settings-workspace` landed: durable
-Board Workspace + Settings → Workspace panel (`GET`/`PUT /api/workspace`).
-Remaining: Agent runtime / OpenShell Settings, briefing agnosticism, second-repo
-proof. No GitLab.
+**Status:** Multi-repo forge model **implemented** (card #175 / PR #247+): work
+remotes resolve per card from `pr_url` → optional Workspace/yaml default →
+refuse. Settings Workspace upstream/fork are optional install defaults (not
+required for `agents.enabled`). No per-Project repo field — the card's PR URL
+is the multi-repo signal; fork owner is derived from the Workspace fork default.
+GitLab remains a named future seam only. Remaining Plan Tasks (#171–#174): Agent
+runtime Settings, OpenShell ops surface, briefing quality-gate agnosticism,
+second-repo proof.
 
-**Goal:** a fresh install can drive **any GitHub-hosted repo** with a configurable
-OpenShell/runtime, without hardcoding `shanemcd/honr`, Colima/gateway paths, or
-other machine-specific defaults.
+**Goal:** a fresh install can drive **any GitHub-hosted repo** (and eventually
+**many** on one board) with configurable OpenShell/runtime, without hardcoding
+`shanemcd/honr`, Colima/gateway paths, or other machine-specific defaults.
 
-**Out of scope here:** GitLab (future forge seam only), rewriting the board state
-machine, and shipping the generalization implementation (that is the Task DAG
-below / in `plan.json`).
+**Out of scope for this Project’s implementation cards:** GitLab (future forge
+seam only), rewriting the board state machine, and shipping generalization
+beyond what each Task’s DoD says.
 
 ---
 
 ## Verdict
 
 Most **logic** is already parameterized (`RepoConfig`, `VertexConfig`, sandbox
-profiles, webhook payload matching). What blocks a second operator is:
+profiles, webhook payload matching). What blocks a second operator — and a
+second *concurrent* repo — is:
 
 1. **Shipped values and silent fallbacks** that assume Shane’s machine
-   (`shanemcd/honr`, `clankrshq`, `shanemcd-rh`, provider names).
+   (`shanemcd/honr`, `clankrshq`, `shanemcd-rh`, provider names) — mostly fixed
+   for beads (`workspace-binding`).
 2. **Process knobs stuck in `honr.yaml`** while Settings only covers sandbox
-   create-specs — operators must edit YAML + restart for repo/auth.
+   create-specs — operators must edit YAML + restart for auth/runtime.
 3. **Host OpenShell/Docker** living entirely outside honr (correct), but
    documented only as a Colima/podman/macOS playbook.
 4. **Briefing / image assumptions** tuned for building honr itself (`cargo
    test --offline`, `honr-sandbox:latest`).
+5. **Install-wide Workspace `upstream`/`fork` as the only work binding** (#169 /
+   #170) — too rigid for multi-repo boards (decision in
+   [Multi-repo forge model](#multi-repo-forge-model-decision-card-175) below).
 
-Prefer **extending Settings** (Workspace + Agent runtime + OpenShell status)
-over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
+Prefer **extending Settings** (narrowed Workspace + Agent runtime + OpenShell
+status) and **Project fields** for work remotes — not a parallel config UI.
+Keep `honr.yaml` as bootstrap/fallback.
+
+---
+
+## Multi-repo forge model (decision, card #175)
+
+### (1) What is wrong with a single install-wide upstream/fork
+
+| Problem | Why it bites |
+|---|---|
+| One board, one work target | Rebinding Settings → Workspace to run Project B against `acme/widgets` unbinds Project A’s clone/PR/rebase path. Concurrent multi-repo dispatch is impossible. |
+| Couples beads Issues to work remotes | `beads_sync_repo` defaults to Workspace `upstream`. Honr’s Issue mirror often *is* `shanemcd/honr` while a second product repo is the PR target — one field cannot mean both. |
+| Contradicts payload-driven merge | `complete_for_merged_pr` / webhook Done already match card `pr_url`, not a global upstream string (`src/store.rs`, `src/api.rs`). Install binding is unused on the path that matters most. |
+| Second-repo proof as “rebind install” | Plan Task #174 as written forces thrashing the whole Workspace. That proves single-repo portability, not multi-repo. |
+| Settings copy overclaims | Workspace panel today: “supervisor and beads use them after reload” and “Agents stay disabled until upstream and fork are set” — true for today’s code, wrong as a long-term product rule. |
+
+**Recommendation:** drop the assumption that Settings Workspace *is* the work
+clone/PR binding. Keep Settings for **forge identity + install defaults + ops**.
+Put **work remotes on the Project** (same shape as today’s `RepoConfig`), and
+**learn from the card’s `pr_url` + sandbox remotes** once a PR exists.
+
+### (2) How clone / push / rebase / webhook / PR-complete learn the repo
+
+No global work binding required. Resolve **per card** (via its Project +
+optional `pr_url`):
+
+```
+card.pr_url  →  parse owner/repo as upstream; fork = {Workspace.fork_owner}/{repo}
+       ↓ if missing
+Workspace / yaml default (upstream, fork, base)
+       ↓ if missing
+refuse with error naming missing pr_url / Workspace defaults
+```
+
+No per-Project `repo` field — the card's reported PR URL is the multi-repo
+signal (binding note on #175).
+
+| Path | How it learns the repo | Notes |
+|---|---|---|
+| **First clone** (no `pr_url`) | Project `fork` / `upstream` / `base` (else install default) | Supervisor `clone_script` / `refresh_script` must take **resolved** `RepoConfig`, not process-global Workspace alone (`src/supervisor.rs`). |
+| **Push** | Sandbox `origin` = fork (clone target). Agent briefing: push to `origin` (the fork). | Invariant: bot has no write to upstream. |
+| **Rebase (supervisor + agent)** | Always onto **PR base repo** `upstream/{base}`, never `origin/{base}` alone (fork base freezes). Upstream comes from resolution above. | Existing scripts already use `cfg.repo.upstream`; change is *where* `cfg.repo` is filled. |
+| **Resume after PR** | Parse card `pr_url`: `https://github.com/{owner}/{repo}/pull/{n}` → upstream `owner/repo`. Fork: prefer Project.fork; else `gh pr view <url> --json headRepository,headRepositoryOwner` / existing sandbox `origin`; else refuse. | Do not require Settings upstream to match the PR. |
+| **PR lookup** (`gh pr list --repo …`) | Resolved upstream for that card | Today hardcoded from install `cfg.repo.upstream`. |
+| **PR-complete (merge webhook)** | Card `pr_url` match only (`normalize_pr_url` / `complete_for_merged_pr`) | **Already correct** — no global binding. Keep. |
+| **MainAdvanced / Review rebase catch-up** | Each Review card’s resolved upstream/base (from `pr_url` or Project) | Must not rebase every Review card onto the install Workspace upstream when Projects differ. |
+| **Webhook forward (ops)** | Operator runs one forwarder **per upstream they care about**. Settings shows a **template** (`--repo=<owner/name>`), not a single Shane (or even single Workspace) repo as the only instruction. | Multi-repo installs may need multiple forwarders or a prod webhook app. |
+
+**What remains in Settings (install-wide):**
+
+| Keep | Drop as *required* work SoT |
+|---|---|
+| Forge provider (`github` now; GitLab disabled/future) | Requiring complete install `upstream`+`fork` before any agent runs |
+| Bot / token docs + OpenShell GitHub provider **names** | Treating Workspace upstream as beads *and* every Project’s PR target |
+| OpenShell connectivity / health | |
+| Agent runtime (engine, Vertex, budgets, providers) | |
+| Sandbox profile catalog | |
+| **Beads sync repo** (honr Issue mirror) — explicit, not “same as work upstream” | |
+| Optional **default** upstream/fork/base for new Projects / yaml migration | |
+
+Prefer extending today’s Settings chrome over a parallel config UI. Narrow the
+Workspace panel copy and fail-closed rules in a follow-on Task — **not** in #175.
+
+### (3) Briefing / `project_prompt` language (rebase onto the correct upstream)
+
+Standing rules (product invariants — keep in default `project_prompt` or
+briefing template):
+
+1. **Remote names:** `origin` = fork (push); `upstream` = PR base repository
+   (fetch/rebase). Never treat the fork’s default branch as the merge base.
+2. **Rebase target:** `git fetch upstream <base> && git rebase upstream/<base>`
+   (or the conflict-resume wording already in `briefing()`).
+3. **When `pr_url` is set:** name the URL; “update that PR”; push to `origin`;
+   open/update against the **parsed** upstream `owner/repo`, base from Project
+   or PR baseRef.
+4. **When a fork is involved:** “The fork’s base freezes at create time; rebase
+   onto `upstream/<base>`, not `origin/<base>`.” (Already in supervisor comments
+   / conflict briefing — keep, interpolate Project-resolved names.)
+5. **Per-Project `project_prompt`:** for a non-default repo, operators should
+   state the canonical upstream/fork once (e.g. “This Project opens PRs against
+   `acme/widgets` from fork `bot/widgets`”). Briefing still injects the resolved
+   values so agents do not rely on memory alone.
+6. **Quality gates:** remain Project/prompt territory (`briefing-repo-agnostic`)
+   — do not hardcode `cargo` for every repo.
+
+### (4) Plan Tasks #170–#174 — revise / cancel / re-block
+
+Board cards under Project **Generalize honr beyond this stack**:
+
+| Card | Key | Disposition | Updated intent / DoD |
+|---|---|---|---|
+| **#170** | `settings-workspace` | **Revise (already merged).** No further UI expansion that treats install upstream/fork as the only work binding. Follow-on narrows copy + fail-closed. | **DoD (residual / follow-on `narrow-workspace-settings`):** (1) Workspace panel states work remotes are **per-Project**; install upstream/fork are **optional defaults**. (2) Agents may run with empty install upstream/fork when the **Project** binding is complete (fail-closed names Project fields). (3) Webhook hint is a placeholder template, not “the” configured install upstream as sole ops path. (4) Beads sync field stays install-wide and is labeled as Issue mirror, not PR target. *No new Settings app.* |
+| **#171** | `settings-agent-runtime` | **Keep.** Unchanged product intent. | **DoD:** unchanged from Plan (Settings Agent runtime; Vertex location from config; providers from durable config; `cargo test --offline` + clippy clean). **blocked_by:** none beyond already-landed #169 (do **not** wait on install upstream/fork being mandatory). |
+| **#172** | `openshell-ops-surface` | **Keep.** | **DoD:** unchanged (OpenShell health panel; role-based ops docs; Shane as worked example; dispatch still gates on gateway health). **blocked_by:** none on Workspace completeness. |
+| **#173** | `briefing-repo-agnostic` | **Revise.** | **DoD:** (1) Briefing without Rust gates omits mandatory `cargo test/clippy --offline` (test covers). (2) Branch/sandbox prefix from config default, overridable — not only literal `honr/card-` with no override. (3) Verdict paths unchanged. (4) Briefing / clone scripts use **Project-resolved** (or `pr_url`-resolved) upstream/base; a Project whose repo ≠ install default does not get the install upstream interpolated (test covers). (5) `cargo test --offline` covers briefing variants. **blocked_by:** `project-repo-binding` (new) — or land binding first in the same PR if scoped tightly. |
+| **#174** | `second-repo-proof` | **Revise + re-block.** | **DoD:** (1) Run record names a **non-Shane** upstream/fork used as the **Project** binding (install Workspace may remain Shane for beads). (2) Card reaches Review with `pr_url` on that upstream. (3) No code path required editing `shanemcd/honr` into config for the **work** remotes. (4) Residual hardcodes filed as follow-ups. **blocked_by:** `project-repo-binding`, #171, #172, #173 (not “rebind install Workspace”). |
+
+**New sibling Task (create after Approve of this decision):**
+
+| Key | Title | Intent | blocked_by | DoD (mechanical) |
+|---|---|---|---|---|
+| `project-repo-binding` | Per-Project repo binding + resolve from `pr_url` | Add Project fields `upstream`/`fork`/`base` (seed from install default / yaml). Supervisor resolves per card: `pr_url` → Project → optional Workspace default → refuse. Clone/push/rebase/PR-lookup use resolved config. Agents no longer require install Workspace upstream/fork when Project is complete. | (none; #169 done) | (1) Project with its own upstream/fork dispatches clone against that fork URL (`rg`/unit test on script or resolve helper). (2) Card with `pr_url` on repo A does not use install Workspace upstream B for `gh pr list` / rebase target (test). (3) Empty Project + empty default → actionable error naming Project fields. (4) Migration: existing single-repo installs seed Project from Workspace/yaml so Shane self-host keeps working. (5) `cargo test --offline` + clippy `-D warnings` clean. |
+
+Optional small follow-on: `narrow-workspace-settings` (UI copy + fail-closed) if not folded into `project-repo-binding`.
+
+### (5) GitLab
+
+**Out of scope** for every Task in this Project except as a named Settings /
+`forge` enum seam (`github` now; `gitlab` listed disabled). No GitLab API,
+webhooks, or clone URLs in DoDs above.
 
 ---
 
@@ -40,23 +159,23 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 
 | Assumption | Where | Today |
 |---|---|---|
-| Upstream / fork / base | `honr.yaml` `execution.agents.repo`; `src/schema.rs` `RepoConfig` | YAML; restart required |
-| Clone fork, PR → upstream | `src/supervisor.rs` `clone_script`, `briefing`, `pr_lookup_script` | Uses yaml `RepoConfig` (generic) |
+| Upstream / fork / base | Board Workspace + `honr.yaml` `execution.agents.repo`; `RepoConfig` | **Install-wide** SoT after #169/#170 — **to become Project + pr_url** (#175) |
+| Clone fork, PR → upstream | `src/supervisor.rs` `clone_script`, `briefing`, `pr_lookup_script` | Uses process `AgentConfig.repo` from Workspace overlay |
 | Cross-fork head `owner:branch` | supervisor PR scripts / tests | Design invariant |
 | Webhook ingress | `POST /api/webhooks/github` in `src/api.rs` | Payload-driven; **no** repo allowlist; **no** signature verify |
-| PR complete on merge | `src/store.rs` `complete_for_merged_pr` / `normalize_pr_url` | Matches card `pr_url` |
-| Dev forwarder example | `docs/operating.md` + Settings → Workspace hint | Placeholder / configured upstream (not Shane hardcode) |
+| PR complete on merge | `src/store.rs` `complete_for_merged_pr` / `normalize_pr_url` | Matches card `pr_url` — **already multi-repo-safe** |
+| Dev forwarder example | `docs/operating.md` + Settings → Workspace hint | Placeholder / configured upstream |
 | PR label UI | `web/src/components/Card.tsx` `prLabel` | Generic `github.com/owner/repo/pull/N` |
 
 ### Repo identity
 
 | Assumption | Where | Today |
 |---|---|---|
-| `shanemcd/honr` + `clankrshq/honr` + `main` | `honr.yaml` | Shipped install values |
+| `shanemcd/honr` + `clankrshq/honr` + `main` | `honr.yaml` | Shipped install values / seed |
 | Empty defaults until yaml | `RepoConfig::default` | Safe schema default |
 | Test fixtures | `schema.rs` `workable()`, supervisor/store/api tests | Convenient, not runtime |
 | Agents `enabled: true` | shipped `honr.yaml` | Footgun for fresh clones (`docs/operating.md`) |
-| Per-Project repo | — | **Missing** (process-wide only) |
+| Per-Project repo | — | **Missing** — required by #175 decision |
 
 ### OpenShell — gateway, Docker, image, policy, credentials
 
@@ -87,7 +206,7 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 
 | Assumption | Where | Today |
 |---|---|---|
-| Fallback repo `shanemcd/honr` | ~~`src/beads.rs`~~ **removed** — Workspace / env / refuse | Was hardcoded — fixed in `workspace-binding` |
+| Fallback repo `shanemcd/honr` | ~~`src/beads.rs`~~ **removed** — Workspace / env / refuse | Fixed in `workspace-binding` |
 | Env `GITHUB_REPOSITORY` / `OWNER` / `REPO` | beads + Workspace `beads_sync_repo` | Env wins; else Workspace / yaml |
 | `bd config github.owner/repo` | live e2e test uses `clankrshq`/`honr` | External to honr config |
 | Mirror scheduling | `src/store.rs` | Generic once URL known |
@@ -99,8 +218,8 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 | Settings → **Sandboxes** | Real: profile CRUD, default, inline policy |
 | Project sandbox picker | Real (`ProjectSandboxPicker`) |
 | Project engine select | Real in Detail drawer |
-| Settings → **General** | **Stub** (“soon”) |
-| Repo / vertex / providers / budgets | **Not in Settings** — yaml only |
+| Settings → **Workspace** | Real (#170) — install upstream/fork/base + beads sync (**narrow after #175**) |
+| Repo / vertex / providers / budgets | **Not in Settings** — yaml only (#171) |
 | Production UI strings | No Shane repo names (fixtures in `web/ui-fixture.mjs` / tests only) |
 
 ### Briefing & tests
@@ -115,10 +234,10 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 ### Existing seams worth extending
 
 1. `RepoConfig` / `VertexConfig` already threaded through clone, briefing, env.
-2. Sandbox profile catalog + Project override + yaml seed (`docs/operating.md`, prior Settings plan).
-3. Per-Project `engine`.
+2. Sandbox profile catalog + Project override + yaml seed.
+3. Per-Project `engine` / `sandbox_profile_id` / `project_prompt` — **same pattern for repo**.
 4. Webhooks match `pr_url`, not a hardcoded upstream string.
-5. Settings shell already has nav + stub General — fill it; do not add a second config app.
+5. Settings shell already has Workspace + Sandboxes — extend/narrow; do not add a second config app.
 
 ---
 
@@ -127,10 +246,10 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 ### (A) Must be per-install Settings / config
 
 - Forge provider (**GitHub now**; GitLab = future enum value only).
-- Workspace repo binding: `upstream`, `fork`, `base`.
 - Bot / token wiring (OpenShell GitHub provider name + docs for credential key `GITHUB_TOKEN`/`GH_TOKEN`).
 - Fork strategy note (cross-fork PR; bot must not write upstream) — configurable *repos*, invariant *model*.
-- Beads GitHub sync target (replace `shanemcd/honr` fallback; align with upstream or explicit override).
+- **Beads GitHub sync target** (Issue mirror for the board — **independent** of work remotes).
+- Optional **default** upstream/fork/base for new Projects (yaml seed / migration convenience) — **not** required for agents when Project binding is complete.
 - Default agent engine; Vertex project / location / model (or “Cursor-only” installs).
 - OpenShell provider name list; agents enabled; concurrency / budgets / timeout.
 - Default sandbox profile (already A).
@@ -141,7 +260,8 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 - `sandbox_profile_id` (exists).
 - `engine` (exists).
 - `project_prompt` / Plan (exists) — standing policy including quality gates for *this* codebase.
-- **Later (not required for “second repo = whole board”):** per-Project repo binding if one board drives multiple upstreams.
+- **`upstream` / `fork` / `base` work remotes** — derived per card from `pr_url`
+  (+ Workspace fork-owner default); not a Project struct field.
 
 ### (C) May remain code defaults with clear override
 
@@ -162,6 +282,7 @@ over a parallel config UI. Keep `honr.yaml` as bootstrap/fallback.
 - Bot containment via forge permissions (no write to upstream).
 - Verdict protocol: `report.json` / `plan.json` / `split.json` / `escalate.json` under `/sandbox/.honr/`.
 - Hangs-as-failure; every OpenShell call has a deadline.
+- Rebase onto PR-base upstream remote, not the fork’s frozen default branch.
 - GitLab **not** implemented in this Project — only a named seam in Settings IA.
 
 ---
@@ -172,72 +293,87 @@ Extend the existing Settings chrome (`web/src/components/Settings.tsx`):
 
 | Section | Contents | vs Project picker |
 |---|---|---|
-| **Workspace** (replace General stub) | Forge: GitHub; upstream / fork / base; beads sync repo; webhook setup hint (repo-agnostic). | Global for v1 (one workspace per process). |
+| **Workspace** (narrowed in #175) | Forge: GitHub; **beads sync repo**; optional default upstream/fork/base; webhook **template**. | Defaults only. **Work remotes from card `pr_url`** (+ fork-owner derive). |
 | **Sandboxes** (exists) | Profiles: image, inline policy, cpu, memory; set default. | Project overrides profile. |
-| **Agent runtime** (new) | Default engine; Vertex project/location/model; OpenShell provider names; enabled / concurrency / budgets (or “advanced” subsection). | Project may override engine only (keep). |
-| **OpenShell** (new, thin) | Read-only gateway health (`openshell status` summary); link to ops doc; optional binary path. **No** Colima path editor — host env stays host. | Global. |
+| **Agent runtime** (new, #171) | Default engine; Vertex project/location/model; OpenShell provider names; enabled / concurrency / budgets. | Project may override engine only (keep). |
+| **OpenShell** (new, thin, #172) | Read-only gateway health (`openshell status` summary); link to ops doc; optional binary path. **No** Colima path editor — host env stays host. | Global. |
 
-**Not** a parallel “config app.” YAML remains cold bootstrap: empty/placeholder example + migration into board state on first boot (same pattern as sandbox profile seed).
+**Project Detail** (not Settings): engine / sandbox picker as today. Work remotes
+are **not** Project fields — derive from card `pr_url` and Workspace fork-owner
+defaults (see §2).
+
+**Not** a parallel “config app.” YAML remains cold bootstrap: seed Workspace
+defaults + each new Project’s repo when empty.
 
 ---
 
-## Workspace binding field map (Task `workspace-binding`)
+## Workspace binding field map (as shipped in #169/#170; post-#175 semantics)
 
 Durable state lives on the Board (`BoardState.workspace` / SQLite meta
 `workspace_binding`). `honr.yaml` `execution.agents.repo` is bootstrap only.
 
-| Field | Type | Seed / read order | Used by |
+| Field | Type | Seed / read order | Role after #175 |
 |---|---|---|---|
-| `forge` | string | default `github` | Settings IA seam (GitLab later) |
-| `upstream` | `owner/name` | yaml `execution.agents.repo.upstream` | clone/PR target, supervisor |
-| `fork` | `owner/name` | yaml `execution.agents.repo.fork` | agent clone + push |
-| `base` | branch | yaml `base` or `main` | PR base / rebase |
-| `beads_sync_repo` | optional `owner/name` | `GITHUB_REPOSITORY` env at seed, else `upstream` | beads Issue URLs / `bd github` |
+| `forge` | string | default `github` | Settings IA seam (GitLab later) — **keep install-wide** |
+| `upstream` | `owner/name` | yaml `execution.agents.repo.upstream` | **Optional default** for new Projects; not sole agent SoT |
+| `fork` | `owner/name` | yaml `execution.agents.repo.fork` | **Optional default** for new Projects |
+| `base` | branch | yaml `base` or `main` | Default base when Project omits |
+| `beads_sync_repo` | optional `owner/name` | `GITHUB_REPOSITORY` env at seed, else was `upstream` | **Issue mirror only** — set explicitly; do not imply work target |
 
-**Resolution for agents:** complete Workspace → else yaml repo → else refuse
-with an error naming missing Workspace `upstream` / `fork` (no
-`shanemcd/honr` default).
+**Resolution for agents (target after `project-repo-binding`):** card `pr_url` →
+Project repo → Workspace default → refuse (name missing **Project** fields). No
+`shanemcd/honr` default.
 
-**Resolution for beads Issue URLs:** `GITHUB_REPOSITORY` env → Workspace
-`beads_sync_repo` / `upstream` → yaml upstream → refuse (numeric / `gh-N`
-refs yield no URL).
+**Resolution for beads Issue URLs (unchanged intent):** `GITHUB_REPOSITORY` env →
+Workspace `beads_sync_repo` → optional default upstream → refuse.
 
 **Seed once:** `Board::seed_workspace_binding_if_empty` on load (mirrors
-sandbox profile seed). After seed, Board is source of truth.
+sandbox profile seed). After `project-repo-binding`, also seed Project.repo from
+Workspace/yaml when empty so existing single-repo installs keep working.
 
 ---
 
 ## Migration path (today’s self-hosting keeps working)
 
-1. **Read order:** board durable workspace/runtime config if present → else `honr.yaml` `execution.agents.*` → else refuse agents with a clear error (no `shanemcd/honr` fallback).
-2. **Seed once:** on load, if workspace binding empty and yaml has upstream/fork, copy into board state (mirror `seed_sandbox_profiles_from`).
-3. **Env bridge:** honor `GITHUB_REPOSITORY` / `HONR_DATABASE_URL` / `HONR_PORT` as today; document that beads sync should match Workspace upstream (or explicit override field).
-4. **Host OpenShell unchanged:** `~/.config/openshell/`, `DOCKER_HOST`, Colima/podman remain operator setup; rewrite `docs/operating.md` / `docs/sandbox-stack.md` to be role-based (“compute driver”, “gateway”, “providers”) with Shane’s stack as *one worked example*, not the schema.
-5. **Shipped yaml:** `enabled: false` in examples; real deploys keep local overrides uncommitted (or gitignored overlay) — stop teaching `enabled: true` as the repo default.
-6. **Tests:** keep using example `owner/repo` fixtures; add tests that missing binding errors instead of falling back to Shane.
+1. **Read order (today):** board durable workspace if complete → else `honr.yaml`
+   → else refuse. **After `project-repo-binding`:** per-card resolve as in §2;
+   Workspace/yaml become defaults only.
+2. **Seed once:** on load, if workspace empty and yaml has upstream/fork, copy
+   into board state. On Project create / migrate, copy Workspace default into
+   Project.repo when Project has no binding.
+3. **Env bridge:** honor `GITHUB_REPOSITORY` / `HONR_DATABASE_URL` / `HONR_PORT`
+   as today; beads sync should be an **explicit** Issue-mirror field (often still
+   the honr repo while work Projects point elsewhere).
+4. **Host OpenShell unchanged:** `~/.config/openshell/`, `DOCKER_HOST`,
+   Colima/podman remain operator setup; rewrite ops docs to be role-based with
+   Shane’s stack as *one worked example* (#172).
+5. **Shipped yaml:** `enabled: false` in examples; real deploys keep local
+   overrides uncommitted.
+6. **Tests:** keep example `owner/repo` fixtures; add tests for Project override
+   and `pr_url` resolve; missing binding errors instead of Shane fallback.
 
 ---
 
 ## Phased roadmap (second GitHub repo before any GitLab)
 
-See `plan.json` Tasks. Intent in short:
+1. ~~**Workspace binding + kill fallbacks** (#169)~~ — landed.
+2. ~~**Settings → Workspace** (#170)~~ — landed; **narrow** after #175 (see table).
+3. **`project-repo-binding`** (new) — Project remotes + `pr_url` resolve; fail-closed without install-wide requirement.
+4. **Settings → Agent runtime** (#171) — providers / Vertex / engine / budgets.
+5. **OpenShell ops surface + docs** (#172) — health in Settings; de-Shane ops docs.
+6. **Repo-agnostic briefing / gates** (#173) — prefixes + quality gates + Project-resolved upstream in briefing.
+7. **Second-repo proof** (#174) — Project bound to non-Shane upstream/fork; one card to Review with real PR (**without** rebinding install Workspace).
 
-1. **Workspace binding + kill fallbacks** — config model, migration, no silent `shanemcd/honr`.
-2. **Settings → Workspace** — operators bind a repo without hand-editing yaml for the common path.
-3. **Settings → Agent runtime** — providers / Vertex / engine / budgets in Settings; fix agy location hardcode.
-4. **OpenShell ops surface + docs** — health in Settings; de-Shane the ops docs.
-5. **Repo-agnostic briefing / gates** — prefixes + quality gates from Project prompt or workspace, not hardcoded `cargo` for every repo.
-6. **Second-repo proof** — configure a non-`shanemcd/honr` upstream/fork and complete one dispatched card to Review with a real PR.
-
-GitLab: mention only as `forge: github | (future) gitlab` on the Workspace model — no Tasks in this Plan implement it.
+GitLab: mention only as `forge: github | (future) gitlab` — no Tasks implement it.
 
 ---
 
-## Approve checklist
+## Approve checklist (card #175)
 
-A human can Approve this Initial plan when:
+A human can Approve this multi-repo decision when:
 
-- [ ] Inventory + A/B/C/D split look right.
-- [ ] Settings IA (extend existing) is preferred over a new config surface.
-- [ ] Migration keeps current Shane self-hosting working.
-- [ ] Task DoDs are mechanically checkable and ordered to unblock a second GitHub repo before forge expansion.
+- [ ] Install-wide upstream/fork is rejected as the long-term work SoT; problems in §1 match reality.
+- [ ] Resolve order in §2 (pr_url → Project → default → refuse) is acceptable; Settings retain tokens/forge/OpenShell/engines/beads sync.
+- [ ] Briefing / `project_prompt` rebase language in §3 is enough to implement without another research card.
+- [ ] Task dispositions for #170–#174 + new `project-repo-binding` look right; GitLab stays a named seam only.
+- [ ] No Settings UI rewrite required to accept this doc; implementation is follow-on Tasks.

@@ -259,6 +259,45 @@ pub fn conflict_bounce_note(conflicting_files: &[String]) -> String {
     )
 }
 
+/// Parse `https://github.com/{owner}/{repo}/pull/{n}` (optional scheme / trailing slash).
+/// Returns `(owner/repo, pull_number)`.
+pub fn parse_github_pr_url(url: &str) -> Option<(String, u64)> {
+    let url = url.trim().trim_end_matches('/');
+    let marker = "github.com/";
+    let idx = url.to_ascii_lowercase().find(marker)?;
+    let rest = &url[idx + marker.len()..];
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    let pull = parts.next()?;
+    let num = parts.next()?;
+    if !pull.eq_ignore_ascii_case("pull") || owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    // Ignore query/fragment on the number segment.
+    let num = num.split(&['?', '#'][..]).next().unwrap_or(num);
+    let n: u64 = num.parse().ok()?;
+    Some((format!("{owner}/{repo}"), n))
+}
+
+/// Bot push target for a given upstream: keep Workspace fork when its repo
+/// name matches; otherwise `{fork_owner}/{upstream_repo}`.
+pub fn derive_fork_for_upstream(workspace_fork: &str, upstream: &str) -> String {
+    let fork = workspace_fork.trim();
+    let upstream = upstream.trim();
+    let fork_owner = fork.split('/').next().unwrap_or("").trim();
+    let fork_repo = fork.split('/').nth(1).unwrap_or("").trim();
+    let up_repo = upstream.split('/').nth(1).unwrap_or("").trim();
+    if fork_owner.is_empty() || up_repo.is_empty() {
+        return fork.to_string();
+    }
+    if fork_repo == up_repo {
+        fork.to_string()
+    } else {
+        format!("{fork_owner}/{up_repo}")
+    }
+}
+
 impl Board {
     pub fn new(schema: Schema, path: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(1024);
@@ -1957,8 +1996,9 @@ impl Board {
     }
 
     /// Replace the durable Workspace binding. Empty upstream/fork are stored
-    /// (so Settings can clear) but agents will fail closed until complete.
-    /// REST: `GET`/`PUT /api/workspace` (Settings → Workspace).
+    /// (optional install defaults). Agents resolve remotes per card via
+    /// [`Self::resolve_card_repo`] — incomplete defaults do not disable
+    /// `agents.enabled`. REST: `GET`/`PUT /api/workspace` (Settings → Workspace).
     pub fn set_workspace_binding(&self, binding: WorkspaceBinding) -> Result<WorkspaceBinding, String> {
         let forge = binding.forge.trim();
         if forge.is_empty() {
@@ -2023,58 +2063,95 @@ impl Board {
         }
     }
 
-    /// Effective clone/PR repo: durable Workspace if complete, else yaml.
-    /// Errors name the missing Workspace fields (fail closed for agents).
-    pub fn effective_agent_repo(&self) -> Result<RepoConfig, String> {
+    /// Optional install-wide work-remote default: durable Workspace if complete,
+    /// else yaml `execution.agents.repo`. Not required for `agents.enabled`.
+    pub fn workspace_default_repo(&self) -> Option<RepoConfig> {
         if let Some(ws) = self.workspace_binding() {
             if ws.is_complete() {
-                return Ok(ws.to_repo_config());
+                return Some(ws.to_repo_config().normalized());
             }
-            let mut missing = Vec::new();
-            if ws.upstream.trim().is_empty() {
-                missing.push("upstream");
-            }
-            if ws.fork.trim().is_empty() {
-                missing.push("fork");
-            }
-            // Incomplete board binding still allows yaml fallback (migration).
-            let yaml = &self.schema.execution.agents.repo;
-            if !yaml.upstream.trim().is_empty() && !yaml.fork.trim().is_empty() {
-                return Ok(yaml.clone());
-            }
-            return Err(format!(
-                "Workspace binding incomplete: missing {}. \
-                 Set them under Settings → Workspace, or seed via execution.agents.repo in honr.yaml.",
-                missing.join(" and ")
-            ));
         }
         let yaml = &self.schema.execution.agents.repo;
-        if !yaml.upstream.trim().is_empty() && !yaml.fork.trim().is_empty() {
-            return Ok(yaml.clone());
+        if yaml.is_complete() {
+            Some(yaml.clone().normalized())
+        } else {
+            None
         }
-        let mut missing = Vec::new();
-        if yaml.upstream.trim().is_empty() {
-            missing.push("upstream");
-        }
-        if yaml.fork.trim().is_empty() {
-            missing.push("fork");
-        }
-        Err(format!(
-            "Workspace binding incomplete: missing {}. \
-             Set them under Settings → Workspace, or seed via execution.agents.repo in honr.yaml.",
-            if missing.is_empty() {
-                "upstream and fork".to_string()
-            } else {
-                missing.join(" and ")
-            }
-        ))
     }
 
-    /// Overlay durable Workspace repo onto a cloned AgentConfig for dispatch.
-    pub fn agents_with_workspace(&self, yaml_agents: &AgentConfig) -> Result<AgentConfig, String> {
+    /// Install default remotes (Workspace / yaml). Errors when neither is complete.
+    /// Prefer [`Self::resolve_card_repo`] for clone/push/rebase/PR-lookup.
+    pub fn effective_agent_repo(&self) -> Result<RepoConfig, String> {
+        self.workspace_default_repo().ok_or_else(|| {
+            "Workspace default incomplete: missing upstream and/or fork. \
+             Set optional defaults under Settings → Workspace (or execution.agents.repo), \
+             or open/report a card pr_url so remotes can be derived."
+                .into()
+        })
+    }
+
+    /// Overlay optional Workspace/yaml default onto AgentConfig. Always succeeds —
+    /// empty remotes are filled later via [`Self::resolve_card_repo`].
+    pub fn agents_with_workspace(&self, yaml_agents: &AgentConfig) -> AgentConfig {
         let mut agents = yaml_agents.clone();
-        agents.repo = self.effective_agent_repo()?;
-        Ok(agents)
+        if let Some(repo) = self.workspace_default_repo() {
+            agents.repo = repo;
+        }
+        agents
+    }
+
+    /// Per-card work remotes for clone / push / rebase / PR-lookup.
+    ///
+    /// Order: card `pr_url` (upstream from URL; fork = Workspace fork owner +
+    /// upstream repo name, or full Workspace fork when repo names match) →
+    /// optional Workspace/yaml default → refuse with a clear error.
+    /// No per-Project repo field — the card's PR URL is the multi-repo signal.
+    pub fn resolve_card_repo(&self, item_id: ItemId) -> Result<RepoConfig, String> {
+        let item = self
+            .get(item_id)
+            .ok_or_else(|| format!("no such item #{item_id}"))?;
+        let default = self.workspace_default_repo();
+
+        if let Some(url) = item.pr_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some((upstream, _)) = parse_github_pr_url(url) {
+                let base = default
+                    .as_ref()
+                    .map(|r| r.base.clone())
+                    .filter(|b| !b.trim().is_empty())
+                    .unwrap_or_else(|| "main".into());
+                let Some(def) = default.as_ref() else {
+                    return Err(format!(
+                        "card #{item_id} has pr_url ({upstream}) but no Workspace fork default \
+                         to derive the push target. Set Settings → Workspace fork \
+                         (bot owner/name), or execution.agents.repo.fork in honr.yaml."
+                    ));
+                };
+                if def.fork.trim().is_empty() {
+                    return Err(format!(
+                        "card #{item_id} has pr_url ({upstream}) but Workspace fork is empty. \
+                         Set Settings → Workspace fork so the bot push target can be derived."
+                    ));
+                }
+                let fork = derive_fork_for_upstream(&def.fork, &upstream);
+                return Ok(RepoConfig {
+                    upstream,
+                    fork,
+                    base,
+                }
+                .normalized());
+            }
+            return Err(format!(
+                "card #{item_id} pr_url is not a parseable GitHub pull URL: {url}"
+            ));
+        }
+
+        if let Some(repo) = self.workspace_default_repo() {
+            return Ok(repo);
+        }
+        // Same error surface as effective_agent_repo for operators.
+        self.effective_agent_repo().map_err(|e| {
+            format!("card #{item_id}: no pr_url and {e}")
+        })
     }
 
     /// Upgrade catalog entries that still store a host path as `policy`.
@@ -3536,14 +3613,17 @@ fn check_split_relatedness(
     }
 
     /// Binding note for live runs when main moves under them.
-    fn main_advanced_steer_note(ref_name: &str, commit_sha: Option<&str>) -> String {
+    /// Uses the card's resolved base branch when available.
+    fn main_advanced_steer_note(ref_name: &str, commit_sha: Option<&str>, base: &str) -> String {
         let where_main = match commit_sha {
             Some(sha) if !sha.is_empty() => format!("{ref_name} @ {sha}"),
             _ => ref_name.to_string(),
         };
+        let base = if base.trim().is_empty() { "main" } else { base.trim() };
         format!(
-            "Main advanced ({where_main}). First action: fetch upstream main and rebase \
-             this card's branch onto upstream/main, then continue the card."
+            "Main advanced ({where_main}). First action: fetch upstream {base} and rebase \
+             this card's branch onto upstream/{base} (not origin/{base} alone — the fork's \
+             base freezes at create time), then continue the card."
         )
     }
 
@@ -3551,8 +3631,8 @@ fn check_split_relatedness(
     /// carries the rebase instruction. Steer alone does not inject mid-turn.
     /// Already-parked cards are left alone (no second park/unpark). Sandbox
     /// environment and conversation_id are preserved through the bounce.
+    /// Each card gets a note using **its** resolved upstream/base.
     fn steer_live_cards_on_main_advanced(&self, ref_name: &str, commit_sha: Option<&str>) {
-        let note = Self::main_advanced_steer_note(ref_name, commit_sha);
         let live_ids: Vec<ItemId> = {
             let s = self.state.read().unwrap();
             s.items
@@ -3562,6 +3642,11 @@ fn check_split_relatedness(
                 .collect()
         };
         for id in live_ids {
+            let base = self
+                .resolve_card_repo(id)
+                .map(|r| r.base)
+                .unwrap_or_else(|_| "main".into());
+            let note = Self::main_advanced_steer_note(ref_name, commit_sha, &base);
             if let Err(e) = self.steer(id, note.clone()) {
                 tracing::warn!("main-advanced steer failed for #{id}: {e}");
             }
@@ -7887,7 +7972,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_binding_fail_closed_names_missing_fields() {
+    fn workspace_default_optional_agents_overlay_does_not_require_complete() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -7897,11 +7982,9 @@ mod tests {
         );
         let err = b.effective_agent_repo().expect_err("empty must fail");
         assert!(
-            err.contains("Workspace binding incomplete"),
-            "must name Workspace: {err}"
+            err.contains("Workspace default incomplete") || err.contains("upstream"),
+            "must name missing defaults: {err}"
         );
-        assert!(err.contains("upstream"), "{err}");
-        assert!(err.contains("fork"), "{err}");
 
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
@@ -7911,17 +7994,199 @@ mod tests {
             beads_sync_repo: None,
         })
         .expect("store incomplete");
-        let err = b.effective_agent_repo().expect_err("still incomplete");
-        assert!(err.contains("Workspace binding incomplete"), "{err}");
-        assert!(err.contains("upstream") && err.contains("fork"), "{err}");
+        assert!(b.effective_agent_repo().is_err());
 
-        // agents_with_workspace refuses the same way.
+        // Overlay always succeeds — remotes filled per card later.
         let agents = AgentConfig {
             enabled: true,
             ..Default::default()
         };
-        let err = b.agents_with_workspace(&agents).expect_err("overlay");
-        assert!(err.contains("Workspace"), "{err}");
+        let overlaid = b.agents_with_workspace(&agents);
+        assert!(overlaid.repo.upstream.is_empty());
+    }
+
+    #[test]
+    fn resolve_card_repo_uses_pr_url_not_workspace_upstream() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-pr-{}.json",
+                std::process::id()
+            )),
+        );
+        b.set_workspace_binding(WorkspaceBinding {
+            forge: "github".into(),
+            upstream: "acme/default".into(),
+            fork: "bot/default".into(),
+            base: "develop".into(),
+            beads_sync_repo: Some("acme/beads".into()),
+        })
+        .unwrap();
+
+        let p = b
+            .create(None, "Other Repo Proj", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Feature",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.set_pr_url(
+            t.id,
+            Some("https://github.com/other/widgets/pull/99".into()),
+        );
+
+        let repo = b.resolve_card_repo(t.id).expect("resolve");
+        assert_eq!(repo.upstream, "other/widgets");
+        assert_eq!(repo.fork, "bot/widgets", "derive fork owner from Workspace");
+        assert_eq!(repo.base, "develop");
+        assert_ne!(repo.upstream, "acme/default");
+    }
+
+    #[test]
+    fn resolve_card_repo_without_pr_uses_workspace_default() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-ws-{}.json",
+                std::process::id()
+            )),
+        );
+        b.seed_workspace_binding_from(&agents_with_repo());
+        let p = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "T",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let repo = b.resolve_card_repo(t.id).unwrap();
+        assert_eq!(repo.upstream, "acme/widgets");
+        assert_eq!(repo.fork, "bot/widgets");
+    }
+
+    #[test]
+    fn resolve_card_repo_refuses_without_pr_or_default() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-refuse-{}.json",
+                std::process::id()
+            )),
+        );
+        let p = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "T",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let err = b.resolve_card_repo(t.id).expect_err("refuse");
+        assert!(err.contains("pr_url") || err.contains("Workspace"), "{err}");
+    }
+
+    #[test]
+    fn parse_github_pr_url_and_derive_fork() {
+        assert_eq!(
+            parse_github_pr_url("https://github.com/Acme/Widgets/pull/42"),
+            Some(("Acme/Widgets".into(), 42))
+        );
+        assert_eq!(
+            parse_github_pr_url("https://GitHub.com/acme/widgets/pull/7/"),
+            Some(("acme/widgets".into(), 7))
+        );
+        assert_eq!(parse_github_pr_url("not-a-url"), None);
+        assert_eq!(
+            derive_fork_for_upstream("bot/honr", "shanemcd/honr"),
+            "bot/honr"
+        );
+        assert_eq!(
+            derive_fork_for_upstream("bot/honr", "acme/widgets"),
+            "bot/widgets"
+        );
+    }
+
+    #[test]
+    fn complete_for_merged_pr_two_owners_independent_of_workspace_upstream() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-multi-pr-complete-{}.json",
+                std::process::id()
+            )),
+        );
+        b.set_workspace_binding(WorkspaceBinding {
+            forge: "github".into(),
+            upstream: "workspace/only".into(),
+            fork: "bot/only".into(),
+            base: "main".into(),
+            beads_sync_repo: None,
+        })
+        .unwrap();
+
+        let p = b
+            .create(None, "Multi", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let make_review = |title: &str, pr: &str| {
+            let t = b
+                .create(
+                    Some(p.id),
+                    title,
+                    "intent",
+                    Some("dod".into()),
+                    Origin::Human,
+                    false,
+                    None,
+                )
+                .unwrap();
+            b.transition(t.id, State::Shaping, "test", None).unwrap();
+            b.transition(t.id, State::Backlog, "test", None).unwrap();
+            b.transition(t.id, State::Claimed, "agent", None).unwrap();
+            b.transition(t.id, State::Running, "agent", None).unwrap();
+            b.transition(t.id, State::Review, "agent", None).unwrap();
+            b.set_pr_url(t.id, Some(pr.into()));
+            t.id
+        };
+        let a = make_review("A", "https://github.com/alpha/one/pull/1");
+        let c = make_review("C", "https://github.com/charlie/two/pull/2");
+
+        assert_eq!(
+            b.complete_for_merged_pr("https://github.com/alpha/one/pull/1", Some(1)),
+            Some(a)
+        );
+        assert_eq!(b.get(a).unwrap().state, State::Done);
+        assert_eq!(b.get(c).unwrap().state, State::Review);
+
+        assert_eq!(
+            b.complete_for_merged_pr("https://github.com/charlie/two/pull/2", Some(2)),
+            Some(c)
+        );
+        assert_eq!(b.get(c).unwrap().state, State::Done);
+        // Workspace.upstream was never consulted.
+        assert_eq!(
+            b.workspace_binding().unwrap().upstream,
+            "workspace/only"
+        );
     }
 
     #[test]

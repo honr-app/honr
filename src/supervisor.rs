@@ -62,15 +62,8 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
         tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
         return;
     }
-    // Workspace binding (board SoT, yaml seed) must be complete before agents run.
-    let agents = match board.agents_with_workspace(&cfg.agents) {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::error!("agents enabled but Workspace binding incomplete: {e}");
-            tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
-            return;
-        }
-    };
+    // Optional Workspace/yaml defaults overlay; work remotes resolve per card.
+    let agents = board.agents_with_workspace(&cfg.agents);
     if let Err(e) = agents.validate() {
         tracing::error!("agents enabled but misconfigured: {e}");
         tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
@@ -610,11 +603,18 @@ async fn is_sandbox_live(os: &OpenShell, name: &str) -> bool {
 }
 
 async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Result<()> {
-    let (board, os, cfg) = (&f.board, &f.os, &f.agents);
+    let (board, os) = (&f.board, &f.os);
     let id = grant.item_id;
     let branch = format!("honr/card-{id}");
 
     ensure_board_owns_run(board, id)?;
+
+    // Per-card remotes: pr_url → Workspace default → refuse.
+    let mut agents = (*f.agents).clone();
+    agents.repo = board
+        .resolve_card_repo(id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cfg = &agents;
 
     let existing_env = board.get(id).and_then(|i| i.environment);
     let (name, is_reused) = match existing_env {
@@ -691,9 +691,14 @@ fn sandbox_spec_for_card(
 /// Take over a run this process did not start: join it at the watch step, with
 /// the setup already done and the briefing already delivered.
 async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
-    let (board, os, cfg) = (&f.board, &f.os, &f.agents);
+    let (board, os) = (&f.board, &f.os);
     let id = a.item_id;
     let branch = format!("honr/card-{id}");
+    let mut agents = (*f.agents).clone();
+    agents.repo = board
+        .resolve_card_repo(id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cfg = &agents;
     let result = async {
         let (run, spent) = watch_agent(
             board,
@@ -2045,7 +2050,19 @@ pub async fn process_awaiting_rebases(
             continue;
         }
 
-        let script = rebase_script(cfg, &branch);
+        let mut card_cfg = cfg.clone();
+        match board.resolve_card_repo(item.id) {
+            Ok(repo) => card_cfg.repo = repo,
+            Err(e) => {
+                tracing::warn!(
+                    "rebase skipped for card #{}: cannot resolve remotes: {e}",
+                    item.id
+                );
+                continue;
+            }
+        }
+
+        let script = rebase_script(&card_cfg, &branch);
         let exec_res = os.exec(&sandbox, &script, Duration::from_secs(60)).await;
         match exec_res {
             Ok(out) => {
@@ -2086,10 +2103,23 @@ pub const CONFLICTING_PR_BOUNCE_REASON: &str =
 /// card looks finished while GitHub still cannot merge.
 fn pr_lookup_script(cfg: &AgentConfig, branch: &str) -> String {
     let upstream = &cfg.repo.upstream;
+    let fork_owner = cfg
+        .repo
+        .fork
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim();
+    // Cross-fork PRs need owner:branch or gh looks on upstream only.
+    let head = if fork_owner.is_empty() {
+        branch.to_string()
+    } else {
+        format!("{fork_owner}:{branch}")
+    };
     format!(
         r#"set -e
 export GH_TOKEN=$GITHUB_TOKEN
-row=$(gh pr list --repo {upstream} --head {branch} --state open --json url,mergeable --jq '.[0] // empty')
+row=$(gh pr list --repo {upstream} --head {head} --state open --json url,mergeable --jq '.[0] // empty')
 if [ -n "$row" ]; then
   url=$(printf '%s' "$row" | jq -r '.url // empty')
   mergeable=$(printf '%s' "$row" | jq -r '.mergeable // empty')
@@ -2204,7 +2234,7 @@ fn choose_briefing(
     resume: bool,
 ) -> String {
     if resume && branch != BranchState::Conflicted {
-        resume_briefing(grant)
+        resume_briefing(grant, upstream, base)
     } else {
         briefing(grant, branch, branch_name, upstream, base)
     }
@@ -2214,7 +2244,7 @@ fn choose_briefing(
 ///
 /// The model already has the cold briefing in session memory; re-dumping it
 /// would burn tokens and invite the agent to restart the card from scratch.
-fn resume_briefing(grant: &ClaimGrant) -> String {
+fn resume_briefing(grant: &ClaimGrant, upstream: &str, base: &str) -> String {
     let mut b = String::new();
     b.push_str(
         "You were parked mid-run. The agent process was stopped; any in-flight tools \
@@ -2242,6 +2272,13 @@ fn resume_briefing(grant: &ClaimGrant) -> String {
             b.push_str(&format!("  - {n}\n"));
         }
     }
+    b.push_str(&format!(
+        "\nRemotes: `origin` is the fork (push); rebase onto `upstream/{base}` — never \
+         `origin/{base}` alone (fork base freezes at create time). PR target: `{upstream}` \
+         base `{base}`.\n",
+        upstream = upstream,
+        base = base,
+    ));
     b.push_str(
         "\nWhen the work is done, write `/sandbox/.honr/report.json` (or escalate/split \
          as before) and publish the PR on this card's branch.\n",
@@ -2327,11 +2364,11 @@ fn briefing(
         BranchState::Fresh => b.push_str(
             "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n",
         ),
-        BranchState::Rebased => b.push_str(
+        BranchState::Rebased => b.push_str(&format!(
             "\nThis card has been worked before. You are on its existing branch, already rebased \
-             onto the current base — review what is there and address the notes above rather \
-             than starting over.\n",
-        ),
+             onto `upstream/{base}` — review what is there and address the notes above rather \
+             than starting over.\n"
+        )),
         BranchState::Conflicted => {
             // upstream/<base>, not origin/<base>: the fork's base freezes at
             // create time; the PR merges into upstream.
@@ -2343,6 +2380,15 @@ fn briefing(
             ));
         }
     }
+
+    // Cross-fork remotes: never treat origin/<base> as the merge base.
+    b.push_str(&format!(
+        "\nRemotes: `origin` is the fork (push); rebase onto `upstream/{base}` — never \
+         `origin/{base}` alone (the fork's base freezes at create time). PRs target \
+         `{upstream}` base `{base}`.\n",
+        upstream = upstream,
+        base = base,
+    ));
 
     let is_initial_plan = crate::model::title_is_initial_plan(&grant.title);
 
@@ -2721,7 +2767,10 @@ mod tests {
     fn the_supervisor_only_looks_up_the_pr() {
         let s = pr_lookup_script(&repo_cfg(), "honr/card-8");
         assert!(s.contains("gh pr list"), "{s}");
-        assert!(s.contains("--head honr/card-8"), "pr list wants a bare branch: {s}");
+        assert!(
+            s.contains("--head clankrshq:honr/card-8"),
+            "cross-fork needs owner:branch: {s}"
+        );
         assert!(s.contains(PR_URL_MARK), "url must come from a marked line: {s}");
         assert!(!s.contains("gh pr create"), "creating is the agent's job now: {s}");
         assert!(!s.contains("push"), "pushing is the agent's job now: {s}");
@@ -2763,14 +2812,19 @@ mod tests {
         let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", "shanemcd/honr", "main");
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
         assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
-        // Fork base freezes; rebase onto upstream, never origin/<base>.
+        // Fork base freezes; rebase onto upstream, never origin/<base> as the target.
         assert!(
             conflicted.contains("upstream/main"),
             "must say rebase onto upstream/<base>: {conflicted}"
         );
         assert!(
-            !conflicted.contains("origin/<base>") && !conflicted.contains("origin/main"),
-            "must not tell the agent to rebase onto the fork base: {conflicted}"
+            conflicted.contains("never") && conflicted.contains("origin/main"),
+            "must warn against rebasing onto the fork base: {conflicted}"
+        );
+        assert!(
+            !conflicted.contains("rebase onto `origin/main`")
+                && !conflicted.contains("rebase onto origin/main"),
+            "must not instruct rebase onto the fork base: {conflicted}"
         );
 
         let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", "shanemcd/honr", "main");
@@ -2961,10 +3015,13 @@ mod tests {
     fn resume_briefing_is_short_and_carries_notes() {
         let mut g = grant();
         g.notes = vec!["Parked: cargo test deadlocked on Board RwLock.".into()];
-        let b = resume_briefing(&g);
+        let b = resume_briefing(&g, "acme/widgets", "main");
         assert!(b.contains("parked mid-run"), "{b}");
         assert!(b.contains("Board RwLock"), "{b}");
         assert!(b.contains("BINDING"), "{b}");
+        assert!(b.contains("upstream/main"), "{b}");
+        assert!(b.contains("acme/widgets"), "{b}");
+        assert!(!b.contains("origin/main alone") || b.contains("never"), "{b}");
         assert!(!b.contains("Standing constraints"), "must not dump the cold briefing: {b}");
     }
 

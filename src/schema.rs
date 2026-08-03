@@ -63,7 +63,7 @@ impl Default for ExecutionConfig {
 /// The agent clones the **fork** and opens a PR against **upstream**. The bot
 /// account has no write access to upstream, so a cross-fork PR is its only
 /// route in — the trust boundary is GitHub's, not ours to enforce.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoConfig {
     /// `owner/name` that PRs target.
     pub upstream: String,
@@ -78,6 +78,22 @@ fn d_base() -> String { "main".into() }
 impl Default for RepoConfig {
     fn default() -> Self {
         Self { upstream: String::new(), fork: String::new(), base: d_base() }
+    }
+}
+
+impl RepoConfig {
+    pub fn is_complete(&self) -> bool {
+        !self.upstream.trim().is_empty() && !self.fork.trim().is_empty()
+    }
+
+    /// Normalize empty base to `main`.
+    pub fn normalized(mut self) -> Self {
+        if self.base.trim().is_empty() {
+            self.base = d_base();
+        }
+        self.upstream = self.upstream.trim().to_string();
+        self.fork = self.fork.trim().to_string();
+        self
     }
 }
 
@@ -177,16 +193,14 @@ impl Default for AgentConfig {
 impl AgentConfig {
     /// Refuse to run rather than half-run. Every one of these presents as a
     /// hang if it's wrong at exec time, so check it at startup instead.
+    ///
+    /// Work remotes (`repo.upstream`/`fork`) are **not** required here: they
+    /// resolve per card from `pr_url` and optional Workspace defaults (see
+    /// `Board::resolve_card_repo`). An incomplete install default only fails
+    /// when a card has no `pr_url` and no Workspace/yaml seed.
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
-        }
-        if self.repo.upstream.is_empty() || self.repo.fork.is_empty() {
-            return Err(
-                "Workspace binding incomplete: missing upstream and/or fork \
-                 (Settings → Workspace, or execution.agents.repo in honr.yaml)"
-                    .into(),
-            );
         }
         if self.vertex.project.is_empty() {
             return Err("execution.agents.vertex.project is required".into());
@@ -302,9 +316,10 @@ mod tests {
     fn enabling_agents_requires_a_complete_config() {
         assert!(workable().validate().is_ok(), "the reference config must pass");
 
+        // Work remotes are resolved per card — empty fork is fine at process start.
         let mut no_fork = workable();
         no_fork.repo.fork = String::new();
-        assert!(no_fork.validate().is_err());
+        assert!(no_fork.validate().is_ok());
 
         let mut no_project = workable();
         no_project.vertex.project = String::new();

@@ -295,6 +295,7 @@ Sandbox stack failures present as hangs — treat silence as failure and escalat
 Finish via /sandbox/.honr/report.json with a real PR (implementation and Initial plan).\n\
 Initial plan: also write /sandbox/.honr/plan.json (proposed Tasks); human Approve creates them.\n\
 If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape); card goes to Review — Approve creates siblings. Never nest under a Task.\n\
+When a fork is involved: origin is the fork (push); rebase onto upstream/<base>, never origin/<base> alone — the fork's base freezes at create time.\n\
 ";
 
 /// One Task row as shown to an agent from the Project Plan.
@@ -352,7 +353,9 @@ impl Default for WorkspaceBinding {
 }
 
 impl WorkspaceBinding {
-    /// True when upstream and fork are both non-empty (agents may run).
+    /// True when upstream and fork are both non-empty (usable as install default).
+    /// Agents do not require this — work remotes resolve per card from `pr_url`
+    /// (see `Board::resolve_card_repo`).
     pub fn is_complete(&self) -> bool {
         !self.upstream.trim().is_empty() && !self.fork.trim().is_empty()
     }
