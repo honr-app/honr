@@ -176,6 +176,9 @@ pub struct Board {
     started_at: DateTime<Utc>,
     pub beads: Option<crate::beads::BeadsClient>,
     pub openshell: Option<crate::openshell::OpenShell>,
+    in_flight_github_pushes: std::sync::Mutex<
+        std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    >,
 }
 
 pub type SharedBoard = Arc<Board>;
@@ -218,6 +221,7 @@ impl Board {
             started_at: Utc::now(),
             beads,
             openshell: Some(crate::openshell::OpenShell::default()),
+            in_flight_github_pushes: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -866,6 +870,45 @@ impl Board {
         Ok(published)
     }
 
+    /// Push a single beads item to GitHub, single-flighted per `beads_id`.
+    /// Concurrent callers for the same `beads_id` await the in-flight push,
+    /// and no-op if `github_issue_url` was successfully set by the first caller.
+    pub async fn push_beads_item_single_flight(self: &Arc<Self>, id: ItemId, beads_id: &str) {
+        if !crate::beads::BeadsClient::is_real_id(beads_id) {
+            return;
+        }
+        let Some(beads) = self.beads.clone() else {
+            return;
+        };
+
+        if self.get(id).and_then(|i| i.github_issue_url.clone()).is_some() {
+            return;
+        }
+        if self.refresh_github_issue_url(id, beads_id).await {
+            return;
+        }
+
+        let lock = {
+            let mut map = self.in_flight_github_pushes.lock().unwrap();
+            map.entry(beads_id.to_string()).or_default().clone()
+        };
+
+        let _guard = lock.lock().await;
+
+        if self.get(id).and_then(|i| i.github_issue_url.clone()).is_some() {
+            return;
+        }
+        if self.refresh_github_issue_url(id, beads_id).await {
+            return;
+        }
+
+        if let Err(e) = beads.github_push(std::slice::from_ref(&beads_id.to_string())).await {
+            tracing::warn!(id, beads_id, error = %e, "beads github push failed in single_flight");
+        }
+        beads.schedule_dolt_push();
+        self.refresh_github_issue_url(id, beads_id).await;
+    }
+
     /// Dual-write a single board item into beads (Project→epic, Task→task with `--parent`).
     /// If successful, stores the real hash id, then pushes **that** bead to GitHub
     /// (`bd github push <id>`) without blocking other mirrors on the push.
@@ -875,43 +918,19 @@ impl Board {
         let Some(beads_id) = self.mirror_beads_item_local(id).await else {
             return;
         };
-        let needs_url = self
-            .get(id)
-            .map(|i| i.github_issue_url.is_none())
-            .unwrap_or(true);
-        if !needs_url {
-            return;
-        }
         let parent = self.get(id).and_then(|i| i.parent);
-        if let Some(beads) = self.beads.clone() {
-            // Epic before Task — GH sub-issues need the parent Issue to exist.
-            if let Some(pid) = parent {
-                if let Some(p) = self.get(pid) {
-                    if p.github_issue_url.is_none() {
-                        if let Some(pbid) = p
-                            .beads_id
-                            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-                        {
-                            if let Err(e) =
-                                beads.github_push(std::slice::from_ref(&pbid)).await
-                            {
-                                tracing::warn!(
-                                    id = pid,
-                                    error = %e,
-                                    "beads github push of parent epic failed"
-                                );
-                            }
-                            self.refresh_github_issue_url(pid, &pbid).await;
-                        }
-                    }
+        // Epic before Task — GH sub-issues need the parent Issue to exist.
+        if let Some(pid) = parent {
+            if let Some(p) = self.get(pid) {
+                if let Some(pbid) = p
+                    .beads_id
+                    .filter(|b| crate::beads::BeadsClient::is_real_id(b))
+                {
+                    self.push_beads_item_single_flight(pid, &pbid).await;
                 }
             }
-            if let Err(e) = beads.github_push(std::slice::from_ref(&beads_id)).await {
-                tracing::warn!(id, error = %e, "beads github push after mirror create failed");
-            }
-            beads.schedule_dolt_push();
         }
-        self.refresh_github_issue_url(id, &beads_id).await;
+        self.push_beads_item_single_flight(id, &beads_id).await;
     }
 
     /// Create/link the beads issue and store `beads_id`, without talking to GitHub.
@@ -1042,9 +1061,9 @@ impl Board {
         if missing.is_empty() {
             return 0;
         }
-        let Some(beads) = self.beads.clone() else {
+        if self.beads.is_none() {
             return 0;
-        };
+        }
 
         let mut need_push: Vec<(ItemId, String)> = Vec::new();
         let mut filled = 0usize;
@@ -1056,13 +1075,9 @@ impl Board {
             }
         }
         if !need_push.is_empty() {
-            let ids: Vec<String> = need_push.iter().map(|(_, bid)| bid.clone()).collect();
-            if let Err(e) = beads.github_push(&ids).await {
-                tracing::warn!(error = %e, "beads github push during url backfill failed");
-            }
-            beads.schedule_dolt_push();
             for (id, beads_id) in &need_push {
-                if self.refresh_github_issue_url(*id, beads_id).await {
+                self.push_beads_item_single_flight(*id, beads_id).await;
+                if self.get(*id).and_then(|i| i.github_issue_url).is_some() {
                     filled += 1;
                 }
             }
@@ -1102,8 +1117,7 @@ impl Board {
             (projects, tasks)
         };
 
-        // Local creates first (projects before tasks), then one selective GitHub
-        // push for the whole batch — not a full-graph sync per card.
+        // Local creates first (projects before tasks), then single-flight GitHub push per card
         let mut created: Vec<(ItemId, String)> = Vec::new();
         for id in projects.into_iter().chain(tasks) {
             if let Some(beads_id) = self.mirror_beads_item_local(id).await {
@@ -1111,15 +1125,8 @@ impl Board {
             }
         }
         if !created.is_empty() {
-            if let Some(beads) = self.beads.clone() {
-                let ids: Vec<String> = created.iter().map(|(_, bid)| bid.clone()).collect();
-                if let Err(e) = beads.github_push(&ids).await {
-                    tracing::warn!(error = %e, "beads github push after heal batch failed");
-                }
-                beads.schedule_dolt_push();
-                for (id, beads_id) in &created {
-                    self.refresh_github_issue_url(*id, beads_id).await;
-                }
+            for (id, beads_id) in &created {
+                self.push_beads_item_single_flight(*id, beads_id).await;
             }
             let healed = created.len();
             tracing::info!("healed {healed} placeholder beads_id(s) with real beads IDs");
@@ -4350,6 +4357,187 @@ mod tests {
         let snap = board.snapshot();
         let item = snap.items.iter().find(|i| i.id == project.id).expect("item in snapshot");
         assert_eq!(item.github_issue_url.as_deref(), Some(expected_url));
+    }
+
+    #[tokio::test]
+    async fn test_single_flight_github_push_prevents_duplicate_pushes() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-single-flight-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let remote_cap = crate::beads::RemoteCapture::new();
+        let beads_client = crate::beads::BeadsClient::with_remotes(
+            &beads_dir,
+            crate::beads::Remotes::Capture(remote_cap.clone()),
+        );
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        let project = board
+            .create(None, "Single Flight Project", "intent", None, Origin::Human, true, None)
+            .expect("create project");
+        let project_beads_id = project.beads_id.clone().expect("real beads_id");
+
+        let _ = remote_cap.take();
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let b = Arc::clone(&board);
+            let p_id = project.id;
+            handles.push(tokio::spawn(async move {
+                b.mirror_beads_item(p_id).await;
+            }));
+        }
+
+        for h in handles {
+            h.await.expect("join task");
+        }
+
+        let ops = remote_cap.ops();
+        let push_ops: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&project_beads_id) => {
+                    Some(ids.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            push_ops.len(),
+            1,
+            "expected exactly one GitHub push for {project_beads_id}, got {:?}",
+            push_ops
+        );
+
+        let project_item = board.get(project.id).unwrap();
+        assert!(
+            project_item.github_issue_url.is_some(),
+            "github_issue_url should be set on board"
+        );
+        let show_issue = beads_client.show(&project_beads_id).await.unwrap();
+        assert_eq!(
+            project_item.github_issue_url,
+            show_issue.github_issue_url(),
+            "board github_issue_url should match beads external_ref"
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[tokio::test]
+    async fn test_create_project_with_seeded_initial_plan_results_in_at_most_one_github_issue_per_beads_id() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "honr-project-seed-single-flight-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let board_file = test_dir.join("honr.json");
+        let beads_dir = test_dir.join(".beads");
+        let remote_cap = crate::beads::RemoteCapture::new();
+        let beads_client = crate::beads::BeadsClient::with_remotes(
+            &beads_dir,
+            crate::beads::Remotes::Capture(remote_cap.clone()),
+        );
+        beads_client.init_stealth().await.expect("stealth init");
+
+        let mut board_raw = Board::new(Schema::default(), board_file);
+        board_raw.beads = Some(beads_client.clone());
+        let board = Arc::new(board_raw);
+
+        let _ = remote_cap.take();
+
+        let project = board
+            .create(None, "Seeded Project", "intent", None, Origin::Human, true, None)
+            .expect("create project");
+        let project_beads_id = project.beads_id.clone().expect("project beads_id");
+
+        let children = board.children_of(project.id);
+        assert!(!children.is_empty(), "expected seeded initial plan task");
+        let seed_id = children[0];
+        let seed_beads_id = board.get(seed_id).unwrap().beads_id.expect("seed beads_id");
+
+        let _ = remote_cap.take();
+
+        let b1 = Arc::clone(&board);
+        let b2 = Arc::clone(&board);
+        let p_id = project.id;
+        let s_id = seed_id;
+
+        let t1 = tokio::spawn(async move {
+            b1.mirror_beads_item(p_id).await;
+        });
+        let t2 = tokio::spawn(async move {
+            b2.mirror_beads_item(s_id).await;
+        });
+
+        t1.await.unwrap();
+        t2.await.unwrap();
+
+        let ops = remote_cap.ops();
+
+        let project_pushes: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&project_beads_id) => {
+                    Some(ids.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            project_pushes.len(),
+            1,
+            "expected at most 1 push for project epic {project_beads_id}, got {:?}",
+            project_pushes
+        );
+
+        let seed_pushes: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&seed_beads_id) => {
+                    Some(ids.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            seed_pushes.len(),
+            1,
+            "expected at most 1 push for seed task {seed_beads_id}, got {:?}",
+            seed_pushes
+        );
+
+        let proj_item = board.get(project.id).unwrap();
+        let proj_show = beads_client.show(&project_beads_id).await.unwrap();
+        assert_eq!(
+            proj_item.github_issue_url,
+            proj_show.github_issue_url(),
+            "project board github_issue_url matches beads external_ref"
+        );
+
+        let seed_item = board.get(seed_id).unwrap();
+        let seed_show = beads_client.show(&seed_beads_id).await.unwrap();
+        assert_eq!(
+            seed_item.github_issue_url,
+            seed_show.github_issue_url(),
+            "seed board github_issue_url matches beads external_ref"
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[tokio::test]
