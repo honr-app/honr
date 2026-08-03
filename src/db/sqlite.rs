@@ -83,13 +83,28 @@ impl SqliteBoardStore {
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
 
+        // Items first, blockers second: `blocked_by` can point at a sibling
+        // with a higher id (or any non-ancestor), so writing edges in the same
+        // pass as rows trips SQLite FOREIGN KEY (787).
         let items: Vec<WorkItem> = state.items.values().cloned().collect();
         for item in parent_first(&items) {
             upsert_item_tx(&mut tx, item).await?;
+        }
+        for item in &items {
             replace_blockers_tx(&mut tx, item.id, &item.blocked_by).await?;
         }
 
         for (&goal_id, lines) in &state.stories {
+            // Drop story lines whose Project was deleted — otherwise INSERT
+            // trips FOREIGN KEY (787) and the whole board fails to boot.
+            if !state.items.contains_key(&goal_id) {
+                tracing::warn!(
+                    goal_id,
+                    lines = lines.len(),
+                    "skipping orphan stories (no matching item)"
+                );
+                continue;
+            }
             replace_stories_tx(&mut tx, goal_id, lines).await?;
         }
 
@@ -538,6 +553,39 @@ mod tests {
         let again = store.load_board_state().await.expect("reload");
         assert_eq!(again.items.get(&2).unwrap().blocked_by, vec![1]);
         assert_eq!(again.stories.get(&1).unwrap()[0].text, "kicked off");
+    }
+
+    #[tokio::test]
+    async fn save_board_state_allows_sibling_blocker_with_higher_id() {
+        let store = mem_store().await;
+        let mut parent = WorkItem::new(1, "Project", "why");
+        parent.level = Some("Project".into());
+        parent.state = State::Backlog;
+
+        let mut early = WorkItem::new(2, "Early", "waits on later sibling");
+        early.parent = Some(1);
+        early.level = Some("Task".into());
+        early.state = State::Backlog;
+        early.blocked_by = vec![3];
+
+        let mut later = WorkItem::new(3, "Later", "the blocker");
+        later.parent = Some(1);
+        later.level = Some("Task".into());
+        later.state = State::Backlog;
+
+        let mut items = BTreeMap::new();
+        items.insert(1, parent);
+        items.insert(2, early);
+        items.insert(3, later);
+        let state = BoardState {
+            next_id: 4,
+            items,
+            stories: BTreeMap::new(),
+            agent_logs: BTreeMap::new(),
+        };
+        store.save_board_state(&state).await.expect("save");
+        let loaded = store.load_board_state().await.expect("load");
+        assert_eq!(loaded.items.get(&2).unwrap().blocked_by, vec![3]);
     }
 
     #[tokio::test]
