@@ -124,6 +124,9 @@ pub struct ItemExtras {
     /// Legacy extras field — migrated into `pull_request` on apply.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Task-scoped product remotes (`RepoConfig`). Never a Project product-repo.
+    #[serde(default)]
+    pub repo: Option<crate::schema::RepoConfig>,
 }
 
 impl ItemExtras {
@@ -150,6 +153,7 @@ impl ItemExtras {
             github_issue_url: item.github_issue_url.clone(),
             pull_request: item.pull_request.clone(),
             pr_url: None,
+            repo: item.repo.clone(),
         }
     }
 
@@ -174,6 +178,12 @@ impl ItemExtras {
         item.pull_request = self.pull_request;
         item.legacy_pr_url = self.pr_url;
         item.migrate_legacy_pr_url();
+        // Projects never carry a product-repo / Task repo binding.
+        item.repo = if item.is_project() {
+            None
+        } else {
+            self.repo.map(|r| r.normalized()).filter(|r| r.is_complete())
+        };
     }
 }
 
@@ -426,6 +436,7 @@ where
         github_issue_url: None,
         pull_request: None,
         legacy_pr_url: None,
+        repo: None,
         plan,
         proposal,
         created_at: parse_dt(&created_at, "created_at")?,

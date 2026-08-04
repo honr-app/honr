@@ -1976,6 +1976,45 @@ impl Board {
         }
     }
 
+    /// Replace a claimable Task's durable product remotes (`RepoConfig`).
+    ///
+    /// Projects refuse this — remotes are task-scoped (no `product_repo`).
+    /// `Some` must be complete (`upstream` non-empty); `None` clears.
+    pub fn set_task_repo(
+        &self,
+        id: ItemId,
+        repo: Option<RepoConfig>,
+    ) -> Result<WorkItem, String> {
+        let normalized = match repo {
+            None => None,
+            Some(r) => {
+                let r = r.normalized();
+                if !r.is_complete() {
+                    return Err(format!(
+                        "card #{id} task repo requires non-empty upstream (owner/name)"
+                    ));
+                }
+                Some(r)
+            }
+        };
+        let item = {
+            let mut s = self.state.write();
+            let it = s
+                .items
+                .get_mut(&id)
+                .ok_or_else(|| format!("no such item #{id}"))?;
+            if it.is_project() {
+                return Err(format!(
+                    "card #{id} is a Project — product remotes live on Tasks, not Projects"
+                ));
+            }
+            it.repo = normalized;
+            it.clone()
+        };
+        self.emit(&item);
+        Ok(item)
+    }
+
     /// Set or clear `pull_request.url`, preserving base/head when present.
     pub fn set_pr_url(&self, id: ItemId, url: Option<String>) {
         let url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
@@ -9113,6 +9152,172 @@ mod tests {
         assert_eq!(ws.beads_sync_repo.as_deref(), Some("old/work"));
         assert!(serde_json::to_string(&ws).unwrap().contains("beads_sync_repo"));
         assert!(!serde_json::to_string(&ws).unwrap().contains("\"upstream\""));
+    }
+
+    #[test]
+    fn task_repo_persists_in_json_roundtrip_and_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-task-repo-persist-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("honr.json");
+        let task_id = {
+            let b = Board::new(Schema::default(), path.clone());
+            let project = b
+                .create(None, "Bound Proj", "why", None, Origin::Human, true, None)
+                .expect("project");
+            assert!(project.repo.is_none(), "Projects carry no product-repo");
+            let task = b
+                .create(
+                    Some(project.id),
+                    "Impl",
+                    "do it",
+                    Some("done".into()),
+                    Origin::Human,
+                    false,
+                    None,
+                )
+                .expect("task");
+            let bound = b
+                .set_task_repo(
+                    task.id,
+                    Some(RepoConfig {
+                        upstream: "acme/widgets".into(),
+                        fork: "bot/widgets".into(),
+                        base: "develop".into(),
+                    }),
+                )
+                .expect("set_task_repo");
+            assert_eq!(bound.repo.as_ref().unwrap().upstream, "acme/widgets");
+            assert_eq!(bound.repo.as_ref().unwrap().fork, "bot/widgets");
+            assert_eq!(bound.repo.as_ref().unwrap().base, "develop");
+
+            let snap = b.snapshot();
+            let snap_task = snap.items.iter().find(|i| i.id == task.id).expect("in snap");
+            assert_eq!(
+                snap_task.repo.as_ref().map(|r| r.upstream.as_str()),
+                Some("acme/widgets")
+            );
+            let snap_proj = snap
+                .items
+                .iter()
+                .find(|i| i.id == project.id)
+                .expect("project in snap");
+            assert!(snap_proj.repo.is_none());
+
+            b.dirty.store(true, Ordering::Relaxed);
+            b.flush();
+            task.id
+        };
+        let restored = Board::load_or_new(Schema::default(), path);
+        let task = restored.get(task_id).expect("restored task");
+        let repo = task.repo.expect("task repo survived flush");
+        assert_eq!(repo.upstream, "acme/widgets");
+        assert_eq!(repo.fork, "bot/widgets");
+        assert_eq!(repo.base, "develop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_has_no_repo_field_and_set_task_repo_refuses() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-project-no-repo-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(None, "No Repo Proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        assert!(project.repo.is_none());
+        let wire = serde_json::to_value(&project).expect("serialize");
+        assert!(
+            wire.get("repo").is_none(),
+            "Projects omit repo when unset (no product_repo)"
+        );
+        assert!(
+            wire.get("product_repo").is_none(),
+            "Projects must not grow a product_repo field"
+        );
+        let err = b
+            .set_task_repo(
+                project.id,
+                Some(RepoConfig {
+                    upstream: "acme/widgets".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                }),
+            )
+            .expect_err("Projects refuse task repo");
+        assert!(
+            err.contains("Project"),
+            "error should name Project refusal: {err}"
+        );
+        assert!(b.get(project.id).unwrap().repo.is_none());
+
+        // WorkspaceBinding stays beads-only (no work-remote fields on wire).
+        let ws = WorkspaceBinding {
+            forge: "github".into(),
+            beads_sync_repo: Some("acme/beads".into()),
+        };
+        let ws_wire = serde_json::to_value(&ws).unwrap();
+        assert!(ws_wire.get("upstream").is_none());
+        assert!(ws_wire.get("fork").is_none());
+        assert!(ws_wire.get("base").is_none());
+        assert_eq!(ws_wire["beads_sync_repo"], "acme/beads");
+    }
+
+    #[test]
+    fn set_task_repo_refuses_empty_upstream() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-task-repo-empty-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = b
+            .create(
+                Some(project.id),
+                "T",
+                "i",
+                Some("d".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        assert!(b
+            .set_task_repo(
+                task.id,
+                Some(RepoConfig {
+                    upstream: "  ".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                }),
+            )
+            .is_err());
+        // Default base when omitted / empty.
+        let bound = b
+            .set_task_repo(
+                task.id,
+                Some(RepoConfig {
+                    upstream: "acme/widgets".into(),
+                    fork: String::new(),
+                    base: String::new(),
+                }),
+            )
+            .expect("complete upstream");
+        assert_eq!(bound.repo.as_ref().unwrap().base, "main");
     }
 
     #[test]

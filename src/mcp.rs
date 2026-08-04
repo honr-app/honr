@@ -83,6 +83,11 @@ pub struct CreateProjectArg {
     /// Standing agent instructions for this Project (defaults on create if omitted).
     #[serde(default)]
     pub project_prompt: Option<String>,
+    /// Ignored — remotes are task-scoped. Accepted so mistaken callers do not
+    /// invent a Project `product_repo` field.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub product_repo: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -100,6 +105,13 @@ pub struct UpdateArg {
     /// Standing instructions — Project cards only.
     #[serde(default)]
     pub project_prompt: Option<String>,
+    /// Task product remotes (`upstream` required). Refused on Projects.
+    #[serde(default)]
+    pub repo: Option<crate::schema::RepoConfig>,
+    /// Ignored — Projects have no product-repo field.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub product_repo: Option<serde_json::Value>,
 }
 
 fn default_above_line() -> bool {
@@ -497,6 +509,8 @@ impl Operator {
         if a.parent.is_some() {
             return Err(bad("Projects are roots; omit parent"));
         }
+        // product_repo is intentionally ignored (no Project-owned remotes).
+        let _ = a.product_repo;
         let item = self
             .board
             .create(
@@ -653,9 +667,12 @@ impl Operator {
             && a.definition_of_done.is_none()
             && a.engine.is_none()
             && a.project_prompt.is_none()
+            && a.repo.is_none()
         {
             return Err(bad("update needs at least one field"));
         }
+        // product_repo is intentionally ignored (task-scoped remotes only).
+        let _ = a.product_repo;
         let item = self
             .board
             .update_item(
@@ -667,6 +684,9 @@ impl Operator {
                 a.project_prompt,
             )
             .map_err(bad)?;
+        if let Some(repo) = a.repo {
+            self.board.set_task_repo(a.id, Some(repo)).map_err(bad)?;
+        }
         let note = match item.engine.as_deref() {
             Some(e) => format!("updated (engine={e})"),
             None => "updated".into(),
