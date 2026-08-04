@@ -3288,6 +3288,7 @@ fn check_split_relatedness(
                 definition_of_done: child.definition_of_done,
                 blocked_by_keys: child.blocked_by_keys,
                 capability: None,
+                repo: child.repo,
                 item_id: None,
             });
         }
@@ -3358,9 +3359,59 @@ fn check_split_relatedness(
         Ok(item)
     }
 
+    /// Resolve remotes for a sibling Task created from a proposal row.
+    ///
+    /// Prefer an explicit complete per-child `repo`; otherwise copy the parent
+    /// card's Task binding (Initial plan or splitting parent). Never reads a
+    /// Project product-repo field (there isn't one).
+    fn resolve_sibling_repo(
+        parent: &WorkItem,
+        spec: &PlanTaskSpec,
+    ) -> Result<RepoConfig, String> {
+        if let Some(r) = &spec.repo {
+            let r = r.clone().normalized();
+            if r.is_complete() {
+                return Ok(r);
+            }
+            return Err(format!(
+                "task '{}' has incomplete repo (upstream owner/name required)",
+                spec.title
+            ));
+        }
+        if let Some(r) = parent.repo.as_ref() {
+            let r = r.clone().normalized();
+            if r.is_complete() {
+                return Ok(r);
+            }
+        }
+        Err(format!(
+            "cannot materialize '{}': no Task repo on child and parent card #{} has none — \
+             bind repo on the Initial plan / parent Task or set per-task repo in the plan",
+            spec.title, parent.id
+        ))
+    }
+
+    /// Every proposal row must resolve to a complete Task repo before Approve
+    /// (or merge-driven materialize) creates siblings.
+    fn validate_proposal_repos(&self, id: ItemId) -> Result<(), String> {
+        let card = self.get(id).ok_or_else(|| format!("no such item #{id}"))?;
+        let proposal = card
+            .proposal
+            .as_ref()
+            .filter(|p| !p.tasks.is_empty())
+            .ok_or_else(|| format!("card #{id} has no proposal to materialize"))?;
+        for spec in &proposal.tasks {
+            let _ = Self::resolve_sibling_repo(&card, spec)?;
+        }
+        Ok(())
+    }
+
     /// Materialize `item.proposal` into sibling Tasks under the parent Project.
     /// Initial plan: keep proposal and stamp `item_id`s (freeze for briefings).
     /// Impl splits: clear the proposal. Does not transition the parent card.
+    ///
+    /// Each new sibling gets a Task repo: per-child override when complete,
+    /// else the parent card's binding. Refuses if any new sibling would remain unbound.
     fn materialize_proposal(
         &self,
         id: ItemId,
@@ -3390,8 +3441,20 @@ fn check_split_relatedness(
                 .collect()
         };
 
+        // Resolve repos for rows we will create before mutating the board.
+        let mut create_plan: Vec<(&PlanTaskSpec, RepoConfig)> = Vec::new();
+        for spec in &proposal.tasks {
+            let title_key = Self::normalize_title(&spec.title);
+            if existing_by_title.contains_key(&title_key) {
+                continue;
+            }
+            let repo = Self::resolve_sibling_repo(&card, spec)?;
+            create_plan.push((spec, repo));
+        }
+
         let mut made = Vec::new();
         let mut key_to_id: BTreeMap<String, ItemId> = BTreeMap::new();
+        let mut create_repos: HashMap<ItemId, RepoConfig> = HashMap::new();
         for spec in &proposal.tasks {
             let title_key = Self::normalize_title(&spec.title);
             if let Some(existing) = existing_by_title.get(&title_key) {
@@ -3413,8 +3476,23 @@ fn check_split_relatedness(
             let sibling = self
                 .transition(sibling.id, State::Backlog, by, Some("from proposal".into()))
                 .map_err(|e| e.to_string())?;
+            let repo = create_plan
+                .iter()
+                .find(|(s, _)| s.key == spec.key)
+                .map(|(_, r)| r.clone())
+                .ok_or_else(|| {
+                    format!("internal: missing resolved repo for proposal key {}", spec.key)
+                })?;
+            create_repos.insert(sibling.id, repo);
             key_to_id.insert(spec.key.clone(), sibling.id);
             made.push(sibling);
+        }
+
+        for (sid, repo) in create_repos {
+            let bound = self.set_task_repo(sid, Some(repo))?;
+            if let Some(slot) = made.iter_mut().find(|i| i.id == sid) {
+                *slot = bound;
+            }
         }
 
         for spec in &proposal.tasks {
@@ -3994,6 +4072,8 @@ facts are pasted, then unpark";
             .is_some_and(|p| !p.tasks.is_empty());
 
         if has_proposal {
+            // Refuse before Done when siblings would land without a Task repo.
+            self.validate_proposal_repos(id)?;
             // UI: "Approve — create Tasks". Materialize now even when a plan/docs
             // PR is attached — waiting on the merge webhook strands the operator
             // whenever the forwarder is down. Merge → Done stays idempotent.
@@ -4901,6 +4981,8 @@ mod tests {
                 None,
             )
             .expect("task");
+        b.set_task_repo(leaf.id, Some(test_task_repo()))
+            .expect("bind leaf repo");
         let _ = b.transition(leaf.id, State::Shaping, "t", None);
         let _ = b.transition(leaf.id, State::Backlog, "t", None);
         b.claim(leaf.id, "agent", None, 45).expect("claim");
@@ -5713,6 +5795,8 @@ mod tests {
                 None,
             )
             .expect("task");
+        b.set_task_repo(task.id, Some(test_task_repo()))
+            .expect("bind task repo");
         let _ = b.transition(task.id, State::Shaping, "t", None);
         let _ = b.transition(task.id, State::Backlog, "t", None);
         let _ = b.claim(task.id, "agent", None, 60).expect("claim");
@@ -5779,6 +5863,8 @@ mod tests {
                 None,
             )
             .expect("card");
+        b.set_task_repo(card.id, Some(test_task_repo()))
+            .expect("bind card repo");
         let _ = b.transition(card.id, State::Shaping, "t", None);
         let _ = b.transition(card.id, State::Backlog, "t", None);
 
@@ -5969,6 +6055,216 @@ mod tests {
     }
 
     #[test]
+    fn approve_defaults_child_repos_from_initial_plan_task() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-approve-default-repo.json"),
+        );
+        let (project, seed) = project_with_initial_plan(&b, "Phase Default Repo");
+        assert_eq!(
+            seed.repo.as_ref().map(|r| r.upstream.as_str()),
+            Some("acme/widgets")
+        );
+
+        b.propose_plan(
+            project.id,
+            "all omit repo",
+            vec![
+                PlanTaskSpec {
+                    key: "t1".into(),
+                    title: "Sibling One".into(),
+                    intent: "do one".into(),
+                    definition_of_done: "one done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    repo: None,
+                    item_id: None,
+                },
+                PlanTaskSpec {
+                    key: "t2".into(),
+                    title: "Sibling Two".into(),
+                    intent: "do two".into(),
+                    definition_of_done: "two done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    repo: None,
+                    item_id: None,
+                },
+            ],
+            vec![],
+        )
+        .expect("propose");
+
+        let published = b.approve_plan(project.id).expect("approve");
+        assert_eq!(published.len(), 2);
+        for id in &published {
+            let task = b.get(*id).expect("sibling");
+            let repo = task.repo.expect("sibling must inherit Initial plan Task repo");
+            assert_eq!(repo.upstream, "acme/widgets");
+            assert_eq!(repo.base, "main");
+        }
+    }
+
+    #[test]
+    fn approve_preserves_per_child_repo_overrides() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-approve-per-child-repo.json"),
+        );
+        let (project, _seed) = project_with_initial_plan(&b, "Phase Multi Repo");
+
+        b.propose_plan(
+            project.id,
+            "mixed repos",
+            vec![
+                PlanTaskSpec {
+                    key: "t1".into(),
+                    title: "Widgets Task".into(),
+                    intent: "default repo".into(),
+                    definition_of_done: "widgets done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    repo: None,
+                    item_id: None,
+                },
+                PlanTaskSpec {
+                    key: "t2".into(),
+                    title: "Other Product Task".into(),
+                    intent: "override repo".into(),
+                    definition_of_done: "other done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    repo: Some(RepoConfig {
+                        upstream: "acme/other".into(),
+                        fork: "bot/other".into(),
+                        base: "develop".into(),
+                    }),
+                    item_id: None,
+                },
+            ],
+            vec![],
+        )
+        .expect("propose");
+
+        let published = b.approve_plan(project.id).expect("approve");
+        assert_eq!(published.len(), 2);
+        let by_title: HashMap<_, _> = published
+            .iter()
+            .filter_map(|id| b.get(*id).map(|i| (i.title.clone(), i)))
+            .collect();
+        let widgets = by_title.get("Widgets Task").expect("widgets");
+        assert_eq!(
+            widgets.repo.as_ref().map(|r| r.upstream.as_str()),
+            Some("acme/widgets"),
+            "omitted child must default from Initial plan"
+        );
+        let other = by_title.get("Other Product Task").expect("other");
+        let other_repo = other.repo.as_ref().expect("override");
+        assert_eq!(other_repo.upstream, "acme/other");
+        assert_eq!(other_repo.fork, "bot/other");
+        assert_eq!(other_repo.base, "develop");
+    }
+
+    #[test]
+    fn approve_refuses_when_initial_plan_and_children_lack_repo() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-approve-refuse-incomplete-repo.json"),
+        );
+        let (project, seed) = project_with_initial_plan(&b, "Phase Unbound");
+        b.set_task_repo(seed.id, None)
+            .expect("clear Initial plan repo");
+
+        b.propose_plan(
+            project.id,
+            "unbound",
+            vec![
+                PlanTaskSpec {
+                    key: "t1".into(),
+                    title: "Unbound A".into(),
+                    intent: "a".into(),
+                    definition_of_done: "a done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    repo: None,
+                    item_id: None,
+                },
+                PlanTaskSpec {
+                    key: "t2".into(),
+                    title: "Unbound B".into(),
+                    intent: "b".into(),
+                    definition_of_done: "b done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    repo: None,
+                    item_id: None,
+                },
+            ],
+            vec![],
+        )
+        .expect("propose");
+
+        let err = b.approve_plan(project.id).unwrap_err();
+        assert!(
+            err.contains("no Task repo") || err.contains("incomplete repo"),
+            "got: {err}"
+        );
+        assert_eq!(
+            b.get(seed.id).unwrap().state,
+            State::Backlog,
+            "Approve must not move Initial plan to Done when repo binding fails"
+        );
+        let siblings: Vec<_> = b
+            .children_of(project.id)
+            .into_iter()
+            .filter_map(|cid| b.get(cid))
+            .filter(|i| !i.is_initial_plan_task())
+            .collect();
+        assert!(
+            siblings.is_empty(),
+            "refuse must not create unbound siblings"
+        );
+    }
+
+    #[test]
+    fn split_approve_defaults_from_parent_task_repo() {
+        let (b, id) = claimed_leaf();
+        let project_id = b.get(id).unwrap().parent.expect("under project");
+        let parent_repo = b.get(id).unwrap().repo.clone().expect("claimed_leaf binds repo");
+        let _ = b.transition(id, State::Running, "agent", None);
+        b.propose_split(
+            id,
+            "agent",
+            vec![
+                SplitChildSpec::new("Split A", "a", "a done"),
+                SplitChildSpec::new("Split B", "b", "b done")
+                    .with_repo(RepoConfig {
+                        upstream: "acme/override".into(),
+                        fork: String::new(),
+                        base: "main".into(),
+                    }),
+            ],
+            5,
+        )
+        .expect("propose");
+        b.approve_review(id).expect("approve");
+        let siblings: Vec<_> = b
+            .children_of(project_id)
+            .into_iter()
+            .filter_map(|cid| b.get(cid))
+            .filter(|i| !i.is_initial_plan_task() && i.id != id)
+            .collect();
+        assert_eq!(siblings.len(), 2);
+        let a = siblings.iter().find(|s| s.title == "Split A").unwrap();
+        assert_eq!(a.repo.as_ref(), Some(&parent_repo));
+        let bb = siblings.iter().find(|s| s.title == "Split B").unwrap();
+        assert_eq!(
+            bb.repo.as_ref().map(|r| r.upstream.as_str()),
+            Some("acme/override")
+        );
+    }
+
+    #[test]
     fn approve_plan_materializes_from_initial_plan_proposal() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-approve-plan.json"));
         let (project, _seed) = project_with_initial_plan(&b, "Phase Y");
@@ -5985,6 +6281,7 @@ mod tests {
                     definition_of_done: "a done".into(),
                     blocked_by_keys: vec![],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 },
                 PlanTaskSpec {
@@ -5994,6 +6291,7 @@ mod tests {
                     definition_of_done: "b done".into(),
                     blocked_by_keys: vec!["a".into()],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 },
             ],
@@ -6088,6 +6386,7 @@ mod tests {
                         definition_of_done: "da".into(),
                         blocked_by_keys: vec![],
                         capability: None,
+                        repo: None,
                         item_id: None,
                     },
                     PlanTaskSpec {
@@ -6097,6 +6396,7 @@ mod tests {
                         definition_of_done: "db".into(),
                         blocked_by_keys: vec!["a".into()],
                         capability: None,
+                        repo: None,
                         item_id: None,
                     },
                     PlanTaskSpec {
@@ -6106,6 +6406,7 @@ mod tests {
                         definition_of_done: "dc".into(),
                         blocked_by_keys: vec!["b".into()],
                         capability: None,
+                        repo: None,
                         item_id: None,
                     },
                 ],
@@ -6185,6 +6486,7 @@ mod tests {
                 definition_of_done: "a done".into(),
                 blocked_by_keys: vec![],
                 capability: None,
+                repo: None,
                 item_id: None,
             }],
             vec![],
@@ -6243,6 +6545,7 @@ mod tests {
                     definition_of_done: "a done".into(),
                     blocked_by_keys: vec![],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 },
                 PlanTaskSpec {
@@ -6252,6 +6555,7 @@ mod tests {
                     definition_of_done: "b done".into(),
                     blocked_by_keys: vec!["a".into()],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 },
             ],
@@ -6293,6 +6597,7 @@ mod tests {
                 definition_of_done: "a done".into(),
                 blocked_by_keys: vec![],
                 capability: None,
+                repo: None,
                 item_id: None,
             }],
             vec![],
@@ -6310,6 +6615,7 @@ mod tests {
                     definition_of_done: "b done".into(),
                     blocked_by_keys: vec![],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 }],
                 vec![],
@@ -6336,6 +6642,7 @@ mod tests {
                 definition_of_done: "a done".into(),
                 blocked_by_keys: vec![],
                 capability: None,
+                repo: None,
                 item_id: None,
             }],
             vec![],
@@ -6370,6 +6677,7 @@ mod tests {
                     definition_of_done: "a done".into(),
                     blocked_by_keys: vec![],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 },
                 PlanTaskSpec {
@@ -6379,6 +6687,7 @@ mod tests {
                     definition_of_done: "b done".into(),
                     blocked_by_keys: vec!["a".into()],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 },
                 PlanTaskSpec {
@@ -6388,6 +6697,7 @@ mod tests {
                     definition_of_done: "c done".into(),
                     blocked_by_keys: vec!["a".into()],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 },
                 PlanTaskSpec {
@@ -6397,6 +6707,7 @@ mod tests {
                     definition_of_done: "d done".into(),
                     blocked_by_keys: vec!["b".into(), "c".into()],
                     capability: None,
+                    repo: None,
                     item_id: None,
                 },
             ],
@@ -6753,6 +7064,9 @@ mod tests {
                 None,
             )
             .expect("create task");
+        board
+            .set_task_repo(task.id, Some(test_task_repo()))
+            .expect("bind task repo");
         assert!(
             task.beads_id
                 .as_deref()
@@ -7941,6 +8255,7 @@ mod tests {
                         definition_of_done: "dod 1".into(),
                         blocked_by_keys: vec![],
                         capability: None,
+                        repo: None,
                         item_id: None,
                     },
                     PlanTaskSpec {
@@ -7950,6 +8265,7 @@ mod tests {
                         definition_of_done: "dod 2".into(),
                         blocked_by_keys: vec![],
                         capability: None,
+                        repo: None,
                         item_id: None,
                     },
                 ],

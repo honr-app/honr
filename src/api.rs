@@ -177,6 +177,21 @@ async fn create_item(
     Json(req): Json<CreateItem>,
 ) -> ApiResult<WorkItem> {
     let _ = req.product_repo; // task-scoped remotes only
+    // Claimable Tasks must carry a complete repo at creation. Projects stay
+    // containers (no product-repo). Internal Board::create may still seed
+    // unbound then set_task_repo (init_plan / materialize).
+    if req.parent.is_some() {
+        let Some(repo) = req.repo.as_ref() else {
+            return Err(ApiError(
+                "creating a Task requires a complete repo (upstream owner/name)".into(),
+            ));
+        };
+        if !repo.clone().normalized().is_complete() {
+            return Err(ApiError(
+                "creating a Task requires a complete repo (upstream owner/name)".into(),
+            ));
+        }
+    }
     let item = b
         .create(
             req.parent,
@@ -264,6 +279,9 @@ pub struct PlanTaskBody {
     blocked_by_keys: Vec<String>,
     #[serde(default)]
     capability: Option<String>,
+    /// Optional per-task remotes; Approve defaults from Initial plan Task repo.
+    #[serde(default)]
+    repo: Option<crate::schema::RepoConfig>,
 }
 
 #[derive(Deserialize)]
@@ -297,6 +315,7 @@ async fn save_plan(
             definition_of_done: t.definition_of_done,
             blocked_by_keys: t.blocked_by_keys,
             capability: t.capability,
+            repo: t.repo,
             item_id: None,
         })
         .collect();
@@ -999,6 +1018,86 @@ mod tests {
             .await
             .is_err(),
             "setting repo on a Project must fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_task_api_refuses_missing_repo() {
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-create-task-repo-{}-{}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+        let project = b
+            .create(None, "P", "why", None, crate::model::Origin::Human, true, None)
+            .expect("project");
+
+        let missing = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: Some(project.id),
+                title: "No repo".into(),
+                intent: "must refuse".into(),
+                definition_of_done: Some("n/a".into()),
+                capability: None,
+                above_line: false,
+                repo: None,
+                product_repo: None,
+            }),
+        )
+        .await;
+        assert!(missing.is_err(), "Task create without repo must fail");
+
+        let empty = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: Some(project.id),
+                title: "Empty upstream".into(),
+                intent: "must refuse".into(),
+                definition_of_done: Some("n/a".into()),
+                capability: None,
+                above_line: false,
+                repo: Some(crate::schema::RepoConfig {
+                    upstream: "  ".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                }),
+                product_repo: None,
+            }),
+        )
+        .await;
+        assert!(empty.is_err(), "Task create with empty upstream must fail");
+
+        let Ok(Json(created)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: Some(project.id),
+                title: "Bound Task".into(),
+                intent: "ok".into(),
+                definition_of_done: Some("done".into()),
+                capability: None,
+                above_line: false,
+                repo: Some(crate::schema::RepoConfig {
+                    upstream: "acme/widgets".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                }),
+                product_repo: None,
+            }),
+        )
+        .await
+        else {
+            panic!("Task create with complete repo must succeed");
+        };
+        assert_eq!(
+            created.repo.as_ref().map(|r| r.upstream.as_str()),
+            Some("acme/widgets")
         );
     }
 
