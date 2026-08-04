@@ -2407,11 +2407,13 @@ impl Board {
 
     /// Per-card work remotes for clone / push / rebase / PR-lookup.
     ///
-    /// - `Ok(Some(repo))` from `pull_request` base/head (or URL-only same-repo stub)
-    /// - `Ok(None)` first run — no remotes; supervisor skips pre-clone
-    /// - `Err` malformed URL
+    /// Resolution order:
+    /// 1. `pull_request` base/head (or URL-only same-repo stub)
+    /// 2. else Task `repo` binding (durable, set before first claim)
+    /// 3. else `Ok(None)` — supervisor skips pre-clone / empty workdir
     ///
-    /// Does **not** require yaml and does not invent a bot fork.
+    /// `Err` only for a malformed `pull_request.url`. No Project product-repo
+    /// step; does not invent a bot fork from yaml or Settings.
     pub fn resolve_card_repo(&self, item_id: ItemId) -> Result<Option<RepoConfig>, String> {
         let item = self
             .get(item_id)
@@ -2435,6 +2437,13 @@ impl Board {
                 return Err(format!(
                     "card #{item_id} pull_request.url is not a parseable GitHub pull URL: {url}"
                 ));
+            }
+        }
+
+        if let Some(repo) = item.repo.as_ref() {
+            let repo = repo.clone().normalized();
+            if repo.is_complete() {
+                return Ok(Some(repo));
             }
         }
 
@@ -9008,6 +9017,228 @@ mod tests {
             )
             .unwrap();
         assert!(b.resolve_card_repo(t.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_card_repo_uses_task_repo_when_no_pull_request() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-task-repo-{}.json",
+                std::process::id()
+            )),
+        );
+        let p = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Initial Plan for P",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.set_task_repo(
+            t.id,
+            Some(RepoConfig {
+                upstream: "acme/widgets".into(),
+                fork: "bot/widgets".into(),
+                base: "develop".into(),
+            }),
+        )
+        .expect("set_task_repo");
+
+        let repo = b.resolve_card_repo(t.id).expect("resolve").expect("bound");
+        assert_eq!(repo.upstream, "acme/widgets");
+        assert_eq!(repo.fork, "bot/widgets");
+        assert_eq!(repo.base, "develop");
+        assert!(repo.is_complete());
+        assert!(repo.uses_cross_fork());
+    }
+
+    #[test]
+    fn resolve_card_repo_pull_request_wins_over_task_repo() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-pr-wins-{}.json",
+                std::process::id()
+            )),
+        );
+        let p = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "T",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.set_task_repo(
+            t.id,
+            Some(RepoConfig {
+                upstream: "acme/from-task".into(),
+                fork: String::new(),
+                base: "main".into(),
+            }),
+        )
+        .unwrap();
+        b.set_pull_request(
+            t.id,
+            Some(crate::model::PullRequest {
+                url: "https://github.com/other/widgets/pull/3".into(),
+                base: Some(crate::model::PullRequestEnd::new("other/widgets", "develop")),
+                head: Some(crate::model::PullRequestEnd::new("bot/widgets", "honr/card-1")),
+            }),
+        );
+
+        let repo = b.resolve_card_repo(t.id).unwrap().unwrap();
+        assert_eq!(repo.upstream, "other/widgets");
+        assert_eq!(repo.fork, "bot/widgets");
+        assert_eq!(repo.base, "develop");
+        assert_ne!(repo.upstream, "acme/from-task");
+    }
+
+    #[test]
+    fn resolve_card_repo_sibling_tasks_resolve_independently() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-siblings-{}.json",
+                std::process::id()
+            )),
+        );
+        let p = b
+            .create(None, "Multi-repo Proj", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let a = b
+            .create(
+                Some(p.id),
+                "Task A",
+                "intent-a",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let c = b
+            .create(
+                Some(p.id),
+                "Task C",
+                "intent-c",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.set_task_repo(
+            a.id,
+            Some(RepoConfig {
+                upstream: "acme/frontend".into(),
+                fork: String::new(),
+                base: "main".into(),
+            }),
+        )
+        .unwrap();
+        b.set_task_repo(
+            c.id,
+            Some(RepoConfig {
+                upstream: "acme/backend".into(),
+                fork: "bot/backend".into(),
+                base: "develop".into(),
+            }),
+        )
+        .unwrap();
+
+        let ra = b.resolve_card_repo(a.id).unwrap().unwrap();
+        let rc = b.resolve_card_repo(c.id).unwrap().unwrap();
+        assert_eq!(ra.upstream, "acme/frontend");
+        assert_eq!(ra.fork, "");
+        assert_eq!(ra.base, "main");
+        assert_eq!(rc.upstream, "acme/backend");
+        assert_eq!(rc.fork, "bot/backend");
+        assert_eq!(rc.base, "develop");
+        // Project itself has no remotes step.
+        assert!(b.resolve_card_repo(p.id).unwrap().is_none());
+    }
+
+    /// `run_card` assigns `resolve_card_repo` into `cfg.repo` and pre-clones
+    /// only when `is_complete()` — Task binding on first claim must satisfy that.
+    #[test]
+    fn resolve_card_repo_task_binding_is_complete_for_pre_clone() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-preclone-{}.json",
+                std::process::id()
+            )),
+        );
+        let p = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "T",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.set_task_repo(
+            t.id,
+            Some(RepoConfig {
+                upstream: "acme/widgets".into(),
+                fork: String::new(),
+                base: "main".into(),
+            }),
+        )
+        .unwrap();
+
+        // Mirror run_card / adopt_card assignment.
+        let mut agents = b.effective_agents();
+        match b.resolve_card_repo(t.id) {
+            Ok(Some(repo)) => agents.repo = repo,
+            Ok(None) => agents.repo = Default::default(),
+            Err(e) => panic!("resolve: {e}"),
+        }
+        assert!(
+            agents.repo.is_complete(),
+            "supervisor pre-clone gate (is_complete) must pass for Task repo"
+        );
+        assert_eq!(agents.repo.clone_target(), "acme/widgets");
+
+        // Unbound sibling → empty workdir path (skip pre-clone).
+        let u = b
+            .create(
+                Some(p.id),
+                "Unbound",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        match b.resolve_card_repo(u.id) {
+            Ok(Some(repo)) => agents.repo = repo,
+            Ok(None) => agents.repo = Default::default(),
+            Err(e) => panic!("resolve unbound: {e}"),
+        }
+        assert!(!agents.repo.is_complete());
     }
 
     #[test]
