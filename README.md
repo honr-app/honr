@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/honr-logo.png" alt="honr, the one that hones" width="180" />
+  <img src="assets/honr-logo.png" alt="honr, the one that hones" width="200" />
 </p>
 
 <h1 align="center">honr</h1>

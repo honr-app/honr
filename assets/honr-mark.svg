@@ -1,7 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="honr mark">
-  <rect width="128" height="128" rx="28" fill="#F3F0EA"/>
-  <g transform="translate(64 64) rotate(-32)">
-    <rect x="-18" y="8" width="56" height="26" rx="6" fill="#3A7A9C"/>
-    <rect x="-28" y="-10" width="56" height="26" rx="6" fill="#14181C"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="honr">
+  <!-- Flat mark approximating the gold H badge (for favicons / small UI) -->
+  <rect width="128" height="128" fill="#0a0a0a"/>
+  <g fill="none" stroke="#c9a24a" stroke-width="7" stroke-linejoin="round">
+    <path d="M40 18 L88 18 L104 40 L104 88 L64 114 L24 88 L24 40 Z"/>
   </g>
+  <path fill="#c9a24a" d="M46 36 h12 v22 h12 V36 h12 v56 H70 V70 H58 v22 H46 Z"/>
 </svg>
