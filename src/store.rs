@@ -254,8 +254,12 @@ struct ClaimPlanContext {
 pub struct ClaimGrant {
     pub item_id: ItemId,
     pub title: String,
+    /// Card intent from the board WorkItem — injected into the agent briefing
+    /// so sandboxed agents never need `bd show` for description context.
+    pub intent: String,
     pub definition_of_done: Option<String>,
     /// Canonical beads hash id when mirrored (e.g. `honr-a1b2`).
+    /// Host/MCP only — not emitted in sandbox briefings.
     pub beads_id: Option<String>,
     /// Containing Project title (when this card is a Task).
     pub project_title: Option<String>,
@@ -2972,6 +2976,7 @@ impl Board {
         Ok(ClaimGrant {
             item_id: id,
             title: item.title.clone(),
+            intent: item.intent.clone(),
             definition_of_done: item.definition_of_done.clone(),
             beads_id: item.beads_id.clone(),
             project_title: ctx.project_title,
@@ -6655,6 +6660,8 @@ mod tests {
         assert_eq!(grant.plan_tasks.len(), 1);
         assert!(grant.plan_tasks[0].current);
         assert_eq!(grant.plan_task_key.as_deref(), Some("a"));
+        assert_eq!(grant.intent, "do a");
+        assert_eq!(grant.title, "Task A");
     }
 
     #[test]
