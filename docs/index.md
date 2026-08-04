@@ -11,6 +11,6 @@ slugs: ready to map to a docs site later.
 | [Agents](agents.md) | Enabling real agents: compute driver, OpenShell, providers, `honr.yaml` / Settings |
 | [Sandbox](sandbox.md) | How a sandboxed run works and the gotchas that matter |
 | [Architecture](architecture.md) | One page: Board / store, supervisor, MCP / REST, beads, persistence |
-| [Task repo binding](task-repo-binding.md) | Plan: Project product-repo binding, Initial plan seeding, remotes resolution |
+| [Task repo binding](task-repo-binding.md) | Plan: task-scoped remotes, init_plan, stop unbound Initial plan auto-seed |
 
 Machine contracts (not prose): [`schemas/report.schema.json`](schemas/report.schema.json).

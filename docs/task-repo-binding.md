@@ -2,29 +2,31 @@
 
 **Status:** plan only — Approve materializes Tasks. No product code in this PR.
 
-**Goal:** every agent-claimable Task gets an unambiguous product repository
-(clone target) without brittle first-run escalations, while keeping
-`create_project` → Initial plan → Approve as the default loop.
+**Goal:** every agent-claimable Task carries an unambiguous product repository
+(clone target) so the supervisor can pre-clone without brittle first-run
+escalations — without binding remotes on the Project container.
 
 **Board epic:** [#280](https://github.com/shanemcd/honr/issues/280). Related
 empty-state onboarding: [#279](https://github.com/shanemcd/honr/issues/279).
 (GitHub Issue #182 is unrelated — closing linked Issues on Done.)
 
-**Out of scope here:** GitLab, multi-repo Tasks under one Project, rewriting
-the state machine, shipping the binding implementation (that is the Task DAG
-in `plan.json`).
+**Out of scope here:** GitLab, rewriting the board state machine, shipping the
+binding implementation (that is the Task DAG in `plan.json`).
+
+**Supersedes:** the Project-scoped product-repo recommendation in an earlier
+revision of this plan (PR feedback: remotes are task-scoped).
 
 ---
 
 ## Verdict
 
-**Require a Project-level product-repo binding at `create_project`. Keep
-auto-seeding Initial plan. Resolve remotes as card `pull_request` → else
-Project binding. Tasks inherit and cannot omit.**
-
-Settings → Forge stays beads sync only. Prefer one coherent default (one
-product repo per Project) over install-wide work remotes or prompt-parsed
-clones as the happy path.
+**Remotes are task-scoped.** `create_project` stays a container only (no repo).
+Stop auto-seeding an unbound Initial plan. Add MCP `init_plan` (or equivalent)
+that **requires** a repo and seeds the Initial plan Task with that binding.
+Every claimable Task carries a repo at creation; siblings may default from the
+Initial plan Task’s repo. `resolve_card_repo`: card `pull_request` → else Task
+repo binding → else `Ok(None)` / escalate. No `Project.product_repo`. Settings
+→ Forge stays beads-only. Multi-repo under one Project remains possible.
 
 ---
 
@@ -37,16 +39,16 @@ clones as the happy path.
 | `WorkspaceBinding` | `src/model.rs` | `forge` + `beads_sync_repo` only |
 | Board SoT | `BoardState.workspace` in `src/store.rs` | Seeded from `GITHUB_REPOSITORY` or yaml upstream |
 | REST | `GET`/`PUT /api/workspace` | Settings → Forge |
-| UI copy | `web/src/components/Settings.tsx` | Explicitly: product remotes live on card `pull_request` |
+| UI copy | `web/src/components/Settings.tsx` | Product remotes live on card `pull_request` |
 
-Model comment: work remotes are **not** stored on WorkspaceBinding — they live
-on each card's `PullRequest` after the agent reports.
+Work remotes are **not** on WorkspaceBinding — they live on each card’s
+`PullRequest` after the agent reports. That separation stays.
 
 ### Project / Task fields
 
-`WorkItem` has no structured `repo_url` / `upstream` / `fork`. Soft guidance
-lives in `project_prompt` (seeded from `DEFAULT_PROJECT_PROMPT` in
-`src/model.rs`), which tells operators to name an exact `owner/name` in prose.
+`WorkItem` has no structured Task repo field. Soft guidance lives in
+`project_prompt` (`DEFAULT_PROJECT_PROMPT` in `src/model.rs`): name an exact
+`owner/name` in prose or escalate.
 
 Hard remotes appear only as per-card `pull_request` (`url` + `base`/`head`)
 after `report.json`.
@@ -63,100 +65,90 @@ after `report.json`.
 2. Else parseable GitHub PR URL → same-repo stub
 3. Else `Ok(None)` — first run
 
-Sibling Tasks after Approve do **not** copy the Initial plan card's
-`pull_request`. Yaml `execution.agents.repo` is legacy/optional and is **not**
-applied when `resolve_card_repo` returns `None` (`run_card` sets
-`agents.repo = Default`).
+Sibling Tasks after Approve do **not** copy the Initial plan card’s
+`pull_request`. Yaml `execution.agents.repo` is legacy; `run_card` clears it
+when `resolve_card_repo` returns `None`.
 
 ### What the sandbox briefing receives
 
-| Case | Supervisor behavior | Briefing (`remotes_briefing_lines`) |
+| Case | Supervisor | Briefing (`remotes_briefing_lines`) |
 |---|---|---|
 | Card has remotes | Pre-clone via `clone_script` | Named `origin` / `upstream` / base |
-| Unbound + Decision note `Clone owner/name` | Empty workdir | Clone that target; do not re-escalate |
+| Unbound + Decision `Clone owner/name` | Empty workdir | Clone that target; do not re-escalate |
 | Unbound + silent prompt | Empty workdir | Escalate — never invent `owner/name` |
-| Unbound + prompt names clone | Empty workdir; **agent** clones | Same Remotes text; success depends on prose |
+| Unbound + prompt names clone | Empty workdir; **agent** clones | Success depends on prose |
 
-Cold briefing also pastes Project prompt + Plan (`briefing` in
-`src/supervisor.rs`). Initial plan cards must write `plan.json` + one docs PR
-+ `report.json` (not `split.json`).
+Initial plan cards must write `plan.json` + one docs PR + `report.json` (not
+`split.json`).
 
 ### create_project + Initial plan auto-seed
 
 `Board::create` (Project root) always calls `seed_initial_plan_task`: titles
-`Initial Plan for <Project>`, intent requires plan.json + docs PR, lands in
-Backlog. MCP `create_project` accepts `title`, `intent`, optional
-`project_prompt` — **no repo arg**.
-
-Happy path in `docs/workflow.md`: create → dispatch Initial plan → Approve →
-dispatch Tasks.
+`Initial Plan for <Project>`, lands in Backlog. MCP `create_project` accepts
+`title`, `intent`, optional `project_prompt` — **no repo arg**. Seeding is
+unconditional and unbound.
 
 ---
 
 ## 2. Failure mode
 
-Missing or ambiguous clone target on first claim → agent writes
-`escalate.json` → `NeedsHuman` ("Needs You"). That is intentional containment
-(agents must not invent this product's own repo from ambient context), but it
-fires on the **first** card of a new Project whenever the operator has not yet
-stuffed `owner/name` into `project_prompt`.
-
-Auto-seeding Initial plan makes the awkwardness acute: the planning card is
-claimable before any human has named remotes. Answering Needs You with
-`Decision: Clone …` unblocks **that** card only; siblings still rediscover.
+Missing or ambiguous clone target on first claim → `escalate.json` →
+Needs You. Intentional containment (do not invent this product’s repo), but it
+fires whenever Initial plan (or any Task) is claimable before a durable repo
+exists. Auto-seeding Initial plan on `create_project` makes that the default
+path. Answering with `Decision: Clone …` unbinds **that** card only; siblings
+still rediscover.
 
 ---
 
 ## 3. Options (trade-offs)
 
-### A. Install-wide default workspace required before any dispatch
+### A. Install-wide default work remotes before any dispatch
 
-Force Settings (or yaml) work remotes before claim.
+- **Pros:** One knob for single-product installs.
+- **Cons:** Conflates with Forge/beads; fights multi-repo under one board;
+  reintroduces silent product-repo defaults.
 
-- **Pros:** One knob; first clone always works for single-product installs.
-- **Cons:** Conflates with Forge/beads (already separated); fights multi-repo
-  and [Generalize](generalization.md); reintroduces silent
-  `shanemcd/honr`-shaped defaults.
+### B. Project-level repo binding at `create_project` — **rejected**
 
-### B. Project-level repo binding required at `create_project`
+- **Pros:** Binding before Initial plan; simple mental model.
+- **Cons:** Encodes “one product repo per Project”; blocks multi-repo under
+  one Project; remotes belong on claimable work, not the container.
+  **Human steer (this revision): do not ship this.**
 
-MCP/UI require `owner/name` (+ optional fork/base) when creating a Project.
+### C. Task-level repo at every materialization, with Initial plan as source
 
-- **Pros:** Binding exists before Initial plan can run; clear ownership;
-  multi-repo = multiple Projects.
-- **Cons:** Slightly heavier create; empty-state onboarding must collect the
-  field (#279).
+- **Pros:** Multi-repo Projects stay natural; supervisor pre-clones from Task
+  binding; siblings can default from Initial plan Task for convenience.
+- **Cons:** Needs an explicit “start planning” tool so Initial plan is not
+  created unbound; every create path must carry or default a repo.
 
-### C. Task-level repo required at materialization (Approve / split) with Project inheritance
+### D. Keep auto-seed; rely on prompt / escalate forever
 
-- **Pros:** Explicit per-Task; inheritance reduces typing.
-- **Cons:** Alone, Initial plan still has nowhere to inherit from unless
-  Project also binds — chicken/egg.
+- **Pros:** No schema change.
+- **Cons:** Needs You on first claim remains the happy path — the pain that
+  escalated this epic.
 
-### D. Stop auto-seeding Initial plan; explicit "start planning" that carries repo
+### E. Hybrid (recommended)
 
-- **Pros:** No claimable card until the operator is ready with a repo.
-- **Cons:** Breaks the documented happy path; "skip planning by default" feels
-  wrong for a Plan-first board; still need a durable binding somewhere.
-
-### E. Hybrid (recommended shape)
-
-`create_project` requires product-repo binding (B); keep Initial plan
-auto-seed; Tasks inherit and cannot omit (C); escalate remains last resort.
+`create_project` = container only (no repo, **no** auto-seed). MCP `init_plan`
+requires repo and seeds Initial plan **with** that Task binding. All other
+claimable Task creates require a repo (or default from Initial plan Task).
+Resolution: `pull_request` → Task repo → escalate. Forge unchanged.
 
 ---
 
 ## 4. Invariants to protect
 
-| Invariant | Implication for binding |
+| Invariant | Implication |
 |---|---|
-| **One state machine** | Binding rules live in `Board` / `machine` paths — not only UI validation or briefing prose. |
-| **Agent is not a participant** | Supervisor still claims/reports; agent never writes Project binding via MCP. |
-| **Merging is human** | Binding does not auto-merge; Approve still surfaces PRs. |
-| **Bot has no upstream write** | Cross-fork: Project stores upstream (PR target) + optional fork (push); containment stays in GitHub permissions. |
+| **One state machine** | Task repo requiredness lives in `Board` create / Approve / split paths — not only UI or briefing prose. |
+| **Agent is not a participant** | Worker never writes Task binding via honr MCP; operator `init_plan` / Approve set it on the host. |
+| **Merging is human** | Binding does not auto-merge. |
+| **Bot has no upstream write** | Task stores upstream (PR target) + optional fork (push); containment stays in GitHub permissions. |
 
-Do not collapse Settings → Forge into product remotes. Do not teach agents to
-guess `owner/name` from the honr install itself.
+Do not add `Project.product_repo`. Do not teach agents to guess `owner/name`
+from the honr install.
 
 ---
 
@@ -164,14 +156,15 @@ guess `owner/name` from the honr install itself.
 
 | Population | Behavior |
 |---|---|
-| **New Projects** | `create_project` refuses without product repo (`upstream` required; `fork` optional, default same-repo; `base` default `main`). |
-| **Existing Projects unbound** | Dispatch gate or one-shot operator bind (UI/MCP `update`); until bound, keep today's escalate / Decision-note path so in-flight cards do not wedge. |
-| **Existing cards with `pull_request`** | Unchanged — card facts win. |
-| **Empty Settings Forge** | Unchanged — beads sync independent of product repo. |
-| **Multi-repo future (Generalize)** | Coherent default remains **one product repo per Project**. Task-level override is a later opt-in, not the v1 menu. |
+| **New Projects** | `create_project` creates container only (no Initial plan seed). Operator calls `init_plan` with repo when ready to plan. |
+| **Existing auto-seeded Initial plans** | Heal or one-shot: require `init_plan`-equivalent bind (UI/MCP) before dispatch; or keep escalate / Decision escape until bound. |
+| **Existing cards with `pull_request`** | Unchanged — card facts win over Task repo field. |
+| **Existing Tasks with no repo and no PR** | Legacy: `Ok(None)` → escalate until operator sets Task repo or answers Decision. |
+| **Empty Settings Forge** | Unchanged — beads sync independent. |
+| **Multi-repo under one Project** | Supported: different Tasks may carry different upstream/fork; no “one repo per Project” rule. |
 
-Yaml `execution.agents.repo` stays bootstrap/seed for beads or local
-self-host convenience — not the supervisor's unbound fallback.
+Yaml `execution.agents.repo` stays bootstrap/seed convenience — not the
+unbound fallback once Task binding exists.
 
 ---
 
@@ -179,30 +172,55 @@ self-host convenience — not the supervisor's unbound fallback.
 
 ### Decision
 
-Ship **E**: Project product-repo binding at create; keep Initial plan
-auto-seed; `resolve_card_repo` = card `pull_request` else Project binding;
-materialized Tasks inherit; unbound Project cannot enter the happy-path
-dispatch without an explicit legacy escape.
+Ship **E**: task-scoped remotes + `init_plan` + stop unbound auto-seed.
+
+### Target happy path
+
+```text
+create_project(title, intent, …)     → Project container (no Task seed)
+init_plan(project, repo, …)          → Initial plan Task with Task.repo set
+dispatch Initial plan                → supervisor pre-clones from Task.repo
+plan.json + docs PR → Review
+Approve                              → sibling Tasks; each gets repo
+                                       (explicit in ChildSpec / or default
+                                        from Initial plan Task.repo)
+```
 
 ### Resolution order (target)
 
 ```text
 card.pull_request (base/head or URL stub)
-  → else Project.product_repo → RepoConfig
+  → else card.task_repo → RepoConfig
   → else Ok(None)  # legacy / misconfig → empty workdir + escalate
 ```
 
-Supervisor pre-clones whenever the resolved `RepoConfig` is complete — Initial
-plan included — so first claim does not depend on prompt archaeology.
+No Project product-repo step.
+
+### Task repo shape
+
+Same facts as today’s `RepoConfig`: `upstream` (`owner/name`, required),
+optional `fork` (default same-repo), `base` (default `main`). Stored on the
+claimable Task (Initial plan and impl cards). After report, `pull_request`
+overrides for resume/rebase as today.
+
+### Sibling defaulting
+
+When Approve / split materializes children:
+
+1. Prefer per-child repo in `plan.json` / `ChildSpec` when present (multi-repo).
+2. Else copy the **Initial plan Task’s** (or splitting parent Task’s) repo.
+3. Refuse materialization if neither yields a complete binding.
+
+Never read a Project-level product-repo field (there isn’t one).
 
 ### Sibling Tasks (see `plan.json`)
 
 | Key | Title | Depends on |
 |---|---|---|
-| `t1` | Project product-repo model + create gate | — |
-| `t2` | resolve_card_repo Project fallback + pre-clone | `t1` |
-| `t3` | Approve / split inheritance + dispatch guards | `t1` |
-| `t4` | Briefing + DEFAULT_PROJECT_PROMPT for bound Projects | `t2` |
-| `t5` | UI create Project + docs (workflow / concepts / #279 hook) | `t1`, `t4` |
+| `t1` | Task repo field on WorkItem + API surface | — |
+| `t2` | Stop create_project auto-seed; add MCP `init_plan` | `t1` |
+| `t3` | `resolve_card_repo` Task fallback + pre-clone | `t1` |
+| `t4` | Require repo on ChildSpec / Approve / split / create-task | `t1`, `t2` |
+| `t5` | Briefing, prompts, workflow docs + UI for `init_plan` | `t2`, `t3`, `t4` |
 
 Approve on this card creates those Tasks. Implementation PRs land separately.
