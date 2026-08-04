@@ -205,8 +205,6 @@ pub struct GoalView {
     pub progress: f32,
     pub leaves_done: usize,
     pub leaves_total: usize,
-    pub spend_cents: u64,
-    pub budget_cents: Option<u64>,
     pub agents_live: usize,
     pub needs_you: usize,
     /// Project auto mode — supervisor queues claimable Backlog leaves.
@@ -273,7 +271,6 @@ pub struct ClaimGrant {
     /// Alias of `run_deadline_at` at claim — not extended by heartbeats.
     pub lease_expires_at: DateTime<Utc>,
     pub run_deadline_at: DateTime<Utc>,
-    pub budget_remaining_cents: Option<u64>,
     pub engine: Option<String>,
 }
 
@@ -298,8 +295,6 @@ pub struct GoalDigest {
     pub goal_id: ItemId,
     pub goal: String,
     pub merged: usize,
-    pub spend_cents: u64,
-    pub budget_cents: Option<u64>,
     pub needs_you: Vec<NeedsYou>,
     pub running: usize,
     pub running_stalled: usize,
@@ -1800,26 +1795,12 @@ impl Board {
         self.emit(&item);
     }
 
-    /// Unused until the supervisor enforces a per-card cents cap.
-    #[allow(dead_code)]
-    pub fn set_budget(&self, id: ItemId, cents: u64) {
-        let item = {
-            let mut s = self.state.write();
-            let Some(it) = s.items.get_mut(&id) else { return };
-            it.budget_cents = Some(cents);
-            it.clone()
-        };
-        self.emit(&item);
-    }
-
-    /// A run died without producing work. Requeue while there is budget left,
+    /// A run died without producing work. Requeue while there are attempts left,
     /// then hand it to a human.
     ///
-    /// This exists because the money caps do not cover it: a card that fails
-    /// *early* — sandbox won't start, clone rejected — spends nothing, so
-    /// nothing stops the sweeper requeueing it every lease period forever.
-    /// Left alone overnight that is an infinite loop building and destroying
-    /// sandboxes. Same idea as a CI retry budget: fail a few times, then escalate.
+    /// Early failures (sandbox won't start, clone rejected) otherwise requeue
+    /// every lease period forever. Same idea as a CI retry budget: fail a few
+    /// times, then escalate.
     pub fn record_run_failure(
         &self,
         id: ItemId,
@@ -2285,8 +2266,6 @@ impl Board {
                 model: agents.vertex.model.clone(),
             },
             max_concurrent: agents.max_concurrent,
-            per_card_budget_cents: agents.per_card_budget_cents,
-            daily_budget_cents: agents.daily_budget_cents,
             agent_timeout_secs: agents.agent_timeout_secs,
             max_attempts: agents.max_attempts,
             branch_prefix: agents.branch_prefix.clone(),
@@ -2380,8 +2359,6 @@ impl Board {
             model: rt.vertex.model.clone(),
         };
         cfg.max_concurrent = rt.max_concurrent;
-        cfg.per_card_budget_cents = rt.per_card_budget_cents;
-        cfg.daily_budget_cents = rt.daily_budget_cents;
         cfg.agent_timeout_secs = rt.agent_timeout_secs;
         cfg.max_attempts = rt.max_attempts;
         cfg.branch_prefix = rt.branch_prefix.clone();
@@ -2928,7 +2905,6 @@ impl Board {
             notes: item.notes.iter().map(|n| n.text.clone()).collect(),
             lease_expires_at: deadline,
             run_deadline_at: deadline,
-            budget_remaining_cents: item.budget_cents.map(|b| b.saturating_sub(item.cost_cents)),
             engine: item.engine.clone(),
         })
     }
@@ -2993,14 +2969,13 @@ impl Board {
         }
     }
 
-    /// `heartbeat` — cost (and optional progress) only. Does **not** extend
-    /// `run_deadline_at`. `lease_secs` is ignored (kept for MCP compatibility).
+    /// `heartbeat` — progress only. Does **not** extend `run_deadline_at`.
+    /// `lease_secs` is ignored (kept for MCP compatibility).
     pub fn heartbeat(
         &self,
         id: ItemId,
         agent_id: &str,
         progress: f32,
-        cost_delta_cents: u64,
         _lease_secs: i64,
     ) -> Result<WorkItem, TransitionError> {
         let item = {
@@ -3012,7 +2987,6 @@ impl Board {
             let now = Utc::now();
             let it = s.items.get_mut(&id).ok_or(TransitionError::NoSuchItem(id))?;
             it.progress = progress.clamp(0.0, 1.0);
-            it.cost_cents += cost_delta_cents;
             if let Some(l) = it.lease.as_mut() {
                 l.last_heartbeat = now;
                 // Do not touch expires_at / run_deadline_at — one fixed timeout.
@@ -4527,7 +4501,6 @@ facts are pasted, then unpark";
             leaves.iter().filter(|i| i.state == State::Done).count()
         };
 
-        let spend_cents = members.iter().map(|i| i.cost_cents).sum();
         let agents_live = members
             .iter()
             .filter(|i| matches!(i.state, State::Claimed | State::Running | State::Splitting))
@@ -4565,8 +4538,6 @@ facts are pasted, then unpark";
             progress: if leaves_total == 0 { 0.0 } else { leaves_done as f32 / leaves_total as f32 },
             leaves_done,
             leaves_total,
-            spend_cents,
-            budget_cents: goal.budget_cents,
             agents_live,
             needs_you,
             auto_dispatch: goal.auto_dispatch,
@@ -4648,14 +4619,10 @@ facts are pasted, then unpark";
                             .unwrap_or(true)
                     })
                     .count();
-                let spend: u64 = items.iter().map(|i| i.cost_cents).sum();
                 if ending_soon == 0 {
-                    format!("{count} running · ${:.2} so far", spend as f64 / 100.0)
+                    format!("{count} running")
                 } else {
-                    format!(
-                        "{count} running · {ending_soon} ending soon · ${:.2} so far",
-                        spend as f64 / 100.0
-                    )
+                    format!("{count} running · {ending_soon} ending soon")
                 }
             }
             Column::NeedsYou => {
@@ -4757,8 +4724,6 @@ facts are pasted, then unpark";
                     goal_id: gid,
                     goal: goal.title.clone(),
                     merged: members.iter().filter(|i| i.state == State::Done).count(),
-                    spend_cents: members.iter().map(|i| i.cost_cents).sum(),
-                    budget_cents: goal.budget_cents,
                     needs_you,
                     running: running.len(),
                     running_stalled: running
@@ -4880,7 +4845,7 @@ mod tests {
     fn heartbeat_does_not_extend_run_deadline() {
         let (b, id) = claimed_leaf();
         let original = b.get(id).unwrap().run_deadline_at.expect("deadline");
-        b.heartbeat(id, "agent", 0.5, 10, 9999).expect("heartbeat");
+        b.heartbeat(id, "agent", 0.5, 9999).expect("heartbeat");
         let after = b.get(id).unwrap();
         assert_eq!(after.run_deadline_at, Some(original));
         assert_eq!(
@@ -4888,7 +4853,7 @@ mod tests {
             Some(original),
             "lease.expires_at must stay pinned to the claim deadline"
         );
-        assert_eq!(after.cost_cents, 10);
+        assert_eq!(after.progress, 0.5);
         assert_eq!(after.state, State::Running);
     }
 
@@ -8879,8 +8844,6 @@ mod tests {
                 model: "board-model".into(),
             },
             max_concurrent: 1,
-            per_card_budget_cents: Some(100),
-            daily_budget_cents: None,
             agent_timeout_secs: 900,
             max_attempts: 2,
             ..Default::default()

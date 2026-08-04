@@ -85,9 +85,11 @@ pub struct ItemExtras {
     pub model: Option<String>,
     #[serde(default)]
     pub progress: f32,
-    #[serde(default)]
+    /// Legacy — ignored on load; cost tracking was removed.
+    #[serde(default, skip_serializing)]
     pub cost_cents: u64,
-    #[serde(default)]
+    /// Legacy — ignored on load; cost tracking was removed.
+    #[serde(default, skip_serializing)]
     pub budget_cents: Option<u64>,
     #[serde(default)]
     pub gate_failures: u32,
@@ -130,8 +132,8 @@ impl ItemExtras {
             engine: item.engine.clone(),
             model: item.model.clone(),
             progress: item.progress,
-            cost_cents: item.cost_cents,
-            budget_cents: item.budget_cents,
+            cost_cents: 0,
+            budget_cents: None,
             gate_failures: item.gate_failures,
             run_failures: item.run_failures,
             diff_added: item.diff_added,
@@ -155,8 +157,6 @@ impl ItemExtras {
         item.engine = self.engine;
         item.model = self.model;
         item.progress = self.progress;
-        item.cost_cents = self.cost_cents;
-        item.budget_cents = self.budget_cents;
         item.gate_failures = self.gate_failures;
         item.run_failures = self.run_failures;
         item.diff_added = self.diff_added;
@@ -404,8 +404,6 @@ where
         engine: None,
         model: None,
         progress: 0.0,
-        cost_cents: 0,
-        budget_cents: None,
         escalation,
         gates,
         gate_failures: 0,

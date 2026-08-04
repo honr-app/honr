@@ -60,8 +60,6 @@ if (existsSync(`${ROOT}target/debug/honr`)) {
         progress: 0.5,
         leaves_done: 4,
         leaves_total: 8,
-        spend_cents: 1200,
-        budget_cents: 5000,
         agents_live: 3,
         needs_you: 1,
         columns: [],

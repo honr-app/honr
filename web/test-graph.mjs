@@ -23,8 +23,6 @@ function makeItem(id, title, blockedBy = [], state = "backlog") {
     lease: null,
     model: null,
     progress: 0,
-    cost_cents: 0,
-    budget_cents: null,
     escalation: null,
     gates: [],
     gate_failures: 0,

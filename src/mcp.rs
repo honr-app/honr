@@ -182,9 +182,9 @@ pub struct HeartbeatArg {
     pub agent_id: String,
     /// 0.0 to 1.0.
     pub progress: f32,
-    /// Spend since your last heartbeat. Budget is enforced in the control
-    /// plane, not on your good behaviour.
+    /// Ignored — legacy wire field; cost tracking was removed.
     #[serde(default)]
+    #[allow(dead_code)]
     pub cost_cents: u64,
     /// Ignored — does not extend the run deadline.
     #[serde(default = "default_lease")]
@@ -249,7 +249,6 @@ pub struct GoalLine {
     pub title: String,
     pub health: String,
     pub progress: String,
-    pub spend: String,
     pub needs_you: usize,
     /// Project auto mode (play) — claimable Backlog queues itself.
     pub auto_dispatch: bool,
@@ -371,10 +370,6 @@ impl Cockpit {
                     g.leaves_total,
                     g.progress * 100.0
                 ),
-                spend: match g.budget_cents {
-                    Some(b) => format!("${:.2} of ${:.2}", g.spend_cents as f64 / 100.0, b as f64 / 100.0),
-                    None => format!("${:.2}", g.spend_cents as f64 / 100.0),
-                },
                 needs_you: g.needs_you,
                 auto_dispatch: g.auto_dispatch,
                 columns: g
@@ -397,7 +392,7 @@ impl Cockpit {
 
     #[tool(
         name = "board_digest",
-        description = "What the human should read on their phone: merged count, spend, the \
+        description = "What the human should read on their phone: merged count, the \
                        specific questions blocking agents, and whether anything is stalled. Call \
                        this when asked 'what's the status', 'anything need me', or at the start \
                        of a session after time away."
@@ -451,9 +446,8 @@ impl Cockpit {
                         .map(|e| format!("{} (blocked {})", e.question, crate::model::humanize(chrono::Duration::seconds(e.blocked_secs(now)))))
                         .unwrap_or_default(),
                     State::Running | State::Claimed => format!(
-                        "{:.0}% · ${:.2} · agent {}",
+                        "{:.0}% · agent {}",
                         i.progress * 100.0,
-                        i.cost_cents as f64 / 100.0,
                         i.lease.as_ref().map(|l| l.agent_id.as_str()).unwrap_or("?")
                     ),
                     State::Review => format!("+{} −{} · gates passed", i.diff_added, i.diff_removed),
@@ -872,14 +866,15 @@ impl Cockpit {
 
     #[tool(
         name = "heartbeat",
-        description = "WORKER VERB. Report spend (and optional progress). Does not extend \
-                       the run deadline — that was fixed at claim."
+        description = "WORKER VERB. Report progress. Does not extend the run deadline — \
+                       that was fixed at claim."
     )]
     fn heartbeat(&self, Parameters(a): Parameters<HeartbeatArg>) -> Out<Ack> {
+        let _ = a.cost_cents; // legacy clients may still send it
         self.board
-            .heartbeat(a.item_id, &a.agent_id, a.progress, a.cost_cents, a.lease_secs)
+            .heartbeat(a.item_id, &a.agent_id, a.progress, a.lease_secs)
             .map_err(|e| bad(e.to_string()))?;
-        self.ack(a.item_id, "cost recorded")
+        self.ack(a.item_id, "progress recorded")
     }
 
     #[tool(

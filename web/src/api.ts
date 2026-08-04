@@ -125,8 +125,6 @@ export const api = {
     fetch("/api/openshell/status").then(jsonOrThrow),
 };
 
-export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
-
 /** `4s`, `12m`, `3h 5m` — matches the server's own formatting. */
 export function since(iso: string, now: number): string {
   const secs = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));

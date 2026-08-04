@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, money, since } from "../api.js";
+import { api, since } from "../api.js";
 import type { BoardEvent, PlanTaskSpec, SandboxProfile, WorkItem } from "../types.js";
 import { cardPrUrl } from "../types.js";
 import { subscribeBoardEvents } from "../useBoard.js";
@@ -477,7 +477,7 @@ export function reduceDetail<T extends Detail = Detail>(
   return prev;
 }
 
-/** Layer 3: is this right? Transcript, diff, cost — and why it exists at all. */
+/** Layer 3: is this right? Transcript, diff — and why it exists at all. */
 export function DetailDrawer({
   id,
   now,
@@ -755,7 +755,6 @@ export function DetailDrawer({
           {/* Engine only — same as the card face. Model falls back into the
               label when no engine is configured; never a second claude-opus-5 chip. */}
           <span className="pill">{resolvedEngine || resolvedModel || "?"}</span>
-          <span className="pill">{money(d.cost_cents)}</span>
           {d.beads_id && (
             <span
               className="pill beads"

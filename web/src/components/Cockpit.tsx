@@ -4,7 +4,7 @@ import { DependencyGraph } from "./DependencyGraph.js";
 import { humanizeEscalation } from "../humanize.js";
 import { BOARD_COLUMNS, COLUMN_OF, normState } from "../types.js";
 import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types.js";
-import { api, money, since } from "../api.js";
+import { api, since } from "../api.js";
 
 export interface CockpitProps {
   goals: GoalView[];
@@ -591,14 +591,6 @@ function Swimlane({
               : `${goal.leaves_done}/${goal.leaves_total}`}
           </span>
         </div>
-        {(goal.spend_cents > 0 || goal.budget_cents != null) && (
-          <span className="spend">
-            {money(goal.spend_cents)}
-            {goal.budget_cents != null && (
-              <span className="dim"> / {money(goal.budget_cents)}</span>
-            )}
-          </span>
-        )}
 
         {!archived && (
           <div className="lane-actions" onClick={(e) => e.stopPropagation()}>

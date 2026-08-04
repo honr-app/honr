@@ -58,8 +58,6 @@ const emptyAgentRuntime = (): AgentRuntimeConfig => ({
   providers: [],
   vertex: { project: "", location: "global", model: "claude-opus-5" },
   max_concurrent: 2,
-  per_card_budget_cents: null,
-  daily_budget_cents: null,
   agent_timeout_secs: 1800,
   max_attempts: 3,
   branch_prefix: "honr",
@@ -80,7 +78,7 @@ export function Settings() {
           Control-plane preferences. Forge holds Issue sync — not a work repo.
           Each card’s <code>pull_request</code> (after report) holds remotes.
           Sandboxes manages named profiles and the global default. Agent runtime
-          holds engine, Vertex, providers, and budgets. OpenShell shows gateway
+          holds engine, Vertex, and providers. OpenShell shows gateway
           health on this host.
         </p>
       </header>
@@ -664,8 +662,8 @@ export function AgentRuntimePanelView({
       <h2 id="agent-runtime-title">Agent runtime</h2>
       <p className="dim">
         Process knobs for OpenShell sandboxes: default engine, provider names,
-        Vertex project/location/model, branch prefix, quality gates, concurrency
-        and budgets. Seeded from <code>honr.yaml</code>; edits persist on the
+        Vertex project/location/model, branch prefix, quality gates, concurrency,
+        and timeouts. Seeded from <code>honr.yaml</code>; edits persist on the
         Board and apply to the next sandbox create. Image/policy live under
         Sandboxes. Host credential paths stay documented overrides — not silent
         home assumptions.
@@ -826,47 +824,6 @@ export function AgentRuntimePanelView({
           </label>
         </div>
 
-        <div className="sandbox-profile-form-row">
-          <label>
-            Per-card budget (cents)
-            <input
-              className="search-input"
-              type="number"
-              min={0}
-              value={draft.per_card_budget_cents ?? ""}
-              disabled={busy}
-              placeholder="none"
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                onDraftChange({
-                  ...draft,
-                  per_card_budget_cents: v === "" ? null : Math.max(0, Number(v) || 0),
-                });
-              }}
-              data-testid="agent-runtime-field-per-card-budget"
-            />
-          </label>
-          <label>
-            Daily budget (cents)
-            <input
-              className="search-input"
-              type="number"
-              min={0}
-              value={draft.daily_budget_cents ?? ""}
-              disabled={busy}
-              placeholder="none"
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                onDraftChange({
-                  ...draft,
-                  daily_budget_cents: v === "" ? null : Math.max(0, Number(v) || 0),
-                });
-              }}
-              data-testid="agent-runtime-field-daily-budget"
-            />
-          </label>
-        </div>
-
         <label>
           Branch prefix
           <input
@@ -1007,7 +964,7 @@ function AgentRuntimePanel() {
               branch_prefix: saved.branch_prefix || "honr",
             });
             setSavedHint(
-              "Saved. Next sandbox create / agent_env use these providers, Vertex, budgets, prefix, and gates.",
+              "Saved. Next sandbox create / agent_env use these providers, Vertex, prefix, and gates.",
             );
           })
           .catch((e) => setError(String(e)))

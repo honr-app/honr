@@ -450,10 +450,6 @@ pub struct AgentRuntimeConfig {
     pub vertex: AgentRuntimeVertex,
     #[serde(default = "default_runtime_concurrent")]
     pub max_concurrent: usize,
-    #[serde(default)]
-    pub per_card_budget_cents: Option<u64>,
-    #[serde(default)]
-    pub daily_budget_cents: Option<u64>,
     #[serde(default = "default_runtime_timeout")]
     pub agent_timeout_secs: u64,
     #[serde(default = "default_runtime_attempts")]
@@ -491,8 +487,6 @@ impl Default for AgentRuntimeConfig {
             providers: Vec::new(),
             vertex: AgentRuntimeVertex::default(),
             max_concurrent: default_runtime_concurrent(),
-            per_card_budget_cents: None,
-            daily_budget_cents: None,
             agent_timeout_secs: default_runtime_timeout(),
             max_attempts: default_runtime_attempts(),
             branch_prefix: default_runtime_branch_prefix(),
@@ -847,11 +841,6 @@ pub struct WorkItem {
     pub progress: f32,
 
     #[serde(default)]
-    pub cost_cents: u64,
-    #[serde(default)]
-    pub budget_cents: Option<u64>,
-
-    #[serde(default)]
     pub escalation: Option<Escalation>,
     #[serde(default)]
     pub gates: Vec<GateRun>,
@@ -860,8 +849,7 @@ pub struct WorkItem {
     /// Runs that died before producing anything — sandbox wouldn't start, clone
     /// failed, agent overran. Distinct from `gate_failures`, which means the
     /// work arrived and was judged wrong. Both have a retry budget; this one
-    /// exists because a card that fails early costs nothing, so no budget stops
-    /// it looping forever.
+    /// exists because early failures otherwise requeue forever with no signal.
     #[serde(default)]
     pub run_failures: u32,
     #[serde(default)]
@@ -970,8 +958,6 @@ impl WorkItem {
             engine: None,
             model: None,
             progress: 0.0,
-            cost_cents: 0,
-            budget_cents: None,
             escalation: None,
             gates: Vec::new(),
             gate_failures: 0,

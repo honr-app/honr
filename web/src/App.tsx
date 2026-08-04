@@ -4,7 +4,6 @@ import { DetailDrawer } from "./components/Detail";
 import { PrimarySidebar, type AppView } from "./components/PrimarySidebar";
 import { Settings } from "./components/Settings";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
-import { money } from "./api";
 import type { WorkItem } from "./types";
 import {
   applyThemePreference,
@@ -34,8 +33,6 @@ export default function App() {
 
   const activeGoals = b.goals.filter((g) => b.items.get(g.id)?.state !== "retired");
   const totalNeedsYou = activeGoals.reduce((n, g) => n + g.needs_you, 0);
-  const totalSpend = activeGoals.reduce((n, g) => n + g.spend_cents, 0);
-  const totalBudget = activeGoals.reduce((n, g) => n + (g.budget_cents ?? 0), 0);
   const live = activeGoals.reduce((n, g) => n + g.agents_live, 0);
 
   const age = b.lastLoadedAt === null ? null : now - b.lastLoadedAt;
@@ -49,12 +46,6 @@ export default function App() {
           {totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
         </div>
         <div className="stats">
-          <span className="dim">spent</span>
-          <span>
-            {money(totalSpend)}
-            {totalBudget > 0 && <span className="dim"> of {money(totalBudget)}</span>}
-          </span>
-          <span className="sep">·</span>
           <span className="live">{live} working</span>
           <span className={b.connected ? "conn ok" : "conn off"}>
             {b.connected ? "live" : "reconnecting…"}

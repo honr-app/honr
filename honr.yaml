@@ -71,12 +71,8 @@ execution:
     # Deliberately 1 until gates are supervisor-run rather than agent-claimed.
     max_concurrent: 1
 
-    # No hard budget caps by default.
-    # per_card_budget_cents: 200
-    # daily_budget_cents: 2000
     agent_timeout_secs: 1800
 
     # Runs that die without producing work before the card becomes a human's
-    # problem. The money caps don't cover this: an early failure spends nothing,
-    # so without a count it requeues every lease period, forever.
+    # problem. Without a count, early failures requeue every lease period forever.
     max_attempts: 3

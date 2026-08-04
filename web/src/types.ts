@@ -94,8 +94,6 @@ export interface AgentRuntimeConfig {
   providers: string[];
   vertex: AgentRuntimeVertex;
   max_concurrent: number;
-  per_card_budget_cents?: number | null;
-  daily_budget_cents?: number | null;
   agent_timeout_secs: number;
   max_attempts: number;
   /** Branch/sandbox stem (default honr → honr/card-N). */
@@ -173,8 +171,6 @@ export interface WorkItem {
   run_deadline_at?: string | null;
   model: string | null;
   progress: number;
-  cost_cents: number;
-  budget_cents: number | null;
   escalation: Escalation | null;
   gates: GateRun[];
   gate_failures: number;
@@ -234,8 +230,6 @@ export interface GoalView {
   progress: number;
   leaves_done: number;
   leaves_total: number;
-  spend_cents: number;
-  budget_cents: number | null;
   agents_live: number;
   needs_you: number;
   /** Project auto mode — supervisor queues claimable Backlog leaves. */
