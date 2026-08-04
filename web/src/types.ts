@@ -153,6 +153,16 @@ export interface TaskProposal {
   tasks: PlanTaskSpec[];
 }
 
+/** Card / Task product remotes (clone + PR target). Not on Projects. */
+export interface RepoConfig {
+  /** owner/name that PRs target (required when set). */
+  upstream: string;
+  /** Optional distinct push remote; empty/omit → same-repo. */
+  fork?: string;
+  /** Default main. */
+  base?: string;
+}
+
 export interface WorkItem {
   id: number;
   parent: number | null;
@@ -198,6 +208,8 @@ export interface WorkItem {
   pull_request?: PullRequest | null;
   /** @deprecated legacy wire — prefer pull_request.url */
   pr_url?: string | null;
+  /** Task-scoped product remotes. Absent on Projects. */
+  repo?: RepoConfig | null;
   plan?: PlanArtifact | null;
   proposal?: TaskProposal | null;
   created_at: string;

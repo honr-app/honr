@@ -795,6 +795,11 @@ mod tests {
         child.blocked_by = vec![1];
         child.awaiting_dispatch = true;
         child.definition_of_done = Some("shipped".into());
+        child.repo = Some(crate::schema::RepoConfig {
+            upstream: "acme/sqlite".into(),
+            fork: "bot/sqlite".into(),
+            base: "main".into(),
+        });
 
         store.upsert_item(&parent).await.expect("parent");
         store.upsert_item(&child).await.expect("child");
@@ -815,9 +820,13 @@ mod tests {
         assert_eq!(loaded.blocked_by, vec![1]);
         assert!(loaded.awaiting_dispatch);
         assert_eq!(loaded.definition_of_done.as_deref(), Some("shipped"));
+        let repo = loaded.repo.expect("task repo in extras");
+        assert_eq!(repo.upstream, "acme/sqlite");
+        assert_eq!(repo.fork, "bot/sqlite");
 
         let p = store.get_item(1).await.expect("get p").expect("p");
         assert_eq!(p.project_prompt.as_deref(), Some("standing"));
+        assert!(p.repo.is_none(), "Project must not persist a product-repo");
         assert_eq!(p.beads_id.as_deref(), Some("honr-abc"));
         assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
 

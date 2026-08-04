@@ -922,6 +922,13 @@ pub struct WorkItem {
     #[serde(default, rename = "pr_url", skip_serializing)]
     pub legacy_pr_url: Option<String>,
 
+    /// Durable product remotes for a claimable Task (`upstream` required;
+    /// optional `fork`; `base` defaults to `main`). Null on Projects — remotes
+    /// are task-scoped, never a Project `product_repo`. After report,
+    /// [`Self::pull_request`] still wins for resume (see `resolve_card_repo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<crate::schema::RepoConfig>,
+
     /// Plan artifact — Projects only (Phase 1). Source of truth for Approve Plan.
     #[serde(default)]
     pub plan: Option<PlanArtifact>,
@@ -980,6 +987,7 @@ impl WorkItem {
             github_issue_url: None,
             pull_request: None,
             legacy_pr_url: None,
+            repo: None,
             plan: None,
             proposal: None,
             created_at: now,
