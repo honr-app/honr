@@ -3,7 +3,8 @@ import { renderToString } from "react-dom/server";
 import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
 import { Board, isBlocked, sortFor } from "./dist-test/components/Board.js";
-import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
+import { Head, PlanEditor, InitPlanForm, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
+import { Help } from "./dist-test/components/Help.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
@@ -475,7 +476,7 @@ const pingPayload = JSON.stringify({ type: "ping" });
 const parsedPing = JSON.parse(pingPayload);
 assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
-// Test 17: App chrome — Board | Settings sidebar + Settings Sandboxes panel
+// Test 17: App chrome — Board | Help | Settings sidebar + Settings Sandboxes panel
 const sidebarHtml = renderToString(
   React.createElement(PrimarySidebar, {
     view: "board",
@@ -484,9 +485,17 @@ const sidebarHtml = renderToString(
 );
 assert(sidebarHtml.includes("data-testid=\"app-sidebar\""), "App should render primary sidebar");
 assert(sidebarHtml.includes("Board"), "Sidebar should include Board nav");
+assert(sidebarHtml.includes("Help"), "Sidebar should include Help nav");
 assert(sidebarHtml.includes("Settings"), "Sidebar should include Settings nav");
 assert(sidebarHtml.includes("data-testid=\"nav-board\""), "Sidebar should expose Board control");
+assert(sidebarHtml.includes("data-testid=\"nav-help\""), "Sidebar should expose Help control");
 assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should expose Settings control");
+
+const helpHtml = renderToString(React.createElement(Help));
+assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
+assert(helpHtml.includes("init_plan"), "Help should document init_plan");
+assert(helpHtml.includes("create_project"), "Help should document create_project");
+assert(helpHtml.includes("8080/mcp"), "Help should show MCP URL");
 
 const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
@@ -755,6 +764,22 @@ const emptyBoardHtml = renderToString(
 );
 assert(emptyBoardHtml.includes("board-page") || emptyBoardHtml.includes("Welcome to honr"),
   "Board view should still render Board");
+assert(emptyBoardHtml.includes("data-testid=\"board-empty\"") || emptyBoardHtml.includes("board-empty"),
+  "Empty board should expose empty-state surface");
+assert(emptyBoardHtml.includes("init_plan"),
+  "Empty board should mention init_plan happy path");
+
+const initPlanHtml = renderToString(
+  React.createElement(InitPlanForm, {
+    draft: { upstream: "acme/widgets", fork: "", base: "main" },
+    setDraft: () => {},
+    onSubmit: () => {},
+  }),
+);
+assert(initPlanHtml.includes("data-testid=\"init-plan-form\""), "InitPlanForm should render");
+assert(initPlanHtml.includes("data-testid=\"init-plan-upstream\""), "InitPlanForm should expose upstream");
+assert(initPlanHtml.includes("Start planning"), "InitPlanForm should offer Start planning");
+assert(initPlanHtml.includes("acme/widgets"), "InitPlanForm should show draft upstream");
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
@@ -764,5 +789,5 @@ assert(!Object.keys(pkg.dependencies || {}).some((d) => /patternfly/i.test(d)),
 assert(!Object.keys(pkg.devDependencies || {}).some((d) => /patternfly/i.test(d)),
   "Must not add a PatternFly devDependency");
 
-console.log("\n✅ All Card, Board, Detail, Settings chrome, and useBoard sequence guard assertions passed!");
+console.log("\n✅ All Card, Board, Detail, Help, Settings chrome, and useBoard sequence guard assertions passed!");
 

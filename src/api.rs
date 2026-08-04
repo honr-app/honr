@@ -49,6 +49,7 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/items/{id}/answer", post(answer))
         .route("/items/{id}/approve", post(approve))
         .route("/items/{id}/approve-plan", post(approve_plan))
+        .route("/items/{id}/init-plan", post(init_plan))
         .route("/items/{id}/request-changes", post(request_changes))
         .route("/items/{id}/cut", post(cut_scope))
         .route("/items/{id}/dispatch", post(dispatch_item))
@@ -233,6 +234,24 @@ async fn approve_plan(
     let published = b.approve_plan(id).map_err(ApiError)?;
     b.schedule_beads_mirror_batch(&published);
     Ok(Json(published))
+}
+
+#[derive(Deserialize)]
+pub struct InitPlanReq {
+    /// Product remotes for the Initial plan Task (`upstream` required).
+    repo: crate::schema::RepoConfig,
+}
+
+/// Seed Initial plan Task with Task-scoped remotes (id = Project).
+/// Same contract as MCP `init_plan`.
+async fn init_plan(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+    Json(req): Json<InitPlanReq>,
+) -> ApiResult<WorkItem> {
+    let seed = b.init_plan(id, req.repo).map_err(ApiError)?;
+    b.schedule_beads_mirror(seed.id);
+    Ok(Json(seed))
 }
 
 #[derive(Deserialize)]
@@ -1019,6 +1038,29 @@ mod tests {
             .is_err(),
             "setting repo on a Project must fail"
         );
+
+        // REST init_plan on a container Project seeds Initial plan with Task repo.
+        let Ok(Json(seed)) = init_plan(
+            AxState(b.clone()),
+            Path(created.id),
+            Json(InitPlanReq {
+                repo: crate::schema::RepoConfig {
+                    upstream: "acme/widgets".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                },
+            }),
+        )
+        .await
+        else {
+            panic!("init_plan");
+        };
+        assert!(seed.is_initial_plan_task());
+        assert_eq!(
+            seed.repo.as_ref().map(|r| r.upstream.as_str()),
+            Some("acme/widgets")
+        );
+        assert!(b.children_of(created.id).contains(&seed.id));
     }
 
     #[tokio::test]
