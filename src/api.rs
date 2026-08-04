@@ -6,7 +6,7 @@ use crate::model::{
     SandboxProfile, State, WorkItem, WorkspaceBinding,
 };
 use crate::openshell::{ProviderRefreshSpec, ProviderTypeProfile};
-use crate::secrets::{open_string_map, seal_string_map, GcloudAdcUser};
+use crate::secrets::{open_string_map, seal_string_map};
 use crate::store::{AncestryLine, SharedBoard};
 
 use axum::extract::{Path, State as AxState};
@@ -88,10 +88,6 @@ pub fn routes() -> Router<SharedBoard> {
             get(list_openshell_providers).post(create_openshell_provider),
         )
         .route("/openshell/providers/sync", post(sync_openshell_providers))
-        .route(
-            "/openshell/providers/import-gcloud-adc",
-            post(import_gcloud_adc_provider),
-        )
         .route(
             "/openshell/providers/{name}",
             put(update_openshell_provider).delete(delete_openshell_provider),
@@ -764,7 +760,7 @@ pub struct OpenShellProviderWrite {
     pub credentials: Option<BTreeMap<String, String>>,
     #[serde(default = "default_attach_true")]
     pub attach_to_sandboxes: bool,
-    /// Optional refresh bootstrap (usually set via import-gcloud-adc).
+    /// Optional refresh bootstrap for providers that need gateway-owned refresh.
     #[serde(default)]
     pub refresh: Option<OpenShellProviderRefreshWrite>,
 }
@@ -780,18 +776,6 @@ pub struct OpenShellProviderRefreshWrite {
     pub material: BTreeMap<String, String>,
     #[serde(default)]
     pub secret_material_keys: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ImportGcloudAdcReq {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub project: Option<String>,
-    #[serde(default)]
-    pub location: Option<String>,
-    #[serde(default = "default_attach_true")]
-    pub attach_to_sandboxes: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1081,78 +1065,6 @@ async fn sync_openshell_providers(AxState(b): AxState<SharedBoard>) -> Json<Sync
         }
     }
     Json(SyncProvidersOut { applied, errors })
-}
-
-async fn import_gcloud_adc_provider(
-    AxState(b): AxState<SharedBoard>,
-    Json(req): Json<ImportGcloudAdcReq>,
-) -> Result<Json<OpenShellProviderView>, ApiError> {
-    let adc: GcloudAdcUser = crate::secrets::read_gcloud_adc()
-        .map_err(|e| ApiError(format!("read gcloud ADC: {e}")))?;
-    let name = req
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("vertex")
-        .to_string();
-    let project = req
-        .project
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("ANTHROPIC_VERTEX_PROJECT_ID").ok())
-        .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT").ok())
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| {
-            ApiError(
-                "project required (body.project or ANTHROPIC_VERTEX_PROJECT_ID / GOOGLE_CLOUD_PROJECT)"
-                    .into(),
-            )
-        })?;
-    let location = req
-        .location
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("global")
-        .to_string();
-
-    let mut material = BTreeMap::new();
-    material.insert("client_id".into(), adc.client_id);
-    material.insert("client_secret".into(), adc.client_secret);
-    material.insert("refresh_token".into(), adc.refresh_token);
-    let material_sealed = seal_string_map(&material)
-        .map_err(|e| ApiError(format!("seal ADC material: {e}")))?;
-
-    let mut config = BTreeMap::new();
-    config.insert("VERTEX_AI_PROJECT_ID".into(), project);
-    config.insert("VERTEX_AI_LOCATION".into(), location);
-
-    let desired = OpenShellProviderDesired {
-        name,
-        provider_type: "google-vertex-ai".into(),
-        config,
-        credentials_sealed: None,
-        credential_keys: Vec::new(),
-        refresh: Some(OpenShellProviderRefreshDesired {
-            credential_key: "GOOGLE_VERTEX_AI_TOKEN".into(),
-            strategy: "oauth2_refresh_token".into(),
-            material_sealed,
-            secret_material_keys: vec!["client_secret".into(), "refresh_token".into()],
-        }),
-        attach_to_sandboxes: req.attach_to_sandboxes,
-    }
-    .normalized();
-    let stored = b.upsert_openshell_provider(desired);
-    let apply_err = apply_desired_to_gateway(&b, &stored).await.err();
-    let mut view = provider_view(&stored, None);
-    view.gateway_synced = Some(apply_err.is_none());
-    if let Some(err) = apply_err {
-        tracing::warn!(provider = %stored.name, error = %err, "ADC provider saved; gateway apply failed");
-    }
-    Ok(Json(view))
 }
 
 async fn list_openshell_provider_profiles(
