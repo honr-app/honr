@@ -2384,8 +2384,8 @@ impl Board {
         cfg.daily_budget_cents = rt.daily_budget_cents;
         cfg.agent_timeout_secs = rt.agent_timeout_secs;
         cfg.max_attempts = rt.max_attempts;
-        cfg.branch_prefix = rt.branch_prefix;
-        cfg.quality_gates = rt.quality_gates;
+        cfg.branch_prefix = rt.branch_prefix.clone();
+        cfg.quality_gates = rt.quality_gates.clone();
         cfg
     }
 
@@ -3655,6 +3655,22 @@ fn check_split_relatedness(
         Ok(item)
     }
 
+    /// True when the answer promises host-side work before the agent can finish,
+    /// without embedding `pr_url=` proof facts yet.
+    fn decision_defers_host_prerequisite(choice: &str) -> bool {
+        let c = choice.to_ascii_lowercase();
+        if c.contains("pr_url=") {
+            return false;
+        }
+        let host_runs = c.contains("host runs")
+            || c.contains("finish host")
+            || c.contains("on the host board")
+            || c.contains("on the host:");
+        let reclaim_to_document = (c.contains("re-claim") || c.contains("reclaim"))
+            && (c.contains("document") || c.contains("to document"));
+        host_runs || (c.contains("host") && reclaim_to_document)
+    }
+
     pub fn answer_escalation(&self, id: ItemId, choice: String) -> Result<WorkItem, String> {
         let title = {
             let mut s = self.state.write();
@@ -3686,6 +3702,32 @@ fn check_split_relatedness(
             .transition(id, State::Backlog, "human", Some(format!("answered: {choice}")))
             .map_err(|e| e.to_string())?;
         self.story(id, format!("{title}: unblocked — {choice}"));
+        // "Host runs X; re-claim to document" without Proof facts is a promise,
+        // not evidence. Auto mode would reclaim immediately and the agent would
+        // re-escalate (#174). Park until cockpit pastes `Proof: …` and unparks.
+        // Already in Backlog — do not call `park()` (Backlog→Backlog is illegal).
+        if Self::decision_defers_host_prerequisite(&choice) {
+            let reason = "Decision defers a host-side prerequisite — parked until Proof \
+facts are pasted, then unpark";
+            let item = {
+                let mut s = self.state.write();
+                let it = s.items.get_mut(&id).ok_or("no such item")?;
+                it.parked = true;
+                it.awaiting_dispatch = false;
+                it.notes.push(Note {
+                    at: Utc::now(),
+                    author: "human".into(),
+                    text: format!("Parked: {reason}"),
+                });
+                it.clone()
+            };
+            self.emit(&item);
+            self.story(
+                id,
+                format!("{title}: parked after host-deferred answer — {reason}."),
+            );
+            return Ok(item);
+        }
         Ok(item)
     }
 
@@ -5313,6 +5355,7 @@ mod tests {
         b.answer_escalation(id, "Investigate the environment".into()).expect("answered");
         let it = b.get(id).unwrap();
         assert!(it.escalation.is_none(), "resolved escalation must not linger");
+        assert!(!it.parked, "ordinary answers must not auto-park");
 
         // The decision survives as standing context for whoever picks it up.
         assert!(
@@ -5320,6 +5363,35 @@ mod tests {
             "the decision must be preserved as a note: {:?}",
             it.notes
         );
+    }
+
+    /// Host-deferred answers without Proof facts must park — otherwise Project
+    /// auto mode reclaims and the agent re-escalates (#174).
+    #[test]
+    fn answering_host_deferred_decision_parks_until_proof() {
+        let (b, id) = claimed_leaf();
+        b.record_run_failure(id, "boom", 1).expect("escalated");
+        b.answer_escalation(
+            id,
+            "Host runs probe dispatch; re-claim this card to document".into(),
+        )
+        .expect("answered");
+        let it = b.get(id).unwrap();
+        assert_eq!(it.state, State::Backlog);
+        assert!(it.parked, "host-deferred Decision must park");
+        assert!(it.escalation.is_none());
+
+        // Pasting pr_url= in the answer is evidence — do not park.
+        let (b2, id2) = claimed_leaf();
+        b2.record_run_failure(id2, "boom", 1).expect("escalated");
+        b2.answer_escalation(
+            id2,
+            "Paste run facts now: card=#9 pr_url=https://github.com/clankrshq/honr-sandbox-probe/pull/2 upstream=clankrshq/honr-sandbox-probe"
+                .into(),
+        )
+        .expect("answered");
+        let it2 = b2.get(id2).unwrap();
+        assert!(!it2.parked, "answers that already embed pr_url= must not park");
     }
 
     #[test]

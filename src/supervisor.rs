@@ -2570,7 +2570,48 @@ fn clone_target_from_notes(notes: &[String]) -> Option<String> {
     None
 }
 
+/// Host-completed proof facts pasted into Decision / steer notes.
+///
+/// Meta cards (e.g. second-repo proof) cannot operate the host Board from inside
+/// a sandbox. Without this, answering "host runs the probe; re-claim to document"
+/// auto-reclaims the agent into the same Needs You because no evidence arrived.
+///
+/// Accepted shapes (newest note wins):
+/// - `Proof: card=#175 pr_url=https://github.com/owner/repo/pull/2 upstream=owner/repo fork=owner/repo`
+/// - `Decision: … pr_url=https://…` (must include `pr_url=`)
+fn proof_facts_from_notes(notes: &[String]) -> Option<String> {
+    for n in notes.iter().rev() {
+        let raw = n.trim();
+        let body = raw
+            .strip_prefix("Decision:")
+            .or_else(|| raw.strip_prefix("decision:"))
+            .map(str::trim)
+            .unwrap_or(raw);
+        if let Some(rest) = body
+            .strip_prefix("Proof:")
+            .or_else(|| body.strip_prefix("proof:"))
+            .map(str::trim)
+        {
+            if rest.contains("pr_url=") {
+                return Some(rest.to_string());
+            }
+        }
+        if body.contains("pr_url=") {
+            return Some(body.to_string());
+        }
+    }
+    None
+}
+
 fn remotes_briefing_lines(repo: &crate::schema::RepoConfig, notes: &[String]) -> String {
+    if let Some(facts) = proof_facts_from_notes(notes) {
+        // Proof facts win over unbound/clone guidance — the card's job is documentation.
+        return format!(
+            "\nHost proof facts are already on this card (`{facts}`). Remotes for *this* \
+card follow the Project prompt / Clone decision as usual; the operational proof DoD is \
+satisfied by the cited Board card + `pr_url`. Do **not** re-escalate for another probe.\n"
+        );
+    }
     if !repo.is_complete() {
         if let Some(target) = clone_target_from_notes(notes) {
             return format!(
@@ -2746,6 +2787,11 @@ fn briefing(
             if repo.is_complete() {
                 b.push_str(
                     "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n",
+                );
+            } else if proof_facts_from_notes(&grant.notes).is_some() {
+                b.push_str(
+                    "\nFirst run with host Proof facts already on the card (see Remotes / notes). \
+Document from those facts — do **not** re-escalate asking for another Board probe.\n",
                 );
             } else if clone_target_from_notes(&grant.notes).is_some() {
                 b.push_str(
@@ -3913,7 +3959,7 @@ mod tests {
             "Decision: Clone shanemcd/honr (suggested by beads External https://github.com/shanemcd/honr/issues/204)"
                 .into(),
         ];
-        let b = briefing(&g, BranchState::Fresh, "honr/card-146", &unbound);
+        let b = briefing(&g, BranchState::Fresh, "honr/card-146", &unbound, &[]);
         assert!(b.contains("shanemcd/honr"), "{b}");
         assert!(
             b.contains("already decided") || b.contains("human-decided"),
@@ -3933,6 +3979,41 @@ mod tests {
         assert!(
             resume.contains("already decided"),
             "resume must carry the decided clone too: {resume}"
+        );
+    }
+
+    /// Pasted Proof facts must stop a meta-proof card from re-asking for a
+    /// host Board probe after "host runs …; re-claim to document" (#174).
+    #[test]
+    fn briefing_honors_host_proof_facts_note() {
+        let unbound = crate::schema::RepoConfig::default();
+        let mut g = grant();
+        g.notes = vec![
+            "Decision: Host runs probe dispatch; re-claim this card to document".into(),
+            "Proof: card=#180 pr_url=https://github.com/clankrshq/honr-sandbox-probe/pull/2 upstream=clankrshq/honr-sandbox-probe fork=clankrshq/honr-sandbox-probe".into(),
+        ];
+        let b = briefing(&g, BranchState::Fresh, "honr/card-174", &unbound, &[]);
+        assert!(
+            b.contains("Host proof facts are already on this card"),
+            "must surface Proof facts: {b}"
+        );
+        assert!(
+            b.contains("clankrshq/honr-sandbox-probe/pull/2"),
+            "must include pr_url: {b}"
+        );
+        assert!(
+            b.contains("Do **not** re-escalate"),
+            "must forbid asking for another probe: {b}"
+        );
+        assert!(
+            !b.contains("only if the Project prompt names"),
+            "must not keep the unbound escalate gate when Proof facts exist: {b}"
+        );
+
+        let resume = resume_briefing(&g, &unbound);
+        assert!(
+            resume.contains("Host proof facts are already on this card"),
+            "resume must carry Proof facts too: {resume}"
         );
     }
 
