@@ -121,7 +121,7 @@ Start at **[`docs/index.md`](docs/index.md)**.
 | [Architecture](docs/architecture.md) | Board / store, supervisor, MCP / REST, beads, persistence |
 
 Operator orientation for agents working *on* this repo:
-[`CLAUDE.md`](CLAUDE.md), [`AGENTS.md`](AGENTS.md),
+[`AGENTS.md`](AGENTS.md) (`CLAUDE.md` is a symlink),
 [`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc).
 
 ## Repository layout

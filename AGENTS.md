@@ -1,68 +1,120 @@
-# Agent Instructions
+# AGENTS.md
 
-## Operator mode (honr builds honr)
+Orientation for the **operator** agent sitting with the human. If you are an
+agent honr dispatched to work on a card, you already have a briefing — ignore
+this file.
 
-You are the **operator** — lead developer / scrum master. Connect via MCP
-(`http://127.0.0.1:8080/mcp`, see `.cursor/mcp.json`). Do **not** implement
-product work by editing this tree; shape Projects/Plans, triage Needs You and
-Review, and **dispatch** Backlog Tasks so sandboxed workers can claim and open PRs.
+**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`). Do not
+implement product work by editing this tree; shape Projects/Plans, triage
+Needs You / Review, let sandboxed workers open PRs. See
+[`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc).
 
-Start with `board_snapshot`. Flow: `create_project` → dispatch Initial plan →
-Approve → `dispatch` Tasks. Docs: [`docs/index.md`](docs/index.md),
-[`docs/concepts.md`](docs/concepts.md), [`docs/workflow.md`](docs/workflow.md).
-Details in `.cursor/rules/honr-operator.mdc`.
+Start with [`docs/index.md`](docs/index.md) and
+[`docs/concepts.md`](docs/concepts.md).
 
----
+## What this is
 
-This project also uses **bd** (beads) for issue identity/graph. Run `bd prime`
-for beads workflow context when needed.
+An agent orchestrator that dispatches work against **its own source**. The
+board is a control plane: moving a card *is* an action. honr claims a card,
+runs a Claude Code agent in an OpenShell sandbox, and the agent opens a
+cross-fork PR that a human merges.
 
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
->
-> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
+## The invariants worth protecting
 
-## Quick Reference
+**One state machine.** Every mutation — UI, MCP, supervisor — goes through
+`Board` in `src/store.rs`. No transport holds state-machine logic. If you find
+yourself encoding a rule in `api.rs` or `mcp.rs`, it belongs in `machine.rs` or
+`store.rs` instead.
 
-```bash
-bd ready --exclude-type=epic  # Find available task work (excludes non-claimable epics; add --parent=<epic> to scope)
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
-```
+**The agent is material, not a participant.** It gets no network path to honr.
+The supervisor calls `claim`/`heartbeat`/`report` on its behalf. An agent that
+could reach honr's MCP could approve its own review.
 
-## Non-Interactive Shell Commands
+**Liveness is observed, never self-reported.** It is parsed from the agent's
+output stream. Do not add a timer-based keepalive — it would assert liveness
+without evidence and throw away the property that makes the signal trustworthy.
 
-**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
+**Merging is human.** Approving in honr surfaces the PR. It never merges.
 
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
+**The bot has no write access to upstream.** Containment lives in GitHub
+permissions, not in our scripts. The fork is disposable.
 
-**Use these forms instead:**
-```bash
-# Force overwrite without prompting
-cp -f source dest           # NOT: cp source dest
-mv -f source dest           # NOT: mv source dest
-rm -f file                  # NOT: rm file
+## Conventions
 
-# For recursive operations
-rm -rf directory            # NOT: rm -r directory
-cp -rf source dest          # NOT: cp -r source dest
-```
+Comments explain **why**, not what. The existing code reads like prose and
+argues with itself where a decision was close; match that. A comment that
+restates the line below it is noise.
 
-**Other commands that may prompt:**
-- `scp` - use `-o BatchMode=yes` for non-interactive
-- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
-- `apt-get` - use `-y` flag
-- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+Tests live next to what they test. `machine.rs` holds the lifecycle
+invariants; other modules test the things that break silently — argv shape,
+shell quoting, config validation. Prefer a test that names the
+failure it prevents over one that names the function it calls.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
+Before you finish: `cargo test` and `cargo clippy --all-targets -- -D warnings`
+must both be clean. Both run `--offline` inside a sandbox.
+
+`git add -A` has twice committed something unintended here — `enabled: true` in
+`honr.yaml` most notably. Stage deliberately.
+
+## Things that will waste your time if you don't know them
+
+**Everything in the sandbox stack fails as a hang, not an error.** Denied
+egress, a missing credential, a wedged relay — all silence. Every exec needs a
+deadline; treat silence as failure. This shaped `openshell.rs` entirely.
+
+**Don't script what the agent can drive.** The supervisor used to push and open
+PRs itself; four separate failures came from that shell being wrong about tools
+the agent already knew. It now only *asks GitHub what happened*. Before adding
+a shell script to the supervisor, ask whether the briefing could say it instead.
+
+**The image's `ENV` does not reach `openshell sandbox exec`.** Pass what the
+agent needs explicitly in `agent_env`, or install wrappers on the default PATH.
+
+**`sandbox upload` takes a destination directory**, and the destination must
+already exist.
+
+**The podman machine stops on its own.** Classify that as infrastructure, not
+as the card failing — see `is_infrastructure`.
+
+**The fork's base freezes** the moment it is created. Rebase onto upstream.
+
+## Where things are
+
+| Path | What |
+|---|---|
+| `src/machine.rs` | Legal transitions and the two invariants |
+| `src/store.rs` | The board — the only write path |
+| `src/supervisor.rs` | Dispatch, per-card lifecycle, briefing, lease sweeping |
+| `src/openshell.rs` | Typed wrapper over the CLI; every call has a deadline |
+| `src/mcp.rs` | Operator tools and worker verbs |
+| `sandbox/` | Containerfile, network policy, metadata shim |
+| `web/` | React UI + `npm run shots` screenshot harness |
+| `docs/sandbox.md` | How a sandboxed run works and the gotchas that matter. Read before touching `sandbox/`. |
+
+## Environment
+
+Claude runs on **Google Vertex**, not the first-party API — there is no
+`ANTHROPIC_API_KEY`. Auth is `CLAUDE_CODE_USE_VERTEX=1` plus gcloud ADC. The
+combination that works is in `honr.yaml` under `execution.agents.vertex`;
+[`docs/sandbox.md`](docs/sandbox.md) explains why the region matters and how a
+sandboxed agent gets a credential it cannot read.
+
+GitHub work uses a bot account, configured as `execution.agents.repo.fork`.
+Its token currently carries broad `repo` scope across that account — a
+fine-grained PAT scoped to the fork alone is the right hardening step and has
+not been done.
+
+## Working with the human here
+
+They will tell you when the board looks wrong, and they have been right every
+time it mattered. Check the evidence before defending the code — twice in one
+session a confident "it's fine" was based on a log that was not capturing
+anything.
+
+State corrections plainly and move on. Do not narrate the mistake at length.
+
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
@@ -70,7 +122,7 @@ This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full 
 ### Quick Reference
 
 ```bash
-bd ready              # Find available work
+bd ready --exclude-type=epic  # Find available task work (excludes non-claimable epics; add --parent=<epic> to scope)
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work
 bd close <id>         # Complete work
@@ -79,7 +131,6 @@ bd close <id>         # Complete work
 ### Rules
 
 - Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- When asking beads what's next, use `bd ready --exclude-type=epic` (and optional `--parent=<epic>`) or `beads_ready` MCP tool — epics are non-claimable work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
@@ -107,7 +158,6 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
    # Team-maintainer opt-in only, unless current instructions forbid it:
    git pull --rebase
-   bd dolt push
    git push
    git status
    ```
@@ -118,27 +168,3 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
 <!-- END BEADS INTEGRATION -->
-
-<!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
-## Beads Issue Tracker
-
-Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
-
-### Quick Reference
-
-```bash
-bd ready --exclude-type=epic  # Find available task work (excludes non-claimable epics)
-bd show <id>            # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>           # Complete work
-bd prime                # Refresh Beads context
-```
-
-### Rules
-
-- Use `bd` for all task tracking; do not create markdown TODO lists.
-- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
-- Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
-<!-- END BEADS CODEX SETUP -->
