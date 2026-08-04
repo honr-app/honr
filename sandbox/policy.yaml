@@ -32,7 +32,6 @@ network_policies:
       - { path: /usr/bin/agy }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
-      - { path: /usr/local/bin/bd }
 
   github:
     name: github
@@ -51,7 +50,6 @@ network_policies:
       - { path: /usr/local/bin/agy }
       - { path: /usr/bin/agy }
       - { path: /usr/bin/node }
-      - { path: /usr/local/bin/bd }
 
   # Cargo/npm registries. Use L4 passthrough (`tls: skip`, no `protocol`) —
   # OpenShell MITM injects a CA via SSL_CERT_FILE/CURL_CA_BUNDLE/etc, but
