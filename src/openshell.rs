@@ -2,7 +2,7 @@
 //!
 //! One place that knows the CLI's shape, so the supervisor never builds an
 //! argv. We shell out rather than use `openshell-sdk` because the SDK does not
-//! support mTLS and our gateway is mTLS-only — see `docs/sandbox-stack.md`
+//! support mTLS and our gateway is mTLS-only — see `docs/sandbox.md`
 //! for the full reasoning and the condition to revisit it.
 //!
 //! **Everything here takes a timeout, and that is not defensive style.** Every

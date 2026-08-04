@@ -1,8 +1,7 @@
 # Sandbox assets
 
-Inputs to `src/openshell.rs` and `src/supervisor.rs`. All verified working —
-see [`docs/sandbox-stack.md`](../docs/sandbox-stack.md) for how they were
-arrived at and what breaks if you change them.
+Inputs to `src/openshell.rs` and `src/supervisor.rs`. How a run works and what
+breaks if you change them: [`docs/sandbox.md`](../docs/sandbox.md).
 
 ## `policy.yaml`
 

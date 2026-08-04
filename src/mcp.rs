@@ -983,7 +983,7 @@ impl ServerHandler for Operator {
                  2. Review — finished and safe. It can wait until this evening. Sort by blast \
                     radius and novelty, not arrival time.\n\
                  3. Everything else waits for a digest.\n\n\
-                 Interrupt the human for four things only: irreversible actions, budget breach, \
+                 Interrupt the human for three things only: irreversible actions, \
                  an ambiguity blocking several items, and repeated failure on the same card. \
                  Otherwise summarise and let them walk away.\n\n\
                  Backlog cards do not auto-start unless the Project's auto mode is on \

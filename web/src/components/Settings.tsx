@@ -1095,8 +1095,8 @@ export function OpenShellPanelView({
         <h3>Host setup</h3>
         <p className="dim">
           Role checklist: compute driver → OpenShell gateway → providers →
-          sandbox image. Details in <code>docs/operating.md</code> (Running real
-          agents) and <code>docs/sandbox-stack.md</code>.
+          sandbox image. Details in <code>docs/agents.md</code> and{" "}
+          <code>docs/sandbox.md</code>.
         </p>
       </aside>
     </section>

@@ -9,8 +9,8 @@ implement product work by editing this tree; shape Projects/Plans, triage
 Needs You / Review, let sandboxed workers open PRs. See
 [`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc).
 
-Read [`docs/state-of-play.md`](docs/state-of-play.md) first. It says what is
-proven, what is not, and what to do next.
+Start with [`docs/index.md`](docs/index.md) and
+[`docs/concepts.md`](docs/concepts.md).
 
 ## What this is
 
@@ -30,10 +30,9 @@ yourself encoding a rule in `api.rs` or `mcp.rs`, it belongs in `machine.rs` or
 The supervisor calls `claim`/`heartbeat`/`report` on its behalf. An agent that
 could reach honr's MCP could approve its own review.
 
-**Liveness and cost are observed, never self-reported.** Both are parsed from
-the agent's output stream. Do not add a timer-based keepalive — it would assert
-liveness without evidence and throw away the property that makes the signal
-trustworthy.
+**Liveness is observed, never self-reported.** It is parsed from the agent's
+output stream. Do not add a timer-based keepalive — it would assert liveness
+without evidence and throw away the property that makes the signal trustworthy.
 
 **Merging is human.** Approving in honr surfaces the PR. It never merges.
 
@@ -48,7 +47,7 @@ restates the line below it is noise.
 
 Tests live next to what they test. `machine.rs` holds the lifecycle
 invariants; other modules test the things that break silently — argv shape,
-cost parsing, shell quoting, config validation. Prefer a test that names the
+shell quoting, config validation. Prefer a test that names the
 failure it prevents over one that names the function it calls.
 
 Before you finish: `cargo test` and `cargo clippy --all-targets -- -D warnings`
@@ -90,15 +89,15 @@ as the card failing — see `is_infrastructure`.
 | `src/mcp.rs` | Operator tools and worker verbs |
 | `sandbox/` | Containerfile, network policy, metadata shim |
 | `web/` | React UI + `npm run shots` screenshot harness |
-| `docs/sandbox-stack.md` | Every gotcha found the hard way. Read before touching `sandbox/`. |
+| `docs/sandbox.md` | How a sandboxed run works and the gotchas that matter. Read before touching `sandbox/`. |
 
 ## Environment
 
 Claude runs on **Google Vertex**, not the first-party API — there is no
 `ANTHROPIC_API_KEY`. Auth is `CLAUDE_CODE_USE_VERTEX=1` plus gcloud ADC. The
 combination that works is in `honr.yaml` under `execution.agents.vertex`;
-`docs/sandbox-stack.md` explains why the region matters and how a sandboxed
-agent gets a credential it cannot read.
+[`docs/sandbox.md`](docs/sandbox.md) explains why the region matters and how a
+sandboxed agent gets a credential it cannot read.
 
 GitHub work uses a bot account, configured as `execution.agents.repo.fork`.
 Its token currently carries broad `repo` scope across that account — a

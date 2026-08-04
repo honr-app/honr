@@ -1,0 +1,72 @@
+# Concepts
+
+honr is an agent orchestrator whose board is a **control plane, not a report**.
+It is written to at machine speed, read by agents as their source of truth, and
+moving a card *is* an action. The scarce resource is human attention.
+
+```
+you ──chat──> operator agent (Cursor / Claude Code)
+                    │ MCP (streamable HTTP, /mcp)
+                    ▼
+            ┌────────────────────┐
+            │  honr (Rust/axum)  │◀── REST + SSE ── React UI
+            │  one state machine │
+            └────────────────────┘
+                    ▲
+              supervisor ──> worker agent in an OpenShell sandbox
+                                 └─> cross-fork PR ──> you merge
+```
+
+## Board as control plane
+
+The UI and the agent API are two renderings of **one state machine**. Every
+mutation goes through `Board` in `src/store.rs`. No transport holds
+state-machine logic — that is what stops the two drifting apart.
+
+Columns (Ready / Backlog through Done) are not status labels for a dashboard;
+transitions are the work. Approving a Plan materializes Tasks. Dispatching a
+card claims it. Answering Needs You unblocks a waiting agent.
+
+## Project + Tasks
+
+One node type, two roles:
+
+| Kind | Role |
+|---|---|
+| **Project** | Container. Holds the Plan, optional `project_prompt`, sandbox profile override, auto-dispatch. Never sits in Backlog as claimable work. |
+| **Task** | Claimable leaf. Initial plan, implementation cards, and follow-ups are Tasks under a Project. |
+
+Task↔task links are dependency edges (via beads). Vision / Epic / Story levels
+are not part of the product schema.
+
+## Operator vs worker
+
+| Role | Who | Reach |
+|---|---|---|
+| **Operator** | Human + chat agent on the host | MCP into honr: shape Projects, triage Needs You / Review, dispatch, park / steer / halt |
+| **Worker** | Agent inside an OpenShell sandbox | No network path to honr. Supervisor calls `claim` / `heartbeat` / `report` on its behalf |
+
+An agent that could reach honr's MCP could approve its own review. Containment
+is intentional: the worker is material, not a participant.
+
+## Invariants worth protecting
+
+**One state machine.** If a rule belongs in the lifecycle, it lives in
+`machine.rs` / `store.rs`, not in `api.rs` or `mcp.rs`.
+
+**Liveness is observed, never self-reported.** The supervisor parses the
+agent's output stream. A timer-based keepalive would assert liveness without
+evidence.
+
+**Merging is human.** Approving in honr surfaces the PR. It never merges.
+
+**The bot has no write access to upstream.** Containment lives in GitHub
+permissions. The fork is disposable; rebase onto upstream, not the fork's
+frozen base.
+
+## Where to go next
+
+- New to the board → [Quickstart](quickstart.md)
+- Day-to-day operation → [Workflow](workflow.md)
+- Turn on sandboxed agents → [Agents](agents.md)
+- How the pieces fit → [Architecture](architecture.md)
