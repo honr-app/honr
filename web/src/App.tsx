@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Board } from "./components/Board";
 import { DetailDrawer } from "./components/Detail";
+import { Help } from "./components/Help";
 import { PrimarySidebar, type AppView } from "./components/PrimarySidebar";
 import { Settings } from "./components/Settings";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
@@ -83,7 +84,7 @@ export default function App() {
         <PrimarySidebar
           view={view}
           onNavigate={(next) => {
-            if (next === "settings") setOpen(null);
+            if (next !== "board") setOpen(null);
             setView(next);
           }}
         />
@@ -120,6 +121,8 @@ export default function App() {
                 />
               )}
             </>
+          ) : view === "help" ? (
+            <Help />
           ) : (
             <Settings />
           )}

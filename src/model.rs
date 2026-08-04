@@ -293,21 +293,48 @@ mod initial_plan_title_tests {
 
 /// Default standing instructions seeded on every new Project (`project_prompt`).
 /// Replaces the old pin soup for policy the agent must always see.
-/// Branching / which repo to clone is Project-specific — put it in this prompt.
+///
+/// Product remotes are **Task-scoped** (`init_plan` / Task.repo / card
+/// `pull_request`) — not owned by this prompt. Keep quality gates and standing
+/// policy here; do not treat prose in `project_prompt` as the remotes SoT.
 pub const DEFAULT_PROJECT_PROMPT: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
 Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/policy.yaml; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
-Name the product repo as an exact `owner/name` (or git URL) and the branching model \
-(same-repo feature branch vs fork) in this Project prompt — agents must not invent a repo.\n\
+Product remotes are Task-scoped (init_plan / Task.repo / card pull_request) — not Project-owned. \
+Do not invent an owner/name from context; if Remotes are unbound, escalate.\n\
 Name this Project's quality gates (test/lint commands) here when agents should run them before \
 publish — do not assume cargo or any other toolchain unless named.\n\
-First run (no card pull_request): if this prompt names a clone target, clone into /sandbox/repo, \
-open the PR, finish via report.json including base/head (see /sandbox/.honr/report.schema.json). \
-If it does not name one, escalate — do not guess. Later runs reuse that card binding.\n\
-Initial plan: also write /sandbox/.honr/plan.json (proposed Tasks); human Approve creates them.\n\
+Initial plan: write /sandbox/.honr/plan.json (proposed Tasks); human Approve creates them \
+(siblings inherit or override the Initial plan Task repo).\n\
 If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape); card goes to Review — Approve creates siblings. Never nest under a Task.\n\
 ";
+
+#[cfg(test)]
+mod default_project_prompt_tests {
+    use super::DEFAULT_PROJECT_PROMPT;
+
+    #[test]
+    fn does_not_treat_prompt_as_repo_binding_sot() {
+        let p = DEFAULT_PROJECT_PROMPT;
+        assert!(
+            p.contains("Task-scoped"),
+            "must say remotes are Task-scoped: {p}"
+        );
+        assert!(
+            p.contains("init_plan") || p.contains("Task.repo"),
+            "must point at Task binding path: {p}"
+        );
+        assert!(
+            !p.contains("Name the product repo as an exact"),
+            "must not imply Project prompt owns clone target: {p}"
+        );
+        assert!(
+            !p.contains("if this prompt names a clone target"),
+            "must not teach Project prompt as first-run remotes SoT: {p}"
+        );
+    }
+}
 
 /// One end of a pull request (GitHub `base` / `head`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
