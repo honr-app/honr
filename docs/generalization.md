@@ -8,7 +8,9 @@ beads sync only**. Settings → **OpenShell** shows gateway health (`openshell
 status`) and an optional CLI binary override. Settings → **Agent runtime**
 holds engine / Vertex / providers / budgets / **branch_prefix** /
 **quality_gates** (seeded from yaml; Board SoT). Yaml `execution.agents.repo`
-is legacy/optional. Remaining Plan Task: second-repo proof.
+is legacy/optional. **Second-repo proof:** done — see
+[second-repo-proof.md](./second-repo-proof.md) (Board card #180 →
+`clankrshq/honr-sandbox-probe` PR #2).
 
 **Goal:** a fresh install can drive **any GitHub-hosted repo** (and eventually
 **many** on one board) with configurable OpenShell/runtime, without hardcoding
@@ -136,7 +138,7 @@ Board cards under Project **Generalize honr beyond this stack**:
 | **#171** | `settings-agent-runtime` | **Shipped.** Settings → Agent runtime; Vertex location from durable config; providers from Board. | **DoD:** met (panel + Board REST; `setup_agy_auth` uses configured location; providers at sandbox create from durable config). |
 | **#172** | `openshell-ops-surface` | **Shipped.** Settings → OpenShell health + binary; role-based ops docs; Shane values labeled example. | **DoD:** met (panel; operating.md roles; sandbox-stack example table; dispatch still gates on `healthy()`). |
 | **#173** | `briefing-repo-agnostic` | **Shipped.** | **DoD:** (1) Empty `quality_gates` omits mandatory cargo from briefing (test). (2) `branch_prefix` config default drives `{prefix}/card-N` (override via Settings/yaml). (3) Verdict paths unchanged. (4) Briefing variants covered by `cargo test --offline`. |
-| **#174** | `second-repo-proof` | **Revise + re-block.** | **DoD:** (1) Run record names a **non-Shane** upstream/fork used as the **Project** binding (install Workspace may remain Shane for beads). (2) Card reaches Review with `pr_url` on that upstream. (3) No code path required editing `shanemcd/honr` into config for the **work** remotes. (4) Residual hardcodes filed as follow-ups. **blocked_by:** `project-repo-binding`, #171, #172, #173 (not “rebind install Workspace”). |
+| **#174** | `second-repo-proof` | **Done** — [second-repo-proof.md](./second-repo-proof.md). | **DoD met:** (1) Run record names non-Shane upstream/fork `clankrshq/honr-sandbox-probe`. (2) Board card **#180** → Review with https://github.com/clankrshq/honr-sandbox-probe/pull/2. (3) Install Workspace/beads stayed `shanemcd/honr`; work remotes were the probe. (4) Follow-ups #256 / #257. |
 
 **New sibling Task (create after Approve of this decision):**
 
@@ -365,7 +367,7 @@ Workspace/yaml when empty so existing single-repo installs keep working.
 4. **Settings → Agent runtime** (#171) — providers / Vertex / engine / budgets.
 5. **OpenShell ops surface + docs** (#172) — health in Settings; de-Shane ops docs.
 6. ~~**Repo-agnostic briefing / gates** (#173)~~ — `branch_prefix` + `quality_gates` on Agent runtime; no hardcoded cargo.
-7. **Second-repo proof** (#174) — Project bound to non-Shane upstream/fork; one card to Review with real PR (**without** rebinding install Workspace).
+7. ~~**Second-repo proof** (#174)~~ — landed; see [second-repo-proof.md](./second-repo-proof.md).
 
 GitLab: mention only as `forge: github | (future) gitlab` — no Tasks implement it.
 
