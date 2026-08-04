@@ -134,6 +134,8 @@ export interface PlanTaskSpec {
   definition_of_done: string;
   blocked_by_keys: string[];
   capability: string | null;
+  /** Optional per-task remotes; Approve defaults from Initial plan / parent Task. */
+  repo?: RepoConfig | null;
   item_id: number | null;
 }
 

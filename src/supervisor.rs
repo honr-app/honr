@@ -1228,6 +1228,9 @@ struct RawSplitChild {
     key: Option<String>,
     #[serde(default)]
     blocked_by_keys: Vec<String>,
+    /// Optional per-child remotes; Approve defaults from the splitting parent Task.
+    #[serde(default)]
+    repo: Option<crate::schema::RepoConfig>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1302,6 +1305,9 @@ struct RawPlanTask {
     blocked_by_keys: Vec<String>,
     #[serde(default)]
     capability: Option<String>,
+    /// Optional per-task remotes; Approve defaults from Initial plan Task repo.
+    #[serde(default)]
+    repo: Option<crate::schema::RepoConfig>,
 }
 
 fn plan_file_to_specs(plan: PlanFile) -> Result<(String, Vec<crate::model::PlanTaskSpec>), String> {
@@ -1330,6 +1336,7 @@ fn plan_file_to_specs(plan: PlanFile) -> Result<(String, Vec<crate::model::PlanT
             definition_of_done: dod,
             blocked_by_keys: t.blocked_by_keys,
             capability: t.capability,
+            repo: t.repo,
             item_id: None,
         });
     }
@@ -1575,6 +1582,7 @@ async fn process_verdict(
                     let mut spec = crate::model::SplitChildSpec::new(c.title, c.intent, dod);
                     spec.key = c.key;
                     spec.blocked_by_keys = c.blocked_by_keys;
+                    spec.repo = c.repo;
                     spec
                 })
                 .collect();
