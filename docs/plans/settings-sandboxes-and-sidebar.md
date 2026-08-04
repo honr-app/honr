@@ -2,7 +2,7 @@
 
 ## Context & Objectives
 
-Today the cockpit is a single Board surface (`web/src/App.tsx` → `Cockpit`).
+Today the board is a single surface (`web/src/App.tsx` → `Board`).
 Sandbox create knobs live only in `honr.yaml` (`execution.agents.image` /
 `policy` / `cpu` / `memory`), and the supervisor always builds one
 `SandboxSpec` from that process config (`src/supervisor.rs` → `run_card`).
@@ -72,7 +72,7 @@ Project.sandbox_profile_id
 ```
 
 All mutations go through `Board` in `src/store.rs` (same invariant as every
-other control-plane write). REST (and MCP if natural for cockpit) are thin.
+other control-plane write). REST (and MCP if natural for operator) are thin.
 
 ---
 
@@ -105,11 +105,11 @@ OpenShell sandboxes from Settings is out of scope for v1 (non-goal).
 ### Task `sidebar` — App chrome: Board vs Settings sidebar
 
 - **Intent**: Introduce navigation so operators can switch between the Board
-  cockpit and a Settings surface without stuffing settings into board chrome.
+  and a Settings surface without stuffing settings into board chrome.
 - **Dependencies**: none.
 - **Definition of Done**: `npm --prefix web test` (or the repo’s existing web
   test script) passes; App renders a persistent Board | Settings nav; Board
-  view still shows the existing Cockpit; Settings route/view renders with a
+  view still shows the existing Board; Settings route/view renders with a
   Sandboxes section placeholder and at least one stub section; no PatternFly
   dependency added.
 

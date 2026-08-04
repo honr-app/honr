@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/ws", get(ws::ws_handler))
         .route("/healthz", get(|| async { "ok" }));
 
-    // The cockpit's door. Same process, same port, same state.
+    // The operator MCP endpoint. Same process, same port, same state.
     app = app.nest("/mcp", mcp::router(board.clone()));
 
     if web_dist.exists() {

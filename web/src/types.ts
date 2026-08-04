@@ -190,7 +190,7 @@ export interface WorkItem {
   conversation_id?: string | null;
   /** Park hold: Backlog; unpark clears this and queues dispatch. */
   parked?: boolean;
-  /** Cockpit asked supervisor to start this Backlog card. */
+  /** Board UI asked supervisor to start this Backlog card. */
   awaiting_dispatch?: boolean;
   engine?: string | null;
   beads_id?: string | null;
@@ -237,7 +237,7 @@ export interface GoalView {
   ready_to_dispatch?: ReadyCard[];
   /** `no_plan` | `awaiting_approval` | `approved_vN` */
   plan_status: string;
-  /** Soft-retired Project — cockpit hides unless "Show archived". */
+  /** Soft-retired Project — board hides unless "Show archived". */
   archived?: boolean;
   columns: ColumnView[];
   story: StoryLine[];

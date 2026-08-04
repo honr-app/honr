@@ -40,14 +40,14 @@ target.
 
 | Call site | What it scans | Why it hurts |
 |---|---|---|
-| `list_backlog` / `list_ready` | All items: `state == Backlog`, not Project, no children, unresolved blockers, capability | Dispatch cockpit + MCP; O(n) per poll |
+| `list_backlog` / `list_ready` | All items: `state == Backlog`, not Project, no children, unresolved blockers, capability | Dispatch operator + MCP; O(n) per poll |
 | `list_awaiting_dispatch` | Backlog + `awaiting_dispatch` + not parked + leaf + unblocked; sort by `entered_state_at` | Supervisor drain every tick |
 | `sweep_leases` | Claimed/Running where `run_deadline_at` (or legacy lease) expired | Every `sweep_interval_ms` |
 | `children_of` / `has_children` | All items with `parent == id` | Called inside backlog/dispatch filters and snapshot |
 | `goal_of` / `depth` / `chain` | Walk `parent` pointers (per item in snapshot/digest) | Snapshot clones every item then re-derives goals |
 | `populate_blockers` / `unresolved_blockers` | Resolve `blocked_by` ids + filter unresolved | Emit path + list filters |
 | `snapshot` | Clone all items + blockers; build every Project `GoalView` via member scans | REST `/api/board` + UI |
-| `digest` | Per-goal member scans for NeedsYou / running / backlog / review counts | Cockpit digest |
+| `digest` | Per-goal member scans for NeedsYou / running / backlog / review counts | Operator digest |
 | `list_awaiting_rebase` | Review cards with rebase flags | Webhook catch-up sibling |
 | `flush` | `serde_json::to_string_pretty` of entire `BoardState` → rename | Interval + shutdown; write amplification |
 

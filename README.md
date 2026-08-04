@@ -10,7 +10,7 @@ That loop works today — [PR #1](https://github.com/shanemcd/honr/pull/1) was
 written by an agent honr dispatched, and is merged.
 
 ```
-you ──chat──> Claude Code (the cockpit)
+you ──chat──> Claude Code (the operator)
                     │ MCP (streamable HTTP, /mcp)
                     ▼
             ┌────────────────────┐
@@ -35,7 +35,7 @@ cargo run                 # :8080 — API, SSE, MCP, and the built UI
 Serves `web/dist` if it exists. For hot reload: `cd web && npm install && npm run dev`
 (:5173, proxies to :8080). `HONR_PORT` overrides the port.
 
-Connect the cockpit (honr must already be listening on :8080):
+Connect the operator MCP (honr must already be listening on :8080):
 
 **Cursor** — project config is [`.cursor/mcp.json`](.cursor/mcp.json):
 
@@ -44,7 +44,7 @@ Connect the cockpit (honr must already be listening on :8080):
 ```
 
 Then **Cursor Settings → Tools & MCP** (or Customize → MCPs), enable **honr**, and reload if needed.
-With the cockpit rule in [`.cursor/rules/honr-cockpit.mdc`](.cursor/rules/honr-cockpit.mdc), the agent
+With the operator rule in [`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc), the agent
 drives Projects/Plans via MCP; sandboxed workers claim Ready Tasks and open PRs.
 
 **Claude Code:**
@@ -68,7 +68,7 @@ on a machine with no podman, no gateway and no credentials.
 | **Board** | What is happening in the columns? Ready → Done, with heartbeat decay on running cards. |
 
 The UI is for **understanding**; the agent is for **driving**. Steer, pin, halt
-and cut scope live in the cockpit, because they all want a reason. What stays
+and cut scope live in the operator MCP, because they all want a reason. What stays
 in the UI is what is genuinely one tap: answering an escalation, approving a
 review.
 
@@ -81,7 +81,7 @@ review.
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
 | `src/beads.rs` | `bd` CLI wrapper — identity, Project→Task parent, deps. |
 | `src/api.rs` `src/sse.rs` | The human face. |
-| `src/mcp.rs` | The cockpit and worker face. |
+| `src/mcp.rs` | The operator and worker face. |
 | `src/openshell.rs` | Typed async wrapper over the `openshell` CLI. |
 | `src/supervisor.rs` | Dispatch, the per-card sandbox lifecycle, lease sweeping. |
 | `honr.yaml` | Level schema (Project + Task) and execution config. |

@@ -1,4 +1,4 @@
-/** Plain-language rewrites for agent/escalation dumps shown in the cockpit. */
+/** Plain-language rewrites for agent/escalation dumps shown on the board. */
 
 export function humanizeEscalation(question: string): {
   summary: string;

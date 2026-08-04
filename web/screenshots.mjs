@@ -144,12 +144,12 @@ const PHONE = { width: 390, height: 844 };
 
 console.log("capturing & asserting:");
 
-// Single cockpit surface (no Home/Board tabs).
-await shoot("desktop-cockpit", DESKTOP, async (page) => {
-  await page.waitForSelector(".cockpit", { timeout: 5000 });
+// Single board surface (no Home/Board tabs).
+await shoot("desktop-board", DESKTOP, async (page) => {
+  await page.waitForSelector(".board-page", { timeout: 5000 });
 
   // Needs you action block when the fixture has an escalation.
-  const needs = page.locator(".cockpit-needs");
+  const needs = page.locator(".board-needs");
   if ((await needs.count()) > 0) {
     await needs.first().waitFor({ state: "visible", timeout: 5000 });
     console.log(`  [Playwright Assertion] Needs you block visible`);
@@ -190,7 +190,7 @@ await shoot("desktop-graph", DESKTOP, async (page) => {
   console.log(`  [Playwright Assertion] Visual dependency graph loaded`);
 });
 
-await shoot("phone-cockpit", PHONE);
+await shoot("phone-board", PHONE);
 
 await shoot("desktop-drawer-needs-you", DESKTOP, async (page) => {
   const card = page.locator(".column-needs_you .card").first();
@@ -203,7 +203,7 @@ await shoot("desktop-drawer-needs-you", DESKTOP, async (page) => {
   if ((await page.locator(".column-needs_you .card").count()) > 0) {
     await page.locator(".column-needs_you .card").first().click();
   } else {
-    await page.locator(".cockpit-need-title").first().click();
+    await page.locator(".board-need-title").first().click();
   }
   await sleep(600);
 });

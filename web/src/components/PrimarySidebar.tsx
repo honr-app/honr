@@ -6,7 +6,7 @@ export interface PrimarySidebarProps {
   onNavigate: (view: AppView) => void;
 }
 
-/** Persistent primary nav — Board stays the cockpit; Settings is a separate surface. */
+/** Persistent primary nav — Board is the main surface; Settings is separate. */
 export function PrimarySidebar({ view, onNavigate }: PrimarySidebarProps) {
   return (
     <nav className="sidebar" aria-label="Primary" data-testid="app-sidebar">

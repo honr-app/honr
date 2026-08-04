@@ -1,7 +1,7 @@
 //! The board. Written to at machine speed, read by agents as their source of
 //! truth, and moving a card *is* an action.
 //!
-//! Both faces — REST/SSE for humans, MCP for the cockpit and for agents — call
+//! Both faces — REST/SSE for humans, MCP for the operator and for agents — call
 //! into here. Neither owns any state-machine logic, which is what keeps the two
 //! renderings from drifting.
 
@@ -212,7 +212,7 @@ pub struct GoalView {
     pub auto_dispatch: bool,
     /// `no_plan` | `awaiting_approval` | `approved_vN`
     pub plan_status: String,
-    /// Soft-retired Project — hidden from the default cockpit, available via
+    /// Soft-retired Project — hidden from the default board view, available via
     /// "Show archived". Digests still omit these.
     pub archived: bool,
     pub columns: Vec<ColumnView>,
@@ -1118,9 +1118,9 @@ impl Board {
             false,
             None,
         )?;
-        let _ = self.transition(seed.id, State::Shaping, "cockpit", Some("seed plan task".into()));
+        let _ = self.transition(seed.id, State::Shaping, "operator", Some("seed plan task".into()));
         let seed = self
-            .transition(seed.id, State::Backlog, "cockpit", Some("seed plan task".into()))
+            .transition(seed.id, State::Backlog, "operator", Some("seed plan task".into()))
             .map_err(|e| e.to_string())?;
         self.story(
             project_id,
@@ -1520,7 +1520,7 @@ impl Board {
 
     /// Mirror many cards after Approve/materialize: suppress dolt push for the
     /// storm, bind real beads ids (parents before children), then write deps.
-    /// Returns immediately — work runs on the runtime; cockpit must not wait.
+    /// Returns immediately — work runs on the runtime; operator must not wait.
     pub fn schedule_beads_mirror_batch(self: &Arc<Self>, ids: &[ItemId]) {
         if ids.is_empty() {
             return;
@@ -2611,7 +2611,7 @@ impl Board {
     }
 
     /// Backlog leaves that are unblocked and match capabilities. Not a start
-    /// queue — cockpit must `enqueue_dispatch` before the supervisor claims.
+    /// queue — operator must `enqueue_dispatch` before the supervisor claims.
     ///
     /// Uses `ids_by_state` + denormalized leaf/blocker checks (not a full scan).
     pub fn list_backlog(&self, capabilities: &[String]) -> Vec<WorkItem> {
@@ -2637,12 +2637,12 @@ impl Board {
             .collect()
     }
 
-    /// Legacy name for cockpit `list_ready` MCP tool.
+    /// Legacy name for operator `list_ready` MCP tool.
     pub fn list_ready(&self, capabilities: &[String]) -> Vec<WorkItem> {
         self.list_backlog(capabilities)
     }
 
-    /// Cards the cockpit asked to start, oldest first. Supervisor drains these.
+    /// Cards the operator asked to start, oldest first. Supervisor drains these.
     ///
     /// Uses `ids_by_state` + denormalized leaf/blocker checks (not a full scan).
     pub fn list_awaiting_dispatch(&self) -> Vec<WorkItem> {
@@ -2663,7 +2663,7 @@ impl Board {
         items
     }
 
-    /// Cockpit asked the supervisor to start this Backlog card.
+    /// Operator asked the supervisor to start this Backlog card.
     pub fn enqueue_dispatch(&self, id: ItemId) -> Result<WorkItem, String> {
         if !self.may_claim(id) {
             return Err("card is parked; unpark before dispatch".into());
@@ -3444,7 +3444,7 @@ fn check_split_relatedness(
         } else {
             Origin::Split { from: id }
         };
-        let made = self.materialize_proposal(id, "cockpit", origin)?;
+        let made = self.materialize_proposal(id, "operator", origin)?;
         if !made.is_empty() {
             self.story(
                 id,
@@ -3678,7 +3678,7 @@ fn check_split_relatedness(
         self.story(id, format!("{title}: unblocked — {choice}"));
         // "Host runs X; re-claim to document" without Proof facts is a promise,
         // not evidence. Auto mode would reclaim immediately and the agent would
-        // re-escalate (#174). Park until cockpit pastes `Proof: …` and unparks.
+        // re-escalate (#174). Park until operator pastes `Proof: …` and unparks.
         // Already in Backlog — do not call `park()` (Backlog→Backlog is illegal).
         if Self::decision_defers_host_prerequisite(&choice) {
             let reason = "Decision defers a host-side prerequisite — parked until Proof \
@@ -3918,7 +3918,7 @@ facts are pasted, then unpark";
 
         if has_proposal {
             // UI: "Approve — create Tasks". Materialize now even when a plan/docs
-            // PR is attached — waiting on the merge webhook strands the cockpit
+            // PR is attached — waiting on the merge webhook strands the operator
             // whenever the forwarder is down. Merge → Done stays idempotent.
             let done = self
                 .transition(id, State::Done, "human", Some("proposal approved".into()))
@@ -4569,7 +4569,7 @@ facts are pasted, then unpark";
 
         let text = match column {
             Column::Backlog => {
-                // Waiting for cockpit to dispatch — not a claim queue.
+                // Waiting for operator to dispatch — not a claim queue.
                 let blocked: Vec<&&&WorkItem> = items
                     .iter()
                     .filter(|i| !Self::unresolved_blockers(s, i).is_empty())

@@ -18,7 +18,7 @@ pub type ItemId = u64;
 pub enum State {
     Draft,
     Shaping,
-    /// Claimable pool — cockpit must explicitly dispatch; nothing auto-starts.
+    /// Claimable pool — operator must explicitly dispatch; nothing auto-starts.
     ///
     /// `alias = "ready"` loads legacy boards/history that used Ready.
     #[serde(alias = "ready")]

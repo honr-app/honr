@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
-import { Cockpit, isBlocked, sortFor } from "./dist-test/components/Cockpit.js";
+import { Board, isBlocked, sortFor } from "./dist-test/components/Board.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
@@ -198,7 +198,7 @@ readyCards.sort(sortFor("backlog"));
 
 assert.strictEqual(readyCards[0].id, 1, "After claim-release bounce, unblocked card #1 must STILL sort first");
 
-// Test 7: Cockpit surfaces Needs you action cards with humanized copy
+// Test 7: Board surfaces Needs you action cards with humanized copy
 const projectItem = {
   id: 100,
   parent: null,
@@ -250,8 +250,8 @@ const needsYouItem = {
   },
 };
 
-const cockpitHtml = renderToString(
-  React.createElement(Cockpit, {
+const boardHtml = renderToString(
+  React.createElement(Board, {
     items: new Map([
       [100, projectItem],
       [9, needsYouItem],
@@ -281,13 +281,13 @@ const cockpitHtml = renderToString(
   })
 );
 
-console.log("\nCockpit HTML:\n", cockpitHtml.slice(0, 800));
-assert(cockpitHtml.includes("cockpit-needs"), "Cockpit should show Needs you section");
+console.log("\nBoard HTML:\n", boardHtml.slice(0, 800));
+assert(boardHtml.includes("board-needs"), "Board should show Needs you section");
 assert(
-  cockpitHtml.includes("Sandbox couldn") && cockpitHtml.includes("clone"),
-  "Cockpit Needs you should humanize clone failures",
+  boardHtml.includes("Sandbox couldn") && boardHtml.includes("clone"),
+  "Board Needs you should humanize clone failures",
 );
-assert(cockpitHtml.includes("Investigate the environment"), "Cockpit should offer answer options");
+assert(boardHtml.includes("Investigate the environment"), "Board should offer answer options");
 
 // Test 8: Detail Head renders Archive and Delete actions
 
@@ -740,9 +740,9 @@ assert(pickerHtml.includes("Heavy"), "Named profiles list by display name");
 assert(!pickerHtml.includes("Default (default)"), "Must not show 'Default (default)' duplication");
 assert(!pickerHtml.includes("Heavy (heavy)"), "Must not show raw id in every option");
 
-// Board view still mounts Cockpit (regression: chrome must not replace it).
-const emptyCockpitHtml = renderToString(
-  React.createElement(Cockpit, {
+// Board view still mounts Board (regression: chrome must not replace it).
+const emptyBoardHtml = renderToString(
+  React.createElement(Board, {
     goals: [],
     items: new Map(),
     stories: new Map(),
@@ -753,8 +753,8 @@ const emptyCockpitHtml = renderToString(
     onOpen: () => {},
   }),
 );
-assert(emptyCockpitHtml.includes("cockpit") || emptyCockpitHtml.includes("Welcome to honr"),
-  "Board view should still render Cockpit");
+assert(emptyBoardHtml.includes("board-page") || emptyBoardHtml.includes("Welcome to honr"),
+  "Board view should still render Board");
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
@@ -764,5 +764,5 @@ assert(!Object.keys(pkg.dependencies || {}).some((d) => /patternfly/i.test(d)),
 assert(!Object.keys(pkg.devDependencies || {}).some((d) => /patternfly/i.test(d)),
   "Must not add a PatternFly devDependency");
 
-console.log("\n✅ All Card, Cockpit, Detail, Settings chrome, and useBoard sequence guard assertions passed!");
+console.log("\n✅ All Card, Board, Detail, Settings chrome, and useBoard sequence guard assertions passed!");
 

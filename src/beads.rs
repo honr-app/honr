@@ -18,7 +18,7 @@ use tokio::sync::Notify;
 const DOLT_PUSH_DEBOUNCE: Duration = Duration::from_secs(30);
 
 /// While a create storm is open, the dolt worker waits instead of pushing —
-/// overlapping `bd dolt push` must not serialize cockpit-driven `bd create`.
+/// overlapping `bd dolt push` must not serialize operator-driven `bd create`.
 const DOLT_STORM_POLL: Duration = Duration::from_millis(50);
 
 /// A remote side-effect `BeadsClient` would perform (`bd github …` / `bd dolt push`).
@@ -257,7 +257,7 @@ pub struct BeadsClient {
     remotes: Remotes,
     dolt_push: Arc<DoltPushDebouncer>,
     backend: BeadsBackend,
-    /// Counts [`Self::create_linked_sync`] calls (tests assert cockpit paths skip it).
+    /// Counts [`Self::create_linked_sync`] calls (tests assert operator paths skip it).
     create_sync_calls: Arc<AtomicU64>,
     /// Workspace / yaml beads sync target (`owner/repo`). Env still wins via
     /// [`resolve_github_repository`].
@@ -521,7 +521,7 @@ impl BeadsClient {
                 // Trailing debounce: wait so create storms collapse to one push.
                 tokio::time::sleep(DOLT_PUSH_DEBOUNCE).await;
                 // Hold the remote push while `bd create` storms are open so the
-                // Dolt lock cannot serialize cockpit materialize (or its async
+                // Dolt lock cannot serialize operator materialize (or its async
                 // mirrors) behind an in-flight push.
                 while client.dolt_push.storm_depth.load(Ordering::SeqCst) > 0 {
                     tokio::time::sleep(DOLT_STORM_POLL).await;
@@ -760,7 +760,7 @@ impl BeadsClient {
     }
 
     /// Synchronous create — used by the async mirror path via `spawn_blocking`,
-    /// never from the cockpit request path (`Board::create` / Approve).
+    /// never from the operator request path (`Board::create` / Approve).
     #[allow(clippy::too_many_arguments)]
     pub fn create_linked_sync(
         &self,
