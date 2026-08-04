@@ -1,9 +1,9 @@
 //! The other UI. It happens to be an API, but it's a designed surface with the
-//! same care — the cockpit has to be able to do the right thing without the
+//! same care — the operator has to be able to do the right thing without the
 //! human reading the board, and an agent has to without any human at all.
 //!
 //! Two families share one state machine:
-//!   * cockpit tools — what a liaison agent needs to triage and decide
+//!   * operator tools — what a liaison agent needs to triage and decide
 //!   * worker verbs  — `list_ready` `claim` `heartbeat` `split` `escalate`
 //!     `report` `release`, and nothing else
 //!
@@ -316,15 +316,15 @@ pub struct HealEpicsOut {
 // ---------------------------------------------------------------- the server
 
 #[derive(Clone)]
-pub struct Cockpit {
+pub struct Operator {
     board: SharedBoard,
     /// Read by the `#[tool_handler]` macro, not by us.
     #[allow(dead_code)]
-    tool_router: rmcp::handler::server::tool::ToolRouter<Cockpit>,
+    tool_router: rmcp::handler::server::tool::ToolRouter<Operator>,
 }
 
 #[tool_router]
-impl Cockpit {
+impl Operator {
     pub fn new(board: SharedBoard) -> Self {
         Self { board, tool_router: Self::tool_router() }
     }
@@ -338,7 +338,7 @@ impl Cockpit {
         Ok(ToolJson(Ack { ok: true, item: id, state, note: note.into() }))
     }
 
-    // ============================================================== cockpit
+    // ============================================================== operator
 
     #[tool(
         name = "board_snapshot",
@@ -512,7 +512,7 @@ impl Cockpit {
         if let Some(prompt) = a.project_prompt {
             let _ = self.board.update_item(item.id, None, None, None, None, Some(prompt));
         }
-        let _ = self.board.transition(item.id, State::Shaping, "cockpit", None);
+        let _ = self.board.transition(item.id, State::Shaping, "operator", None);
         self.board.schedule_beads_mirror(item.id);
         for cid in self.board.children_of(item.id) {
             self.board.schedule_beads_mirror(cid);
@@ -831,8 +831,8 @@ impl Cockpit {
 
     #[tool(
         name = "list_ready",
-        description = "WORKER VERB / cockpit alias. Lists Backlog leaves filtered by capabilities. \
-                       Not a start queue — cockpit must dispatch before the supervisor claims."
+        description = "WORKER VERB / operator alias. Lists Backlog leaves filtered by capabilities. \
+                       Not a start queue — operator must dispatch before the supervisor claims."
     )]
     fn list_ready(&self, Parameters(a): Parameters<ListReadyArg>) -> Out<ListReadyOut> {
         let rows = self
@@ -948,7 +948,7 @@ impl Cockpit {
     #[tool(
         name = "release",
         description = "WORKER VERB. Graceful surrender — give the card back to Backlog without \
-                       waiting for your lease to expire. Cockpit must dispatch again to restart."
+                       waiting for your lease to expire. Operator must dispatch again to restart."
     )]
     fn release(&self, Parameters(a): Parameters<AgentItemArg>) -> Out<Ack> {
         self.board
@@ -959,7 +959,7 @@ impl Cockpit {
 }
 
 #[tool_handler]
-impl ServerHandler for Cockpit {
+impl ServerHandler for Operator {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(
             rmcp::model::ServerCapabilities::builder().enable_tools().build(),
@@ -972,7 +972,7 @@ impl ServerHandler for Cockpit {
             me
         })
         .with_instructions(
-                "honr — an agent orchestration board. You are the cockpit: the human's liaison, \
+                "honr — an agent orchestration board. You are the operator: the human's liaison, \
                  not a dashboard reader.\n\n\
                  When querying beads for available work or 'what's next', use beads_ready \
                  (or bd ready --exclude-type=epic with optional --parent=<epic>). Epics are \
@@ -1005,10 +1005,10 @@ impl ServerHandler for Cockpit {
 
 /// Mounted on the same axum router, same port, same state as the human face.
 ///
-/// Stateless on purpose. Cockpit tools are request/response over `SharedBoard`;
+/// Stateless on purpose. Operator tools are request/response over `SharedBoard`;
 /// an in-memory `Mcp-Session-Id` only made Cursor brittle across `cargo run`
 /// restarts ("Session not found") without buying us server→client streams.
-pub fn service(board: SharedBoard) -> StreamableHttpService<Cockpit, NeverSessionManager> {
+pub fn service(board: SharedBoard) -> StreamableHttpService<Operator, NeverSessionManager> {
     // rmcp defaults to localhost/127.0.0.1/::1 only (DNS-rebinding guard).
     // Docker clients reach us as host.docker.internal — allow that Host.
     let mcp_http = StreamableHttpServerConfig::default()
@@ -1021,7 +1021,7 @@ pub fn service(board: SharedBoard) -> StreamableHttpService<Cockpit, NeverSessio
             "host.docker.internal:8080",
         ]);
     StreamableHttpService::new(
-        move || Ok(Cockpit::new(board.clone())),
+        move || Ok(Operator::new(board.clone())),
         Arc::new(NeverSessionManager::default()),
         mcp_http,
     )
@@ -1178,7 +1178,7 @@ mod tests {
     #[test]
     fn list_column_returns_record_with_items_for_triage_columns() {
         let (board, goal_id) = test_board();
-        let cockpit = Cockpit::new(board.clone());
+        let operator = Operator::new(board.clone());
 
         // Ready card
         let card_ready = board
@@ -1232,7 +1232,7 @@ mod tests {
 
         // Verify list_column for needs_you, ready, shaping returns a record object with "items"
         for col in [Column::NeedsYou, Column::Backlog, Column::Shaping] {
-            let res = cockpit
+            let res = operator
                 .list_column(Parameters(ColumnArg { column: col, goal: None }))
                 .expect("list_column should succeed");
             let value = serde_json::to_value(&res.0).expect("serialize to value");
@@ -1247,7 +1247,7 @@ mod tests {
     #[test]
     fn propose_breakdown_and_approve_plan_return_record_with_items() {
         let (board, goal_id) = test_board();
-        let cockpit = Cockpit::new(board.clone());
+        let operator = Operator::new(board.clone());
 
         let breakdown_arg = BreakdownArg {
             parent: goal_id,
@@ -1264,14 +1264,14 @@ mod tests {
             cancel_keys: vec![],
         };
 
-        let bd_res = cockpit
+        let bd_res = operator
             .propose_breakdown(Parameters(breakdown_arg))
             .expect("propose_breakdown should succeed");
         let bd_val = serde_json::to_value(&bd_res.0).expect("serialize to value");
         assert!(bd_val.is_object(), "propose_breakdown response must be a JSON record object");
         assert!(bd_val.as_object().unwrap().contains_key("items"));
 
-        let approve_res = cockpit
+        let approve_res = operator
             .approve_plan(Parameters(IdArg { id: goal_id }))
             .expect("approve_plan should succeed");
         let app_val = serde_json::to_value(&approve_res.0).expect("serialize to value");
@@ -1282,10 +1282,10 @@ mod tests {
     #[test]
     fn cut_scope_list_ready_and_split_return_record_with_items() {
         let (board, goal_id) = test_board();
-        let cockpit = Cockpit::new(board.clone());
+        let operator = Operator::new(board.clone());
 
         // list_ready
-        let ready_res = cockpit
+        let ready_res = operator
             .list_ready(Parameters(ListReadyArg { capabilities: vec!["any".into()] }))
             .expect("list_ready should succeed");
         let ready_val = serde_json::to_value(&ready_res.0).expect("serialize to value");
@@ -1293,7 +1293,7 @@ mod tests {
         assert!(ready_val.as_object().unwrap().contains_key("items"));
 
         // cut_scope
-        let cut_res = cockpit
+        let cut_res = operator
             .cut_scope(Parameters(ReasonArg { id: goal_id, reason: Some("retired".into()) }))
             .expect("cut_scope should succeed");
         let cut_val = serde_json::to_value(&cut_res.0).expect("serialize to value");
@@ -1304,7 +1304,7 @@ mod tests {
     #[test]
     fn list_column_sorts_unblocked_ready_first() {
         let (board, goal_id) = test_board();
-        let cockpit = Cockpit::new(board.clone());
+        let operator = Operator::new(board.clone());
 
         // Card 1: unblocked
         let c1 = board.create(Some(goal_id), "Card 1", "Unblocked", Some("DoD".into()), Origin::Human, false, None).expect("c1");
@@ -1321,7 +1321,7 @@ mod tests {
         let _ = board.claim(c1.id, "agent-1", None, 60).expect("claim");
         let _ = board.release(c1.id, "agent-1").expect("release");
 
-        let res = cockpit
+        let res = operator
             .list_column(Parameters(ColumnArg { column: Column::Backlog, goal: Some(goal_id) }))
             .expect("list_column should succeed");
 
@@ -1447,7 +1447,7 @@ mod tests {
     #[test]
     fn approve_review_mcp_returns_dispatch_next_note() {
         let (board, goal_id) = test_board();
-        let cockpit = Cockpit::new(board.clone());
+        let operator = Operator::new(board.clone());
 
         let t1 = board
             .create(Some(goal_id), "Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
@@ -1463,7 +1463,7 @@ mod tests {
         let _ = board.transition(t1.id, State::Running, "agent", None);
         let _ = board.transition(t1.id, State::Review, "agent", None);
 
-        let ack = cockpit.approve_review(Parameters(IdArg { id: t1.id })).expect("approve_review");
+        let ack = operator.approve_review(Parameters(IdArg { id: t1.id })).expect("approve_review");
         assert_eq!(ack.0.note, format!("approved — dispatch #{} next", t2.id));
     }
 
@@ -1492,8 +1492,8 @@ mod tests {
             .await
             .expect("create task");
 
-        let cockpit = Cockpit::new(board);
-        let res = cockpit
+        let operator = Operator::new(board);
+        let res = operator
             .beads_ready(Parameters(BeadsReadyArg { parent: None }))
             .await
             .expect("beads_ready should succeed");

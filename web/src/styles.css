@@ -633,51 +633,51 @@ main > :first-child { flex: 1; min-width: 0; }
   background: var(--panel);
 }
 
-/* ------------------------------------------------------------------- cockpit */
+/* ------------------------------------------------------------------- board page */
 
-.cockpit {
+.board-page {
   padding: 16px 14px 40px;
   display: flex;
   flex-direction: column;
   gap: 14px;
 }
-.cockpit-hero {
+.board-hero {
   margin: 0;
   padding: 0 2px 14px;
   border-bottom: 1px solid var(--line);
 }
-.cockpit-attention .cockpit-hero { padding-bottom: 12px; }
-.cockpit-hero h1 {
+.board-attention .board-hero { padding-bottom: 12px; }
+.board-hero h1 {
   margin: 0 0 8px;
   font-size: 22px;
   font-weight: 600;
   letter-spacing: -0.02em;
   line-height: 1.25;
 }
-.cockpit-lede {
+.board-lede {
   margin: 0;
   color: var(--dim);
   max-width: 58ch;
   line-height: 1.55;
 }
-.cockpit-empty-card {
+.board-empty-card {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel);
   padding: 20px 22px;
   max-width: 520px;
 }
-.cockpit-empty-card h2 { margin: 0 0 8px; font-size: 16px; }
-.cockpit-empty-card p { margin: 0; line-height: 1.55; }
+.board-empty-card h2 { margin: 0 0 8px; font-size: 16px; }
+.board-empty-card p { margin: 0; line-height: 1.55; }
 
-.cockpit-section-head {
+.board-section-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
 }
-.cockpit-section-head h2 {
+.board-section-head h2 {
   margin: 0;
   font-size: 13px;
   font-weight: 600;
@@ -686,10 +686,10 @@ main > :first-child { flex: 1; min-width: 0; }
   color: var(--needs-human);
 }
 
-.cockpit-needs { margin: 0; }
-.cockpit-needs-list { display: flex; flex-direction: column; gap: 10px; }
+.board-needs { margin: 0; }
+.board-needs-list { display: flex; flex-direction: column; gap: 10px; }
 
-.cockpit-need {
+.board-need {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
@@ -699,8 +699,8 @@ main > :first-child { flex: 1; min-width: 0; }
   border: 1px solid color-mix(in srgb, var(--needs-human) 35%, var(--line));
   border-radius: var(--radius-sm);
 }
-.cockpit-need-main { flex: 1; min-width: 220px; }
-.cockpit-need-title {
+.board-need-main { flex: 1; min-width: 220px; }
+.board-need-title {
   background: none;
   border: 0;
   padding: 0;
@@ -709,10 +709,10 @@ main > :first-child { flex: 1; min-width: 0; }
   font-size: 14px;
   text-align: left;
 }
-.cockpit-need-title:hover { color: var(--accent); border-color: transparent; }
-.cockpit-need-q { margin: 6px 0 4px; line-height: 1.5; color: var(--ink); max-width: 62ch; }
-.cockpit-need-detail { margin: 4px 0 6px; }
-.cockpit-need-detail .linkish {
+.board-need-title:hover { color: var(--accent); border-color: transparent; }
+.board-need-q { margin: 6px 0 4px; line-height: 1.5; color: var(--ink); max-width: 62ch; }
+.board-need-detail { margin: 4px 0 6px; }
+.board-need-detail .linkish {
   background: none;
   border: 0;
   padding: 0;
@@ -721,8 +721,8 @@ main > :first-child { flex: 1; min-width: 0; }
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.cockpit-need-detail .linkish:hover { color: var(--accent); }
-.cockpit-need-raw {
+.board-need-detail .linkish:hover { color: var(--accent); }
+.board-need-raw {
   margin: 6px 0 0;
   padding: 8px 10px;
   font-size: 11px;
@@ -736,7 +736,7 @@ main > :first-child { flex: 1; min-width: 0; }
   max-height: 140px;
   overflow: auto;
 }
-.cockpit-need-opts {
+.board-need-opts {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -744,14 +744,14 @@ main > :first-child { flex: 1; min-width: 0; }
   min-width: 0;
   max-width: 100%;
 }
-.cockpit-need-opts button {
+.board-need-opts button {
   text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
   max-width: 100%;
 }
 
-.cockpit-project-select {
+.board-project-select {
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -760,7 +760,7 @@ main > :first-child { flex: 1; min-width: 0; }
   padding: 4px 8px;
   max-width: 220px;
 }
-.cockpit-lanes {
+.board-lanes {
   display: flex;
   flex-direction: column;
   gap: 12px;

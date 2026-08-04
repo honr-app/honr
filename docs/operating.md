@@ -169,7 +169,7 @@ part of a profile.
 
 ## What dispatch decides, and when
 
-By default, cockpit decides what starts. A Backlog card is inert until someone
+By default, the operator decides what starts. A Backlog card is inert until someone
 calls `dispatch` (MCP tool or UI **Start**), which sets `awaiting_dispatch`.
 
 **Project auto mode** (swimlane play/pause, or MCP `set_auto_dispatch`) is the
@@ -186,7 +186,7 @@ is claimable and not already being run by this process, and claims it.
 
 A card is eligible for enqueue when it is `Backlog`, not parked, unblocked,
 has a definition of done. Lease expiry, park, halt, release, and request_changes
-all clear `awaiting_dispatch` — with auto off, cockpit must dispatch again; with
+all clear `awaiting_dispatch` — with auto off, operator must dispatch again; with
 auto on, the next tick re-queues claimable cards. Unpark clears the hold and
 queues the supervisor (same as Start).
 
@@ -203,7 +203,7 @@ to Backlog. Approve Plan does not auto-dispatch (unless Project auto is already 
 | Resume a parked card | **Resume** / `unpark` — clears the hold and queues the supervisor; next claim uses `--conversation` when an id is still on the card. |
 | Throw away the run | **Halt** — stops the agent, clears `conversation_id`, and deletes the sandbox. Next dispatch starts clean. |
 | Auto-start claimable Backlog under a Project | Swimlane **Auto** play/pause (or `set_auto_dispatch`). Pause clears the queue; runners keep going. |
-| Anything requiring a reason | Tell the cockpit. Steer, pin, park, halt and cut live there. |
+| Anything requiring a reason | Tell the operator (MCP). Steer, pin, park, halt and cut live there. |
 
 Manual `steer` on a *running* card does not inject mid-turn: the note is stored
 and seen on the next claim (or on resume after park). Prefer **park** when the

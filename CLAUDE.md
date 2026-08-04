@@ -1,13 +1,13 @@
 # CLAUDE.md
 
-Orientation for the **cockpit** agent sitting with the human. If you are an
+Orientation for the **operator** agent sitting with the human. If you are an
 agent honr dispatched to work on a card, you already have a briefing — ignore
 this file.
 
-**Cockpit mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`). Do not
+**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`). Do not
 implement product work by editing this tree; shape Projects/Plans, triage
 Needs You / Review, let sandboxed workers open PRs. See
-[`.cursor/rules/honr-cockpit.mdc`](.cursor/rules/honr-cockpit.mdc).
+[`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc).
 
 Read [`docs/state-of-play.md`](docs/state-of-play.md) first. It says what is
 proven, what is not, and what to do next.
@@ -87,7 +87,7 @@ as the card failing — see `is_infrastructure`.
 | `src/store.rs` | The board — the only write path |
 | `src/supervisor.rs` | Dispatch, per-card lifecycle, briefing, lease sweeping |
 | `src/openshell.rs` | Typed wrapper over the CLI; every call has a deadline |
-| `src/mcp.rs` | Cockpit tools and worker verbs |
+| `src/mcp.rs` | Operator tools and worker verbs |
 | `sandbox/` | Containerfile, network policy, metadata shim |
 | `web/` | React UI + `npm run shots` screenshot harness |
 | `docs/sandbox-stack.md` | Every gotcha found the hard way. Read before touching `sandbox/`. |

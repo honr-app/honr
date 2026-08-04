@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Cockpit } from "./components/Cockpit";
+import { Board } from "./components/Board";
 import { DetailDrawer } from "./components/Detail";
 import { PrimarySidebar, type AppView } from "./components/PrimarySidebar";
 import { Settings } from "./components/Settings";
@@ -94,7 +94,7 @@ export default function App() {
               {!b.loaded ? (
                 <div className="dim pad">loading…</div>
               ) : (
-                <Cockpit
+                <Board
                   goals={b.goals}
                   items={b.items}
                   stories={b.stories}

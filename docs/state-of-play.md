@@ -43,7 +43,7 @@ Creating a Project seeds an **Initial plan** Task. That agent writes `plan.json`
 sibling Tasks in **Backlog** and syncs the Project Plan. Impl cards that are too
 big write `split.json` the same way — proposal on the card → Review → Approve.
 `propose_breakdown` / Project Approve Plan remain for manual replan. Nothing
-auto-starts — cockpit must **dispatch** (MCP or UI Start) each card.
+auto-starts — operator must **dispatch** (MCP or UI Start) each card.
 Tasks relate by beads dependency edges (`blocks` / `relates-to`), not nested
 hierarchy. Upon Plan approval, tasks with dependency constraints materialize
 as a DAG (e.g. A→B, A→C, B+C→D). Friendly plain-language blocker chips appear on cards,
@@ -56,7 +56,7 @@ beads id synchronously (Project→epic, Task→`--parent`); GitHub Issue push is
 epic-first so Task Issues can be children. Sandbox beads is a host snapshot for
 `bd show` — durable graph writes stay on the host. A fresh clone starts empty.
 
-Example shape (historical card numbers; recreate via the cockpit):
+Example shape (historical card numbers; recreate via the operator MCP):
 
 ```
 Phase 2 — real agents                                   (Project + Plan)
@@ -81,7 +81,7 @@ no weaken invariants, hangs-as-failure, report/split protocols).
 
 Initial plan and impl **split** share one model: structured proposal on the card
 → Review → Approve creates sibling Tasks. Initial plan still needs a docs PR;
-impl split does not. Cockpit `propose_breakdown` is for manual Project replan only.
+impl split does not. Operator `propose_breakdown` is for manual Project replan only.
 
 ## Known gaps, roughly by value
 

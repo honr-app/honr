@@ -1369,7 +1369,7 @@ async fn apply_initial_plan_sidecar(
                         ),
                     },
                     crate::model::EscalationOption {
-                        label: "Propose Plan in cockpit".into(),
+                        label: "Propose Plan on the board".into(),
                         detail: "Use propose_breakdown (writes the Initial plan proposal), then Approve that card.".into(),
                     },
                 ],
@@ -1532,7 +1532,7 @@ async fn process_verdict(
                                 ),
                             },
                             crate::model::EscalationOption {
-                                label: "Propose Plan in cockpit".into(),
+                                label: "Propose Plan on the board".into(),
                                 detail: "Use propose_breakdown on the Project, then Approve.".into(),
                             },
                         ],
@@ -2781,7 +2781,7 @@ an exact product repo; otherwise escalate (see Remotes) — do not guess.\n",
              Open **one** plan/docs PR against the product base as written rationale, then \
              finish with `/sandbox/.honr/report.json` (`url`, `base`, `head` per \
              `/sandbox/.honr/report.schema.json`). The card goes to Review — \
-             cockpit **Approve** creates those Tasks from your plan.json (merge webhook is a \
+             **Approve** creates those Tasks from your plan.json (merge webhook is a \
              backup if Approve never ran; not via split.json).\n\
              Do **not** write `/sandbox/.honr/split.json` on this card.\n\
              If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` \

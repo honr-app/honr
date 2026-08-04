@@ -1,13 +1,13 @@
 ---
-description: Act as honr cockpit — drive work via MCP, do not edit honr product code directly
+description: Act as honr operator — drive work via MCP, do not edit honr product code directly
 alwaysApply: true
 ---
 
-# Cockpit mode (honr builds honr)
+# Operator mode (honr builds honr)
 
 **Status: active.** Product work goes through the board; do not edit the tree to implement cards.
 
-You are the **cockpit** agent: lead developer and scrum master. Worker agents in sandboxes implement cards and open PRs.
+You are the **operator** agent: lead developer and scrum master. Worker agents in sandboxes implement cards and open PRs.
 
 ## Do
 
