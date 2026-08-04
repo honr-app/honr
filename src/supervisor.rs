@@ -34,8 +34,6 @@ const WORKDIR: &str = "/sandbox/repo";
 /// does not exist in the OpenShell image and the sandbox user cannot `mkdir` it
 /// at `/` (Permission denied). Never put verdicts under `{WORKDIR}/.honr`.
 const VERDICT_DIR: &str = "/sandbox/.honr";
-/// Host beads snapshot unpack target (`BEADS_DIR`). Same constraint as VERDICT_DIR.
-const BEADS_SANDBOX_DIR: &str = "/sandbox/.beads";
 const SHIM_LOCAL: &str = "sandbox/metadata-shim.py";
 /// `sandbox upload` takes a destination **directory**, not a destination file:
 /// uploading to `/tmp/metadata-shim.py` creates a *directory* of that name with
@@ -986,14 +984,6 @@ async fn run_inside(
         with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
         beat(0.02)?;
 
-        match with_board_cancel(board, id, sync_beads_into_sandbox(board, os, name)).await {
-            Ok(()) => beat(0.025)?,
-            Err(e) if is_supervisor_cancel(&e.to_string()) => return Err(e),
-            Err(e) => {
-                tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
-            }
-        }
-
         let _ = with_board_cancel(
             board,
             id,
@@ -1026,14 +1016,6 @@ async fn run_inside(
         beat(0.01)?;
         with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
         beat(0.02)?;
-
-        match with_board_cancel(board, id, sync_beads_into_sandbox(board, os, name)).await {
-            Ok(()) => beat(0.025)?,
-            Err(e) if is_supervisor_cancel(&e.to_string()) => return Err(e),
-            Err(e) => {
-                tracing::warn!("#{id}: beads sync into sandbox failed (agent can still run): {e}");
-            }
-        }
 
         let _ = with_board_cancel(
             board,
@@ -1870,9 +1852,7 @@ fn start_script(
 rm -f {AGENT_PID} {AGENT_STATUS}
 : > {AGENT_LOG}
 export HONR_BRIEFING={brief}
-{conv_export}# Reused sandboxes keep create-time env; force the writable beads path every run.
-export BEADS_DIR={BEADS_SANDBOX_DIR}
-setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} {cmd} >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
+{conv_export}setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} {cmd} >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
 for i in $(seq 1 40); do
   if [ -s {AGENT_PID} ]; then exit 0; fi
   sleep 0.25
@@ -1989,58 +1969,10 @@ fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
         ("CARGO_HOME".into(), "/opt/cargo".into()),
         ("NPM_CONFIG_CACHE".into(), "/opt/npm-cache".into()),
         ("PATH".into(), "/opt/cargo/bin:/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin".into()),
-        // Shared task graph with the host control plane (uploaded at sandbox start).
-        ("BEADS_DIR".into(), BEADS_SANDBOX_DIR.into()),
         // Cursor Agent CLI compile cache (defaults to $HOME/Library/... on darwin
         // host builds of the wrapper; keep it under the writable sandbox tree).
         ("NODE_COMPILE_CACHE".into(), "/tmp/cursor-compile-cache".into()),
     ]
-}
-
-/// Snapshot the host beads DB into the sandbox so `bd show` can read the same
-/// Project + Task graph the supervisor dispatched from.
-///
-/// This is a **read snapshot**. Durable graph mutations (create/close/dep/remember)
-/// belong on the host after report/split — sandbox writes to this copy do not
-/// sync back.
-async fn sync_beads_into_sandbox(
-    board: &SharedBoard,
-    os: &OpenShell,
-    name: &str,
-) -> anyhow::Result<()> {
-    let Some(client) = board.beads.as_ref() else {
-        return Ok(());
-    };
-    let dir = &client.beads_dir;
-    if !dir.exists() {
-        return Ok(());
-    }
-    let tar = std::env::temp_dir().join(format!("{name}-beads.tgz"));
-    let parent = dir.parent().unwrap_or(std::path::Path::new("."));
-    let folder = dir.file_name().and_then(|s| s.to_str()).unwrap_or(".beads");
-    let status = tokio::process::Command::new("tar")
-        .args(["-czf"])
-        .arg(&tar)
-        .arg("-C")
-        .arg(parent)
-        .arg(folder)
-        .status()
-        .await?;
-    anyhow::ensure!(status.success(), "failed to tar host beads dir {:?}", dir);
-    os.upload(name, tar.to_str().unwrap_or_default(), "/tmp").await?;
-    let archive = format!("/tmp/{}", tar.file_name().and_then(|s| s.to_str()).unwrap_or("beads.tgz"));
-    let unpack = os
-        .exec(
-            name,
-            &format!(
-                "mkdir -p /sandbox && tar -xzf {archive} -C /sandbox && test -d {BEADS_SANDBOX_DIR} && echo beads-up"
-            ),
-            Duration::from_secs(60),
-        )
-        .await?;
-    anyhow::ensure!(unpack.ok(), "beads unpack failed: {}", outerr(&unpack));
-    let _ = std::fs::remove_file(&tar);
-    Ok(())
 }
 
 /// A credential helper that echoes the injected token. The value is OpenShell's
