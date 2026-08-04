@@ -173,18 +173,11 @@ pub struct AgentConfig {
     pub engine: String,
     #[serde(default = "d_concurrent")]
     pub max_concurrent: usize,
-    /// Real money. Breaching this stops the sandbox rather than truncating
-    /// the work silently. Optional — no budget limit by default.
-    #[serde(default)]
-    pub per_card_budget_cents: Option<u64>,
-    #[serde(default)]
-    pub daily_budget_cents: Option<u64>,
     /// Hard ceiling on one agent run. Everything here fails as a hang.
     #[serde(default = "d_agent_timeout")]
     pub agent_timeout_secs: u64,
     /// Runs that die without producing work before the card becomes a human's
-    /// problem. The money caps do not cover this: an early failure spends
-    /// nothing, so without a count it requeues forever.
+    /// problem. Without a count, early failures requeue forever.
     #[serde(default = "d_max_attempts")]
     pub max_attempts: u32,
     /// Git branch / sandbox name stem. Branches are `{prefix}/card-{id}`;
@@ -250,8 +243,6 @@ impl Default for AgentConfig {
             memory: None,
             engine: d_engine(),
             max_concurrent: d_concurrent(),
-            per_card_budget_cents: None,
-            daily_budget_cents: None,
             agent_timeout_secs: d_agent_timeout(),
             max_attempts: d_max_attempts(),
             branch_prefix: d_branch_prefix(),

@@ -1,4 +1,4 @@
-import { formatCountdown, money, secsUntil, since } from "../api.js";
+import { formatCountdown, secsUntil, since } from "../api.js";
 import { friendlyState, humanizeEscalation } from "../humanize.js";
 import type { ColumnKey, WorkItem } from "../types";
 import { cardPrUrl } from "../types.js";
@@ -114,7 +114,6 @@ export function Card({ item, column, now, agentTimeout, defaultEngine, defaultMo
             <span className={endingSoon ? "countdown ending-soon" : "countdown"}>
               {remaining !== null ? formatCountdown(remaining) : "—"}
             </span>
-            <span className="dim">{money(item.cost_cents)}</span>
           </div>
           <div className="bar">
             <div
@@ -182,7 +181,6 @@ export function Card({ item, column, now, agentTimeout, defaultEngine, defaultMo
           <span>
             +{item.diff_added} −{item.diff_removed}
           </span>
-          <span>{money(item.cost_cents)}</span>
         </div>
       )}
     </div>

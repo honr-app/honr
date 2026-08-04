@@ -881,8 +881,6 @@ mod tests {
                 model: "claude-opus-5".into(),
             },
             max_concurrent: 1,
-            per_card_budget_cents: Some(200),
-            daily_budget_cents: None,
             agent_timeout_secs: 900,
             max_attempts: 3,
             ..Default::default()

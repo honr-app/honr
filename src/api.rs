@@ -498,8 +498,6 @@ fn runtime_from_yaml(agents: &crate::schema::AgentConfig) -> AgentRuntimeConfig 
             model: agents.vertex.model.clone(),
         },
         max_concurrent: agents.max_concurrent,
-        per_card_budget_cents: agents.per_card_budget_cents,
-        daily_budget_cents: agents.daily_budget_cents,
         agent_timeout_secs: agents.agent_timeout_secs,
         max_attempts: agents.max_attempts,
         branch_prefix: agents.branch_prefix.clone(),
@@ -1809,8 +1807,6 @@ mod tests {
                     model: "claude-opus-5".into(),
                 },
                 max_concurrent: 1,
-                per_card_budget_cents: Some(150),
-                daily_budget_cents: Some(2000),
                 agent_timeout_secs: 600,
                 max_attempts: 2,
                 ..Default::default()
@@ -1830,6 +1826,5 @@ mod tests {
         assert_eq!(effective.vertex.location, "us-east5");
         assert_eq!(effective.vertex.project, "settings-proj");
         assert_eq!(effective.agent_timeout_secs, 600);
-        assert_eq!(effective.per_card_budget_cents, Some(150));
     }
 }

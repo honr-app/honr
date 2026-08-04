@@ -8,9 +8,9 @@
 //!
 //! Three properties are load-bearing:
 //!
-//! - **Liveness and cost are observed, never self-reported.** Both come from
-//!   parsing the agent's `stream-json` as it arrives, so a hung agent cannot
-//!   claim to be fine and a chatty one cannot under-report spend.
+//! - **Liveness is observed, never self-reported.** It comes from parsing the
+//!   agent's `stream-json` as it arrives, so a hung agent cannot claim to be
+//!   fine by sending heartbeats on its own.
 //! - **Everything fails as a hang.** Every exec carries a deadline, and silence
 //!   is treated as failure rather than patience.
 //! - **The supervisor reads the run; it does not own it.** The agent is started
@@ -191,10 +191,6 @@ where
     }
 }
 
-/// Spend since process start, in cents. Coarse on purpose — a daily ceiling
-/// that resets on restart is a backstop against a runaway loop, not accounting.
-static SPENT_TODAY: AtomicU64 = AtomicU64::new(0);
-
 /// Wait this long after the infrastructure fails before trying again. The
 /// podman machine stops on its own — three times in one session — and retrying
 /// every 3s just converts an outage into a wall of identical errors.
@@ -285,10 +281,8 @@ impl Fleet {
                         let _ = f.board.release(id, &agent_id);
                     } else {
                         tracing::error!("#{id} failed: {msg}");
-                        // Count it. A run that dies early spends nothing, so no
-                        // money cap stops the sweeper requeueing it forever —
-                        // after `max_attempts` this becomes a human's problem
-                        // instead of an overnight loop.
+                        // Count it. After `max_attempts` this becomes a human's
+                        // problem instead of an overnight loop.
                         if let Err(e2) =
                             f.board.record_run_failure(id, &msg, f.board.effective_agents().max_attempts)
                         {
@@ -334,16 +328,11 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         // Only awaiting_dispatch cards are claimed (Start / MCP dispatch / Project
         // auto mode). Adoption and in-flight runs are independent of that queue.
 
-        // Live Settings → Agent runtime (providers / budgets / timeout / model).
+        // Live Settings → Agent runtime (providers / timeout / model).
         let agents = board.effective_agents();
 
         if fleet.in_flight.load(Ordering::Relaxed) as usize >= agents.max_concurrent {
             continue;
-        }
-        if let Some(daily) = agents.daily_budget_cents {
-            if daily > 0 && SPENT_TODAY.load(Ordering::Relaxed) >= daily {
-                continue;
-            }
         }
         if fleet.cooldown.lock().is_some_and(|t| std::time::Instant::now() < t) {
             continue;
@@ -391,20 +380,16 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
 ///
 /// honr is rebuilt constantly while honr is what's being built, so a restart
 /// mid-run is the normal case, not an incident. Killing the sandbox was the
-/// safe stopgap: correct, and it threw away a five-minute run and its spend
-/// every time. Re-adopting keeps the run going and the card Running.
+/// safe stopgap: correct, and it threw away a five-minute run every time.
+/// Re-adopting keeps the run going and the card Running.
 #[derive(Debug, Clone)]
 struct Adoption {
     item_id: ItemId,
     agent_id: String,
     sandbox: String,
-    /// First log line this process has not already accounted for. Everything
-    /// before it was streamed — and charged — by the process that died.
+    /// First log line this process has not already streamed. Everything before
+    /// it was handled by the process that died.
     from_line: u64,
-    /// The run's cumulative spend as of that line. The stream reports a running
-    /// total and the supervisor charges the *difference*, so without a starting
-    /// point the next cost line would bill the whole run a second time.
-    seen_cents: u64,
 }
 
 /// The card this sandbox belongs to, if the sandbox is worth adopting.
@@ -650,7 +635,7 @@ async fn adopt(
             return None;
         }
     };
-    let (from_line, seen_cents) = probe_of(&out.stdout)?;
+    let from_line = probe_of(&out.stdout)?;
 
     let agent_id = item
         .lease
@@ -660,7 +645,7 @@ async fn adopt(
 
     // Promote Claimed → Running / refresh last_heartbeat for diagnostics.
     // Does not move the deadline — remaining time is what the original claim set.
-    if let Err(e) = board.heartbeat(id, &agent_id, item.progress, 0, 0) {
+    if let Err(e) = board.heartbeat(id, &agent_id, item.progress, 0) {
         tracing::error!("#{id}: adopted {sandbox} but could not mark it running: {e}");
     }
     board.story(id, format!("honr restarted; picked {sandbox} back up rather than killing it."));
@@ -670,22 +655,16 @@ async fn adopt(
         agent_id,
         sandbox: sandbox.to_string(),
         from_line,
-        seen_cents,
     })
 }
 
 /// Where a live run had got to, or `None` if nothing is running.
-fn probe_of(stdout: &str) -> Option<(u64, u64)> {
+fn probe_of(stdout: &str) -> Option<u64> {
     if !stdout.contains(MARK_ALIVE) && !stdout.contains(MARK_EXITED) {
         return None;
     }
     let lines: u64 = stdout.lines().find_map(|l| l.strip_prefix(MARK_LINES))?.trim().parse().ok()?;
-    let seen = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix(MARK_COST))
-        .and_then(parse_cost_cents)
-        .unwrap_or(0);
-    Some((lines + 1, seen))
+    Some(lines + 1)
 }
 
 // ----------------------------------------------------------- the lifecycle
@@ -800,7 +779,7 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     let branch = crate::schema::card_branch_name(&agents.branch_prefix, id);
     let cfg = &agents;
     let result = async {
-        let (run, spent) = watch_agent(
+        let run = watch_agent(
             board,
             os,
             cfg,
@@ -808,10 +787,9 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
             id,
             &a.sandbox,
             a.from_line,
-            a.seen_cents,
         )
         .await?;
-        finish(board, os, cfg, &a.agent_id, id, &a.sandbox, &branch, &run, spent).await
+        finish(board, os, cfg, &a.agent_id, id, &a.sandbox, &branch, &run).await
     }
     .await;
     finalize(os, id, &a.sandbox, &result).await;
@@ -985,7 +963,7 @@ async fn run_inside(
     // board's claim.
     let beat = |p: f32| -> anyhow::Result<()> {
         ensure_board_owns_run(board, id)?;
-        let _ = board.heartbeat(id, agent_id, p, 0, 0);
+        let _ = board.heartbeat(id, agent_id, p, 0);
         Ok(())
     };
 
@@ -1132,19 +1110,16 @@ async fn run_inside(
     anyhow::ensure!(start.ok(), "agent did not start: {}", outerr(&start));
     beat(0.04)?;
 
-    // From the top of the log with nothing spent: this run is ours from its
-    // first line. An adopted run joins here instead, further in.
-    let (run, spent) = watch_agent(board, os, cfg, agent_id, id, name, 1, 0).await?;
-    finish(board, os, cfg, agent_id, id, name, branch, &run, spent).await
+    // From the top of the log: this run is ours from its first line. An adopted
+    // run joins here instead, further in.
+    let run = watch_agent(board, os, cfg, agent_id, id, name, 1).await?;
+    finish(board, os, cfg, agent_id, id, name, branch, &run).await
 }
 
-/// Watch a detached agent to completion: charge cost as stream lines arrive,
-/// and hand back its exit status.
+/// Watch a detached agent to completion and hand back its exit status.
 ///
-/// `from_line` and `seen_cents` are the whole reason this is a separate step.
-/// They make watching *resumable*: a supervisor that starts halfway through a
-/// run skips the lines a previous one already streamed, and starts its cost
-/// arithmetic from what that one already charged.
+/// `from_line` makes watching *resumable*: a supervisor that starts halfway
+/// through a run skips the lines a previous one already streamed.
 ///
 /// The run deadline is fixed at claim — stream updates must not push it out.
 /// If the board leaves Claimed/Running (deadline sweep or Halt), the watch
@@ -1158,29 +1133,16 @@ async fn watch_agent(
     id: ItemId,
     name: &str,
     from_line: u64,
-    seen_cents: u64,
-) -> anyhow::Result<(Output, u64)> {
-    let spent = Arc::new(AtomicU64::new(seen_cents));
+) -> anyhow::Result<Output> {
     // The agent carries its own deadline inside the sandbox; this one only has
     // to outlast it, so a hung *follower* still fails rather than waiting.
     let timeout = Duration::from_secs(cfg.agent_timeout_secs) + Duration::from_secs(120);
 
-    let (board2, spent2) = (board.clone(), spent.clone());
+    let board2 = board.clone();
     let agent_owned = agent_id.to_string();
 
     let follow = follow_script(from_line);
     let stream = os.exec_streaming(name, &follow, timeout, move |line| {
-        let cents = parse_cost_cents(line);
-        let delta = cents
-            .map(|c| {
-                let prev = spent2.swap(c, Ordering::Relaxed);
-                c.saturating_sub(prev)
-            })
-            .unwrap_or(0);
-        if delta > 0 {
-            SPENT_TODAY.fetch_add(delta, Ordering::Relaxed);
-        }
-
         if let Some(cid) = parse_conversation_id(line) {
             board2.set_conversation_id(id, Some(cid));
         }
@@ -1188,13 +1150,13 @@ async fn watch_agent(
         // Buffer live agent output lines for UI stream view.
         board2.append_agent_log(id, line.to_string());
 
-        // Cost-only heartbeat — does not extend run_deadline_at.
+        // Liveness heartbeat — does not extend run_deadline_at.
         if board2
             .get(id)
             .is_some_and(|i| board_still_owns_run(i.state))
         {
             let progress = board2.get(id).map(|i| i.progress).unwrap_or(0.0);
-            let _ = board2.heartbeat(id, &agent_owned, progress, delta, 0);
+            let _ = board2.heartbeat(id, &agent_owned, progress, 0);
         }
     });
     tokio::pin!(stream);
@@ -1205,10 +1167,7 @@ async fn watch_agent(
 
     loop {
         tokio::select! {
-            res = &mut stream => {
-                let run = res?;
-                return Ok((run, spent.load(Ordering::Relaxed)));
-            }
+            res = &mut stream => return res.map_err(Into::into),
             _ = poll.tick() => {
                 ensure_board_owns_run(board, id)?;
             }
@@ -1776,8 +1735,7 @@ async fn process_verdict(
     }
 }
 
-/// Settle a finished run: check what it cost, check it succeeded, and put the
-/// PR on the board.
+/// Settle a finished run: check it succeeded and put the PR on the board.
 #[allow(clippy::too_many_arguments)]
 async fn finish(
     board: &SharedBoard,
@@ -1788,14 +1746,8 @@ async fn finish(
     name: &str,
     branch: &str,
     run: &Output,
-    spent: u64,
 ) -> anyhow::Result<()> {
     let short = Duration::from_secs(180);
-    if let Some(card_cap) = cfg.per_card_budget_cents {
-        if card_cap > 0 && spent > card_cap {
-            anyhow::bail!("per-card budget breached: {spent}c > {card_cap}c");
-        }
-    }
 
     if process_verdict(board, os, cfg, agent_id, id, name, branch).await? {
         return Ok(());
@@ -1947,21 +1899,18 @@ pub const MARK_ALIVE: &str = "HONR-AGENT-ALIVE";
 pub const MARK_EXITED: &str = "HONR-AGENT-EXITED";
 pub const MARK_GONE: &str = "HONR-AGENT-GONE";
 pub const MARK_LINES: &str = "HONR-LOG-LINES=";
-pub const MARK_COST: &str = "HONR-LOG-COST=";
 
 /// Ask a sandbox whether its agent is still going, and how far its log got.
 ///
-/// The line count is what a new supervisor resumes from, and the last cost line
-/// is what its arithmetic starts from — both because the previous supervisor
-/// already streamed, and charged for, everything before them.
+/// The line count is what a new supervisor resumes from — everything before it
+/// was already streamed by the previous process.
 fn probe_script() -> String {
     format!(
         r#"if [ -f {AGENT_STATUS} ]; then echo {MARK_EXITED}
 elif [ -s {AGENT_PID} ] && kill -0 "$(cat {AGENT_PID})" 2>/dev/null; then echo {MARK_ALIVE}
 else echo {MARK_GONE}
 fi
-printf '%s%s\n' '{MARK_LINES}' "$(wc -l < {AGENT_LOG} 2>/dev/null || echo 0)"
-printf '%s%s\n' '{MARK_COST}' "$(grep -h total_cost_usd {AGENT_LOG} 2>/dev/null | tail -1)""#
+printf '%s%s\n' '{MARK_LINES}' "$(wc -l < {AGENT_LOG} 2>/dev/null || echo 0)""#
     )
 }
 
@@ -2924,26 +2873,10 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Cost, in cents, if this stream line carries one.
-///
-/// Deliberately tolerant: Claude Code reports a running `total_cost_usd`, but
-/// the exact shape is not a stable contract. An unrecognised line is liveness
-/// and nothing more — never an error, because a stream-format change must not
-/// take the supervisor down.
-fn parse_cost_cents(line: &str) -> Option<u64> {
-    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    let usd = v
-        .get("total_cost_usd")
-        .or_else(|| v.get("cost_usd"))
-        .or_else(|| v.pointer("/result/total_cost_usd"))?
-        .as_f64()?;
-    Some((usd * 100.0).round().max(0.0) as u64)
-}
-
 /// Pull a resume handle out of a stream-json line, if present.
 ///
-/// agy uses `conversation_id`; Cursor Agent CLI uses `session_id`. Tolerant
-/// like cost parsing: walk a few known shapes and ignore the rest.
+/// agy uses `conversation_id`; Cursor Agent CLI uses `session_id`. Tolerant:
+/// walk a few known shapes and ignore the rest.
 fn parse_conversation_id(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     const KEYS: &[&str] = &[
@@ -3164,30 +3097,6 @@ mod tests {
         .expect_err("must cancel when retired");
         assert!(is_supervisor_cancel(&err.to_string()), "{err}");
         assert_eq!(board.get(id).unwrap().state, State::Retired);
-    }
-
-    #[test]
-    fn cost_is_parsed_from_the_stream() {
-        assert_eq!(parse_cost_cents(r#"{"total_cost_usd":0.42}"#), Some(42));
-        assert_eq!(parse_cost_cents(r#"{"type":"result","result":{"total_cost_usd":1.23}}"#), Some(123));
-    }
-
-    /// Half-cent values land wherever binary float puts them — `1.005 * 100.0`
-    /// is `100.4999…`, so this is 100 rather than 101. Fine here: this figure
-    /// is a budget backstop, not a ledger, and a cent of slack against a
-    /// two-dollar cap changes nothing. It would not be fine if it were billing.
-    #[test]
-    fn sub_cent_precision_is_not_promised() {
-        assert_eq!(parse_cost_cents(r#"{"total_cost_usd":1.005}"#), Some(100));
-    }
-
-    /// A line we don't understand is liveness, not a crash. The stream format
-    /// is not a contract we control.
-    #[test]
-    fn unknown_lines_are_not_errors() {
-        assert_eq!(parse_cost_cents("not json at all"), None);
-        assert_eq!(parse_cost_cents(r#"{"type":"assistant","message":{}}"#), None);
-        assert_eq!(parse_cost_cents(""), None);
     }
 
     #[test]
@@ -3670,25 +3579,19 @@ mod tests {
         assert!(!s.contains("rm -rf"), "must not wipe workdir: {s}");
     }
 
-    /// Where to resume, and what has already been paid for.
-    ///
-    /// The stream reports a *cumulative* total and the supervisor charges the
-    /// difference, so a fresh process that started its arithmetic at zero would
-    /// bill the whole run again on the very next cost line.
+    /// Where to resume after honr restarts mid-run.
     #[test]
-    fn a_probe_says_where_to_resume_and_what_was_already_charged() {
-        let out = format!(
-            "{MARK_ALIVE}\n{MARK_LINES}117\n{MARK_COST}{{\"total_cost_usd\":0.88}}\n"
-        );
-        assert_eq!(probe_of(&out), Some((118, 88)));
+    fn a_probe_says_where_to_resume() {
+        let out = format!("{MARK_ALIVE}\n{MARK_LINES}117\n");
+        assert_eq!(probe_of(&out), Some(118));
 
         // A run that finished while honr was down still has a PR to record.
-        let done = format!("{MARK_EXITED}\n{MARK_LINES}4\n{MARK_COST}\n");
-        assert_eq!(probe_of(&done), Some((5, 0)));
+        let done = format!("{MARK_EXITED}\n{MARK_LINES}4\n");
+        assert_eq!(probe_of(&done), Some(5));
 
         // Nothing running means there is nothing to adopt — the card goes back
         // in the queue rather than being watched forever.
-        let gone = format!("{MARK_GONE}\n{MARK_LINES}0\n{MARK_COST}\n");
+        let gone = format!("{MARK_GONE}\n{MARK_LINES}0\n");
         assert_eq!(probe_of(&gone), None);
     }
 
@@ -3843,7 +3746,6 @@ mod tests {
             notes: vec![],
             lease_expires_at: deadline,
             run_deadline_at: deadline,
-            budget_remaining_cents: None,
             engine: None,
         }
     }
@@ -4726,8 +4628,6 @@ mod tests {
                 model: "settings-model".into(),
             },
             max_concurrent: 1,
-            per_card_budget_cents: None,
-            daily_budget_cents: None,
             agent_timeout_secs: 1800,
             max_attempts: 3,
             ..Default::default()
