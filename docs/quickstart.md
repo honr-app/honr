@@ -1,13 +1,13 @@
 # Quickstart
 
 Run the board with no compute driver, no gateway, and no credentials. Agents
-are off by default — that is deliberate so honr works on a laptop that only
+are off by default: that is deliberate so honr works on a laptop that only
 needs to show and shape work.
 
 ## Start the server
 
 ```bash
-cargo run                 # :8080 — API, SSE, MCP, and the built UI
+cargo run                 # :8080 (API, SSE, MCP, and the built UI)
 ```
 
 Serves `web/dist` if it exists. For hot reload:
@@ -47,7 +47,7 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 
 honr must already be listening.
 
-**Cursor** — project config is [`.cursor/mcp.json`](../.cursor/mcp.json):
+**Cursor**: project config is [`.cursor/mcp.json`](../.cursor/mcp.json):
 
 ```json
 { "mcpServers": { "honr": { "type": "http", "url": "http://127.0.0.1:8080/mcp" } } }
@@ -67,7 +67,7 @@ claude mcp add --transport http honr http://localhost:8080/mcp
 
 ## Empty board
 
-The board starts empty. Nothing claims cards until you enable agents — see
+The board starts empty. Nothing claims cards until you enable agents. See
 [Agents](agents.md). You can still create Projects, inspect columns in the UI,
 and exercise MCP tools that do not need a sandbox.
 

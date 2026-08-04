@@ -1,5 +1,9 @@
 # Concepts
 
+**honr** means **honer**: the one that hones. To *hone* is to refine a skill,
+idea, or technique through practice and time. The board is that loop made
+concrete.
+
 honr is an agent orchestrator whose board is a **control plane, not a report**.
 It is written to at machine speed, read by agents as their source of truth, and
 moving a card *is* an action. The scarce resource is human attention.
@@ -21,7 +25,7 @@ you ──chat──> operator agent (Cursor / Claude Code)
 
 The UI and the agent API are two renderings of **one state machine**. Every
 mutation goes through `Board` in `src/store.rs`. No transport holds
-state-machine logic — that is what stops the two drifting apart.
+state-machine logic: that is what stops the two drifting apart.
 
 Columns (Ready / Backlog through Done) are not status labels for a dashboard;
 transitions are the work. Approving a Plan materializes Tasks. Dispatching a

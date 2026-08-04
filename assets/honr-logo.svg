@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="honr">
+  <title>honr</title>
+  <rect width="512" height="512" fill="#F3F0EA"/>
+
+  <!-- Hone stroke: refining pass over a steel edge -->
+  <g transform="translate(256 168) rotate(-32)">
+    <rect x="-26" y="14" width="92" height="42" rx="9" fill="#3A7A9C"/>
+    <rect x="-40" y="-14" width="92" height="42" rx="9" fill="#14181C"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text
+    x="256"
+    y="360"
+    text-anchor="middle"
+    fill="#14181C"
+    font-family="ui-rounded, 'SF Pro Rounded', 'Segoe UI', system-ui, -apple-system, sans-serif"
+    font-size="96"
+    font-weight="700"
+    letter-spacing="-2"
+  >honr</text>
+</svg>

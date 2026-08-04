@@ -7,7 +7,7 @@ under [`sandbox/`](../sandbox/); this page is the prose companion.
 
 Claude Code on Vertex walks google-auth's ADC chain. In a sandbox that chain
 finds nothing and falls through to the GCE metadata server. OpenShell blocks
-metadata endpoints permanently as SSRF hardening — no policy can open them.
+metadata endpoints permanently as SSRF hardening. No policy can open them.
 Symptom: `claude -p` appears to hang, then the exec relay closes.
 
 The fix is a metadata server the sandbox *is* allowed to reach:
@@ -30,7 +30,7 @@ Vertex
 Two properties worth preserving:
 
 - **No credential is ever in the sandbox.** Reading the env var gains an agent
-  nothing — the value is an opaque placeholder; the proxy substitutes on egress.
+  nothing: the value is an opaque placeholder; the proxy substitutes on egress.
 - **Traffic goes straight to `aiplatform.googleapis.com`**, which the
   `google-vertex-ai` provider already allow-lists. OpenShell's `inference.local`
   router has been blocked by SSRF on this stack
@@ -41,7 +41,7 @@ Two properties worth preserving:
 
 `src/openshell.rs` shells out to the `openshell` CLI. The SDK does not support
 mTLS, and the gateway is mTLS-only. Crates are not on crates.io, and the curated
-surface cannot stream exec — streaming is how liveness is observed. Revisit when
+surface cannot stream exec: streaming is how liveness is observed. Revisit when
 the gateway moves off mTLS *and* the crates are published.
 
 ## Image and offline gates
@@ -52,7 +52,7 @@ sudo. For honr itself, [`sandbox/Containerfile`](../sandbox/Containerfile) bakes
 to be reachable from an agent sandbox.
 
 ```bash
-# from the repo root — Cargo.lock and web/package-lock.json must be in context
+# from the repo root; Cargo.lock and web/package-lock.json must be in context
 docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 ```
 
@@ -66,7 +66,7 @@ hanging on a denied fetch.
 ## Operator-relevant gotchas
 
 **Everything fails as a hang, not an error.** Denied egress, missing
-credential, wedged relay — all silence. Every exec needs a deadline; treat
+credential, wedged relay: all silence. Every exec needs a deadline; treat
 silence as failure.
 
 **The image's `ENV` does not reach `openshell sandbox exec`.** Pass toolchain
@@ -78,7 +78,7 @@ already exist. Wrong shape surfaces as
 `can't find '__main__' module in '/tmp/metadata-shim.py'`.
 
 **The compute driver can stop on its own.** Classify that as infrastructure,
-not as the card failing — see `is_infrastructure` in the supervisor.
+not as the card failing: see `is_infrastructure` in the supervisor.
 
 **The fork's base freezes** the moment it is created. Re-running a card resumes
 its existing branch and rebases onto **upstream**, not the fork's base. If the
@@ -95,7 +95,7 @@ generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 | Symptom | Cause |
 |---|---|
 | `can't find '__main__' module in '/tmp/metadata-shim.py'` | `upload` takes a destination *directory* |
-| `timeout: failed to run command 'cargo'` | toolchain not on PATH — image `ENV` does not reach `sandbox exec` |
+| `timeout: failed to run command 'cargo'` | toolchain not on PATH. Image `ENV` does not reach `sandbox exec` |
 | `push failed:` with nothing after it | git writes errors to stderr; check `outerr`, not stdout |
 | `(stale info)` on push | `--force-with-lease` against an ad-hoc URL instead of a named remote |
 | `create sandbox failed: connection error` | compute driver died; infrastructure, not a card retry |
