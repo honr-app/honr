@@ -4254,12 +4254,18 @@ mod tests {
         let project = board
             .create(None, "Proj", "why", None, Origin::Human, true, None)
             .unwrap();
+        let seed = board
+            .init_plan(
+                project.id,
+                crate::schema::RepoConfig {
+                    upstream: "acme/widgets".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                },
+            )
+            .expect("init_plan");
+        let seed_id = seed.id;
         let _ = board.transition(project.id, State::Shaping, "t", None);
-        let seed_id = board
-            .children_of(project.id)
-            .into_iter()
-            .find(|&id| board.get(id).is_some_and(|i| i.is_initial_plan_task()))
-            .expect("seeded Initial plan");
         let _ = board.claim(seed_id, "agent-1", None, 60).unwrap();
         let _ = board.transition(seed_id, State::Running, "agent-1", None);
 
@@ -4314,12 +4320,18 @@ mod tests {
         let project = board
             .create(None, "Proj", "why", None, Origin::Human, true, None)
             .unwrap();
+        let seed = board
+            .init_plan(
+                project.id,
+                crate::schema::RepoConfig {
+                    upstream: "acme/widgets".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                },
+            )
+            .expect("init_plan");
+        let seed_id = seed.id;
         let _ = board.transition(project.id, State::Shaping, "t", None);
-        let seed_id = board
-            .children_of(project.id)
-            .into_iter()
-            .find(|&id| board.get(id).is_some_and(|i| i.is_initial_plan_task()))
-            .expect("seeded Initial plan");
         let _ = board.claim(seed_id, "agent-1", None, 60).unwrap();
         let _ = board.transition(seed_id, State::Running, "agent-1", None);
 

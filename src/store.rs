@@ -1094,16 +1094,44 @@ impl Board {
 
         self.emit(&item);
 
-        // Every Project gets a claimable Initial Plan Task so planning can run
-        // as a dedicated sandbox job (optional plan PR + split into siblings).
-        if parent.is_none() {
-            self.seed_initial_plan_task(item.id, &item.title)?;
-        }
+        // Projects are containers only — no auto-seeded Initial plan. Operators
+        // call [`Self::init_plan`] with a Task-scoped repo when ready to plan.
         Ok(self.get(item.id).unwrap_or(item))
     }
 
-    fn seed_initial_plan_task(&self, project_id: ItemId, project_title: &str) -> Result<WorkItem, String> {
-        let title = crate::model::initial_plan_title(project_title);
+    /// Seed the Project's claimable Initial plan Task bound to `repo`.
+    ///
+    /// `create` no longer auto-seeds: remotes must be known before planning so
+    /// the supervisor can pre-clone. Refuses incomplete `upstream` and refuses
+    /// when an Initial plan already exists under the Project.
+    pub fn init_plan(
+        &self,
+        project_id: ItemId,
+        repo: RepoConfig,
+    ) -> Result<WorkItem, String> {
+        let project = self
+            .get(project_id)
+            .ok_or_else(|| format!("no work item #{project_id}"))?;
+        if !project.is_project() {
+            return Err(format!(
+                "init_plan requires a Project; card #{project_id} is not one"
+            ));
+        }
+        if self.initial_plan_of(project_id).is_some() {
+            return Err(format!(
+                "Project #{project_id} already has an Initial plan Task — refuse duplicate seed"
+            ));
+        }
+        let repo = repo.normalized();
+        if !repo.is_complete() {
+            return Err(
+                "init_plan requires non-empty upstream (owner/name) for the Initial plan Task"
+                    .into(),
+            );
+        }
+
+        let project_title = project.title.clone();
+        let title = crate::model::initial_plan_title(&project_title);
         let seed = self.create(
             Some(project_id),
             title.clone(),
@@ -1118,13 +1146,14 @@ impl Board {
             false,
             None,
         )?;
-        let _ = self.transition(seed.id, State::Shaping, "operator", Some("seed plan task".into()));
+        let seed = self.set_task_repo(seed.id, Some(repo))?;
+        let _ = self.transition(seed.id, State::Shaping, "operator", Some("init plan".into()));
         let seed = self
-            .transition(seed.id, State::Backlog, "operator", Some("seed plan task".into()))
+            .transition(seed.id, State::Backlog, "operator", Some("init plan".into()))
             .map_err(|e| e.to_string())?;
         self.story(
             project_id,
-            format!("Seeded {title} Task #{}.", seed.id),
+            format!("Seeded {title} Task #{} with Task repo.", seed.id),
         );
         Ok(seed)
     }
@@ -4834,6 +4863,26 @@ mod tests {
         client.set_github_repository(Some("test-owner/test-repo".into()));
     }
 
+    /// Complete Task repo used by tests that need an Initial plan after create.
+    fn test_task_repo() -> RepoConfig {
+        RepoConfig {
+            upstream: "acme/widgets".into(),
+            fork: String::new(),
+            base: "main".into(),
+        }
+    }
+
+    /// Project + Initial plan (via `init_plan`) — replaces the old auto-seed path.
+    fn project_with_initial_plan(b: &Board, title: &str) -> (WorkItem, WorkItem) {
+        let project = b
+            .create(None, title, "why", None, Origin::Human, true, None)
+            .expect("project");
+        let seed = b
+            .init_plan(project.id, test_task_repo())
+            .expect("init_plan");
+        (project, seed)
+    }
+
     /// A board with one leaf sitting in Backlog, claimed by `agent`.
     fn claimed_leaf() -> (Board, ItemId) {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nowrite.json"));
@@ -5230,7 +5279,7 @@ mod tests {
             s.items.get_mut(&parked.id).unwrap().parked = true;
         }
 
-        // Retire the seeded Initial plan so it does not join the auto queue.
+        // No auto-seeded Initial plan; optional retire is a no-op when absent.
         if let Some(ip) = b.initial_plan_of(project.id) {
             let _ = b.transition(ip.id, State::Retired, "t", Some("test".into()));
         }
@@ -5604,22 +5653,9 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-initial-plan-no-split.json"),
         );
-        let project = b
-            .create(
-                None,
-                "Archive UI",
-                "Archive completed work from the board",
-                None,
-                Origin::Human,
-                true,
-                None,
-            )
-            .expect("project");
-        let seed_id = b
-            .children_of(project.id)
-            .into_iter()
-            .find(|&id| b.get(id).unwrap().is_initial_plan_task())
-            .expect("initial plan");
+        let (project, seed) = project_with_initial_plan(&b, "Archive UI");
+        let seed_id = seed.id;
+        let _ = project;
         let _ = b.claim(seed_id, "agent", None, 60).expect("claim initial plan");
         let _ = b.transition(seed_id, State::Running, "agent", None);
 
@@ -5840,34 +5876,102 @@ mod tests {
     }
 
     #[test]
-    fn project_create_seeds_initial_plan_task() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-seed-plan.json"));
+    fn project_create_does_not_auto_seed_initial_plan() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-no-auto-seed.json"));
         let project = b
             .create(None, "Phase X", "why", None, Origin::Human, true, None)
             .expect("project");
         assert!(project.plan.is_none(), "Plan lives on Initial plan, not Project");
+        assert!(
+            b.children_of(project.id).is_empty(),
+            "create_project is container-only — no Initial plan until init_plan"
+        );
+        assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
+    }
 
-        let kids = b.children_of(project.id);
-        assert_eq!(kids.len(), 1, "exactly one seed Task");
-        let seed = b.get(kids[0]).unwrap();
+    #[test]
+    fn init_plan_binds_repo_and_resolve_card_repo() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-init-plan.json"));
+        let project = b
+            .create(None, "Phase X", "why", None, Origin::Human, true, None)
+            .expect("project");
+
+        let seed = b
+            .init_plan(
+                project.id,
+                RepoConfig {
+                    upstream: "acme/widgets".into(),
+                    fork: "bot/widgets".into(),
+                    base: "develop".into(),
+                },
+            )
+            .expect("init_plan");
+
+        assert_eq!(b.children_of(project.id), vec![seed.id]);
         assert_eq!(seed.title, initial_plan_title("Phase X"));
-        assert_eq!(seed.state, State::Backlog, "Initial plan is dispatchable planning work");
+        assert_eq!(seed.state, State::Backlog);
         assert!(seed.is_initial_plan_task());
         assert!(b.may_claim(seed.id));
         assert!(
             b.list_ready(&["any".into()]).iter().any(|i| i.id == seed.id),
             "Initial plan must appear in list_ready"
         );
-        // Project itself must not be Backlog / claimable.
-        assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
+
+        let repo = seed.repo.expect("Task repo set");
+        assert_eq!(repo.upstream, "acme/widgets");
+        assert_eq!(repo.fork, "bot/widgets");
+        assert_eq!(repo.base, "develop");
+
+        let resolved = b
+            .resolve_card_repo(seed.id)
+            .expect("resolve")
+            .expect("bound");
+        assert_eq!(resolved.upstream, "acme/widgets");
+        assert_eq!(resolved.fork, "bot/widgets");
+        assert_eq!(resolved.base, "develop");
+
+        let dup = b
+            .init_plan(project.id, test_task_repo())
+            .unwrap_err();
+        assert!(
+            dup.contains("already has an Initial plan"),
+            "got: {dup}"
+        );
+    }
+
+    #[test]
+    fn init_plan_refuses_empty_upstream() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-init-plan-empty.json"),
+        );
+        let project = b
+            .create(None, "Phase Empty", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let err = b
+            .init_plan(
+                project.id,
+                RepoConfig {
+                    upstream: "  ".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            err.contains("upstream") || err.contains("init_plan"),
+            "got: {err}"
+        );
+        assert!(
+            b.children_of(project.id).is_empty(),
+            "failed init_plan must not leave a child"
+        );
     }
 
     #[test]
     fn approve_plan_materializes_from_initial_plan_proposal() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-approve-plan.json"));
-        let project = b
-            .create(None, "Phase Y", "why", None, Origin::Human, true, None)
-            .expect("project");
+        let (project, _seed) = project_with_initial_plan(&b, "Phase Y");
         let _ = b.transition(project.id, State::Shaping, "t", None);
 
         b.propose_plan(
@@ -5959,6 +6063,7 @@ mod tests {
                 None,
             )
             .expect("project");
+        let _ = board.init_plan(project.id, test_task_repo()).expect("init_plan");
         let _ = board.transition(project.id, State::Shaping, "t", None);
 
         // Simulate an in-flight dolt push / create storm — request path must not wait.
@@ -6058,15 +6163,9 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-approve-closes-review.json"),
         );
-        let project = b
-            .create(None, "Phase Review", "why", None, Origin::Human, true, None)
-            .expect("project");
+        let (project, seed) = project_with_initial_plan(&b, "Phase Review");
+        let seed_id = seed.id;
         let _ = b.transition(project.id, State::Shaping, "t", None);
-        let seed_id = b
-            .children_of(project.id)
-            .into_iter()
-            .find(|&id| b.get(id).is_some_and(|i| i.is_initial_plan_task()))
-            .expect("seed");
         // Simulate finished Initial plan sitting in Review.
         let _ = b.claim(seed_id, "agent-1", None, 60).unwrap();
         let _ = b.transition(seed_id, State::Running, "agent-1", None);
@@ -6123,15 +6222,9 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-approve-review-initial.json"),
         );
-        let project = b
-            .create(None, "Phase AR", "why", None, Origin::Human, true, None)
-            .expect("project");
+        let (project, seed) = project_with_initial_plan(&b, "Phase AR");
+        let seed_id = seed.id;
         let _ = b.transition(project.id, State::Shaping, "t", None);
-        let seed_id = b
-            .children_of(project.id)
-            .into_iter()
-            .find(|&id| b.get(id).is_some_and(|i| i.is_initial_plan_task()))
-            .expect("seed");
         let _ = b.claim(seed_id, "agent-1", None, 60).unwrap();
         let _ = b.transition(seed_id, State::Running, "agent-1", None);
         b.set_pr_url(seed_id, Some("https://example.com/pr/2".into()));
@@ -6188,9 +6281,7 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-plan-frozen.json"),
         );
-        let project = b
-            .create(None, "Phase Freeze", "why", None, Origin::Human, true, None)
-            .expect("project");
+        let (project, _seed) = project_with_initial_plan(&b, "Phase Freeze");
         let _ = b.transition(project.id, State::Shaping, "t", None);
         b.propose_plan(
             project.id,
@@ -6233,9 +6324,7 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-claim-from-proposal.json"),
         );
-        let project = b
-            .create(None, "Phase Brief", "why", None, Origin::Human, true, None)
-            .expect("project");
+        let (project, _seed) = project_with_initial_plan(&b, "Phase Brief");
         let _ = b.transition(project.id, State::Shaping, "t", None);
         b.propose_plan(
             project.id,
@@ -6267,9 +6356,7 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-approve-diamond-dag.json"),
         );
-        let project = b
-            .create(None, "Phase Diamond", "why", None, Origin::Human, true, None)
-            .expect("project");
+        let (project, _seed) = project_with_initial_plan(&b, "Phase Diamond");
         let _ = b.transition(project.id, State::Shaping, "t", None);
 
         b.propose_plan(
@@ -6438,15 +6525,9 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-snapshot-reenter.json"),
         );
-        let project = b
-            .create(None, "Reenter", "why", None, Origin::Human, true, None)
-            .expect("project");
+        let (project, seed) = project_with_initial_plan(&b, "Reenter");
+        let seed_id = seed.id;
         let _ = b.transition(project.id, State::Shaping, "t", None);
-        let seed_id = b
-            .children_of(project.id)
-            .into_iter()
-            .find(|&id| b.get(id).is_some_and(|i| i.is_initial_plan_task()))
-            .expect("seed");
         let _ = b.transition(seed_id, State::Done, "t", Some("legacy".into()));
         // Clear proposal so plan_status walks the impl-children path.
         {
@@ -6521,14 +6602,8 @@ mod tests {
                 std::process::id()
             )),
         );
-        let project = b
-            .create(None, "Test Project", "why", None, Origin::Human, true, None)
-            .expect("project");
-        let initial_id = b
-            .children_of(project.id)
-            .into_iter()
-            .next()
-            .expect("seeded initial plan");
+        let (project, seed) = project_with_initial_plan(&b, "Test Project");
+        let initial_id = seed.id;
 
         let digest_before = b.digest();
         let goal_before = digest_before
@@ -6563,15 +6638,9 @@ mod tests {
                 std::process::id()
             )),
         );
-        let project = b
-            .create(None, "Keep sandboxes", "why", None, Origin::Human, true, None)
-            .expect("project");
-        // create() seeds Initial plan — park it Done so it doesn't muddy the ratio.
-        let initial_id = b
-            .children_of(project.id)
-            .into_iter()
-            .next()
-            .expect("seeded Initial plan");
+        let (project, seed) = project_with_initial_plan(&b, "Keep sandboxes");
+        // Initial plan via init_plan — park it Done so it doesn't muddy the ratio.
+        let initial_id = seed.id;
         let done = b
             .create(
                 Some(project.id),
@@ -7076,9 +7145,10 @@ mod tests {
         let project = board
             .create(None, "Seeded Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
-        let children = board.children_of(project.id);
-        assert!(!children.is_empty(), "expected seeded initial plan task");
-        let seed_id = children[0];
+        let seed = board
+            .init_plan(project.id, test_task_repo())
+            .expect("init_plan");
+        let seed_id = seed.id;
 
         let _ = remote_cap.take();
 
@@ -7185,13 +7255,14 @@ mod tests {
         board_raw.beads = Some(beads_client.clone());
         let board = Arc::new(board_raw);
 
-        // 1. Create Project (seeds Initial plan)
+        // 1. Create Project + init_plan (Task-scoped repo)
         let project = board
             .create(None, "New Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
-        let children = board.children_of(project.id);
-        assert!(!children.is_empty(), "expected seeded initial plan task");
-        let seed_id = children[0];
+        let seed = board
+            .init_plan(project.id, test_task_repo())
+            .expect("init_plan");
+        let seed_id = seed.id;
 
         board.mirror_beads_item(project.id).await;
         board.mirror_beads_item(seed_id).await;
@@ -7298,22 +7369,16 @@ mod tests {
 
         // Force placeholders on open cards (+ keep retired as placeholder) so heal
         // has work — create already leaves placeholders; overwrite for stable ids.
-        let initial_plan = board
-            .snapshot()
-            .items
-            .into_iter()
-            .find(|i| i.parent == Some(project.id) && i.is_initial_plan_task())
-            .expect("seeded initial plan");
+        // No auto-seeded Initial plan — only project + task (+ retired ignored).
         board.set_beads_id(project.id, "bd-honr-heal-project");
-        board.set_beads_id(initial_plan.id, "bd-honr-heal-plan");
         board.set_beads_id(task.id, "bd-honr-heal-task");
         board.set_beads_id(retired.id, "bd-honr-heal-retired");
 
         // 2. Execute heal
         let healed_count = board.heal_placeholder_beads_ids().await;
         assert_eq!(
-            healed_count, 3,
-            "should heal project, initial plan, and task (not retired)"
+            healed_count, 2,
+            "should heal project and task (not retired); no auto-seeded Initial plan"
         );
 
         // 3. Assert open cards have real beads IDs
@@ -7562,7 +7627,7 @@ mod tests {
             .create(None, "Test Project", "Goal", None, Origin::Human, true, None)
             .unwrap();
 
-        // Project creation seeds 1 initial plan task in Backlog.
+        // create_project is container-only — no auto-seeded Initial plan.
         let t1 = b
             .create(Some(project.id), "Task One", "Unblocked", Some("DOD".into()), Origin::Human, false, None)
             .unwrap();
@@ -7577,7 +7642,7 @@ mod tests {
                 .iter()
                 .find(|c| c.column == Column::Backlog)
                 .expect("ready col");
-            assert!(ready_col.summary.text.contains("2 in backlog"));
+            assert!(ready_col.summary.text.contains("1 in backlog"));
             assert!(!ready_col.summary.text.contains("blocked on"));
         }
 
@@ -7596,7 +7661,7 @@ mod tests {
                 .iter()
                 .find(|c| c.column == Column::Backlog)
                 .expect("ready col");
-            assert!(ready_col.summary.text.contains("3 in backlog"));
+            assert!(ready_col.summary.text.contains("2 in backlog"));
             assert!(
                 ready_col.summary.text.contains(&format!("1 blocked on #{}: Task One", t1.id)),
                 "Summary was: {}",
@@ -7850,7 +7915,10 @@ mod tests {
         let project = board
             .create(None, "No Orphan GH Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
-        let seed_id = board.children_of(project.id)[0];
+        let seed = board
+            .init_plan(project.id, test_task_repo())
+            .expect("init_plan");
+        let seed_id = seed.id;
 
         board.mirror_beads_item(project.id).await;
         board.mirror_beads_item(seed_id).await;
@@ -8086,22 +8154,22 @@ mod tests {
 
         assert_eq!(b.current_seq(), 0);
 
-        // 1. Create project emits Upsert for Project and Initial plan Task transitions + Story (5 events in total)
+        // 1. create_project is container-only — one Upsert for the Project.
         let p = b
             .create(None, "Test Seq", "intent", None, Origin::Human, true, None)
             .unwrap();
 
         let initial_seq = b.current_seq();
-        assert_eq!(initial_seq, 5);
+        assert_eq!(initial_seq, 1);
 
-        // 2. Story event (seq 6)
+        // 2. Story event (seq 2)
         b.story(p.id, "Story line 1".to_string());
-        assert_eq!(b.current_seq(), 6);
+        assert_eq!(b.current_seq(), 2);
 
-        // At seq 6 with capacity 10, event_buffer contains seq 1..6
+        // At seq 2 with capacity 10, event_buffer contains seq 1..2
         match b.catch_up(0) {
             CatchUpResult::Events(events) => {
-                assert_eq!(events.len(), 6);
+                assert_eq!(events.len(), 2);
                 for (i, ev) in events.iter().enumerate() {
                     assert_eq!(ev.seq(), (i + 1) as u64);
                 }
@@ -8109,26 +8177,25 @@ mod tests {
             CatchUpResult::Reset { .. } => panic!("expected events for last_seq 0"),
         }
 
-        // Request catchup from seq 4 (should return seq 5 and 6)
-        match b.catch_up(4) {
+        // Request catchup from seq 1 (should return seq 2)
+        match b.catch_up(1) {
             CatchUpResult::Events(events) => {
-                assert_eq!(events.len(), 2);
-                assert_eq!(events[0].seq(), 5);
-                assert_eq!(events[1].seq(), 6);
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].seq(), 2);
             }
-            CatchUpResult::Reset { .. } => panic!("expected events for last_seq 4"),
+            CatchUpResult::Reset { .. } => panic!("expected events for last_seq 1"),
         }
 
-        // Request catchup from current_seq (seq 6) (should return empty vec)
-        match b.catch_up(6) {
+        // Request catchup from current_seq (seq 2) (should return empty vec)
+        match b.catch_up(2) {
             CatchUpResult::Events(events) => {
                 assert!(events.is_empty());
             }
-            CatchUpResult::Reset { .. } => panic!("expected empty events for last_seq 6"),
+            CatchUpResult::Reset { .. } => panic!("expected empty events for last_seq 2"),
         }
 
-        // 3. Emit 5 more events to overflow buffer capacity 10 (total 11 events: seq 1..11, buffer holds seq 2..11)
-        for i in 0..5 {
+        // 3. Emit 9 more events to overflow buffer capacity 10 (total 11: seq 1..11, buffer holds 2..11)
+        for i in 0..9 {
             b.story(p.id, format!("Story line extra {i}"));
         }
         assert_eq!(b.current_seq(), 11);
