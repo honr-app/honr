@@ -144,6 +144,9 @@ pub struct ChildSpec {
     /// Legacy: board item ids. Prefer `blocked_by_keys` for new Plans.
     #[serde(default)]
     pub blocked_by: Vec<ItemId>,
+    /// Optional per-task remotes. Omit to inherit from Initial plan / parent Task on Approve.
+    #[serde(default)]
+    pub repo: Option<crate::schema::RepoConfig>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -625,6 +628,7 @@ impl Operator {
                 definition_of_done: c.definition_of_done,
                 blocked_by_keys,
                 capability: c.capability,
+                repo: c.repo,
                 item_id: None,
             });
         }
@@ -934,6 +938,7 @@ impl Operator {
                     crate::model::SplitChildSpec::new(c.title, c.intent, c.definition_of_done);
                 spec.key = c.key;
                 spec.blocked_by_keys = c.blocked_by_keys;
+                spec.repo = c.repo;
                 spec
             })
             .collect();
@@ -1310,6 +1315,7 @@ mod tests {
                 key: Some("t1".into()),
                 blocked_by_keys: vec![],
                 blocked_by: vec![],
+                repo: None,
             }],
             summary: Some("one task".into()),
             cancel_keys: vec![],

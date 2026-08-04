@@ -201,6 +201,11 @@ pub struct PlanTaskSpec {
     pub blocked_by_keys: Vec<String>,
     #[serde(default)]
     pub capability: Option<String>,
+    /// Optional per-task product remotes. On Approve/materialize, missing or
+    /// incomplete values default from the Initial plan (or splitting parent)
+    /// Task repo — never from a Project field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<crate::schema::RepoConfig>,
     /// Set when Approve Plan materializes (or updates) a board Task.
     #[serde(default)]
     pub item_id: Option<ItemId>,
@@ -756,6 +761,8 @@ pub struct SplitChildSpec {
     pub definition_of_done: String,
     pub key: Option<String>,
     pub blocked_by_keys: Vec<String>,
+    /// Optional per-child remotes; Approve defaults from the splitting parent Task.
+    pub repo: Option<crate::schema::RepoConfig>,
 }
 
 impl SplitChildSpec {
@@ -770,7 +777,15 @@ impl SplitChildSpec {
             definition_of_done: definition_of_done.into(),
             key: None,
             blocked_by_keys: Vec::new(),
+            repo: None,
         }
+    }
+
+    #[must_use]
+    #[allow(dead_code)] // used from unit tests; production builds via SplitChildSpec fields
+    pub fn with_repo(mut self, repo: crate::schema::RepoConfig) -> Self {
+        self.repo = Some(repo);
+        self
     }
 
     #[must_use]
