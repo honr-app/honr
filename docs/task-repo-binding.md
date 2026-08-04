@@ -1,8 +1,9 @@
 # Task repo binding
 
-Every agent-claimable Task carries durable product remotes so the supervisor can
-pre-clone without first-run guessing. Remotes are **Task-scoped** — not a
-Project field, and not Settings → Forge (beads-only).
+Every agent-claimable Task carries durable product remotes so the agent can
+clone without first-run guessing. The supervisor does **not** pre-clone — it
+leaves `/sandbox/repo` empty. Remotes are **Task-scoped** — not a Project
+field, and not Settings → Forge (beads-only).
 
 Related empty-state onboarding: [#279](https://github.com/shanemcd/honr/issues/279)
 (Help chrome is separate; this page is the remotes contract).
@@ -12,7 +13,7 @@ Related empty-state onboarding: [#279](https://github.com/shanemcd/honr/issues/2
 ```text
 create_project(title, intent, …)     → Project container (no Task seed)
 init_plan(project, repo, …)          → Initial plan Task with Task.repo set
-dispatch Initial plan                → supervisor pre-clones from Task.repo
+dispatch Initial plan                → empty workdir; agent clones from Task.repo
 plan.json + docs PR → Review
 Approve                              → sibling Tasks; each gets repo
                                        (explicit in ChildSpec / or default

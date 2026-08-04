@@ -1,16 +1,21 @@
 //! The human face. Thin: every handler here delegates straight to `Board`, so
 //! the pixels and the agent API can't drift apart.
 
-use crate::model::{ItemId, SandboxProfile, State, WorkItem, WorkspaceBinding};
-use crate::model::AgentRuntimeConfig;
+use crate::model::{
+    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, OpenShellProviderRefreshDesired,
+    SandboxProfile, State, WorkItem, WorkspaceBinding,
+};
+use crate::openshell::{ProviderRefreshSpec, ProviderTypeProfile};
+use crate::secrets::{open_string_map, seal_string_map, GcloudAdcUser};
 use crate::store::{AncestryLine, SharedBoard};
 
 use axum::extract::{Path, State as AxState};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub struct ApiError(String);
@@ -78,6 +83,23 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/agent-runtime", get(get_agent_runtime).put(put_agent_runtime))
         .route("/openshell/status", get(openshell_status))
         .route("/openshell", get(get_openshell).put(put_openshell))
+        .route(
+            "/openshell/providers",
+            get(list_openshell_providers).post(create_openshell_provider),
+        )
+        .route("/openshell/providers/sync", post(sync_openshell_providers))
+        .route(
+            "/openshell/providers/import-gcloud-adc",
+            post(import_gcloud_adc_provider),
+        )
+        .route(
+            "/openshell/providers/{name}",
+            put(update_openshell_provider).delete(delete_openshell_provider),
+        )
+        .route(
+            "/openshell/provider-profiles",
+            get(list_openshell_provider_profiles),
+        )
 }
 
 #[derive(Serialize)]
@@ -113,22 +135,24 @@ async fn item_detail(
     AxState(b): AxState<SharedBoard>,
     Path(id): Path<ItemId>,
 ) -> ApiResult<ItemDetail> {
-    let item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
+    let mut item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
     let agents = b.effective_agents();
     let default_engine = agents.engine.clone();
-    let default_model = agents.vertex.model.clone();
+    // Display the resolved profile engine (not stale WorkItem.engine).
+    item.engine = Some(b.resolve_engine_for_card(id));
     Ok(Json(ItemDetail {
         ancestry: b.ancestry(id),
         children: b.children_of(id),
         item,
         default_engine,
-        default_model,
+        default_model: String::new(),
     }))
 }
 
 #[derive(Serialize)]
 pub struct LogResponse {
-    pub claude: Vec<String>,
+    /// Observed agent transcript (any engine — cursor / agy / claude).
+    pub agent: Vec<String>,
     pub openshell: Vec<String>,
 }
 
@@ -137,7 +161,7 @@ async fn item_logs(
     Path(id): Path<ItemId>,
 ) -> ApiResult<LogResponse> {
     let item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
-    let claude = b.get_agent_logs(id);
+    let agent = b.get_agent_logs(id);
 
     let env_name = item.environment.clone().unwrap_or_else(|| {
         let prefix = b.effective_agents().branch_prefix;
@@ -151,7 +175,7 @@ async fn item_logs(
         Vec::new()
     };
 
-    Ok(Json(LogResponse { claude, openshell }))
+    Ok(Json(LogResponse { agent, openshell }))
 }
 
 #[derive(Deserialize)]
@@ -557,66 +581,592 @@ fn runtime_from_yaml(agents: &crate::schema::AgentConfig) -> AgentRuntimeConfig 
     AgentRuntimeConfig {
         enabled: agents.enabled,
         engine: agents.engine.clone(),
-        providers: agents.providers.clone(),
-        vertex: crate::model::AgentRuntimeVertex {
-            project: agents.vertex.project.clone(),
-            location: agents.vertex.location.clone(),
-            model: agents.vertex.model.clone(),
-        },
         max_concurrent: agents.max_concurrent,
         agent_timeout_secs: agents.agent_timeout_secs,
         max_attempts: agents.max_attempts,
         branch_prefix: agents.branch_prefix.clone(),
-        quality_gates: agents.quality_gates.clone(),
     }
 }
 
 // ---------------------------------------------------------------- OpenShell connectivity
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenShellSettings {
-    /// Optional absolute/relative path to the `openshell` CLI. Empty/null → PATH default.
+    /// Gateway URL (`https://127.0.0.1:17670`). Not secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binary_path: Option<String>,
+    pub gateway_endpoint: Option<String>,
+    /// Write-only PEM fields — accepted on PUT, never returned on GET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_pem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert_pem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key_pem: Option<String>,
+    /// When true on PUT, wipe sealed mTLS material.
+    #[serde(default)]
+    pub clear_mtls: bool,
+    /// When true on PUT, import PEMs from `~/.config/openshell/gateways/<name>/mtls/`.
+    #[serde(default)]
+    pub import_openshell_cli_mtls: bool,
+    /// Gateway name for import (default `openshell`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_gateway_name: Option<String>,
+    /// Read-only presence flags (GET / after PUT).
+    #[serde(default)]
+    pub mtls: crate::secrets::OpenShellMtlsStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenShellStatusOut {
     pub healthy: bool,
-    pub binary: String,
     pub summary: String,
-    pub cli_missing: bool,
+    /// True when endpoint or mTLS material is missing.
+    pub not_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Current Settings override (None when using PATH default).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub binary_path: Option<String>,
+    pub gateway_endpoint: Option<String>,
+    pub mtls: crate::secrets::OpenShellMtlsStatus,
+}
+
+fn openshell_settings_view(b: &SharedBoard) -> OpenShellSettings {
+    OpenShellSettings {
+        gateway_endpoint: b.openshell_gateway_endpoint(),
+        ca_pem: None,
+        client_cert_pem: None,
+        client_key_pem: None,
+        clear_mtls: false,
+        import_openshell_cli_mtls: false,
+        import_gateway_name: None,
+        mtls: b.openshell_mtls_status(),
+    }
 }
 
 async fn get_openshell(AxState(b): AxState<SharedBoard>) -> Json<OpenShellSettings> {
-    Json(OpenShellSettings {
-        binary_path: b.openshell_bin_override(),
-    })
+    Json(openshell_settings_view(&b))
 }
 
 async fn put_openshell(
     AxState(b): AxState<SharedBoard>,
     Json(req): Json<OpenShellSettings>,
-) -> Json<OpenShellSettings> {
-    let binary_path = b.set_openshell_bin(req.binary_path);
-    Json(OpenShellSettings { binary_path })
+) -> Result<Json<OpenShellSettings>, (axum::http::StatusCode, String)> {
+    let _ = b.set_openshell_gateway_endpoint(req.gateway_endpoint);
+
+    if req.clear_mtls {
+        b.set_openshell_mtls_sealed(None);
+    } else if req.import_openshell_cli_mtls {
+        let name = req.import_gateway_name.as_deref().unwrap_or("openshell");
+        let bundle = crate::secrets::import_openshell_cli_mtls(name).map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("import OpenShell CLI mTLS: {e}"),
+            )
+        })?;
+        let sealed = crate::secrets::seal_mtls(&bundle).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("seal mTLS: {e}"),
+            )
+        })?;
+        b.set_openshell_mtls_sealed(Some(sealed));
+    } else {
+        let any_pem = req.ca_pem.as_ref().is_some_and(|s| !s.trim().is_empty())
+            || req
+                .client_cert_pem
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || req
+                .client_key_pem
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty());
+        if any_pem {
+            // Merge with existing decrypted bundle when only some fields are sent.
+            let mut bundle = match b.openshell_mtls_sealed() {
+                Some(s) => crate::secrets::open_mtls(&s).unwrap_or(crate::secrets::OpenShellMtlsBundle {
+                    ca_pem: String::new(),
+                    client_cert_pem: String::new(),
+                    client_key_pem: String::new(),
+                }),
+                None => crate::secrets::OpenShellMtlsBundle {
+                    ca_pem: String::new(),
+                    client_cert_pem: String::new(),
+                    client_key_pem: String::new(),
+                },
+            };
+            if let Some(pem) = req.ca_pem.filter(|s| !s.trim().is_empty()) {
+                bundle.ca_pem = pem;
+            }
+            if let Some(pem) = req.client_cert_pem.filter(|s| !s.trim().is_empty()) {
+                bundle.client_cert_pem = pem;
+            }
+            if let Some(pem) = req.client_key_pem.filter(|s| !s.trim().is_empty()) {
+                bundle.client_key_pem = pem;
+            }
+            let sealed = crate::secrets::seal_mtls(&bundle).map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("seal mTLS: {e}"),
+                )
+            })?;
+            b.set_openshell_mtls_sealed(Some(sealed));
+        }
+    }
+
+    Ok(Json(openshell_settings_view(&b)))
 }
 
 async fn openshell_status(AxState(b): AxState<SharedBoard>) -> Json<OpenShellStatusOut> {
     let st = b.openshell_client().gateway_status().await;
     Json(OpenShellStatusOut {
         healthy: st.healthy,
-        binary: st.binary,
         summary: st.summary,
-        cli_missing: st.cli_missing,
+        not_configured: st.not_configured,
         error: st.error,
-        binary_path: b.openshell_bin_override(),
+        gateway_endpoint: b.openshell_gateway_endpoint(),
+        mtls: b.openshell_mtls_status(),
     })
+}
+
+// ---------------------------------------------------------------- OpenShell providers
+
+/// Safe GET view — never includes credential values.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OpenShellProviderView {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    pub config: BTreeMap<String, String>,
+    pub credential_keys: Vec<String>,
+    pub has_credentials: bool,
+    pub has_refresh: bool,
+    pub attach_to_sandboxes: bool,
+    /// Present when the gateway was reachable for this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_synced: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenShellProvidersOut {
+    pub providers: Vec<OpenShellProviderView>,
+    /// True when the gateway list call succeeded (sync badges are meaningful).
+    pub gateway_reachable: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenShellProviderWrite {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    #[serde(default)]
+    pub config: BTreeMap<String, String>,
+    /// Write-only. Omit / empty on PUT to keep existing sealed credentials.
+    #[serde(default)]
+    pub credentials: Option<BTreeMap<String, String>>,
+    #[serde(default = "default_attach_true")]
+    pub attach_to_sandboxes: bool,
+    /// Optional refresh bootstrap (usually set via import-gcloud-adc).
+    #[serde(default)]
+    pub refresh: Option<OpenShellProviderRefreshWrite>,
+}
+
+fn default_attach_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenShellProviderRefreshWrite {
+    pub credential_key: String,
+    pub strategy: String,
+    pub material: BTreeMap<String, String>,
+    #[serde(default)]
+    pub secret_material_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ImportGcloudAdcReq {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default = "default_attach_true")]
+    pub attach_to_sandboxes: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncProvidersOut {
+    pub applied: Vec<String>,
+    pub errors: Vec<SyncProviderError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncProviderError {
+    pub name: String,
+    pub error: String,
+}
+
+fn provider_view(
+    p: &OpenShellProviderDesired,
+    gateway_names: Option<&std::collections::HashSet<String>>,
+) -> OpenShellProviderView {
+    OpenShellProviderView {
+        name: p.name.clone(),
+        provider_type: p.provider_type.clone(),
+        config: p.config.clone(),
+        credential_keys: p.credential_keys.clone(),
+        has_credentials: p.has_credentials(),
+        has_refresh: p.refresh.is_some(),
+        attach_to_sandboxes: p.attach_to_sandboxes,
+        gateway_synced: gateway_names.map(|g| g.contains(&p.name)),
+    }
+}
+
+fn seal_credentials_from_write(
+    credentials: Option<&BTreeMap<String, String>>,
+    existing: Option<&OpenShellProviderDesired>,
+) -> Result<(Option<String>, Vec<String>), (StatusCode, String)> {
+    if let Some(creds) = credentials {
+        let cleaned: BTreeMap<String, String> = creds
+            .iter()
+            .map(|(k, v)| (k.trim().to_string(), v.clone()))
+            .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+            .collect();
+        if cleaned.is_empty() {
+            return Ok((
+                existing.and_then(|e| e.credentials_sealed.clone()),
+                existing.map(|e| e.credential_keys.clone()).unwrap_or_default(),
+            ));
+        }
+        let keys: Vec<_> = cleaned.keys().cloned().collect();
+        let sealed = seal_string_map(&cleaned).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("seal credentials: {e}"),
+            )
+        })?;
+        return Ok((Some(sealed), keys));
+    }
+    Ok((
+        existing.and_then(|e| e.credentials_sealed.clone()),
+        existing.map(|e| e.credential_keys.clone()).unwrap_or_default(),
+    ))
+}
+
+fn seal_refresh_from_write(
+    refresh: Option<&OpenShellProviderRefreshWrite>,
+    existing: Option<&OpenShellProviderDesired>,
+) -> Result<Option<OpenShellProviderRefreshDesired>, (StatusCode, String)> {
+    let Some(r) = refresh else {
+        return Ok(existing.and_then(|e| e.refresh.clone()));
+    };
+    let material: BTreeMap<String, String> = r
+        .material
+        .iter()
+        .map(|(k, v)| (k.trim().to_string(), v.clone()))
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+        .collect();
+    if material.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "refresh.material must not be empty".into(),
+        ));
+    }
+    let sealed = seal_string_map(&material).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("seal refresh material: {e}"),
+        )
+    })?;
+    Ok(Some(OpenShellProviderRefreshDesired {
+        credential_key: r.credential_key.trim().to_string(),
+        strategy: r.strategy.trim().to_string(),
+        material_sealed: sealed,
+        secret_material_keys: r.secret_material_keys.clone(),
+    }))
+}
+
+fn credentials_for_apply(
+    p: &OpenShellProviderDesired,
+) -> Result<BTreeMap<String, String>, String> {
+    match p.credentials_sealed.as_deref() {
+        None | Some("") => Ok(BTreeMap::new()),
+        Some(s) => open_string_map(s).map_err(|e| format!("open credentials: {e}")),
+    }
+}
+
+fn refresh_for_apply(p: &OpenShellProviderDesired) -> Result<Option<ProviderRefreshSpec>, String> {
+    let Some(r) = &p.refresh else {
+        return Ok(None);
+    };
+    let material = open_string_map(&r.material_sealed)
+        .map_err(|e| format!("open refresh material: {e}"))?;
+    Ok(Some(ProviderRefreshSpec {
+        credential_key: r.credential_key.clone(),
+        strategy: r.strategy.clone(),
+        material,
+        secret_material_keys: r.secret_material_keys.clone(),
+    }))
+}
+
+async fn apply_desired_to_gateway(
+    b: &SharedBoard,
+    p: &OpenShellProviderDesired,
+) -> Result<(), String> {
+    let os = b.openshell_client();
+    let credentials = credentials_for_apply(p)?;
+    let refresh = refresh_for_apply(p)?;
+    os.apply_provider(
+        &p.name,
+        &p.provider_type,
+        credentials,
+        p.config.clone(),
+        refresh.as_ref(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+async fn list_openshell_providers(AxState(b): AxState<SharedBoard>) -> Json<OpenShellProvidersOut> {
+    let desired = b.openshell_providers();
+    let os = b.openshell_client();
+    let (gateway_reachable, gateway_names) = match os.list_providers().await {
+        Ok(list) => (
+            true,
+            Some(
+                list.into_iter()
+                    .map(|p| p.name)
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+        ),
+        Err(_) => (false, None),
+    };
+    let providers = desired
+        .iter()
+        .map(|p| provider_view(p, gateway_names.as_ref()))
+        .collect();
+    Json(OpenShellProvidersOut {
+        providers,
+        gateway_reachable,
+    })
+}
+
+async fn create_openshell_provider(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<OpenShellProviderWrite>,
+) -> Result<Json<OpenShellProviderView>, ApiError> {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError("name is required".into()));
+    }
+    if req.provider_type.trim().is_empty() {
+        return Err(ApiError("type is required".into()));
+    }
+    let existing = b
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == name);
+    let (credentials_sealed, credential_keys) =
+        seal_credentials_from_write(req.credentials.as_ref(), existing.as_ref())
+            .map_err(|(_, m)| ApiError(m))?;
+    let refresh = seal_refresh_from_write(req.refresh.as_ref(), existing.as_ref())
+        .map_err(|(_, m)| ApiError(m))?;
+    let desired = OpenShellProviderDesired {
+        name,
+        provider_type: req.provider_type.trim().to_string(),
+        config: req.config,
+        credentials_sealed,
+        credential_keys,
+        refresh,
+        attach_to_sandboxes: req.attach_to_sandboxes,
+    }
+    .normalized();
+    let stored = b.upsert_openshell_provider(desired);
+    // Best-effort apply; desired state is already persisted.
+    let apply_err = apply_desired_to_gateway(&b, &stored).await.err();
+    let gateway_synced = match &apply_err {
+        None if b.openshell_client().gateway_status().await.healthy => Some(true),
+        None => None,
+        Some(_) => Some(false),
+    };
+    let mut view = provider_view(&stored, None);
+    view.gateway_synced = gateway_synced;
+    if let Some(err) = apply_err {
+        tracing::warn!(provider = %stored.name, error = %err, "provider saved locally; gateway apply failed");
+    }
+    Ok(Json(view))
+}
+
+async fn update_openshell_provider(
+    AxState(b): AxState<SharedBoard>,
+    Path(name): Path<String>,
+    Json(req): Json<OpenShellProviderWrite>,
+) -> Result<Json<OpenShellProviderView>, ApiError> {
+    let name = name.trim().to_string();
+    let existing = b
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| ApiError(format!("no provider {name:?}")))?;
+    // Name in path is authoritative; body name may rename.
+    let new_name = {
+        let n = req.name.trim();
+        if n.is_empty() {
+            name.clone()
+        } else {
+            n.to_string()
+        }
+    };
+    if new_name != name {
+        let _ = b.delete_openshell_provider(&name);
+        let _ = b.openshell_client().delete_provider(&name).await;
+    }
+    let (credentials_sealed, credential_keys) =
+        seal_credentials_from_write(req.credentials.as_ref(), Some(&existing))
+            .map_err(|(_, m)| ApiError(m))?;
+    let refresh = seal_refresh_from_write(req.refresh.as_ref(), Some(&existing))
+        .map_err(|(_, m)| ApiError(m))?;
+    let desired = OpenShellProviderDesired {
+        name: new_name,
+        provider_type: {
+            let t = req.provider_type.trim();
+            if t.is_empty() {
+                existing.provider_type.clone()
+            } else {
+                t.to_string()
+            }
+        },
+        config: if req.config.is_empty() {
+            existing.config.clone()
+        } else {
+            req.config
+        },
+        credentials_sealed,
+        credential_keys,
+        refresh,
+        attach_to_sandboxes: req.attach_to_sandboxes,
+    }
+    .normalized();
+    let stored = b.upsert_openshell_provider(desired);
+    let apply_err = apply_desired_to_gateway(&b, &stored).await.err();
+    let mut view = provider_view(&stored, None);
+    view.gateway_synced = Some(apply_err.is_none());
+    Ok(Json(view))
+}
+
+async fn delete_openshell_provider(
+    AxState(b): AxState<SharedBoard>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let name = name.trim().to_string();
+    if !b.delete_openshell_provider(&name) {
+        return Err(ApiError(format!("no provider {name:?}")));
+    }
+    let _ = b.openshell_client().delete_provider(&name).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn sync_openshell_providers(AxState(b): AxState<SharedBoard>) -> Json<SyncProvidersOut> {
+    let desired = b.openshell_providers();
+    let mut applied = Vec::new();
+    let mut errors = Vec::new();
+    for p in desired {
+        match apply_desired_to_gateway(&b, &p).await {
+            Ok(()) => applied.push(p.name),
+            Err(e) => errors.push(SyncProviderError {
+                name: p.name,
+                error: e,
+            }),
+        }
+    }
+    Json(SyncProvidersOut { applied, errors })
+}
+
+async fn import_gcloud_adc_provider(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<ImportGcloudAdcReq>,
+) -> Result<Json<OpenShellProviderView>, ApiError> {
+    let adc: GcloudAdcUser = crate::secrets::read_gcloud_adc()
+        .map_err(|e| ApiError(format!("read gcloud ADC: {e}")))?;
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("vertex")
+        .to_string();
+    let project = req
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("ANTHROPIC_VERTEX_PROJECT_ID").ok())
+        .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT").ok())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            ApiError(
+                "project required (body.project or ANTHROPIC_VERTEX_PROJECT_ID / GOOGLE_CLOUD_PROJECT)"
+                    .into(),
+            )
+        })?;
+    let location = req
+        .location
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("global")
+        .to_string();
+
+    let mut material = BTreeMap::new();
+    material.insert("client_id".into(), adc.client_id);
+    material.insert("client_secret".into(), adc.client_secret);
+    material.insert("refresh_token".into(), adc.refresh_token);
+    let material_sealed = seal_string_map(&material)
+        .map_err(|e| ApiError(format!("seal ADC material: {e}")))?;
+
+    let mut config = BTreeMap::new();
+    config.insert("VERTEX_AI_PROJECT_ID".into(), project);
+    config.insert("VERTEX_AI_LOCATION".into(), location);
+
+    let desired = OpenShellProviderDesired {
+        name,
+        provider_type: "google-vertex-ai".into(),
+        config,
+        credentials_sealed: None,
+        credential_keys: Vec::new(),
+        refresh: Some(OpenShellProviderRefreshDesired {
+            credential_key: "GOOGLE_VERTEX_AI_TOKEN".into(),
+            strategy: "oauth2_refresh_token".into(),
+            material_sealed,
+            secret_material_keys: vec!["client_secret".into(), "refresh_token".into()],
+        }),
+        attach_to_sandboxes: req.attach_to_sandboxes,
+    }
+    .normalized();
+    let stored = b.upsert_openshell_provider(desired);
+    let apply_err = apply_desired_to_gateway(&b, &stored).await.err();
+    let mut view = provider_view(&stored, None);
+    view.gateway_synced = Some(apply_err.is_none());
+    if let Some(err) = apply_err {
+        tracing::warn!(provider = %stored.name, error = %err, "ADC provider saved; gateway apply failed");
+    }
+    Ok(Json(view))
+}
+
+async fn list_openshell_provider_profiles(
+    AxState(b): AxState<SharedBoard>,
+) -> Result<Json<Vec<ProviderTypeProfile>>, ApiError> {
+    let os = b.openshell_client();
+    let st = os.gateway_status().await;
+    if st.not_configured {
+        return Err(ApiError(st.summary));
+    }
+    os.list_provider_profiles()
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(e.to_string()))
 }
 
 // ---------------------------------------------------------------- sandbox profiles
@@ -658,6 +1208,8 @@ pub struct UpsertSandboxProfileReq {
     pub cpu: Option<String>,
     #[serde(default)]
     pub memory: Option<String>,
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 async fn upsert_sandbox_profile(
@@ -672,6 +1224,7 @@ async fn upsert_sandbox_profile(
             policy: req.policy,
             cpu: req.cpu,
             memory: req.memory,
+            engine: req.engine,
         })
         .map_err(ApiError)?,
     ))
@@ -1750,6 +2303,7 @@ mod tests {
                 policy: "version: 1\n# api-test\n".into(),
                 cpu: Some("2".into()),
                 memory: Some("4Gi".into()),
+                engine: None,
             }),
         )
         .await
@@ -1773,6 +2327,7 @@ mod tests {
                 policy: "version: 1\n# api-test\n".into(),
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
+                engine: None,
             }),
         )
         .await
@@ -1791,6 +2346,7 @@ mod tests {
                 policy: "version: 1\n# api-test-updated\n".into(),
                 cpu: Some("8".into()),
                 memory: Some("32Gi".into()),
+                engine: None,
             }),
         )
         .await
@@ -1885,6 +2441,7 @@ mod tests {
                 policy: "policy.yaml".into(),
                 cpu: None,
                 memory: None,
+                engine: None,
             }),
         )
         .await
@@ -1904,6 +2461,7 @@ mod tests {
                 policy: "policy.yaml".into(),
                 cpu: None,
                 memory: None,
+                engine: None,
             }),
         )
         .await
@@ -1973,7 +2531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openshell_status_reports_cli_missing_for_bad_binary() {
+    async fn openshell_status_not_configured_without_endpoint() {
         let path = std::env::temp_dir().join(format!(
             "honr-test-api-os-miss-{}.json",
             std::time::SystemTime::now()
@@ -1985,29 +2543,18 @@ mod tests {
             crate::schema::Schema::default(),
             path,
         ));
-        let Json(saved) = put_openshell(
-            AxState(b.clone()),
-            Json(OpenShellSettings {
-                binary_path: Some("/nonexistent/honr-openshell-missing-bin".into()),
-            }),
-        )
-        .await;
-        assert_eq!(
-            saved.binary_path.as_deref(),
-            Some("/nonexistent/honr-openshell-missing-bin")
-        );
         let Json(st) = openshell_status(AxState(b.clone())).await;
         assert!(!st.healthy);
-        assert!(st.cli_missing, "summary={}", st.summary);
+        assert!(st.not_configured, "summary={}", st.summary);
         assert!(
-            st.summary.contains("not found") || st.summary.contains("CLI"),
+            st.summary.contains("endpoint") || st.summary.contains("not configured"),
             "summary={}",
             st.summary
         );
     }
 
     #[tokio::test]
-    async fn openshell_status_healthy_when_binary_exits_zero() {
+    async fn openshell_status_healthy_when_injected_mock_ok() {
         let path = std::env::temp_dir().join(format!(
             "honr-test-api-os-ok-{}.json",
             std::time::SystemTime::now()
@@ -2015,38 +2562,23 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let b = std::sync::Arc::new(crate::store::Board::new(
-            crate::schema::Schema::default(),
-            path,
+        let mut board = crate::store::Board::new(crate::schema::Schema::default(), path);
+        board.openshell = Some(crate::openshell::OpenShell::mock(
+            |_| crate::openshell::Output {
+                code: 0,
+                stdout: "Connected".into(),
+                stderr: String::new(),
+            },
+            std::time::Duration::from_secs(5),
         ));
-        // `true` ignores argv and exits 0 — stands in for a healthy gateway CLI.
-        let _ = put_openshell(
-            AxState(b.clone()),
-            Json(OpenShellSettings {
-                binary_path: Some("true".into()),
-            }),
-        )
-        .await;
+        let b = std::sync::Arc::new(board);
         let Json(st) = openshell_status(AxState(b.clone())).await;
         assert!(st.healthy, "summary={}", st.summary);
-        assert!(!st.cli_missing);
-        assert_eq!(st.binary, "true");
-
-        // Clear override → default `openshell` name is what status reports as binary.
-        let _ = put_openshell(
-            AxState(b.clone()),
-            Json(OpenShellSettings {
-                binary_path: None,
-            }),
-        )
-        .await;
-        let Json(cfg) = get_openshell(AxState(b.clone())).await;
-        assert!(cfg.binary_path.is_none());
-        assert_eq!(b.openshell_bin(), crate::openshell::DEFAULT_BIN);
+        assert!(!st.not_configured);
     }
 
     #[tokio::test]
-    async fn openshell_status_unhealthy_when_binary_exits_nonzero() {
+    async fn openshell_status_unhealthy_when_injected_mock_fails() {
         let path = std::env::temp_dir().join(format!(
             "honr-test-api-os-bad-{}.json",
             std::time::SystemTime::now()
@@ -2054,20 +2586,143 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        let mut board = crate::store::Board::new(crate::schema::Schema::default(), path);
+        board.openshell = Some(crate::openshell::OpenShell::mock(
+            |_| crate::openshell::Output {
+                code: 1,
+                stdout: String::new(),
+                stderr: "gateway unreachable".into(),
+            },
+            std::time::Duration::from_secs(5),
+        ));
+        let b = std::sync::Arc::new(board);
+        let Json(st) = openshell_status(AxState(b.clone())).await;
+        assert!(!st.healthy);
+        assert!(!st.not_configured);
+    }
+
+    #[tokio::test]
+    async fn openshell_put_seals_mtls_and_never_echoes_pems() {
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-api-os-mtls-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let key_path = dir.join("master.key");
+        // Share the secrets test lock — HONR_MASTER_KEY* is process-global.
+        let _env = crate::secrets::master_key_env::Guard::with_key_path(&key_path);
+
+        let path = dir.join("board.json");
         let b = std::sync::Arc::new(crate::store::Board::new(
             crate::schema::Schema::default(),
             path,
         ));
-        let _ = put_openshell(
+        let Json(saved) = put_openshell(
             AxState(b.clone()),
             Json(OpenShellSettings {
-                binary_path: Some("false".into()),
+                gateway_endpoint: Some("https://127.0.0.1:17670".into()),
+                ca_pem: Some(
+                    "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n".into(),
+                ),
+                client_cert_pem: Some(
+                    "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----\n".into(),
+                ),
+                client_key_pem: Some(
+                    "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----\n".into(),
+                ),
+                ..Default::default()
             }),
         )
-        .await;
-        let Json(st) = openshell_status(AxState(b.clone())).await;
-        assert!(!st.healthy);
-        assert!(!st.cli_missing);
+        .await
+        .expect("put mtls");
+        assert_eq!(
+            saved.gateway_endpoint.as_deref(),
+            Some("https://127.0.0.1:17670")
+        );
+        assert!(saved.mtls.complete);
+        assert!(saved.ca_pem.is_none());
+        assert!(saved.client_cert_pem.is_none());
+        assert!(saved.client_key_pem.is_none());
+        let sealed = b.openshell_mtls_sealed().expect("sealed stored");
+        assert!(!sealed.contains("BEGIN"));
+        let Json(got) = get_openshell(AxState(b.clone())).await;
+        assert!(got.mtls.complete);
+        assert!(got.ca_pem.is_none());
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn openshell_providers_create_list_never_echo_secrets_and_sync_delete() {
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-api-os-providers-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let key_path = dir.join("master.key");
+        let _env = crate::secrets::master_key_env::Guard::with_key_path(&key_path);
+
+        let path = dir.join("board.json");
+        let b = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+
+        let mut creds = BTreeMap::new();
+        creds.insert("GITHUB_TOKEN".into(), "ghp_never_echo_me".into());
+        let Json(created) = create_openshell_provider(
+            AxState(b.clone()),
+            Json(OpenShellProviderWrite {
+                name: "gh-clankr".into(),
+                provider_type: "github".into(),
+                config: BTreeMap::new(),
+                credentials: Some(creds),
+                attach_to_sandboxes: true,
+                refresh: None,
+            }),
+        )
+        .await
+        .expect("create provider");
+        assert_eq!(created.name, "gh-clankr");
+        assert_eq!(created.provider_type, "github");
+        assert!(created.has_credentials);
+        assert_eq!(created.credential_keys, vec!["GITHUB_TOKEN".to_string()]);
+        let created_json = serde_json::to_string(&created).expect("json");
+        assert!(
+            !created_json.contains("ghp_never_echo_me"),
+            "create must not echo secrets: {created_json}"
+        );
+
+        let Json(listed) = list_openshell_providers(AxState(b.clone())).await;
+        assert_eq!(listed.providers.len(), 1);
+        let listed_json = serde_json::to_string(&listed).expect("list json");
+        assert!(!listed_json.contains("ghp_never_echo_me"));
+        assert!(!listed.gateway_reachable);
+
+        let Json(synced) = sync_openshell_providers(AxState(b.clone())).await;
+        // Gateway not configured — sync records an error but desired state remains.
+        assert!(synced.applied.is_empty());
+        assert_eq!(synced.errors.len(), 1);
+        assert_eq!(synced.errors[0].name, "gh-clankr");
+
+        assert_eq!(
+            delete_openshell_provider(AxState(b.clone()), Path("gh-clankr".into()))
+                .await
+                .expect("delete"),
+            StatusCode::NO_CONTENT
+        );
+        let Json(after) = list_openshell_providers(AxState(b.clone())).await;
+        assert!(after.providers.is_empty());
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -2082,28 +2737,16 @@ mod tests {
         let mut schema = crate::schema::Schema::default();
         schema.execution.agents.enabled = true;
         schema.execution.agents.engine = "cursor".into();
-        schema.execution.agents.providers = vec!["yaml-provider".into()];
-        schema.execution.agents.vertex.project = "yaml-proj".into();
-        schema.execution.agents.vertex.location = "global".into();
-        schema.execution.agents.vertex.model = "yaml-model".into();
         let b = std::sync::Arc::new(crate::store::Board::new(schema, path));
 
         let Json(seeded) = get_agent_runtime(AxState(b.clone())).await;
         assert_eq!(seeded.engine, "cursor");
-        assert_eq!(seeded.providers, vec!["yaml-provider".to_string()]);
-        assert_eq!(seeded.vertex.project, "yaml-proj");
 
         let Json(saved) = put_agent_runtime(
             AxState(b.clone()),
             Json(crate::model::AgentRuntimeConfig {
                 enabled: true,
                 engine: "agy".into(),
-                providers: vec!["vertex".into(), "gh-bot".into()],
-                vertex: crate::model::AgentRuntimeVertex {
-                    project: "settings-proj".into(),
-                    location: "us-east5".into(),
-                    model: "claude-opus-5".into(),
-                },
                 max_concurrent: 1,
                 agent_timeout_secs: 600,
                 max_attempts: 2,
@@ -2112,17 +2755,13 @@ mod tests {
         )
         .await;
         assert_eq!(saved.engine, "agy");
-        assert_eq!(saved.vertex.location, "us-east5");
-        assert_eq!(saved.providers, vec!["vertex".to_string(), "gh-bot".to_string()]);
+        assert_eq!(saved.max_concurrent, 1);
 
         let Json(again) = get_agent_runtime(AxState(b.clone())).await;
         assert_eq!(again, saved);
 
         let effective = b.effective_agents();
         assert_eq!(effective.engine, "agy");
-        assert_eq!(effective.providers, vec!["vertex".to_string(), "gh-bot".to_string()]);
-        assert_eq!(effective.vertex.location, "us-east5");
-        assert_eq!(effective.vertex.project, "settings-proj");
         assert_eq!(effective.agent_timeout_secs, 600);
     }
 }

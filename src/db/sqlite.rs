@@ -2,14 +2,17 @@
 
 use super::codec::{
     item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME, META_DEFAULT_SANDBOX_PROFILE_ID,
-    META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_BIN, META_SANDBOX_PROFILES,
+    META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_BIN, META_OPENSHELL_GATEWAY_ENDPOINT,
+    META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS, META_SANDBOX_PROFILES,
     META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
-use crate::model::{ItemId, SandboxProfile, WorkItem, WorkspaceBinding};
-use crate::model::AgentRuntimeConfig;
+use crate::model::{
+    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, SandboxProfile, WorkItem,
+    WorkspaceBinding,
+};
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -61,7 +64,10 @@ impl SqliteBoardStore {
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
         let openshell_bin = self.load_openshell_bin().await?;
+        let openshell_gateway_endpoint = self.load_openshell_gateway_endpoint().await?;
+        let openshell_mtls_sealed = self.load_openshell_mtls_sealed().await?;
         let agent_runtime = self.load_agent_runtime().await?;
+        let openshell_providers = self.load_openshell_providers().await?;
         let mut state = BoardState {
             next_id,
             items,
@@ -70,7 +76,10 @@ impl SqliteBoardStore {
             default_sandbox_profile_id,
             workspace,
             openshell_bin,
+            openshell_gateway_endpoint,
+            openshell_mtls_sealed,
             agent_runtime,
+            openshell_providers,
             agent_logs: BTreeMap::new(),
             ..Default::default()
         };
@@ -148,12 +157,27 @@ impl SqliteBoardStore {
             state.openshell_bin.as_deref().unwrap_or(""),
         )
         .await?;
+        set_meta_tx(
+            &mut tx,
+            META_OPENSHELL_GATEWAY_ENDPOINT,
+            state.openshell_gateway_endpoint.as_deref().unwrap_or(""),
+        )
+        .await?;
+        set_meta_tx(
+            &mut tx,
+            META_OPENSHELL_MTLS_SEALED,
+            state.openshell_mtls_sealed.as_deref().unwrap_or(""),
+        )
+        .await?;
         let agent_runtime_json = match &state.agent_runtime {
             None => String::new(),
             Some(rt) => serde_json::to_string(rt)
                 .map_err(|e| StoreError::Query(format!("serialize agent_runtime: {e}")))?,
         };
         set_meta_tx(&mut tx, META_AGENT_RUNTIME, &agent_runtime_json).await?;
+        let providers_json = serde_json::to_string(&state.openshell_providers)
+            .map_err(|e| StoreError::Query(format!("serialize openshell_providers: {e}")))?;
+        set_meta_tx(&mut tx, META_OPENSHELL_PROVIDERS, &providers_json).await?;
 
         tx.commit()
             .await
@@ -221,12 +245,37 @@ impl SqliteBoardStore {
             .filter(|s| !s.is_empty()))
     }
 
+    async fn load_openshell_gateway_endpoint(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .meta_get(META_OPENSHELL_GATEWAY_ENDPOINT)
+            .await?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_openshell_mtls_sealed(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .meta_get(META_OPENSHELL_MTLS_SEALED)
+            .await?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
+    }
+
     async fn load_agent_runtime(&self) -> Result<Option<AgentRuntimeConfig>, StoreError> {
         match self.meta_get(META_AGENT_RUNTIME).await? {
             None => Ok(None),
             Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(None),
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode agent_runtime: {e}"))),
+        }
+    }
+
+    async fn load_openshell_providers(&self) -> Result<Vec<OpenShellProviderDesired>, StoreError> {
+        match self.meta_get(META_OPENSHELL_PROVIDERS).await? {
+            None => Ok(Vec::new()),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(Vec::new()),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode openshell_providers: {e}"))),
         }
     }
 }
@@ -848,6 +897,7 @@ mod tests {
                 policy: "version: 1\n# sqlite-roundtrip\n".into(),
                 cpu: Some("2".into()),
                 memory: None,
+                engine: None,
             },
         );
         state.default_sandbox_profile_id = Some("default".into());
@@ -883,12 +933,6 @@ mod tests {
         with_rt.agent_runtime = Some(crate::model::AgentRuntimeConfig {
             enabled: true,
             engine: "agy".into(),
-            providers: vec!["vertex".into(), "gh".into()],
-            vertex: crate::model::AgentRuntimeVertex {
-                project: "demo-proj".into(),
-                location: "us-east5".into(),
-                model: "claude-opus-5".into(),
-            },
             max_concurrent: 1,
             agent_timeout_secs: 900,
             max_attempts: 3,
@@ -899,8 +943,7 @@ mod tests {
         let rt = rt_again.agent_runtime.expect("agent_runtime round-trip");
         assert!(rt.enabled);
         assert_eq!(rt.engine, "agy");
-        assert_eq!(rt.vertex.location, "us-east5");
-        assert_eq!(rt.providers, vec!["vertex".to_string(), "gh".to_string()]);
+        assert_eq!(rt.max_concurrent, 1);
     }
 
     #[tokio::test]

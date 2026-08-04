@@ -8,6 +8,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub type ItemId = u64;
 
@@ -435,31 +436,85 @@ pub struct PlanTaskBrief {
     pub current: bool,
 }
 
-/// Vertex knobs for Settings → Agent runtime (durable board state).
+/// Desired OpenShell provider (Settings → OpenShell → Providers).
+///
+/// Honr is source of truth; Sync/Apply pushes to the gateway via gRPC.
+/// Credential values are sealed — GET APIs expose keys only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentRuntimeVertex {
+pub struct OpenShellProviderDesired {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub provider_type: String,
     #[serde(default)]
-    pub project: String,
-    #[serde(default = "default_runtime_location")]
-    pub location: String,
-    #[serde(default = "default_runtime_model")]
-    pub model: String,
+    pub config: BTreeMap<String, String>,
+    /// Sealed JSON object of credential key → value (never returned on GET).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_sealed: Option<String>,
+    /// Plain keys present in the sealed credentials blob (safe to return).
+    #[serde(default)]
+    pub credential_keys: Vec<String>,
+    /// Optional gateway-owned refresh bootstrap (e.g. gcloud ADC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<OpenShellProviderRefreshDesired>,
+    /// When true, sandbox create attaches this provider by name.
+    #[serde(default = "default_true")]
+    pub attach_to_sandboxes: bool,
 }
 
-fn default_runtime_location() -> String {
-    "global".into()
-}
-fn default_runtime_model() -> String {
-    "claude-opus-5".into()
+fn default_true() -> bool {
+    true
 }
 
-impl Default for AgentRuntimeVertex {
-    fn default() -> Self {
-        Self {
-            project: String::new(),
-            location: default_runtime_location(),
-            model: default_runtime_model(),
+/// Refresh material for [`OpenShellProviderDesired`] (Vertex ADC, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenShellProviderRefreshDesired {
+    /// Provider credential env key that refresh writes into (e.g. `GOOGLE_VERTEX_AI_TOKEN`).
+    pub credential_key: String,
+    /// Proto strategy name: `oauth2_refresh_token`, `google_service_account_jwt`, …
+    pub strategy: String,
+    /// Sealed JSON object of refresh material key → value.
+    pub material_sealed: String,
+    /// Material keys treated as secret by the gateway.
+    #[serde(default)]
+    pub secret_material_keys: Vec<String>,
+}
+
+impl OpenShellProviderDesired {
+    pub fn normalized(mut self) -> Self {
+        self.name = self.name.trim().to_string();
+        self.provider_type = self.provider_type.trim().to_string();
+        self.config = self
+            .config
+            .into_iter()
+            .map(|(k, v)| (k.trim().to_string(), v))
+            .filter(|(k, _)| !k.is_empty())
+            .collect();
+        self.credential_keys = self
+            .credential_keys
+            .into_iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+        self.credential_keys.sort();
+        self.credential_keys.dedup();
+        if let Some(ref mut r) = self.refresh {
+            r.credential_key = r.credential_key.trim().to_string();
+            r.strategy = r.strategy.trim().to_string();
+            r.secret_material_keys = r
+                .secret_material_keys
+                .iter()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect();
         }
+        self
+    }
+
+    pub fn has_credentials(&self) -> bool {
+        self.credentials_sealed
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || self.refresh.is_some()
     }
 }
 
@@ -475,11 +530,6 @@ pub struct AgentRuntimeConfig {
     /// Primary agent CLI (`cursor`, `agy`, or `claude`).
     #[serde(default = "default_runtime_engine")]
     pub engine: String,
-    /// OpenShell `--provider` names (must match local gateway registrations).
-    #[serde(default)]
-    pub providers: Vec<String>,
-    #[serde(default)]
-    pub vertex: AgentRuntimeVertex,
     #[serde(default = "default_runtime_concurrent")]
     pub max_concurrent: usize,
     #[serde(default = "default_runtime_timeout")]
@@ -489,10 +539,6 @@ pub struct AgentRuntimeConfig {
     /// Branch / sandbox name stem (default `honr` → `honr/card-N`).
     #[serde(default = "default_runtime_branch_prefix")]
     pub branch_prefix: String,
-    /// Install-wide briefing quality gates (shell commands). Empty = none.
-    /// Per-repo gates also belong in Project `project_prompt`.
-    #[serde(default)]
-    pub quality_gates: Vec<String>,
 }
 
 fn default_runtime_engine() -> String {
@@ -516,54 +562,22 @@ impl Default for AgentRuntimeConfig {
         Self {
             enabled: false,
             engine: default_runtime_engine(),
-            providers: Vec::new(),
-            vertex: AgentRuntimeVertex::default(),
             max_concurrent: default_runtime_concurrent(),
             agent_timeout_secs: default_runtime_timeout(),
             max_attempts: default_runtime_attempts(),
             branch_prefix: default_runtime_branch_prefix(),
-            quality_gates: Vec::new(),
         }
     }
 }
 
 impl AgentRuntimeConfig {
-    /// Trim string fields; drop blank provider names.
+    /// Trim string fields; normalize branch prefix and counters.
     pub fn normalized(mut self) -> Self {
         self.engine = self.engine.trim().to_string();
         if self.engine.is_empty() {
             self.engine = default_runtime_engine();
         }
-        self.providers = self
-            .providers
-            .into_iter()
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty())
-            .collect();
-        self.vertex.project = self.vertex.project.trim().to_string();
-        self.vertex.location = {
-            let loc = self.vertex.location.trim();
-            if loc.is_empty() {
-                default_runtime_location()
-            } else {
-                loc.to_string()
-            }
-        };
-        self.vertex.model = {
-            let m = self.vertex.model.trim();
-            if m.is_empty() {
-                default_runtime_model()
-            } else {
-                m.to_string()
-            }
-        };
         self.branch_prefix = crate::schema::normalize_branch_prefix(&self.branch_prefix);
-        self.quality_gates = self
-            .quality_gates
-            .into_iter()
-            .map(|g| g.trim().to_string())
-            .filter(|g| !g.is_empty())
-            .collect();
         if self.max_concurrent == 0 {
             self.max_concurrent = 1;
         }
@@ -663,7 +677,7 @@ impl WorkspaceBinding {
 }
 
 /// Named create-spec for OpenShell sandboxes. Board-state catalog entries;
-/// YAML `execution.agents` image/policy/cpu/memory is seed/fallback only.
+/// YAML `execution.agents` image/policy/cpu/memory/engine is seed/fallback only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxProfile {
     pub id: String,
@@ -677,6 +691,10 @@ pub struct SandboxProfile {
     pub cpu: Option<String>,
     #[serde(default)]
     pub memory: Option<String>,
+    /// Agent CLI for cards using this profile (`cursor`, `agy`, `claude`).
+    /// When unset, claim/run falls back to Settings → Agent runtime engine.
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 /// Stable id slug from a display name. Lowercase ASCII alphanumerics; runs of
@@ -712,6 +730,8 @@ pub struct ResolvedSandboxCreate {
     pub policy: String,
     pub cpu: Option<String>,
     pub memory: Option<String>,
+    /// Profile engine when set; YAML fallback carries `agents.engine`.
+    pub engine: Option<String>,
     /// Catalog profile that won, if any. `None` means YAML fallback.
     pub profile_id: Option<String>,
 }
@@ -723,17 +743,32 @@ impl ResolvedSandboxCreate {
             policy: p.policy.clone(),
             cpu: p.cpu.clone(),
             memory: p.memory.clone(),
+            engine: p
+                .engine
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
             profile_id: Some(p.id.clone()),
         }
     }
 
     pub fn from_agents(agents: &crate::schema::AgentConfig) -> Self {
+        let engine = {
+            let e = agents.engine.trim();
+            if e.is_empty() {
+                None
+            } else {
+                Some(e.to_string())
+            }
+        };
         Self {
             image: agents.image.clone(),
             // honr.yaml still names a path for bootstrap; profiles store content.
             policy: resolve_policy_yaml(&agents.policy),
             cpu: agents.cpu.clone(),
             memory: agents.memory.clone(),
+            engine,
             profile_id: None,
         }
     }

@@ -38,30 +38,14 @@ if the CLI is missing). Optional binary path override lives there when
 Default local gateway port is often `17670`: deliberately not honr’s `8080`.
 Your install may differ; trust `openshell status`, not a hardcoded URL.
 
-## 3. Providers
+## 3. Providers (temporarily out of honr)
 
-```bash
-openshell provider list        # expect your Vertex (or other) + GitHub providers
-```
+Honr no longer stores OpenShell provider names or Vertex/GitHub secrets in
+yaml or Settings. Sandbox create passes an empty provider list until providers
+can be created and attached entirely through the honr UI/API.
 
-Provider **names** in `honr.yaml` / Settings Agent runtime must match what you
-registered on **this** gateway. Example create recipes:
-
-```bash
-openshell provider create --name vertex    --type google-vertex-ai --from-gcloud-adc
-openshell provider update  vertex --config VERTEX_AI_PROJECT_ID=<your-gcp-project> \
-                                  --config VERTEX_AI_LOCATION=global
-openshell provider create --name gh-bot --type github --credential GITHUB_TOKEN
-```
-
-The GitHub credential key **must** be named `GITHUB_TOKEN` or `GH_TOKEN`: the
-profile matches on the name. Prefer a fine-grained PAT scoped to the repos you
-actually dispatch against before agents run unattended.
-
-Claude runs on **Google Vertex** in the worked example. There is no
-`ANTHROPIC_API_KEY`. Auth is `CLAUDE_CODE_USE_VERTEX=1` plus gcloud ADC. Region
-matters (`global` is the combination that has worked); see [Sandbox](sandbox.md)
-for how a sandboxed agent gets a credential it cannot read.
+Until that lands, wipe and recreate gateway providers yourself if you need a
+manual smoke test — but do not expect honr to wire them.
 
 ## 4. Sandbox image
 
@@ -74,7 +58,7 @@ docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 
 From the repo root, not `sandbox/`: `Cargo.lock` and `web/package-lock.json`
 must be in context. Other product repos may use a different image via
-Settings → Sandboxes.
+Settings → OpenShell → Profiles.
 
 Then flip `execution.agents.enabled: true` in `honr.yaml` and **restart** -
 config is read once at startup; there is no hot reload and no runtime toggle.
@@ -86,22 +70,28 @@ config is read once at startup; there is no hot reload and no runtime toggle.
 ## Sandbox profile resolution
 
 When the supervisor creates an OpenShell sandbox for a card, create knobs
-(`--from` image, policy YAML, cpu, memory) resolve in this order:
+(`--from` image, policy YAML, cpu, memory) and the agent engine resolve in this
+order:
 
 1. **Project override**: `sandbox_profile_id` on the containing Project, if set
    and present in the board profile catalog
 2. **Global default**: `default_sandbox_profile_id` on durable board state
 3. **YAML fallback**: `execution.agents` `image` / `policy` / `cpu` / `memory`
-   in `honr.yaml` (also used to seed the catalog when it is empty at load)
+   / `engine` in `honr.yaml` (also used to seed the catalog when it is empty at
+   load)
 
 Profile `policy` is **inline YAML text** stored on the board (edited in Settings
 as a textarea). At create, the supervisor writes a temp file for OpenShell's
 `--policy` flag. The host path in `execution.agents.policy` is seed/fallback
 only: not the catalog source of truth.
 
-Profiles are managed via Settings (REST: `/api/sandbox-profiles`). Process
-knobs (auth, repo, engine, concurrency) stay in YAML and are not part of a
-profile.
+**Engine** is a field on the sandbox profile (Settings → OpenShell → Profiles).
+When a profile omits it, claim/run falls back to Settings → Agent runtime
+`engine`. Per-card engine overrides are ignored.
+
+Profiles are managed under Settings → OpenShell → Profiles (REST:
+`/api/sandbox-profiles`). Concurrency, timeouts, and the fallback engine live
+under Agent runtime.
 
 ## When something breaks
 

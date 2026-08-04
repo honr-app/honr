@@ -93,11 +93,10 @@ as the card failing — see `is_infrastructure`.
 
 ## Environment
 
-Claude runs on **Google Vertex**, not the first-party API — there is no
-`ANTHROPIC_API_KEY`. Auth is `CLAUDE_CODE_USE_VERTEX=1` plus gcloud ADC. The
-combination that works is in `honr.yaml` under `execution.agents.vertex`;
-[`docs/sandbox.md`](docs/sandbox.md) explains why the region matters and how a
-sandboxed agent gets a credential it cannot read.
+Agent model / Vertex-style credentials are no longer configured in
+`honr.yaml` or Settings → Agent runtime. They will come back through OpenShell
+configuration managed in honr. Until then, sandboxed Claude/agy runs that
+depended on Vertex env injection are expected to fail.
 
 GitHub work uses a bot account, configured as `execution.agents.repo.fork`.
 Its token currently carries broad `repo` scope across that account — a

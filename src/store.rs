@@ -43,9 +43,18 @@ pub struct BoardState {
     /// Optional OpenShell CLI path override (Settings → OpenShell). Empty/None → `openshell` on PATH.
     #[serde(default)]
     pub openshell_bin: Option<String>,
+    /// Gateway URL for direct mTLS clients (Settings → OpenShell). Not secret.
+    #[serde(default)]
+    pub openshell_gateway_endpoint: Option<String>,
+    /// Sealed mTLS PEMs (DB ciphertext). Decrypt only via `secrets`; never expose on GET.
+    #[serde(default)]
+    pub openshell_mtls_sealed: Option<String>,
     /// Process agent knobs (Settings → Agent runtime). Seeded from yaml; Board SoT after.
     #[serde(default)]
     pub agent_runtime: Option<AgentRuntimeConfig>,
+    /// Desired OpenShell providers (Settings → OpenShell → Providers). Board SoT.
+    #[serde(default)]
+    pub openshell_providers: Vec<OpenShellProviderDesired>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
     /// Parent → child ids. Rebuilt after load; maintained on create/delete.
@@ -69,7 +78,10 @@ impl BoardState {
             default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
             workspace: self.workspace.clone(),
             openshell_bin: self.openshell_bin.clone(),
+            openshell_gateway_endpoint: self.openshell_gateway_endpoint.clone(),
+            openshell_mtls_sealed: self.openshell_mtls_sealed.clone(),
             agent_runtime: self.agent_runtime.clone(),
+            openshell_providers: self.openshell_providers.clone(),
             agent_logs: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
             ids_by_state: HashMap::new(),
@@ -439,7 +451,8 @@ impl Board {
             store: None,
             started_at: Utc::now(),
             beads,
-            openshell: Some(crate::openshell::OpenShell::default()),
+            // None → build from Settings (endpoint + sealed mTLS). Tests inject mocks.
+            openshell: None,
             in_flight_github_pushes: Mutex::new(std::collections::HashMap::new()),
             pushed_beads_ids: RwLock::new(std::collections::HashSet::new()),
         }
@@ -930,7 +943,7 @@ impl Board {
         self.emit(&item);
 
         if let Some(env) = env_to_delete {
-            let os = self.openshell.clone().unwrap_or_default();
+            let os = self.openshell_client();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     let _ = os.delete(&env).await;
@@ -1106,7 +1119,7 @@ impl Board {
     /// Seed the Project's claimable Initial plan Task bound to `repo`.
     ///
     /// `create` no longer auto-seeds: remotes must be known before planning so
-    /// the supervisor can pre-clone. Refuses incomplete `upstream` and refuses
+    /// the agent can clone from a named target. Refuses incomplete `upstream` and refuses
     /// when an Initial plan already exists under the Project.
     pub fn init_plan(
         &self,
@@ -2186,6 +2199,14 @@ impl Board {
             return false;
         }
         let id = "default".to_string();
+        let engine = {
+            let e = agents.engine.trim();
+            if e.is_empty() {
+                None
+            } else {
+                Some(e.to_string())
+            }
+        };
         s.sandbox_profiles.insert(
             id.clone(),
             SandboxProfile {
@@ -2195,6 +2216,7 @@ impl Board {
                 policy: resolve_policy_yaml(&agents.policy),
                 cpu: agents.cpu.clone(),
                 memory: agents.memory.clone(),
+                engine,
             },
         );
         s.default_sandbox_profile_id = Some(id);
@@ -2273,18 +2295,8 @@ impl Board {
 
     // ------------------------------------------------ OpenShell connectivity (board state)
 
-    /// Effective OpenShell CLI binary: Settings override, else `openshell`.
-    pub fn openshell_bin(&self) -> String {
-        self.state
-            .read()
-            .openshell_bin
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| crate::openshell::DEFAULT_BIN.to_string())
-    }
-
-    /// Optional override as stored (None / empty → use PATH default).
+    /// Optional legacy CLI binary override (unused; kept so older board rows load).
+    #[allow(dead_code)]
     pub fn openshell_bin_override(&self) -> Option<String> {
         self.state
             .read()
@@ -2294,23 +2306,126 @@ impl Board {
             .filter(|s| !s.is_empty())
     }
 
-    /// Persist optional OpenShell binary path. Empty clears the override.
-    pub fn set_openshell_bin(&self, bin: Option<String>) -> Option<String> {
-        let stored = bin
+    pub fn openshell_gateway_endpoint(&self) -> Option<String> {
+        self.state
+            .read()
+            .openshell_gateway_endpoint
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn set_openshell_gateway_endpoint(&self, endpoint: Option<String>) -> Option<String> {
+        let stored = endpoint
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         {
             let mut s = self.state.write();
-            s.openshell_bin = stored.clone();
+            s.openshell_gateway_endpoint = stored.clone();
         }
         self.dirty.store(true, Ordering::Relaxed);
         stored
     }
 
-    /// Client using the board's configured binary (Settings override or default).
+    pub fn openshell_mtls_sealed(&self) -> Option<String> {
+        self.state
+            .read()
+            .openshell_mtls_sealed
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Replace or clear the sealed mTLS blob. `None` / empty clears.
+    pub fn set_openshell_mtls_sealed(&self, sealed: Option<String>) -> Option<String> {
+        let stored = sealed
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        {
+            let mut s = self.state.write();
+            s.openshell_mtls_sealed = stored.clone();
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    pub fn openshell_mtls_status(&self) -> crate::secrets::OpenShellMtlsStatus {
+        crate::secrets::mtls_status_from_sealed(self.openshell_mtls_sealed().as_deref())
+    }
+
+    /// Desired OpenShell providers (credentials sealed).
+    pub fn openshell_providers(&self) -> Vec<OpenShellProviderDesired> {
+        self.state.read().openshell_providers.clone()
+    }
+
+    /// Replace the full desired-provider list.
+    #[allow(dead_code)]
+    pub fn set_openshell_providers(&self, providers: Vec<OpenShellProviderDesired>) {
+        let stored: Vec<_> = providers.into_iter().map(|p| p.normalized()).collect();
+        {
+            let mut s = self.state.write();
+            s.openshell_providers = stored;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Upsert one desired provider by name.
+    pub fn upsert_openshell_provider(&self, provider: OpenShellProviderDesired) -> OpenShellProviderDesired {
+        let stored = provider.normalized();
+        {
+            let mut s = self.state.write();
+            if let Some(slot) = s
+                .openshell_providers
+                .iter_mut()
+                .find(|p| p.name == stored.name)
+            {
+                *slot = stored.clone();
+            } else {
+                s.openshell_providers.push(stored.clone());
+            }
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    /// Remove a desired provider by name. Returns true when something was removed.
+    pub fn delete_openshell_provider(&self, name: &str) -> bool {
+        let name = name.trim();
+        let removed = {
+            let mut s = self.state.write();
+            let before = s.openshell_providers.len();
+            s.openshell_providers.retain(|p| p.name != name);
+            s.openshell_providers.len() != before
+        };
+        if removed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        removed
+    }
+
+    /// Provider names with `attach_to_sandboxes` for sandbox create.
+    pub fn sandbox_attach_provider_names(&self) -> Vec<String> {
+        self.state
+            .read()
+            .openshell_providers
+            .iter()
+            .filter(|p| p.attach_to_sandboxes)
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    /// Client using Settings gateway endpoint + sealed mTLS (or an injected mock).
     pub fn openshell_client(&self) -> crate::openshell::OpenShell {
+        if let Some(os) = &self.openshell {
+            return os.clone();
+        }
+        let mtls = self
+            .openshell_mtls_sealed()
+            .as_deref()
+            .and_then(|s| crate::secrets::open_mtls(s).ok());
         crate::openshell::OpenShell::new(
-            self.openshell_bin(),
+            self.openshell_gateway_endpoint(),
+            mtls,
             std::time::Duration::from_secs(120),
         )
     }
@@ -2331,17 +2446,10 @@ impl Board {
         s.agent_runtime = Some(AgentRuntimeConfig {
             enabled: agents.enabled,
             engine: agents.engine.clone(),
-            providers: agents.providers.clone(),
-            vertex: AgentRuntimeVertex {
-                project: agents.vertex.project.clone(),
-                location: agents.vertex.location.clone(),
-                model: agents.vertex.model.clone(),
-            },
             max_concurrent: agents.max_concurrent,
             agent_timeout_secs: agents.agent_timeout_secs,
             max_attempts: agents.max_attempts,
             branch_prefix: agents.branch_prefix.clone(),
-            quality_gates: agents.quality_gates.clone(),
         });
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
@@ -2424,17 +2532,10 @@ impl Board {
         };
         cfg.enabled = rt.enabled;
         cfg.engine = rt.engine.clone();
-        cfg.providers = rt.providers.clone();
-        cfg.vertex = crate::schema::VertexConfig {
-            project: rt.vertex.project.clone(),
-            location: rt.vertex.location.clone(),
-            model: rt.vertex.model.clone(),
-        };
         cfg.max_concurrent = rt.max_concurrent;
         cfg.agent_timeout_secs = rt.agent_timeout_secs;
         cfg.max_attempts = rt.max_attempts;
         cfg.branch_prefix = rt.branch_prefix.clone();
-        cfg.quality_gates = rt.quality_gates.clone();
         cfg
     }
 
@@ -2443,7 +2544,7 @@ impl Board {
     /// Resolution order:
     /// 1. `pull_request` base/head (or URL-only same-repo stub)
     /// 2. else Task `repo` binding (durable, set before first claim)
-    /// 3. else `Ok(None)` — supervisor skips pre-clone / empty workdir
+    /// 3. else `Ok(None)` — unbound; briefing tells the agent to escalate or clone from notes
     ///
     /// `Err` only for a malformed `pull_request.url`. No Project product-repo
     /// step; does not invent a bot fork from yaml or Settings.
@@ -2538,6 +2639,10 @@ impl Board {
         let policy = profile.policy;
         let cpu = profile.cpu.filter(|c| !c.trim().is_empty());
         let memory = profile.memory.filter(|m| !m.trim().is_empty());
+        let engine = profile
+            .engine
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty());
         let mut s = self.state.write();
         let id = {
             let trimmed = profile.id.trim();
@@ -2555,6 +2660,7 @@ impl Board {
             policy,
             cpu,
             memory,
+            engine,
         };
         s.sandbox_profiles.insert(stored.id.clone(), stored.clone());
         drop(s);
@@ -2672,6 +2778,28 @@ impl Board {
         }
         drop(s);
         ResolvedSandboxCreate::from_agents(&self.schema.execution.agents)
+    }
+
+    /// Engine for a card at claim/run: sandbox profile engine, else Agent runtime.
+    ///
+    /// Ignores stale `WorkItem.engine` — engine lives on the profile now.
+    pub fn resolve_engine_for_card(&self, item_id: ItemId) -> String {
+        let create = self.resolve_sandbox_create(item_id);
+        if let Some(e) = create
+            .engine
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return e.to_string();
+        }
+        let fallback = self.effective_agents().engine;
+        let t = fallback.trim();
+        if t.is_empty() {
+            "cursor".into()
+        } else {
+            t.to_string()
+        }
     }
 
     // ------------------------------------------------------- the agent verbs
@@ -2972,6 +3100,7 @@ impl Board {
         }
 
         let ctx = self.claim_plan_context(id, &item);
+        let engine = Some(self.resolve_engine_for_card(id));
 
         Ok(ClaimGrant {
             item_id: id,
@@ -2987,7 +3116,7 @@ impl Board {
             notes: item.notes.iter().map(|n| n.text.clone()).collect(),
             lease_expires_at: deadline,
             run_deadline_at: deadline,
-            engine: item.engine.clone(),
+            engine,
         })
     }
 
@@ -3961,7 +4090,7 @@ facts are pasted, then unpark";
             .transition(id, State::Backlog, "human", reason.or(Some("halted".into())))
             .map_err(|e| e.to_string())?;
         if let Some(env) = env_to_delete {
-            let os = self.openshell.clone().unwrap_or_default();
+            let os = self.openshell_client();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     let _ = os.delete(&env).await;
@@ -4001,6 +4130,9 @@ facts are pasted, then unpark";
 
     /// Delete item — removes the item (and its subtree) permanently from the board.
     pub fn delete_item(&self, id: ItemId) -> Result<(), String> {
+        // Build the client before taking the write lock — openshell_client reads
+        // board state, and parking_lot RwLock is not reentrant.
+        let os = self.openshell_client();
         let mut s = self.state.write();
         if !s.items.contains_key(&id) {
             return Err(format!("item #{id} not found"));
@@ -4026,7 +4158,7 @@ facts are pasted, then unpark";
                 let is_initial = it.is_initial_plan_task();
                 let has_gh_url = it.github_issue_url.is_some();
                 let env = it.environment.clone();
-                let os = self.openshell.clone().unwrap_or_default();
+                let os = os.clone();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
                         if let Some(env_name) = env {
@@ -4591,7 +4723,7 @@ facts are pasted, then unpark";
     pub fn snapshot(&self) -> Snapshot {
         let s = self.state.read();
         let now = Utc::now();
-        let items: Vec<WorkItem> = s
+        let mut items: Vec<WorkItem> = s
             .items
             .values()
             .map(|i| {
@@ -4620,6 +4752,11 @@ facts are pasted, then unpark";
         // made the UI show NOT LIVE after Agent runtime landed).
         let agents =
             Self::overlay_agent_runtime(&self.schema.execution.agents, s.agent_runtime.as_ref());
+        drop(s);
+        // Card face engine comes from the sandbox profile, not WorkItem.engine.
+        for item in &mut items {
+            item.engine = Some(self.resolve_engine_for_card(item.id));
+        }
         Snapshot {
             items,
             levels: self.schema.levels.clone(),
@@ -4628,7 +4765,8 @@ facts are pasted, then unpark";
             agent_timeout_secs: agents.agent_timeout_secs,
             seq: self.seq.load(Ordering::Relaxed),
             default_engine: agents.engine,
-            default_model: agents.vertex.model,
+            // Model selection moves to OpenShell-in-honr config; keep empty for UI.
+            default_model: String::new(),
         }
     }
 
@@ -4912,7 +5050,7 @@ facts are pasted, then unpark";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AgentRuntimeConfig, AgentRuntimeVertex, Origin};
+    use crate::model::{AgentRuntimeConfig, Origin};
 
     /// Poll until `pred` succeeds. Prefer this over multi-second sleep loops —
     /// memory beads + Capture remotes usually settle within a few yields.
@@ -9168,15 +9306,10 @@ mod tests {
     fn agents_with_repo() -> AgentConfig {
         AgentConfig {
             enabled: true,
-            providers: vec!["vertex".into(), "gh".into()],
             repo: crate::schema::RepoConfig {
                 upstream: "acme/widgets".into(),
                 fork: "bot/widgets".into(),
                 base: "main".into(),
-            },
-            vertex: crate::schema::VertexConfig {
-                project: "demo".into(),
-                ..Default::default()
             },
             ..Default::default()
         }
@@ -9247,12 +9380,6 @@ mod tests {
         schema.execution.agents = AgentConfig {
             enabled: true,
             engine: "cursor".into(),
-            providers: vec!["vertex".into(), "gh".into()],
-            vertex: crate::schema::VertexConfig {
-                project: "yaml-proj".into(),
-                location: "global".into(),
-                model: "yaml-model".into(),
-            },
             max_concurrent: 2,
             agent_timeout_secs: 1800,
             max_attempts: 3,
@@ -9268,19 +9395,12 @@ mod tests {
         assert!(b.agent_runtime().is_none());
         assert!(b.seed_agent_runtime_from(&b.schema.execution.agents.clone()));
         let seeded = b.agent_runtime().expect("seeded");
-        assert_eq!(seeded.vertex.project, "yaml-proj");
-        assert_eq!(seeded.providers, vec!["vertex".to_string(), "gh".to_string()]);
+        assert_eq!(seeded.engine, "cursor");
         assert!(!b.seed_agent_runtime_if_empty(), "second seed is a no-op");
 
         b.set_agent_runtime(AgentRuntimeConfig {
             enabled: true,
             engine: "agy".into(),
-            providers: vec!["vertex".into(), "gh-bot".into()],
-            vertex: AgentRuntimeVertex {
-                project: "board-proj".into(),
-                location: "us-east5".into(),
-                model: "board-model".into(),
-            },
             max_concurrent: 1,
             agent_timeout_secs: 900,
             max_attempts: 2,
@@ -9288,9 +9408,6 @@ mod tests {
         });
         let eff = b.effective_agents();
         assert_eq!(eff.engine, "agy");
-        assert_eq!(eff.providers, vec!["vertex".to_string(), "gh-bot".to_string()]);
-        assert_eq!(eff.vertex.location, "us-east5");
-        assert_eq!(eff.vertex.project, "board-proj");
         assert_eq!(eff.max_concurrent, 1);
         assert_eq!(eff.agent_timeout_secs, 900);
         // Image / policy still from yaml (sandbox profiles own create-spec).
@@ -9563,10 +9680,10 @@ mod tests {
         assert!(b.resolve_card_repo(p.id).unwrap().is_none());
     }
 
-    /// `run_card` assigns `resolve_card_repo` into `cfg.repo` and pre-clones
-    /// only when `is_complete()` — Task binding on first claim must satisfy that.
+    /// `run_card` assigns `resolve_card_repo` into `cfg.repo` for the briefing;
+    /// Task binding on first claim must be `is_complete()` so remotes are named.
     #[test]
-    fn resolve_card_repo_task_binding_is_complete_for_pre_clone() {
+    fn resolve_card_repo_task_binding_is_complete_for_agent_clone() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -9607,11 +9724,11 @@ mod tests {
         }
         assert!(
             agents.repo.is_complete(),
-            "supervisor pre-clone gate (is_complete) must pass for Task repo"
+            "agent-clone remotes gate (is_complete) must pass for Task repo"
         );
         assert_eq!(agents.repo.clone_target(), "acme/widgets");
 
-        // Unbound sibling → empty workdir path (skip pre-clone).
+        // Unbound sibling → no remotes in briefing (agent escalates or uses notes).
         let u = b
             .create(
                 Some(p.id),
@@ -9981,6 +10098,7 @@ mod tests {
                 policy: SEED_POLICY_YAML.into(),
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
+                engine: None,
             })
             .expect("upsert heavy");
         b.set_default_sandbox_profile(&heavy.id)
@@ -10027,6 +10145,7 @@ mod tests {
             policy: SEED_POLICY_YAML.into(),
             cpu: None,
             memory: None,
+            engine: None,
         })
         .unwrap();
 
@@ -10075,6 +10194,7 @@ mod tests {
             policy: SEED_POLICY_YAML.into(),
             cpu: Some("1".into()),
             memory: None,
+            engine: None,
         })
         .unwrap();
         b.set_default_sandbox_profile("ci").unwrap();
@@ -10152,6 +10272,7 @@ mod tests {
             policy: def_policy.into(),
             cpu: Some("2".into()),
             memory: None,
+            engine: None,
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -10167,6 +10288,7 @@ mod tests {
             policy: alt_policy.into(),
             cpu: None,
             memory: Some("8Gi".into()),
+            engine: None,
         })
         .unwrap();
         b.set_project_sandbox_profile(project.id, Some("alt".into()))
@@ -10176,6 +10298,103 @@ mod tests {
         assert_eq!(over.image, "alt-img");
         assert_eq!(over.policy, alt_policy);
         assert_eq!(over.memory.as_deref(), Some("8Gi"));
+    }
+
+    #[test]
+    fn resolve_engine_for_card_profile_wins_over_runtime_and_ignores_item_engine() {
+        let mut schema = Schema::default();
+        schema.execution.agents.engine = "cursor".into();
+        let b = Board::new(
+            schema,
+            std::env::temp_dir().join(format!(
+                "honr-test-engine-resolve-{}.json",
+                std::process::id()
+            )),
+        );
+        b.set_agent_runtime(AgentRuntimeConfig {
+            enabled: true,
+            engine: "cursor".into(),
+            ..Default::default()
+        });
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "img:1".into(),
+            policy: SEED_POLICY_YAML.into(),
+            cpu: None,
+            memory: None,
+            engine: Some("agy".into()),
+        })
+        .unwrap();
+        b.set_default_sandbox_profile("default").unwrap();
+
+        let project = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = b
+            .create(
+                Some(project.id),
+                "T",
+                "do",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        // Stale card-level engine must not win.
+        b.update_item(task.id, None, None, None, Some("claude".into()), None)
+            .unwrap();
+        assert_eq!(b.resolve_engine_for_card(task.id), "agy");
+
+        b.transition(task.id, State::Shaping, "test", None).unwrap();
+        b.transition(task.id, State::Backlog, "test", None).unwrap();
+        let grant = b.claim(task.id, "agent-1", None, 60).unwrap();
+        assert_eq!(grant.engine.as_deref(), Some("agy"));
+    }
+
+    #[test]
+    fn resolve_engine_for_card_falls_back_to_agent_runtime() {
+        let mut schema = Schema::default();
+        schema.execution.agents.engine = "cursor".into();
+        let b = Board::new(
+            schema,
+            std::env::temp_dir().join(format!(
+                "honr-test-engine-fallback-{}.json",
+                std::process::id()
+            )),
+        );
+        b.set_agent_runtime(AgentRuntimeConfig {
+            enabled: true,
+            engine: "claude".into(),
+            ..Default::default()
+        });
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "img:1".into(),
+            policy: SEED_POLICY_YAML.into(),
+            cpu: None,
+            memory: None,
+            engine: None,
+        })
+        .unwrap();
+        b.set_default_sandbox_profile("default").unwrap();
+        let project = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = b
+            .create(
+                Some(project.id),
+                "T",
+                "do",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(b.resolve_engine_for_card(task.id), "claude");
     }
 
     #[test]
@@ -10194,6 +10413,7 @@ mod tests {
                 policy: SEED_POLICY_YAML.into(),
                 cpu: None,
                 memory: None,
+                engine: None,
             })
             .expect("create from name");
         assert_eq!(created.id, "heavy-ci");
@@ -10208,6 +10428,7 @@ mod tests {
                 policy: SEED_POLICY_YAML.into(),
                 cpu: None,
                 memory: None,
+                engine: None,
             })
             .expect("create colliding slug");
         assert_eq!(again.id, "default-2");
@@ -10221,6 +10442,7 @@ mod tests {
                 policy: SEED_POLICY_YAML.into(),
                 cpu: None,
                 memory: None,
+                engine: None,
             })
             .expect("create punctuation name");
         assert_eq!(punct.id, "profile");
@@ -10252,6 +10474,7 @@ mod tests {
             policy: policy_path.to_string_lossy().into(),
             cpu: None,
             memory: None,
+            engine: None,
         })
         .unwrap();
         assert_eq!(b.migrate_sandbox_policies_to_inline(), 1);

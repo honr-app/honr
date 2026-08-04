@@ -54,17 +54,16 @@ type Active = Arc<parking_lot::Mutex<std::collections::HashSet<ItemId>>>;
 type Cooldown = Arc<parking_lot::Mutex<Option<std::time::Instant>>>;
 
 pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
-    let os = Arc::new(board.openshell_client());
     // Durable Settings overlay (seeded from yaml at board load).
     let agents = board.effective_agents();
     if !agents.enabled {
         tracing::info!("execution.agents.enabled = false; board runs with no executor");
-        tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
+        tokio::spawn(sweeper_loop(board, cfg, Arc::default()));
         return;
     }
     if let Err(e) = agents.validate() {
         tracing::error!("agents enabled but misconfigured: {e}");
-        tokio::spawn(sweeper_loop(board, cfg, os, Arc::default()));
+        tokio::spawn(sweeper_loop(board, cfg, Arc::default()));
         return;
     }
     let cfg = ExecutionConfig {
@@ -88,7 +87,6 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
 async fn sweeper_loop(
     board: SharedBoard,
     cfg: ExecutionConfig,
-    os: Arc<OpenShell>,
     active: Active,
 ) {
     let mut t = tokio::time::interval(Duration::from_millis(cfg.sweep_interval_ms));
@@ -97,6 +95,9 @@ async fn sweeper_loop(
         for id in board.sweep_leases() {
             tracing::info!("run deadline exceeded on #{id}; requeued");
         }
+        // Live Settings → OpenShell (endpoint + mTLS). Do not freeze a client at
+        // spawn — operators often paste certs after honr is already up.
+        let os = board.openshell_client();
         // Periodic sweep: do not reopen Backlog cards (that loops). Detach
         // leaves Claimed|Running; only startup reconcile repairs old damage.
         let _ = reconcile(
@@ -227,7 +228,6 @@ fn is_infrastructure(err: &str) -> bool {
 #[derive(Clone)]
 struct Fleet {
     board: SharedBoard,
-    os: Arc<OpenShell>,
     in_flight: Arc<AtomicU64>,
     /// Which cards this process is actively supervising.
     ///
@@ -242,6 +242,11 @@ struct Fleet {
 }
 
 impl Fleet {
+    /// Fresh client from current Settings (endpoint + sealed mTLS).
+    fn os(&self) -> OpenShell {
+        self.board.openshell_client()
+    }
+
     /// Everything that has to happen around a run, whichever way it started.
     ///
     /// Adopted runs go through here too, so a run that survived a restart
@@ -299,15 +304,15 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     let timeout_secs = cfg.agents.agent_timeout_secs as i64;
     let fleet = Fleet {
         board: board.clone(),
-        os: Arc::new(board.openshell_client()),
         in_flight: Arc::default(),
         active: Arc::default(),
         cooldown: Arc::default(),
     };
 
     // Pick up whatever survived the last process before anything else — the
-    // sweeper included — gets a chance to act on those cards.
-    for a in reconcile_once_reachable(&fleet.os, &board, timeout_secs, GATEWAY_GRACE).await {
+    // sweeper included — gets a chance to act on those cards. Re-reads Settings
+    // each poll so endpoint/mTLS pasted during the grace window still adopts.
+    for a in reconcile_once_reachable(&board, timeout_secs, GATEWAY_GRACE).await {
         let (id, agent_id) = (a.item_id, a.agent_id.clone());
         fleet.supervise(id, agent_id, adopt_card(fleet.clone(), a));
     }
@@ -315,7 +320,6 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
     tokio::spawn(sweeper_loop(
         board.clone(),
         cfg.clone(),
-        fleet.os.clone(),
         fleet.active.clone(),
     ));
 
@@ -326,7 +330,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         // Only awaiting_dispatch cards are claimed (Start / MCP dispatch / Project
         // auto mode). Adoption and in-flight runs are independent of that queue.
 
-        // Live Settings → Agent runtime (providers / timeout / model).
+        // Live Settings → Agent runtime (engine / timeout / concurrency).
         let agents = board.effective_agents();
 
         if fleet.in_flight.load(Ordering::Relaxed) as usize >= agents.max_concurrent {
@@ -336,8 +340,8 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
             continue;
         }
         // The compute driver / gateway stop on their own. Claiming a card we
-        // can't run would strand it until the lease lapsed. Uses the board's
-        // OpenShell binary (Settings override) so a path change is live.
+        // can't run would strand it until the lease lapsed. Live Settings
+        // OpenShell client (endpoint + mTLS).
         if !board.openshell_client().healthy().await {
             tracing::warn!("openshell gateway unhealthy; not claiming");
             continue;
@@ -358,7 +362,7 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         let grant = match board.claim(
             item.id,
             &agent_id,
-            Some(agents.vertex.model.clone()),
+            None,
             agents.agent_timeout_secs as i64,
         ) {
             Ok(g) => g,
@@ -445,14 +449,14 @@ const GATEWAY_POLL: Duration = Duration::from_secs(5);
 /// anyway, so a sweep during an outage cannot produce work — it can only turn
 /// live runs into lies about them.
 async fn reconcile_once_reachable(
-    os: &OpenShell,
     board: &SharedBoard,
     timeout_secs: i64,
     grace: Duration,
 ) -> Vec<Adoption> {
     let deadline = std::time::Instant::now() + grace;
     let mut announced = false;
-    while !os.healthy().await {
+    // Re-read Settings each poll — endpoint/mTLS often land after process start.
+    while !board.openshell_client().healthy().await {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
             // Loud, because the board is about to be less trustworthy than
@@ -478,8 +482,9 @@ async fn reconcile_once_reachable(
     // Claimed/Running card with a dead agent process should be requeued.
     // `reopen_backlog`: repair cards that old detach-as-failure left in Backlog
     // with a live sandbox (e.g. #145 after Ctrl-C).
+    let os = board.openshell_client();
     reconcile(
-        os,
+        &os,
         board,
         &Active::default(),
         timeout_secs,
@@ -675,10 +680,13 @@ async fn is_sandbox_live(os: &OpenShell, name: &str) -> bool {
 }
 
 async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Result<()> {
-    let (board, os) = (&f.board, &f.os);
+    let board = &f.board;
+    let os_owned = f.os();
+    let os = &os_owned;
     let id = grant.item_id;
     // Live Settings → Agent runtime; per-card remotes from pull_request or
-    // Task.repo (resolve_card_repo). Complete → pre-clone via is_complete().
+    // Task.repo (resolve_card_repo). Remotes go in the briefing — the agent
+    // clones; the supervisor never pre-clones.
     let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
         Ok(Some(repo)) => agents.repo = repo,
@@ -735,7 +743,8 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     };
 
     let resolved = board.resolve_sandbox_create(id);
-    let spec = sandbox_spec_for_card(id, &name, cfg, &resolved);
+    let attach = board.sandbox_attach_provider_names();
+    let spec = sandbox_spec_for_card(id, &name, &resolved, &attach);
 
     let result = run_inside(
         board, os, cfg, &agent_id, &grant, &name, &branch, &spec, is_reused,
@@ -749,15 +758,15 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
 fn sandbox_spec_for_card(
     id: ItemId,
     name: &str,
-    cfg: &AgentConfig,
     resolved: &crate::model::ResolvedSandboxCreate,
+    attach_providers: &[String],
 ) -> SandboxSpec {
     SandboxSpec {
         name: name.to_string(),
         from: resolved.image.clone(),
-        providers: cfg.providers.clone(),
+        providers: attach_providers.to_vec(),
         policy: Some(resolved.policy.clone()),
-        env: agent_env(cfg),
+        env: agent_env(),
         labels: vec![(LABEL_ITEM.to_string(), id.to_string())],
         cpu: resolved.cpu.clone(),
         memory: resolved.memory.clone(),
@@ -767,7 +776,9 @@ fn sandbox_spec_for_card(
 /// Take over a run this process did not start: join it at the watch step, with
 /// the setup already done and the briefing already delivered.
 async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
-    let (board, os) = (&f.board, &f.os);
+    let board = &f.board;
+    let os_owned = f.os();
+    let os = &os_owned;
     let id = a.item_id;
     let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
@@ -865,7 +876,9 @@ async fn wait_until_sandbox_ready(os: &OpenShell, name: &str) -> anyhow::Result<
                         tokio::time::sleep(Duration::from_millis(750)).await;
                         return Ok(());
                     }
-                    if phase.eq_ignore_ascii_case("Deleting") || phase.eq_ignore_ascii_case("Failed")
+                    if phase.eq_ignore_ascii_case("Deleting")
+                        || phase.eq_ignore_ascii_case("Failed")
+                        || phase.eq_ignore_ascii_case("Error")
                     {
                         anyhow::bail!("sandbox {name} entered phase {phase} before setup finished");
                     }
@@ -991,27 +1004,15 @@ async fn run_inside(
         )
         .await;
 
-        let branch_state = if cfg.repo.is_complete() {
-            let clone = with_board_cancel(
-                board,
-                id,
-                exec_with_infra_retry(os, name, &clone_script(cfg, branch), short, "clone"),
-            )
-            .await?;
-            beat(0.03)?;
-            branch_state_of(&clone.stdout)
-        } else {
-            // Unbound: no pull_request and no Task.repo — agent clones or escalates.
-            let _ = with_board_cancel(
-                board,
-                id,
-                exec_with_infra_retry(os, name, &empty_workdir_script(), short, "workdir"),
-            )
-            .await?;
-            beat(0.03)?;
-            BranchState::Fresh
-        };
-        branch_state
+        // Agent owns the clone. Supervisor only clears `/sandbox/repo`.
+        let _ = with_board_cancel(
+            board,
+            id,
+            exec_with_infra_retry(os, name, &empty_workdir_script(), short, "workdir"),
+        )
+        .await?;
+        beat(0.03)?;
+        BranchState::Fresh
     } else {
         beat(0.01)?;
         with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
@@ -1024,7 +1025,25 @@ async fn run_inside(
         )
         .await;
 
-        let branch_state = if cfg.repo.is_complete() {
+        // Reuse: refresh only if the agent already left a checkout. Otherwise
+        // empty workdir again — never supervisor-clone.
+        let has_repo = with_board_cancel(
+            board,
+            id,
+            async {
+                os.exec(
+                    name,
+                    &format!("test -d {WORKDIR}/.git"),
+                    short,
+                )
+                .await
+                .map_err(Into::into)
+            },
+        )
+        .await
+        .map(|o| o.ok())
+        .unwrap_or(false);
+        let branch_state = if has_repo {
             let refresh = with_board_cancel(
                 board,
                 id,
@@ -1034,6 +1053,12 @@ async fn run_inside(
             beat(0.03)?;
             branch_state_of(&refresh.stdout)
         } else {
+            let _ = with_board_cancel(
+                board,
+                id,
+                exec_with_infra_retry(os, name, &empty_workdir_script(), short, "workdir"),
+            )
+            .await?;
             beat(0.03)?;
             BranchState::Fresh
         };
@@ -1050,14 +1075,7 @@ async fn run_inside(
     let resume = is_reused
         && matches!(engine, "agy" | "cursor")
         && conversation_id.is_some();
-    let briefing_text = choose_briefing(
-        grant,
-        branch_state,
-        branch,
-        &cfg.repo,
-        &cfg.quality_gates,
-        resume,
-    );
+    let briefing_text = choose_briefing(grant, branch_state, branch, &cfg.repo, resume);
     if resume {
         board.story(
             id,
@@ -1068,12 +1086,8 @@ async fn run_inside(
         );
     }
     if engine == "agy" {
-        with_board_cancel(
-            board,
-            id,
-            setup_agy_auth(os, name, &cfg.vertex.project, &cfg.vertex.location),
-        )
-        .await?;
+        with_board_cancel(board, id, setup_agy_auth(os, name))
+            .await?;
     }
     let start = with_board_cancel(board, id, async {
         os.exec(
@@ -1169,19 +1183,30 @@ struct EscalateFile {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+struct RawEscalationOptionFields {
+    /// Canonical keys are `label` / `detail`. Agents often write `title` / `body`.
+    #[serde(alias = "title")]
+    label: String,
+    #[serde(default, alias = "body", alias = "description")]
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(untagged)]
 enum RawEscalationOption {
-    Struct { label: String, detail: Option<String> },
+    Struct(RawEscalationOptionFields),
     String(String),
 }
 
 impl RawEscalationOption {
     fn into_escalation_option(self) -> crate::model::EscalationOption {
         match self {
-            RawEscalationOption::Struct { label, detail } => crate::model::EscalationOption {
-                detail: detail.unwrap_or_else(|| label.clone()),
-                label,
-            },
+            RawEscalationOption::Struct(RawEscalationOptionFields { label, detail }) => {
+                crate::model::EscalationOption {
+                    detail: detail.unwrap_or_else(|| label.clone()),
+                    label,
+                }
+            }
             RawEscalationOption::String(s) => crate::model::EscalationOption {
                 label: s.clone(),
                 detail: s,
@@ -1917,21 +1942,15 @@ async fn stop_agent(os: &OpenShell, name: &str) {
     let _ = os.exec(name, &script, Duration::from_secs(30)).await;
 }
 
-/// Build the antigravity-cli settings JSON for `agy` auth in the sandbox.
-/// Exposed for unit tests so a non-`global` location is asserted without OpenShell.
-pub(crate) fn agy_auth_settings_json(project: &str, location: &str) -> String {
-    format!(
-        r#"{{"enableTelemetry":false,"gcp":{{"project":"{project}","location":"{location}"}}}}"#
-    )
+/// Minimal antigravity-cli settings for `agy` in the sandbox.
+/// GCP project/location used to live in honr Vertex config; that path is gone
+/// until OpenShell configuration is managed entirely in honr.
+pub(crate) fn agy_auth_settings_json() -> String {
+    r#"{"enableTelemetry":false}"#.into()
 }
 
-async fn setup_agy_auth(
-    os: &OpenShell,
-    name: &str,
-    project: &str,
-    location: &str,
-) -> anyhow::Result<()> {
-    let settings = agy_auth_settings_json(project, location);
+async fn setup_agy_auth(os: &OpenShell, name: &str) -> anyhow::Result<()> {
+    let settings = agy_auth_settings_json();
     let script = format!(
         r#"set -e
 mkdir -p /sandbox/.gemini/antigravity-cli
@@ -1947,16 +1966,8 @@ echo '{settings}' > /sandbox/.gemini/antigravity-cli/settings.json
     Ok(())
 }
 
-fn agent_env(cfg: &AgentConfig) -> Vec<(String, String)> {
+fn agent_env() -> Vec<(String, String)> {
     vec![
-        ("CLAUDE_CODE_USE_VERTEX".into(), "1".into()),
-        ("ANTHROPIC_VERTEX_PROJECT_ID".into(), cfg.vertex.project.clone()),
-        ("CLOUD_ML_REGION".into(), cfg.vertex.location.clone()),
-        ("ANTHROPIC_MODEL".into(), cfg.vertex.model.clone()),
-        ("GOOGLE_CLOUD_PROJECT".into(), cfg.vertex.project.clone()),
-        ("GOOGLE_CLOUD_REGION".into(), cfg.vertex.location.clone()),
-        // Point google-auth at the shim instead of the blocked metadata server.
-        ("GCE_METADATA_HOST".into(), "127.0.0.1:8127".into()),
         ("DISABLE_TELEMETRY".into(), "1".into()),
         ("DISABLE_ERROR_REPORTING".into(), "1".into()),
         ("DISABLE_AUTOUPDATER".into(), "1".into()),
@@ -2004,9 +2015,7 @@ pub fn parse_conflict_files(stdout: &str) -> Vec<String> {
     Vec::new()
 }
 
-/// Clone, and **resume the card's branch if it already exists.**
-///
-/// Empty workdir for first runs (no card pull_request yet). Agent clones.
+/// Empty `/sandbox/repo` for the agent to clone into. Supervisor never pre-clones.
 fn empty_workdir_script() -> String {
     format!(
         r#"set -e
@@ -2026,26 +2035,33 @@ async fn ensure_report_schema_in_sandbox(
         tracing::warn!("report.schema.json missing on host; agent will rely on briefing prose");
         return Ok(());
     }
-    let _ = os
-        .exec(
-            name,
-            &format!("mkdir -p {VERDICT_DIR}"),
-            timeout,
-        )
-        .await?;
-    // upload destination is a directory; place file then move into place.
+    // A prior upload bug could leave `{VERDICT_DIR}` as a *file* (schema
+    // contents). Clear that so mkdir/upload always get a real directory.
+    let prep = format!(
+        r#"set -e
+if [ -e {VERDICT_DIR} ] && [ ! -d {VERDICT_DIR} ]; then
+  rm -f {VERDICT_DIR}
+fi
+mkdir -p {VERDICT_DIR}
+test -d {VERDICT_DIR}"#
+    );
+    let out = os.exec(name, &prep, timeout).await?;
+    anyhow::ensure!(out.ok(), "prepare {VERDICT_DIR}: {}", outerr(&out));
+    // upload destination is a directory; file lands as report.schema.json inside.
     os.upload(name, host.to_str().unwrap_or_default(), VERDICT_DIR)
         .await?;
+    let check = format!("test -f {VERDICT_DIR}/report.schema.json");
+    let out = os.exec(name, &check, timeout).await?;
+    anyhow::ensure!(
+        out.ok(),
+        "report.schema.json missing under {VERDICT_DIR} after upload: {}",
+        outerr(&out)
+    );
     Ok(())
 }
 
-/// Always branching from base was wrong the moment a card could be re-run:
-/// the agent would start over from scratch and its push would be rejected as
-/// non-fast-forward against its own earlier work. That is precisely the
-/// "changes requested, go fix it" path.
-///
-/// Not shallow. A rebase against base needs real history, and honr is small.
-/// Same-repo: clone base as origin. Cross-fork: clone head as origin + upstream remote.
+/// Reference clone recipe (unit-tested). Runtime setup no longer runs this —
+/// the agent clones. Kept so the intended remote/branch layout stays documented.
 fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
     let clone = cfg.repo.clone_target();
     let upstream = cfg.repo.upstream.trim();
@@ -2528,13 +2544,15 @@ open a PR. When you do clone and finish, write `/sandbox/.honr/report.json` with
     let clone = repo.clone_target();
     if repo.uses_cross_fork() {
         format!(
-            "\nRemotes for this run: `origin` is `{clone}` (push); rebase onto \
-`upstream/{base}` (PR target `{upstream}`). Never treat `origin/{base}` alone as the \
+            "\nThe supervisor does **not** pre-clone. Clone into `/sandbox/repo` yourself. \
+Remotes for this run: `origin` is `{clone}` (push); add `upstream` = `{upstream}` and \
+rebase onto `upstream/{base}` (PR target). Never treat `origin/{base}` alone as the \
 merge base when head and base repos differ.\n"
         )
     } else {
         format!(
-            "\nRemotes for this run: `origin` is `{upstream}` (clone and push). Rebase onto \
+            "\nThe supervisor does **not** pre-clone. Clone into `/sandbox/repo` yourself. \
+Remotes for this run: `origin` is `{upstream}` (clone and push). Rebase onto \
 `origin/{base}`. Open the PR against the same repo, base `{base}`.\n"
         )
     }
@@ -2545,13 +2563,12 @@ fn choose_briefing(
     branch: BranchState,
     branch_name: &str,
     repo: &crate::schema::RepoConfig,
-    quality_gates: &[String],
     resume: bool,
 ) -> String {
     if resume && branch != BranchState::Conflicted {
         resume_briefing(grant, repo)
     } else {
-        briefing(grant, branch, branch_name, repo, quality_gates)
+        briefing(grant, branch, branch_name, repo)
     }
 }
 
@@ -2600,7 +2617,6 @@ fn briefing(
     branch: BranchState,
     branch_name: &str,
     repo: &crate::schema::RepoConfig,
-    quality_gates: &[String],
 ) -> String {
     let upstream = repo.upstream.trim();
     let base = repo.base.trim();
@@ -2671,9 +2687,11 @@ fn briefing(
     match branch {
         BranchState::Fresh => {
             if repo.is_complete() {
-                b.push_str(
-                    "\nYou are on a new branch off the base. Nothing has been done on this card yet.\n",
-                );
+                b.push_str(&format!(
+                    "\nFirst run: `/sandbox/repo` is empty (supervisor does not pre-clone). \
+Clone using the Remotes below, create or resume branch `{branch_name}` off the base, \
+then do the card. Nothing has been done on this card yet.\n"
+                ));
             } else if proof_facts_from_notes(&grant.notes).is_some() {
                 b.push_str(
                     "\nFirst run with host Proof facts already on the card (see Remotes / notes). \
@@ -2743,8 +2761,9 @@ does not name a clone target, escalate instead (see Remotes).\n",
     } else {
         b.push_str(
             "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
-             Write `/sandbox/.honr/escalate.json` with your question, options, \
-             and recommended choice index, then exit. Options must supply at least two concrete choices.\n\
+             Write `/sandbox/.honr/escalate.json` with your question, options \
+             (`label`+`detail`, or `title`+`body`), and recommended choice index, then exit. \
+             Options must supply at least two concrete choices.\n\
              \nIf work is discovered to be bigger than one card, do not overrun. \
              Write `/sandbox/.honr/split.json` with `children` each having `title`, `intent`, \
              optional `definition_of_done`, optional `key`, and optional `blocked_by_keys` \
@@ -2761,31 +2780,11 @@ does not name a clone target, escalate instead (see Remotes).\n",
 `head` (see `/sandbox/.honr/report.schema.json`), diffstat (`added`/`removed`), and optional \
 `gates`.\n",
         );
-        if quality_gates.is_empty() {
-            b.push_str(
-                "\nRun the project's own checks before you finish — see the Project prompt and \
+        b.push_str(
+            "\nRun the project's own checks before you finish — see the Project prompt and \
 definition of done for which gates apply. Do not assume cargo or any other toolchain unless \
 those instructions name it.\n",
-            );
-        } else {
-            b.push_str("\nRun the project's own checks before you finish");
-            if quality_gates.len() == 1 {
-                b.push_str(&format!(
-                    " — `{}`. If the check needs the network, something is wrong and you should \
-say so rather than work around it.\n",
-                    quality_gates[0]
-                ));
-            } else {
-                b.push_str(":\n");
-                for g in quality_gates {
-                    b.push_str(&format!("  - `{g}`\n"));
-                }
-                b.push_str(
-                    "If any check needs the network, something is wrong and you should say so \
-rather than work around it.\n",
-                );
-            }
-        }
+        );
         b.push_str(&format!(
             "\nWhen the work is done, publish it yourself:\n\
              \n  1. Commit on `{branch}`. Do not commit to any other branch.\n\
@@ -3101,34 +3100,49 @@ mod tests {
     /// place that says how. If it stops saying it, nothing pushes at all.
     #[test]
     fn the_briefing_tells_the_agent_to_publish() {
-        let gates = vec![
-            "cargo test --offline --locked".into(),
-            "cargo clippy --offline -- -D warnings".into(),
-        ];
         let b = briefing(
             &grant(),
             BranchState::Fresh,
             "honr/card-7",
             &cross_fork_repo(),
-            &gates,
         );
         assert!(b.contains("honr/card-7"), "must name the branch: {b}");
         assert!(b.contains("shanemcd/honr"), "must name the PR target: {b}");
         assert!(b.to_lowercase().contains("push"), "{b}");
         assert!(b.to_lowercase().contains("pull request"), "{b}");
-        assert!(b.contains("cargo test --offline --locked"), "gates must be named: {b}");
-        assert!(b.contains("cargo clippy --offline -- -D warnings"), "clippy gate: {b}");
     }
 
-    /// Empty quality_gates must not invent cargo for a non-Rust Project.
+    /// Supervisor must not imply a pre-cloned checkout on Fresh + complete repo.
     #[test]
-    fn briefing_without_rust_gates_omits_cargo() {
+    fn complete_repo_fresh_briefing_makes_agent_clone() {
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "honr/card-7",
+            &cross_fork_repo(),
+        );
+        assert!(
+            b.contains("does not pre-clone") || b.contains("does **not** pre-clone"),
+            "must say supervisor does not pre-clone: {b}"
+        );
+        assert!(
+            b.contains("Clone into `/sandbox/repo`") || b.contains("Clone using the Remotes"),
+            "must tell the agent to clone: {b}"
+        );
+        assert!(
+            !b.contains("You are on a new branch off the base"),
+            "old pre-cloned Fresh wording must be gone: {b}"
+        );
+    }
+
+    /// Briefing must not invent cargo — gates live in the Project prompt.
+    #[test]
+    fn briefing_does_not_invent_cargo_gates() {
         let b = briefing(
             &grant(),
             BranchState::Fresh,
             "acme/card-7",
             &cross_fork_repo(),
-            &[],
         );
         assert!(
             !b.contains("cargo test --offline"),
@@ -3164,7 +3178,6 @@ mod tests {
             BranchState::Fresh,
             &crate::schema::card_branch_name("widgets", 7),
             &cross_fork_repo(),
-            &[],
         );
         assert!(b.contains("widgets/card-7"), "briefing must use configured prefix: {b}");
         assert!(!b.contains("honr/card-7"), "must not force honr/card- hardcode: {b}");
@@ -3183,7 +3196,7 @@ mod tests {
     /// on top of a branch that cannot merge.
     #[test]
     fn the_briefing_tells_the_agent_about_a_conflict() {
-        let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", &cross_fork_repo(), &[]);
+        let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", &cross_fork_repo());
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
         assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
         // Fork base freezes; rebase onto upstream, never origin/<base> as the target.
@@ -3201,7 +3214,7 @@ mod tests {
             "must not instruct rebase onto the fork base: {conflicted}"
         );
 
-        let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo(), &[]);
+        let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo());
         assert!(!fresh.contains("CONFLICTS"));
         assert!(fresh.contains("new branch"));
     }
@@ -3218,7 +3231,6 @@ mod tests {
             BranchState::Conflicted,
             "honr/card-7",
             &cross_fork_repo(),
-            &[],
             true,
         );
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
@@ -3233,7 +3245,6 @@ mod tests {
             BranchState::Rebased,
             "honr/card-7",
             &cross_fork_repo(),
-            &[],
             true,
         );
         assert!(parked.contains("parked mid-run"), "{parked}");
@@ -3276,7 +3287,7 @@ mod tests {
     fn steering_notes_reach_the_briefing() {
         let mut g = grant();
         g.notes = vec!["Changes requested: rebase onto latest, api.rs only.".into()];
-        let b = briefing(&g, BranchState::Rebased, "honr/card-7", &cross_fork_repo(), &[]);
+        let b = briefing(&g, BranchState::Rebased, "honr/card-7", &cross_fork_repo());
         assert!(b.contains("rebase onto latest, api.rs only."), "{b}");
         assert!(
             b.contains("BINDING"),
@@ -3413,7 +3424,7 @@ mod tests {
             "test fixture keeps beads_id so we assert it is not briefed"
         );
 
-        let cold = briefing(&g, BranchState::Fresh, "honr/card-7", &cross_fork_repo(), &[]);
+        let cold = briefing(&g, BranchState::Fresh, "honr/card-7", &cross_fork_repo());
         assert!(
             cold.contains("Intent: why the card exists"),
             "cold briefing must emit card intent: {cold}"
@@ -3583,12 +3594,12 @@ mod tests {
     /// onto its branch. `false` stands in for a gateway that is not there.
     #[tokio::test]
     async fn startup_waits_for_a_gateway_that_is_not_up_yet() {
-        let os = OpenShell::new("false", Duration::from_secs(5));
         let board = test_board();
-        let grace = Duration::from_millis(300);
+        // Short grace: assert we wait, not that we wait a human-scale outage.
+        let grace = Duration::from_millis(50);
 
         let began = std::time::Instant::now();
-        let adopted = reconcile_once_reachable(&os, &board, 600, grace).await;
+        let adopted = reconcile_once_reachable(&board, 600, grace).await;
 
         assert!(adopted.is_empty(), "nothing can be adopted through a dead gateway");
         assert!(began.elapsed() >= grace, "must wait for the gateway, not skip past it");
@@ -3598,9 +3609,8 @@ mod tests {
     /// not hold the sweeper — and therefore every Running card — forever.
     #[tokio::test]
     async fn a_gateway_that_never_answers_does_not_freeze_the_board() {
-        let os = OpenShell::new("false", Duration::from_secs(5));
         let began = std::time::Instant::now();
-        reconcile_once_reachable(&os, &test_board(), 600, Duration::from_millis(50)).await;
+        reconcile_once_reachable(&test_board(), 600, Duration::from_millis(50)).await;
         assert!(began.elapsed() < Duration::from_secs(30), "gave up in bounded time");
     }
 
@@ -3766,6 +3776,23 @@ mod tests {
         assert_eq!(opts[0].label, "Postgres");
         assert_eq!(opts[0].detail, "Postgres");
         assert_eq!(opts[1].label, "SQLite");
+
+        // Cursor agents often emit title/body instead of label/detail (#197).
+        let json3 = r#"{
+            "question": "How finish?",
+            "options": [
+                {"title": "Accept smoke", "body": "No PR"},
+                {"title": "Re-run", "description": "With bot token"}
+            ],
+            "recommended": 0,
+            "evidence": {"auth_login": "shanemcd"}
+        }"#;
+        let esc3: EscalateFile = serde_json::from_str(json3).unwrap();
+        let opts: Vec<_> = esc3.options.into_iter().map(|o| o.into_escalation_option()).collect();
+        assert_eq!(opts[0].label, "Accept smoke");
+        assert_eq!(opts[0].detail, "No PR");
+        assert_eq!(opts[1].label, "Re-run");
+        assert_eq!(opts[1].detail, "With bot token");
     }
 
     #[test]
@@ -3801,7 +3828,7 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_escalate_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", &cross_fork_repo(), &[]);
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", &cross_fork_repo());
         assert!(b.contains("/sandbox/.honr/escalate.json"), "briefing must mention /sandbox/.honr/escalate.json: {b}");
         assert!(!b.contains("`.honr/escalate.json`"), "briefing must omit WORKDIR .honr/escalate.json: {b}");
     }
@@ -3812,7 +3839,7 @@ mod tests {
     fn unbound_briefing_forbids_guessing_the_repo() {
         let unbound = crate::schema::RepoConfig::default();
         assert!(!unbound.is_complete());
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-172", &unbound, &[]);
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-172", &unbound);
         assert!(
             b.contains("Do **not** guess") || b.contains("do not guess"),
             "must forbid guessing: {b}"
@@ -3891,7 +3918,7 @@ mod tests {
             "Decision: Clone shanemcd/honr (suggested by beads External https://github.com/shanemcd/honr/issues/204)"
                 .into(),
         ];
-        let b = briefing(&g, BranchState::Fresh, "honr/card-146", &unbound, &[]);
+        let b = briefing(&g, BranchState::Fresh, "honr/card-146", &unbound);
         assert!(b.contains("shanemcd/honr"), "{b}");
         assert!(
             b.contains("already decided") || b.contains("human-decided"),
@@ -3924,7 +3951,7 @@ mod tests {
             "Decision: Host runs probe dispatch; re-claim this card to document".into(),
             "Proof: card=#180 pr_url=https://github.com/clankrshq/honr-sandbox-probe/pull/2 upstream=clankrshq/honr-sandbox-probe fork=clankrshq/honr-sandbox-probe".into(),
         ];
-        let b = briefing(&g, BranchState::Fresh, "honr/card-174", &unbound, &[]);
+        let b = briefing(&g, BranchState::Fresh, "honr/card-174", &unbound);
         assert!(
             b.contains("Host proof facts are already on this card"),
             "must surface Proof facts: {b}"
@@ -3951,7 +3978,7 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_split_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", &cross_fork_repo(), &[]);
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", &cross_fork_repo());
         assert!(b.contains("/sandbox/.honr/split.json"), "briefing must mention /sandbox/.honr/split.json: {b}");
         assert!(!b.contains("`.honr/split.json`"), "briefing must omit WORKDIR .honr/split.json: {b}");
         assert!(
@@ -3976,7 +4003,7 @@ mod tests {
     fn briefing_initial_plan_requires_report_not_split() {
         let mut g = grant();
         g.title = crate::model::initial_plan_title("Test Project");
-        let b = briefing(&g, BranchState::Fresh, "honr/card-92", &cross_fork_repo(), &[]);
+        let b = briefing(&g, BranchState::Fresh, "honr/card-92", &cross_fork_repo());
         assert!(b.contains("Initial plan"), "briefing must identify Initial plan: {b}");
         assert!(
             b.contains("report.json"),
@@ -4022,7 +4049,7 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_report_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", &cross_fork_repo(), &[]);
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", &cross_fork_repo());
         assert!(b.contains("/sandbox/.honr/report.json"), "briefing must mention /sandbox/.honr/report.json: {b}");
         assert!(!b.contains("`.honr/report.json`"), "briefing must omit WORKDIR .honr/report.json: {b}");
         assert!(b.contains("diffstat"), "briefing must mention diffstat: {b}");
@@ -4576,6 +4603,7 @@ mod tests {
                 policy: default_policy.into(),
                 cpu: Some("2".into()),
                 memory: Some("4Gi".into()),
+                engine: None,
             })
             .unwrap();
         board
@@ -4586,6 +4614,7 @@ mod tests {
                 policy: heavy_policy.into(),
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
+                engine: None,
             })
             .unwrap();
         board.set_default_sandbox_profile("default").unwrap();
@@ -4608,7 +4637,7 @@ mod tests {
         // Unset Project → global default.
         let unset = board.resolve_sandbox_create(task.id);
         let unset_spec =
-            sandbox_spec_for_card(task.id, "honr-card-test", &board.schema.execution.agents, &unset);
+            sandbox_spec_for_card(task.id, "honr-card-test", &unset, &[]);
         assert_eq!(unset.profile_id.as_deref(), Some("default"));
         assert_eq!(unset_spec.from, "default-image:1");
         assert_eq!(unset_spec.policy.as_deref(), Some(default_policy));
@@ -4621,7 +4650,7 @@ mod tests {
             .unwrap();
         let over = board.resolve_sandbox_create(task.id);
         let over_spec =
-            sandbox_spec_for_card(task.id, "honr-card-test", &board.schema.execution.agents, &over);
+            sandbox_spec_for_card(task.id, "honr-card-test", &over, &[]);
         assert_eq!(over.profile_id.as_deref(), Some("heavy"));
         assert_eq!(over_spec.from, "heavy-image:1");
         assert_eq!(over_spec.policy.as_deref(), Some(heavy_policy));
@@ -4630,45 +4659,26 @@ mod tests {
     }
 
     #[test]
-    fn agy_auth_settings_json_uses_configured_location_not_hardcoded_global() {
-        let j = agy_auth_settings_json("my-gcp-proj", "us-east5");
-        assert!(
-            j.contains(r#""location":"us-east5""#),
-            "expected configured location in {j}"
-        );
-        assert!(
-            j.contains(r#""project":"my-gcp-proj""#),
-            "expected project in {j}"
-        );
-        assert!(
-            !j.contains(r#""location":"global""#),
-            "must not hardcode global when location is set: {j}"
-        );
+    fn agy_auth_settings_json_is_minimal_without_vertex() {
+        let j = agy_auth_settings_json();
+        assert!(j.contains(r#""enableTelemetry":false"#), "{j}");
+        assert!(!j.contains("gcp"), "vertex gcp block removed: {j}");
     }
 
     #[test]
-    fn durable_providers_and_vertex_flow_into_sandbox_spec_and_agent_env() {
+    fn durable_agent_runtime_overlays_engine_into_effective_agents() {
         let path = std::env::temp_dir().join(format!(
             "honr-test-agent-rt-spec-{}.json",
             std::process::id()
         ));
         let mut schema = crate::schema::Schema::default();
-        schema.execution.agents.providers = vec!["yaml-only".into()];
-        schema.execution.agents.vertex.project = "yaml-proj".into();
-        schema.execution.agents.vertex.location = "global".into();
-        schema.execution.agents.vertex.model = "yaml-model".into();
+        schema.execution.agents.engine = "cursor".into();
         let board = crate::store::Board::new(schema, path);
         assert!(board.seed_agent_runtime_if_empty());
 
         board.set_agent_runtime(crate::model::AgentRuntimeConfig {
             enabled: true,
             engine: "claude".into(),
-            providers: vec!["vertex".into(), "gh-settings".into()],
-            vertex: crate::model::AgentRuntimeVertex {
-                project: "settings-proj".into(),
-                location: "us-central1".into(),
-                model: "settings-model".into(),
-            },
             max_concurrent: 1,
             agent_timeout_secs: 1800,
             max_attempts: 3,
@@ -4676,30 +4686,39 @@ mod tests {
         });
 
         let cfg = board.effective_agents();
-        assert_eq!(cfg.providers, vec!["vertex".to_string(), "gh-settings".to_string()]);
-        assert_eq!(cfg.vertex.location, "us-central1");
+        assert_eq!(cfg.engine, "claude");
 
         let resolved = crate::model::ResolvedSandboxCreate {
             image: "img:1".into(),
             policy: "version: 1\n".into(),
             cpu: None,
             memory: None,
+            engine: None,
             profile_id: None,
         };
-        let spec = sandbox_spec_for_card(1, "honr-card-1-a1", &cfg, &resolved);
-        assert_eq!(spec.providers, vec!["vertex".to_string(), "gh-settings".to_string()]);
-
-        let env = agent_env(&cfg);
-        let loc = env
-            .iter()
-            .find(|(k, _)| k == "CLOUD_ML_REGION")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(loc, Some("us-central1"));
-        let model = env
-            .iter()
-            .find(|(k, _)| k == "ANTHROPIC_MODEL")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(model, Some("settings-model"));
+        board.upsert_openshell_provider(crate::model::OpenShellProviderDesired {
+            name: "vertex".into(),
+            provider_type: "google-vertex-ai".into(),
+            config: Default::default(),
+            credentials_sealed: None,
+            credential_keys: Vec::new(),
+            refresh: None,
+            attach_to_sandboxes: true,
+        });
+        board.upsert_openshell_provider(crate::model::OpenShellProviderDesired {
+            name: "local-only".into(),
+            provider_type: "github".into(),
+            config: Default::default(),
+            credentials_sealed: None,
+            credential_keys: Vec::new(),
+            refresh: None,
+            attach_to_sandboxes: false,
+        });
+        let attach = board.sandbox_attach_provider_names();
+        let spec = sandbox_spec_for_card(1, "honr-card-1-a1", &resolved, &attach);
+        assert_eq!(spec.from, "img:1");
+        assert_eq!(spec.policy.as_deref(), Some("version: 1\n"));
+        assert_eq!(spec.providers, vec!["vertex".to_string()]);
     }
 }
 

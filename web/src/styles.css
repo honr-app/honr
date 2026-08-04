@@ -633,6 +633,61 @@ main > :first-child { flex: 1; min-width: 0; }
   background: var(--panel);
 }
 
+.openshell-providers {
+  margin: 20px 0 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.openshell-providers-head {
+  margin-bottom: 10px;
+}
+.openshell-providers-head h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+.openshell-provider-list {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.openshell-provider-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.openshell-provider-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  min-width: 180px;
+  flex: 1;
+}
+.openshell-provider-meta {
+  font-size: 12px;
+}
+.openshell-provider-form {
+  margin-top: 8px;
+}
+
+.openshell-profiles {
+  margin: 20px 0 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.openshell-profiles h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
 /* ------------------------------------------------------------------- board page */
 
 .board-page {

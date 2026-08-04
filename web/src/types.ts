@@ -50,7 +50,7 @@ export interface BlockerSummary {
   state: State;
 }
 
-/** Named OpenShell create-spec from the board catalog (Settings → Sandboxes). */
+/** Named OpenShell create-spec from the board catalog (Settings → OpenShell → Profiles). */
 export interface SandboxProfile {
   id: string;
   name: string;
@@ -59,6 +59,8 @@ export interface SandboxProfile {
   policy: string;
   cpu?: string | null;
   memory?: string | null;
+  /** Agent CLI (`cursor` / `agy` / `claude`). Unset → Agent runtime default. */
+  engine?: string | null;
 }
 
 export interface SandboxProfilesOut {
@@ -76,40 +78,86 @@ export interface WorkspaceBinding {
   beads_sync_repo?: string | null;
 }
 
-/** Settings → OpenShell binary override. */
+/** Presence flags for sealed OpenShell mTLS material (never returns PEMs). */
+export interface OpenShellMtlsStatus {
+  ca: boolean;
+  client_cert: boolean;
+  client_key: boolean;
+  complete: boolean;
+}
+
+/** Settings → OpenShell connectivity (gateway endpoint + mTLS). */
 export interface OpenShellSettings {
-  binary_path?: string | null;
+  gateway_endpoint?: string | null;
+  /** Write-only on PUT. */
+  ca_pem?: string | null;
+  client_cert_pem?: string | null;
+  client_key_pem?: string | null;
+  clear_mtls?: boolean;
+  import_openshell_cli_mtls?: boolean;
+  import_gateway_name?: string | null;
+  mtls?: OpenShellMtlsStatus;
 }
 
 /** Settings → Agent runtime (process knobs; seeded from honr.yaml). */
-export interface AgentRuntimeVertex {
-  project: string;
-  location: string;
-  model: string;
-}
-
 export interface AgentRuntimeConfig {
   enabled: boolean;
   engine: string;
-  providers: string[];
-  vertex: AgentRuntimeVertex;
   max_concurrent: number;
   agent_timeout_secs: number;
   max_attempts: number;
   /** Branch/sandbox stem (default honr → honr/card-N). */
   branch_prefix: string;
-  /** Install-wide briefing quality gates (shell commands). Empty = none. */
-  quality_gates: string[];
 }
 
 /** GET /api/openshell/status — gateway health for Settings. */
 export interface OpenShellStatus {
   healthy: boolean;
-  binary: string;
   summary: string;
-  cli_missing: boolean;
+  not_configured: boolean;
   error?: string | null;
-  binary_path?: string | null;
+  gateway_endpoint?: string | null;
+  mtls?: OpenShellMtlsStatus;
+}
+
+/** GET /api/openshell/providers — desired provider (secrets never included). */
+export interface OpenShellProviderView {
+  name: string;
+  type: string;
+  config: Record<string, string>;
+  credential_keys: string[];
+  has_credentials: boolean;
+  has_refresh: boolean;
+  attach_to_sandboxes: boolean;
+  gateway_synced?: boolean | null;
+}
+
+export interface OpenShellProvidersOut {
+  providers: OpenShellProviderView[];
+  gateway_reachable: boolean;
+}
+
+export interface OpenShellProviderWrite {
+  name: string;
+  type: string;
+  config?: Record<string, string>;
+  /** Write-only. Omit on update to keep sealed credentials. */
+  credentials?: Record<string, string> | null;
+  attach_to_sandboxes?: boolean;
+}
+
+export interface ProviderTypeProfile {
+  id: string;
+  display_name: string;
+  description: string;
+  category: string;
+  credential_env_vars: string[];
+  config_keys: string[];
+}
+
+export interface SyncProvidersOut {
+  applied: string[];
+  errors: { name: string; error: string }[];
 }
 
 /** GitHub-shaped PR end (base / head). */

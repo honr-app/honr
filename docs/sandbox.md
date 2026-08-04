@@ -37,12 +37,14 @@ Two properties worth preserving:
   ([NVIDIA/OpenShell#2478](https://github.com/NVIDIA/OpenShell/issues/2478));
   the shim path sidesteps that.
 
-## Why the CLI wrapper, not the gRPC SDK
+## Gateway client (gRPC + mTLS)
 
-`src/openshell.rs` shells out to the `openshell` CLI. The SDK does not support
-mTLS, and the gateway is mTLS-only. Crates are not on crates.io, and the curated
-surface cannot stream exec: streaming is how liveness is observed. Revisit when
-the gateway moves off mTLS *and* the crates are published.
+`src/openshell.rs` talks to the gateway in-process over gRPC with client
+certificates. Endpoint + sealed PEMs live in Settings (board DB); the only host
+secret file is `~/.config/honr/master.key`. Upload/download use exec + tar over
+that same channel — no `openshell` CLI spawn. Upstream `openshell-sdk` still
+omits mTLS; we build the channel ourselves and use `openshell-core` /
+`openshell-policy` for protos and YAML policy.
 
 ## Image and offline gates
 
@@ -73,9 +75,11 @@ silence as failure.
 vars explicitly in `agent_env` (supervisor does this), or install wrappers on
 the default PATH. Baking `ENV PATH=…` into the Containerfile is not enough.
 
-**`sandbox upload` takes a destination directory**, and that directory must
-already exist. Wrong shape surfaces as
-`can't find '__main__' module in '/tmp/metadata-shim.py'`.
+**Upload destination is a directory** (same semantics as the old CLI): uploading
+to `/tmp/metadata-shim.py` creates a *directory* of that name with the file
+inside it, and python then reports
+`can't find '__main__' module in '/tmp/metadata-shim.py'`. Put the shim in
+`/tmp` so it lands at `/tmp/metadata-shim.py`.
 
 **The compute driver can stop on its own.** Classify that as infrastructure,
 not as the card failing: see `is_infrastructure` in the supervisor.
