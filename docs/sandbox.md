@@ -80,6 +80,11 @@ already exist. Wrong shape surfaces as
 **The compute driver can stop on its own.** Classify that as infrastructure,
 not as the card failing: see `is_infrastructure` in the supervisor.
 
+**`/sandbox/repo` may start empty.** When the supervisor does not pre-clone,
+the agent clones from the Remotes briefing (`origin` / `upstream`) into that
+path. `/sandbox/.honr` is always present at start with at least
+`report.schema.json`.
+
 **The fork's base freezes** the moment it is created. Re-running a card resumes
 its existing branch and rebases onto **upstream**, not the fork's base. If the
 rebase conflicts, the supervisor backs out and tells the agent to resolve it.
