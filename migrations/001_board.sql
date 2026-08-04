@@ -1,5 +1,5 @@
 -- Board persistence schema (SQLite default; Postgres-compatible types).
--- Indexed columns match the hot paths in docs/plans/pluggable-board-database.md.
+-- Indexed columns match the hot query paths (column filters, parent, status).
 -- Nested WorkItem fields that are not filter keys live in JSON text blobs.
 
 CREATE TABLE meta (

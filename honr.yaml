@@ -7,7 +7,7 @@
 # Board persistence. Default is local SQLite (`sqlite:honr.db`). Set a
 # postgres:// or postgresql:// URL (or HONR_DATABASE_URL) for Postgres.
 # Empty DB + existing honr.json → one-shot import (JSON left in place).
-# See docs/operating.md § Board database.
+# See docs/quickstart.md (Board database).
 board:
   database:
     url: sqlite:honr.db
@@ -32,7 +32,7 @@ execution:
 
   # Real agents in OpenShell sandboxes. Off by default so the board runs on a
   # machine with no podman, no gateway and no credentials. Turning this on
-  # spends real money — see docs/sandbox-stack.md before you do.
+  # spends real money — see docs/agents.md and docs/sandbox.md before you do.
   agents:
     enabled: true
     engine: cursor

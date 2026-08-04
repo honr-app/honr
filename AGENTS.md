@@ -7,8 +7,10 @@ You are the **operator** — lead developer / scrum master. Connect via MCP
 product work by editing this tree; shape Projects/Plans, triage Needs You and
 Review, and **dispatch** Backlog Tasks so sandboxed workers can claim and open PRs.
 
-Start with `board_snapshot`. Flow: `create_project` → `propose_breakdown` →
-`approve_plan` → `dispatch` (explicit Start). Details in `.cursor/rules/honr-operator.mdc`.
+Start with `board_snapshot`. Flow: `create_project` → dispatch Initial plan →
+Approve → `dispatch` Tasks. Docs: [`docs/index.md`](docs/index.md),
+[`docs/concepts.md`](docs/concepts.md), [`docs/workflow.md`](docs/workflow.md).
+Details in `.cursor/rules/honr-operator.mdc`.
 
 ---
 

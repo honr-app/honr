@@ -126,7 +126,7 @@ impl RepoConfig {
 
 /// Vertex settings passed into the sandbox. Values that are wrong here fail as
 /// a hang, so they are configuration rather than constants — see
-/// `docs/sandbox-stack.md` for which combination actually works.
+/// `docs/sandbox.md` / `docs/agents.md` for which combination actually works.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VertexConfig {
     pub project: String,

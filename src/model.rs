@@ -547,7 +547,7 @@ impl AgentRuntimeConfig {
 
 /// Per-install forge identity + beads Issue sync (Settings → Forge).
 /// Work remotes are **not** stored here — they live on each card's
-/// [`PullRequest`] after the agent reports. See `docs/generalization.md`.
+/// [`PullRequest`] after the agent reports. See `docs/architecture.md`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkspaceBinding {
     /// Forge provider. Only `github` is implemented; `gitlab` is a future seam.
