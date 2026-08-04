@@ -2638,10 +2638,8 @@ fn resume_briefing(grant: &ClaimGrant, repo: &crate::schema::RepoConfig) -> Stri
     if let Some(key) = &grant.plan_task_key {
         b.push_str(&format!("Plan key: {key}\n"));
     }
-    if let Some(bid) = &grant.beads_id {
-        if crate::beads::BeadsClient::is_real_id(bid) {
-            b.push_str(&format!("Beads id: {bid} (use `bd show {bid}`)\n"));
-        }
+    if !grant.intent.trim().is_empty() {
+        b.push_str(&format!("Intent: {}\n", grant.intent.trim()));
     }
     if let Some(dod) = &grant.definition_of_done {
         b.push_str(&format!("Definition of done: {dod}\n"));
@@ -2717,10 +2715,8 @@ fn briefing(
     if let Some(key) = &grant.plan_task_key {
         b.push_str(&format!("Plan key: {key}\n"));
     }
-    if let Some(bid) = &grant.beads_id {
-        if crate::beads::BeadsClient::is_real_id(bid) {
-            b.push_str(&format!("Beads id: {bid} (use `bd show {bid}`)\n"));
-        }
+    if !grant.intent.trim().is_empty() {
+        b.push_str(&format!("Intent: {}\n", grant.intent.trim()));
     }
     if let Some(dod) = &grant.definition_of_done {
         b.push_str(&format!("Definition of done: {dod}\n"));
@@ -2794,9 +2790,7 @@ an exact product repo; otherwise escalate (see Remotes) — do not guess.\n",
              backup if Approve never ran; not via split.json).\n\
              Do **not** write `/sandbox/.honr/split.json` on this card.\n\
              If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` \
-             with options (at least two) and a recommended index, then exit.\n\
-             \n`bd` in the sandbox is a **read snapshot** — use `bd prime` / `bd show <id>` for \
-             context. Do not rely on `bd remember` or `bd dep add` for durable state.\n",
+             with options (at least two) and a recommended index, then exit.\n",
         );
         if repo.is_complete() {
             b.push_str(&format!(
@@ -2827,9 +2821,7 @@ does not name a clone target, escalate instead (see Remotes).\n",
              Splits may only carve this card's definition of done into smaller slices of the same outcome. \
              Do not invent work that belongs to another Project — escalate instead. \
              If a PR already exists for the card, do not split — finish via report. \
-             Split and publish are mutually exclusive for one run.\n\
-             \n`bd` in the sandbox is a **read snapshot** — use `bd prime` / `bd show <id>` for \
-             context. Do not rely on `bd remember` or `bd dep add` for durable state.\n",
+             Split and publish are mutually exclusive for one run.\n",
         );
 
         b.push_str(
@@ -3475,6 +3467,53 @@ mod tests {
         assert!(!b.contains("Standing constraints"), "must not dump the cold briefing: {b}");
     }
 
+    /// Card intent must ride in the grant and briefing; agents must not be told
+    /// to run `bd show` / `bd prime` for card context (sandbox beads cut, t1).
+    #[test]
+    fn briefing_injects_intent_without_bd_workflow() {
+        let g = grant();
+        assert!(
+            !g.intent.is_empty(),
+            "ClaimGrant must carry card intent from WorkItem"
+        );
+        assert!(
+            g.beads_id.is_some(),
+            "test fixture keeps beads_id so we assert it is not briefed"
+        );
+
+        let cold = briefing(&g, BranchState::Fresh, "honr/card-7", &cross_fork_repo(), &[]);
+        assert!(
+            cold.contains("Intent: why the card exists"),
+            "cold briefing must emit card intent: {cold}"
+        );
+        assert!(
+            !cold.contains("bd show") && !cold.contains("bd prime"),
+            "cold briefing must not instruct bd: {cold}"
+        );
+        assert!(
+            !cold.contains("Beads id:"),
+            "cold briefing must not emit beads id line: {cold}"
+        );
+        assert!(
+            !cold.contains("read snapshot"),
+            "cold briefing must not describe beads read snapshot: {cold}"
+        );
+
+        let resume = resume_briefing(&g, &cross_fork_repo());
+        assert!(
+            resume.contains("Intent: why the card exists"),
+            "resume briefing must emit card intent: {resume}"
+        );
+        assert!(
+            !resume.contains("bd show") && !resume.contains("bd prime"),
+            "resume briefing must not instruct bd: {resume}"
+        );
+        assert!(
+            !resume.contains("Beads id:"),
+            "resume briefing must not emit beads id line: {resume}"
+        );
+    }
+
     /// Following is a *reader*. It can start part-way through, which is what
     /// lets a restarted honr take over a run instead of killing it.
     #[test]
@@ -3738,6 +3777,7 @@ mod tests {
         ClaimGrant {
             item_id: 7,
             title: "t".into(),
+            intent: "why the card exists".into(),
             definition_of_done: None,
             beads_id: Some("honr-test7".into()),
             project_title: Some("Test Project".into()),
