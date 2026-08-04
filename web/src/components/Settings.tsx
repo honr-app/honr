@@ -1121,7 +1121,6 @@ export function OpenShellProvidersPanelView({
   onEdit,
   onDelete,
   onSync,
-  onImportAdc,
   onToggleAttach,
 }: {
   providers: OpenShellProviderView[];
@@ -1137,7 +1136,6 @@ export function OpenShellProvidersPanelView({
   onEdit: (p: OpenShellProviderView) => void;
   onDelete: (name: string) => void;
   onSync: () => void;
-  onImportAdc: () => void;
   onToggleAttach: (p: OpenShellProviderView, attach: boolean) => void;
 }) {
   const typeOptions = profiles.length
@@ -1196,14 +1194,6 @@ export function OpenShellProvidersPanelView({
         >
           Sync all to gateway
         </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onImportAdc}
-          data-testid="openshell-providers-import-adc"
-        >
-          Import gcloud ADC
-        </button>
         <span className="dim" data-testid="openshell-providers-gateway-badge">
           {gatewayReachable ? "gateway reachable" : "gateway offline — local only"}
         </span>
@@ -1211,7 +1201,7 @@ export function OpenShellProvidersPanelView({
 
       {providers.length === 0 && !draft ? (
         <p className="dim" data-testid="openshell-providers-empty">
-          No providers yet. Add one, or import Vertex from gcloud ADC.
+          No providers yet. Add one to attach credentials to sandboxes.
         </p>
       ) : (
         <ul className="openshell-provider-list" data-testid="openshell-provider-list">
@@ -1515,19 +1505,6 @@ function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: boolean }
                 : `Synced ${out.applied.length} provider(s) to the gateway.`,
             );
             if (out.errors.length) setError(errBits);
-            return refresh();
-          })
-          .catch((e) => setError(String(e)))
-          .finally(() => setBusy(false));
-      }}
-      onImportAdc={() => {
-        setBusy(true);
-        setError(null);
-        setHint(null);
-        api
-          .importGcloudAdcProvider()
-          .then((p) => {
-            setHint(`Imported ADC as provider ${p.name}.`);
             return refresh();
           })
           .catch((e) => setError(String(e)))

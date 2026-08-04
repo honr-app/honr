@@ -613,14 +613,13 @@ const openshellProvidersHtml = renderToString(
     onEdit: () => {},
     onDelete: () => {},
     onSync: () => {},
-    onImportAdc: () => {},
     onToggleAttach: () => {},
   }),
 );
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers\""), "Providers band renders");
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-provider-gh-clankr\""), "Provider row renders");
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers-sync\""), "Sync all control");
-assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers-import-adc\""), "Import ADC control");
+assert(!openshellProvidersHtml.includes("openshell-providers-import-adc"), "Import ADC control removed");
 assert(openshellProvidersHtml.includes("on gateway"), "Gateway sync badge");
 assert(!openshellProvidersHtml.includes("sk-"), "Providers view must not echo secrets");
 
@@ -636,7 +635,6 @@ const openshellProvidersEmptyHtml = renderToString(
     onEdit: () => {},
     onDelete: () => {},
     onSync: () => {},
-    onImportAdc: () => {},
     onToggleAttach: () => {},
   }),
 );

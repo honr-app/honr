@@ -153,13 +153,6 @@ export const api = {
     del(`/openshell/providers/${encodeURIComponent(name)}`),
   syncOpenShellProviders: (): Promise<SyncProvidersOut> =>
     post("/openshell/providers/sync"),
-  importGcloudAdcProvider: (body?: {
-    name?: string;
-    project?: string;
-    location?: string;
-    attach_to_sandboxes?: boolean;
-  }): Promise<OpenShellProviderView> =>
-    post("/openshell/providers/import-gcloud-adc", body ?? {}),
   listOpenShellProviderProfiles: (): Promise<ProviderTypeProfile[]> =>
     fetch("/api/openshell/provider-profiles").then(jsonOrThrow),
 };

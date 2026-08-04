@@ -2062,6 +2062,7 @@ test -d {VERDICT_DIR}"#
 
 /// Reference clone recipe (unit-tested). Runtime setup no longer runs this —
 /// the agent clones. Kept so the intended remote/branch layout stays documented.
+#[allow(dead_code)]
 fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
     let clone = cfg.repo.clone_target();
     let upstream = cfg.repo.upstream.trim();
