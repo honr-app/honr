@@ -679,7 +679,8 @@ async fn is_sandbox_live(os: &OpenShell, name: &str) -> bool {
 async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Result<()> {
     let (board, os) = (&f.board, &f.os);
     let id = grant.item_id;
-    // Live Settings → Agent runtime; per-card remotes from pull_request.
+    // Live Settings → Agent runtime; per-card remotes from pull_request or
+    // Task.repo (resolve_card_repo). Complete → pre-clone via is_complete().
     let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
         Ok(Some(repo)) => agents.repo = repo,
@@ -1010,7 +1011,7 @@ async fn run_inside(
             beat(0.03)?;
             branch_state_of(&clone.stdout)
         } else {
-            // First run: Project prompt names the repo; agent clones.
+            // Unbound: no pull_request and no Task.repo — agent clones or escalates.
             let _ = with_board_cancel(
                 board,
                 id,
@@ -2273,7 +2274,7 @@ pub async fn process_awaiting_rebases(
             Ok(Some(repo)) => card_cfg.repo = repo,
             Ok(None) => {
                 tracing::warn!(
-                    "rebase skipped for card #{}: no pull_request remotes yet",
+                    "rebase skipped for card #{}: no pull_request or Task repo remotes",
                     item.id
                 );
                 continue;
