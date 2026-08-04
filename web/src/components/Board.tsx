@@ -77,18 +77,12 @@ export function Board(props: BoardProps) {
 
   const totals = useMemo(() => {
     let needsYou = 0;
-    let running = 0;
     let review = 0;
-    let backlog = 0;
-    let done = 0;
     for (const t of tasks) {
       if (t.state === "needs_human") needsYou += 1;
-      if (["claimed", "running", "splitting"].includes(t.state)) running += 1;
       if (t.state === "review") review += 1;
-      if (normState(t.state) === "backlog") backlog += 1;
-      if (t.state === "done") done += 1;
     }
-    return { needsYou, running, review, backlog, done, total: tasks.length };
+    return { needsYou, review };
   }, [tasks]);
 
   // Stable order from the board (id / creation). Activity shows on badges and
@@ -125,15 +119,6 @@ export function Board(props: BoardProps) {
       return changed ? next : prev;
     });
   }, [sortedGoals, filterState, props.items]);
-
-  const mode = modeCopy({
-    needsYou: totals.needsYou,
-    running: totals.running,
-    inReview: totals.review,
-    backlog: totals.backlog,
-    done: totals.done,
-    totalTasks: totals.total,
-  });
 
   if (!activeGoals.length && !(showArchived && archivedGoals.length)) {
     return (
@@ -173,12 +158,7 @@ export function Board(props: BoardProps) {
     (filterState === "all" || filterState === "needs_you");
 
   return (
-    <div className={`board-page ${totals.needsYou > 0 ? "board-attention" : ""}`}>
-      <header className="board-hero">
-        <h1>{mode.title}</h1>
-        <p className="board-lede">{mode.lede}</p>
-      </header>
-
+    <div className="board-page">
       <div className="board-filter">
         <input
           type="text"
@@ -309,57 +289,6 @@ export function Board(props: BoardProps) {
       </div>
     </div>
   );
-}
-
-function modeCopy({
-  needsYou,
-  running,
-  inReview,
-  backlog,
-  done,
-  totalTasks,
-}: {
-  needsYou: number;
-  running: number;
-  inReview: number;
-  backlog: number;
-  done: number;
-  totalTasks: number;
-}): { title: string; lede: string } {
-  if (needsYou > 0) {
-    return {
-      title: `${needsYou} decision${needsYou === 1 ? "" : "s"} waiting on you`,
-      lede: "Resolve the decision below to unblock that card. Everything else can wait.",
-    };
-  }
-  if (running > 0) {
-    return {
-      title: `${running} task${running === 1 ? "" : "s"} running`,
-      lede: "Agents are working. Expand a project for columns, or wait for the next decision.",
-    };
-  }
-  if (inReview > 0) {
-    return {
-      title: `${inReview} ready for review`,
-      lede: "Finished work is waiting. Review when you have time — nothing is blocked on you right now.",
-    };
-  }
-  if (backlog > 0) {
-    return {
-      title: `${backlog} in backlog`,
-      lede: "Nothing starts until you dispatch. Open a card and press Start, or use the MCP dispatch tool.",
-    };
-  }
-  if (done === totalTasks && totalTasks > 0) {
-    return {
-      title: "All tasks done — nice work",
-      lede: "Nothing in flight. Start another Project when you're ready.",
-    };
-  }
-  return {
-    title: "Quiet for now",
-    lede: "No decisions and nothing running. Expand a project, or change the filter.",
-  };
 }
 
 function NeedsYouList({
