@@ -1,7 +1,7 @@
 # Agents
 
 This spends real money and opens pull requests. Four **roles** must be
-satisfied on the host — the concrete tools below are examples, not the only
+satisfied on the host: the concrete tools below are examples, not the only
 stack. For sandbox mechanics and gotchas, see [Sandbox](sandbox.md).
 
 ## 1. Compute driver
@@ -26,7 +26,7 @@ budget, but it cannot prevent the outage.
 ## 2. OpenShell gateway
 
 ```bash
-# Example (Homebrew service) — use whatever starts *your* gateway:
+# Example (Homebrew service). Use whatever starts *your* gateway:
 #   brew services start openshell
 openshell status       # expect Connected + Authenticated (mTLS transport)
 ```
@@ -35,7 +35,7 @@ Confirm in **Settings → OpenShell** (healthy / unhealthy, or an explicit error
 if the CLI is missing). Optional binary path override lives there when
 `openshell` is not on `PATH`.
 
-Default local gateway port is often `17670` — deliberately not honr’s `8080`.
+Default local gateway port is often `17670`: deliberately not honr’s `8080`.
 Your install may differ; trust `openshell status`, not a hardcoded URL.
 
 ## 3. Providers
@@ -54,11 +54,11 @@ openshell provider update  vertex --config VERTEX_AI_PROJECT_ID=<your-gcp-projec
 openshell provider create --name gh-bot --type github --credential GITHUB_TOKEN
 ```
 
-The GitHub credential key **must** be named `GITHUB_TOKEN` or `GH_TOKEN` — the
+The GitHub credential key **must** be named `GITHUB_TOKEN` or `GH_TOKEN`: the
 profile matches on the name. Prefer a fine-grained PAT scoped to the repos you
 actually dispatch against before agents run unattended.
 
-Claude runs on **Google Vertex** in the worked example — there is no
+Claude runs on **Google Vertex** in the worked example. There is no
 `ANTHROPIC_API_KEY`. Auth is `CLAUDE_CODE_USE_VERTEX=1` plus gcloud ADC. Region
 matters (`global` is the combination that has worked); see [Sandbox](sandbox.md)
 for how a sandboxed agent gets a credential it cannot read.
@@ -72,11 +72,11 @@ references. For honr’s own Rust toolchain image:
 docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 ```
 
-From the repo root, not `sandbox/` — `Cargo.lock` and `web/package-lock.json`
+From the repo root, not `sandbox/`: `Cargo.lock` and `web/package-lock.json`
 must be in context. Other product repos may use a different image via
 Settings → Sandboxes.
 
-Then flip `execution.agents.enabled: true` in `honr.yaml` and **restart** —
+Then flip `execution.agents.enabled: true` in `honr.yaml` and **restart** -
 config is read once at startup; there is no hot reload and no runtime toggle.
 
 > Put it back to `false` before committing. It has been committed as `true`
@@ -88,16 +88,16 @@ config is read once at startup; there is no hot reload and no runtime toggle.
 When the supervisor creates an OpenShell sandbox for a card, create knobs
 (`--from` image, policy YAML, cpu, memory) resolve in this order:
 
-1. **Project override** — `sandbox_profile_id` on the containing Project, if set
+1. **Project override**: `sandbox_profile_id` on the containing Project, if set
    and present in the board profile catalog
-2. **Global default** — `default_sandbox_profile_id` on durable board state
-3. **YAML fallback** — `execution.agents` `image` / `policy` / `cpu` / `memory`
+2. **Global default**: `default_sandbox_profile_id` on durable board state
+3. **YAML fallback**: `execution.agents` `image` / `policy` / `cpu` / `memory`
    in `honr.yaml` (also used to seed the catalog when it is empty at load)
 
 Profile `policy` is **inline YAML text** stored on the board (edited in Settings
 as a textarea). At create, the supervisor writes a temp file for OpenShell's
 `--policy` flag. The host path in `execution.agents.policy` is seed/fallback
-only — not the catalog source of truth.
+only: not the catalog source of truth.
 
 Profiles are managed via Settings (REST: `/api/sandbox-profiles`). Process
 knobs (auth, repo, engine, concurrency) stay in YAML and are not part of a
@@ -106,7 +106,7 @@ profile.
 ## When something breaks
 
 **Everything in this stack fails as a hang, not an error.** A denied egress, a
-missing credential, a wedged relay — all present as silence. If something is
+missing credential, a wedged relay: all present as silence. If something is
 taking too long, it has already failed.
 
 ```bash
@@ -114,7 +114,7 @@ openshell logs <sandbox> -n 60          # grep DENIED, ALLOWED, ssrf, HTTP:
 openshell sandbox list                  # phases; Deleting still appears here
 ```
 
-A sandbox is **kept, not deleted, when a card fails** — `openshell logs` is the
+A sandbox is **kept, not deleted, when a card fails**: `openshell logs` is the
 tool that answers questions and a deleted sandbox answers none. Names are
 attempt-scoped (`honr-card-8-a2`), so retries don't collide with the one kept
 for inspection. `reconcile` clears them on the next startup.
@@ -128,7 +128,7 @@ picks the run back up. The card stays Running; no second sandbox is created.
 
 Startup waits up to 3 minutes for the gateway before reconciling. If the wait
 runs out you get a loud `gateway unreachable after 180s; starting without
-reconciling` — treat any Running card as suspect.
+reconciling`: treat any Running card as suspect.
 
 If the sandbox is up but nothing is running in it, the card returns to Backlog
-without spending a retry — that was the restart's fault, not the card's.
+without spending a retry: that was the restart's fault, not the card's.

@@ -1,7 +1,7 @@
 # honr docs
 
 Operator-first docs for running and understanding honr. Flat pages with stable
-slugs — ready to map to a docs site later.
+slugs: ready to map to a docs site later.
 
 | Page | What |
 |---|---|

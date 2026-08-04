@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="honr mark">
+  <rect width="128" height="128" rx="28" fill="#F3F0EA"/>
+  <g transform="translate(64 64) rotate(-32)">
+    <rect x="-18" y="8" width="56" height="26" rx="6" fill="#3A7A9C"/>
+    <rect x="-28" y="-10" width="56" height="26" rx="6" fill="#14181C"/>
+  </g>
+</svg>

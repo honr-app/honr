@@ -5,11 +5,11 @@ Day-to-day operation once the board is up. For enabling sandboxed agents, see
 
 ## Happy path
 
-1. **Create a Project** (`create_project` or UI) — Initial plan Task lands in
+1. **Create a Project** (`create_project` or UI): Initial plan Task lands in
    Backlog.
-2. **Dispatch** Initial plan (`dispatch` / UI **Start**) — agent writes
+2. **Dispatch** Initial plan (`dispatch` / UI **Start**): agent writes
    `plan.json` plus a plan/docs PR and reports to Review.
-3. **Approve** that card — creates sibling Tasks under the Project. Approve
+3. **Approve** that card: creates sibling Tasks under the Project. Approve
    does not auto-dispatch unless Project auto mode is already on.
 4. **Dispatch** each Ready / Backlog Task (or turn on Project auto mode).
 5. Worker opens a cross-fork PR → card lands in **Review**.
@@ -19,16 +19,16 @@ Day-to-day operation once the board is up. For enabling sandboxed agents, see
 same split path: `split.json` → Review with proposal → Approve creates siblings.
 
 Standing policy lives in Project `project_prompt` (edit via `update`). Task
-inputs are the Plan. Read `item_detail`'s proposal / Plan before approving — a
+inputs are the Plan. Read `item_detail`'s proposal / Plan before approving. A
 card that passes its gates can still be building the wrong thing.
 
 ## Triage order
 
 Urgency differs:
 
-1. **Needs You** — an agent is stopped and burning nothing while it waits.
+1. **Needs You**: an agent is stopped and burning nothing while it waits.
    Resolve these first.
-2. **Review** — finished and safe. Sort by blast radius and novelty, not
+2. **Review**: finished and safe. Sort by blast radius and novelty, not
    arrival time.
 3. Everything else waits for a digest (`board_snapshot` / `board_digest`).
 
@@ -50,7 +50,7 @@ answer Needs You, or unpark.
 The supervisor takes the oldest Backlog card with `awaiting_dispatch` that is
 claimable and not already being run, subject to concurrency and gateway health
 gates. Lease expiry, park, halt, release, and request_changes all clear
-`awaiting_dispatch` — with auto off, dispatch again; with auto on, the next
+`awaiting_dispatch`: with auto off, dispatch again; with auto on, the next
 tick re-queues claimable cards. Unpark clears the hold and queues the
 supervisor (same as Start).
 
@@ -58,12 +58,12 @@ supervisor (same as Start).
 
 | You want to | Do this |
 |---|---|
-| Send a reviewed card back with instructions | **Request changes**. The note reaches the next run's briefing. Does not auto-start — dispatch again. |
-| Answer a blocked agent | **Needs You** — pick an option. |
-| Stop a wedged run but keep context | **Park** — stops the agent, keeps sandbox + conversation, holds until **Resume** / `unpark`. |
-| Resume a parked card | **Unpark** — clears the hold and queues the supervisor; next claim can resume the conversation. |
-| Throw away the run | **Halt** — stops the agent, clears conversation id, deletes the sandbox. Next dispatch starts clean. |
-| Soft note for later | **Steer** — stored and seen on the next claim. Does not inject mid-turn. |
+| Send a reviewed card back with instructions | **Request changes**. The note reaches the next run's briefing. Does not auto-start. Dispatch again. |
+| Answer a blocked agent | **Needs You**: pick an option. |
+| Stop a wedged run but keep context | **Park**: stops the agent, keeps sandbox + conversation, holds until **Resume** / `unpark`. |
+| Resume a parked card | **Unpark**: clears the hold and queues the supervisor; next claim can resume the conversation. |
+| Throw away the run | **Halt**: stops the agent, clears conversation id, deletes the sandbox. Next dispatch starts clean. |
+| Soft note for later | **Steer**: stored and seen on the next claim. Does not inject mid-turn. |
 | Auto-start claimable Backlog under a Project | Swimlane **Auto** play/pause (or `set_auto_dispatch`). |
 
 Prefer **park** over **halt** when the agent is stuck and you want the same
@@ -78,7 +78,7 @@ Ingress is `POST /api/webhooks/github`. A push to the default branch emits
    the merged PR.
 2. **Review rebase catch-up** for sibling PRs still in Review that are behind
    `main` (supervisor-driven git on the PR branch).
-3. **Live runs** — each Claimed / Running card gets a steer note to fetch /
+3. **Live runs**: each Claimed / Running card gets a steer note to fetch /
    rebase onto upstream main. Because steer alone does not inject mid-turn,
    honr then parks and unparks so the agent acts on resume. Sandbox and
    conversation id are preserved.
