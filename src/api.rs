@@ -164,12 +164,19 @@ pub struct CreateItem {
     capability: Option<String>,
     #[serde(default)]
     above_line: bool,
+    /// Task product remotes. Ignored when creating a Project root.
+    #[serde(default)]
+    repo: Option<crate::schema::RepoConfig>,
+    /// Ignored — Projects have no product-repo field.
+    #[serde(default)]
+    product_repo: Option<serde_json::Value>,
 }
 
 async fn create_item(
     AxState(b): AxState<SharedBoard>,
     Json(req): Json<CreateItem>,
 ) -> ApiResult<WorkItem> {
+    let _ = req.product_repo; // task-scoped remotes only
     let item = b
         .create(
             req.parent,
@@ -183,6 +190,17 @@ async fn create_item(
         .map_err(ApiError)?;
     // A project dropped in plain language starts shaping immediately.
     let item = b.transition(item.id, State::Shaping, "human", None).unwrap_or(item);
+    if let Some(repo) = req.repo {
+        if !item.is_project() {
+            let item = b.set_task_repo(item.id, Some(repo)).map_err(ApiError)?;
+            b.schedule_beads_mirror(item.id);
+            for cid in b.children_of(item.id) {
+                b.schedule_beads_mirror(cid);
+            }
+            return Ok(Json(item));
+        }
+        // Accidental repo/product_repo on a Project — ignore.
+    }
     b.schedule_beads_mirror(item.id);
     for cid in b.children_of(item.id) {
         b.schedule_beads_mirror(cid);
@@ -296,6 +314,12 @@ pub struct UpdateItemReq {
     engine: Option<String>,
     #[serde(default)]
     project_prompt: Option<String>,
+    /// Task product remotes (`upstream` required). Refused on Projects.
+    #[serde(default)]
+    repo: Option<crate::schema::RepoConfig>,
+    /// Ignored — Projects have no product-repo field.
+    #[serde(default)]
+    product_repo: Option<serde_json::Value>,
 }
 
 async fn update_item(
@@ -303,8 +327,9 @@ async fn update_item(
     Path(id): Path<ItemId>,
     Json(req): Json<UpdateItemReq>,
 ) -> ApiResult<WorkItem> {
-    Ok(Json(
-        b.update_item(
+    let _ = req.product_repo; // task-scoped remotes only
+    let item = b
+        .update_item(
             id,
             req.title,
             req.intent,
@@ -312,8 +337,11 @@ async fn update_item(
             req.engine,
             req.project_prompt,
         )
-        .map_err(ApiError)?,
-    ))
+        .map_err(ApiError)?;
+    if let Some(repo) = req.repo {
+        return Ok(Json(b.set_task_repo(id, Some(repo)).map_err(ApiError)?));
+    }
+    Ok(Json(item))
 }
 
 async fn halt(
@@ -844,6 +872,135 @@ async fn github_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn item_detail_and_snapshot_show_task_repo_when_set() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-task-repo-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let project = b
+            .create(
+                None,
+                "API Proj",
+                "why",
+                None,
+                crate::model::Origin::Human,
+                true,
+                None,
+            )
+            .expect("project");
+        let task = b
+            .create(
+                Some(project.id),
+                "API Task",
+                "do",
+                Some("shipped".into()),
+                crate::model::Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        b.set_task_repo(
+            task.id,
+            Some(crate::schema::RepoConfig {
+                upstream: "acme/api".into(),
+                fork: String::new(),
+                base: "main".into(),
+            }),
+        )
+        .expect("bind");
+
+        let Ok(Json(detail)) = item_detail(AxState(b.clone()), Path(task.id)).await else {
+            panic!("item_detail");
+        };
+        let detail_v = serde_json::to_value(&detail).expect("detail json");
+        assert_eq!(detail_v["repo"]["upstream"], "acme/api");
+        assert_eq!(detail_v["repo"]["base"], "main");
+
+        let Ok(Json(proj_detail)) = item_detail(AxState(b.clone()), Path(project.id)).await else {
+            panic!("project detail");
+        };
+        let proj_v = serde_json::to_value(&proj_detail).expect("proj json");
+        assert!(
+            proj_v.get("repo").is_none() || proj_v["repo"].is_null(),
+            "Project detail must not expose a product-repo: {proj_v}"
+        );
+
+        // create Project with accidental product_repo — ignored.
+        let Ok(Json(created)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: None,
+                title: "Accidental".into(),
+                intent: "why".into(),
+                definition_of_done: None,
+                capability: None,
+                above_line: true,
+                repo: Some(crate::schema::RepoConfig {
+                    upstream: "should/ignore".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                }),
+                product_repo: Some(serde_json::json!({"upstream": "also/ignore"})),
+            }),
+        )
+        .await
+        else {
+            panic!("create project");
+        };
+        assert!(created.is_project());
+        assert!(created.repo.is_none());
+
+        // update Project with product_repo — ignored; repo refused.
+        let Ok(Json(updated)) = update_item(
+            AxState(b.clone()),
+            Path(project.id),
+            Json(UpdateItemReq {
+                title: None,
+                intent: None,
+                definition_of_done: None,
+                engine: None,
+                project_prompt: None,
+                repo: None,
+                product_repo: Some(serde_json::json!("acme/nope")),
+            }),
+        )
+        .await
+        else {
+            panic!("update ignore product_repo");
+        };
+        assert!(updated.repo.is_none());
+        assert!(
+            update_item(
+                AxState(b.clone()),
+                Path(project.id),
+                Json(UpdateItemReq {
+                    title: None,
+                    intent: None,
+                    definition_of_done: None,
+                    engine: None,
+                    project_prompt: None,
+                    repo: Some(crate::schema::RepoConfig {
+                        upstream: "acme/nope".into(),
+                        fork: String::new(),
+                        base: "main".into(),
+                    }),
+                    product_repo: None,
+                }),
+            )
+            .await
+            .is_err(),
+            "setting repo on a Project must fail"
+        );
+    }
 
     /// Where a card ran and what it produced have to survive the trip to the
     /// browser. The card face reads them off the board snapshot and the drawer
