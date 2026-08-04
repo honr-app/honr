@@ -1,10 +1,15 @@
 import type {
   AgentRuntimeConfig,
+  OpenShellProviderView,
+  OpenShellProviderWrite,
+  OpenShellProvidersOut,
   OpenShellSettings,
   OpenShellStatus,
+  ProviderTypeProfile,
   SandboxProfile,
   SandboxProfilesOut,
   Snapshot,
+  SyncProvidersOut,
   WorkItem,
   WorkspaceBinding,
 } from "./types";
@@ -29,11 +34,17 @@ const put = (path: string, body?: unknown) =>
     body: JSON.stringify(body ?? {}),
   }).then(jsonOrThrow);
 
+const del = (path: string) =>
+  fetch(`/api${path}`, { method: "DELETE" }).then(async (r) => {
+    if (r.status === 204) return null;
+    return jsonOrThrow(r);
+  });
+
 export const api = {
   board: (): Promise<Snapshot> => fetch("/api/board").then(jsonOrThrow),
   digest: () => fetch("/api/digest").then(jsonOrThrow),
   detail: (id: number) => fetch(`/api/items/${id}`).then(jsonOrThrow),
-  logs: (id: number): Promise<{ claude: string[]; openshell: string[] }> => fetch(`/api/items/${id}/logs`).then(jsonOrThrow),
+  logs: (id: number): Promise<{ agent: string[]; openshell: string[] }> => fetch(`/api/items/${id}/logs`).then(jsonOrThrow),
   // The human verbs. Each costs the system something different.
   steer: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/steer`, { text }),
@@ -128,6 +139,29 @@ export const api = {
     put("/openshell", settings),
   getOpenShellStatus: (): Promise<OpenShellStatus> =>
     fetch("/api/openshell/status").then(jsonOrThrow),
+
+  listOpenShellProviders: (): Promise<OpenShellProvidersOut> =>
+    fetch("/api/openshell/providers").then(jsonOrThrow),
+  createOpenShellProvider: (body: OpenShellProviderWrite): Promise<OpenShellProviderView> =>
+    post("/openshell/providers", body),
+  updateOpenShellProvider: (
+    name: string,
+    body: OpenShellProviderWrite,
+  ): Promise<OpenShellProviderView> =>
+    put(`/openshell/providers/${encodeURIComponent(name)}`, body),
+  deleteOpenShellProvider: (name: string): Promise<null> =>
+    del(`/openshell/providers/${encodeURIComponent(name)}`),
+  syncOpenShellProviders: (): Promise<SyncProvidersOut> =>
+    post("/openshell/providers/sync"),
+  importGcloudAdcProvider: (body?: {
+    name?: string;
+    project?: string;
+    location?: string;
+    attach_to_sandboxes?: boolean;
+  }): Promise<OpenShellProviderView> =>
+    post("/openshell/providers/import-gcloud-adc", body ?? {}),
+  listOpenShellProviderProfiles: (): Promise<ProviderTypeProfile[]> =>
+    fetch("/api/openshell/provider-profiles").then(jsonOrThrow),
 };
 
 /** `4s`, `12m`, `3h 5m` — matches the server's own formatting. */

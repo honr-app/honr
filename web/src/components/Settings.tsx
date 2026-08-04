@@ -1,21 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "../api.js";
 import type {
   AgentRuntimeConfig,
+  OpenShellProviderView,
+  OpenShellProviderWrite,
   OpenShellSettings,
   OpenShellStatus,
+  ProviderTypeProfile,
   SandboxProfile,
   WorkspaceBinding,
 } from "../types.js";
 
-type SettingsSection = "sandboxes" | "workspace" | "agent-runtime" | "openshell";
+type SettingsSection = "workspace" | "agent-runtime" | "openshell";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
-  { id: "sandboxes", label: "Sandboxes" },
+  { id: "openshell", label: "OpenShell" },
   // Nav label is Forge — "Workspace" implied a single work repo (upstream/fork).
   { id: "workspace", label: "Forge" },
   { id: "agent-runtime", label: "Agent runtime" },
-  { id: "openshell", label: "OpenShell" },
 ];
 
 type ProfileDraft = {
@@ -25,6 +27,7 @@ type ProfileDraft = {
   policy: string;
   cpu: string;
   memory: string;
+  engine: string;
 };
 
 const emptyDraft = (): ProfileDraft => ({
@@ -34,6 +37,7 @@ const emptyDraft = (): ProfileDraft => ({
   policy: "",
   cpu: "",
   memory: "",
+  engine: "cursor",
 });
 
 function draftFrom(p: SandboxProfile): ProfileDraft {
@@ -44,6 +48,7 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
     policy: p.policy,
     cpu: p.cpu ?? "",
     memory: p.memory ?? "",
+    engine: p.engine?.trim() || "cursor",
   };
 }
 
@@ -55,20 +60,17 @@ const emptyWorkspace = (): WorkspaceBinding => ({
 const emptyAgentRuntime = (): AgentRuntimeConfig => ({
   enabled: false,
   engine: "cursor",
-  providers: [],
-  vertex: { project: "", location: "global", model: "claude-opus-5" },
   max_concurrent: 2,
   agent_timeout_secs: 1800,
   max_attempts: 3,
   branch_prefix: "honr",
-  quality_gates: [],
 });
 
 /**
- * Settings shell — Sandboxes, Forge, Agent runtime, and OpenShell connectivity.
+ * Settings shell — OpenShell (gateway / providers / profiles), Forge, Agent runtime.
  */
 export function Settings() {
-  const [section, setSection] = useState<SettingsSection>("sandboxes");
+  const [section, setSection] = useState<SettingsSection>("openshell");
 
   return (
     <div className="settings" data-testid="settings">
@@ -77,9 +79,9 @@ export function Settings() {
         <p className="settings-lede">
           Control-plane preferences. Forge holds Issue sync — not a work repo.
           Each card’s <code>pull_request</code> (after report) holds remotes.
-          Sandboxes manages named profiles and the global default. Agent runtime
-          holds engine, Vertex, and providers. OpenShell shows gateway
-          health on this host.
+          OpenShell holds gateway connectivity, providers, and sandbox profiles
+          (including which agent engine a profile runs). Agent runtime holds
+          concurrency, timeouts, and the fallback engine.
         </p>
       </header>
 
@@ -101,14 +103,12 @@ export function Settings() {
         </nav>
 
         <div className="settings-panel" data-testid={`settings-panel-${section}`}>
-          {section === "sandboxes" ? (
-            <SandboxesPanel />
+          {section === "openshell" ? (
+            <OpenShellPanel />
           ) : section === "workspace" ? (
             <WorkspacePanel />
-          ) : section === "agent-runtime" ? (
-            <AgentRuntimePanel />
           ) : (
-            <OpenShellPanel />
+            <AgentRuntimePanel />
           )}
         </div>
       </div>
@@ -148,12 +148,13 @@ export function SandboxesPanelView({
   const isEditing = editingId !== null;
 
   return (
-    <section aria-labelledby="sandboxes-title" data-testid="sandboxes-panel">
-      <h2 id="sandboxes-title">Sandboxes</h2>
+    <div className="openshell-profiles" data-testid="openshell-profiles">
+    <section aria-labelledby="openshell-profiles-title" data-testid="sandboxes-panel">
+      <h3 id="openshell-profiles-title">Profiles</h3>
       <p className="dim">
-        Named create-specs for OpenShell. The global default is used when a
-        Project has no override. Live card environments are managed on the board,
-        not here.
+        Named create-specs (image, policy, CPU, memory). The global default is
+        used when a Project has no override. Live card environments are managed
+        on the board, not here.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -185,6 +186,8 @@ export function SandboxesPanelView({
                       )}
                     </div>
                     <div className="dim sandbox-profile-meta">
+                      {p.engine?.trim() || "engine: default"}
+                      <span className="sep">·</span>
                       {p.image}
                       {(p.cpu || p.memory) && (
                         <>
@@ -281,6 +284,24 @@ export function SandboxesPanelView({
             />
           </label>
           <label>
+            Agent engine
+            <select
+              className="search-input"
+              value={draft.engine}
+              disabled={busy}
+              onChange={(e) => onDraftChange({ ...draft, engine: e.target.value })}
+              data-testid="sandbox-field-engine"
+            >
+              <option value="cursor">Cursor Agent (cursor)</option>
+              <option value="agy">Antigravity CLI (agy)</option>
+              <option value="claude">Claude Code (Anthropic)</option>
+            </select>
+            <span className="dim sandbox-field-hint">
+              Cards using this profile run this CLI. Agent runtime supplies the
+              fallback when unset on older profiles.
+            </span>
+          </label>
+          <label>
             Policy (YAML)
             <textarea
               className="sandbox-policy-textarea"
@@ -332,6 +353,7 @@ export function SandboxesPanelView({
         </form>
       )}
     </section>
+    </div>
   );
 }
 
@@ -372,10 +394,12 @@ function SandboxesPanel() {
 
   if (loading && profiles.length === 0 && !error) {
     return (
-      <section aria-labelledby="sandboxes-title" data-testid="sandboxes-panel">
-        <h2 id="sandboxes-title">Sandboxes</h2>
-        <p className="dim">loading…</p>
-      </section>
+      <div className="openshell-profiles" data-testid="openshell-profiles">
+        <section aria-labelledby="openshell-profiles-title" data-testid="sandboxes-panel">
+          <h3 id="openshell-profiles-title">Profiles</h3>
+          <p className="dim">loading…</p>
+        </section>
+      </div>
     );
   }
 
@@ -409,6 +433,7 @@ function SandboxesPanel() {
           policy: draft.policy,
           cpu: draft.cpu.trim() || null,
           memory: draft.memory.trim() || null,
+          engine: draft.engine.trim() || null,
         };
         run(api.upsertSandboxProfile(body)).then(() => {
           setEditingId(null);
@@ -656,17 +681,14 @@ export function AgentRuntimePanelView({
   onDraftChange: (next: AgentRuntimeConfig) => void;
   onSave: () => void;
 }) {
-  const providersText = draft.providers.join(", ");
   return (
     <section aria-labelledby="agent-runtime-title" data-testid="agent-runtime-panel">
       <h2 id="agent-runtime-title">Agent runtime</h2>
       <p className="dim">
-        Process knobs for OpenShell sandboxes: default engine, provider names,
-        Vertex project/location/model, branch prefix, quality gates, concurrency,
-        and timeouts. Seeded from <code>honr.yaml</code>; edits persist on the
-        Board and apply to the next sandbox create. Image/policy live under
-        Sandboxes. Host credential paths stay documented overrides — not silent
-        home assumptions.
+        Process knobs for OpenShell sandboxes: branch prefix, concurrency,
+        timeouts, and the fallback agent engine when a profile omits one.
+        Seeded from <code>honr.yaml</code>; edits persist on the Board. Per-run
+        engine lives on OpenShell → Profiles.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -712,79 +734,6 @@ export function AgentRuntimePanelView({
             <option value="agy">agy</option>
             <option value="claude">claude</option>
           </select>
-        </label>
-
-        <label>
-          OpenShell providers
-          <input
-            className="search-input"
-            value={providersText}
-            disabled={busy}
-            placeholder="vertex, gh-bot, cursor-honr — comma-separated"
-            onChange={(e) =>
-              onDraftChange({
-                ...draft,
-                providers: e.target.value
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              })
-            }
-            data-testid="agent-runtime-field-providers"
-          />
-          <span className="dim sandbox-field-hint">
-            Names must match local OpenShell gateway registrations.
-          </span>
-        </label>
-
-        <div className="sandbox-profile-form-row">
-          <label>
-            Vertex project
-            <input
-              className="search-input"
-              value={draft.vertex.project}
-              disabled={busy}
-              onChange={(e) =>
-                onDraftChange({
-                  ...draft,
-                  vertex: { ...draft.vertex, project: e.target.value },
-                })
-              }
-              data-testid="agent-runtime-field-vertex-project"
-            />
-          </label>
-          <label>
-            Vertex location
-            <input
-              className="search-input"
-              value={draft.vertex.location}
-              disabled={busy}
-              placeholder="global"
-              onChange={(e) =>
-                onDraftChange({
-                  ...draft,
-                  vertex: { ...draft.vertex, location: e.target.value },
-                })
-              }
-              data-testid="agent-runtime-field-vertex-location"
-            />
-          </label>
-        </div>
-
-        <label>
-          Vertex model
-          <input
-            className="search-input"
-            value={draft.vertex.model}
-            disabled={busy}
-            onChange={(e) =>
-              onDraftChange({
-                ...draft,
-                vertex: { ...draft.vertex, model: e.target.value },
-              })
-            }
-            data-testid="agent-runtime-field-vertex-model"
-          />
         </label>
 
         <div className="sandbox-profile-form-row">
@@ -841,32 +790,6 @@ export function AgentRuntimePanelView({
         </label>
 
         <label>
-          Quality gates
-          <textarea
-            className="search-input"
-            rows={3}
-            value={(draft.quality_gates ?? []).join("\n")}
-            disabled={busy}
-            placeholder={"cargo test --offline --locked\ncargo clippy --offline -- -D warnings"}
-            onChange={(e) =>
-              onDraftChange({
-                ...draft,
-                quality_gates: e.target.value
-                  .split("\n")
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              })
-            }
-            data-testid="agent-runtime-field-quality-gates"
-          />
-          <span className="dim sandbox-field-hint">
-            One shell command per line, injected into agent briefings. Leave empty
-            so non-Rust Projects are not told to run cargo — put per-repo gates in
-            the Project prompt instead.
-          </span>
-        </label>
-
-        <label>
           Max attempts
           <input
             className="search-input"
@@ -914,9 +837,6 @@ function AgentRuntimePanel() {
         setDraft({
           ...emptyAgentRuntime(),
           ...rt,
-          vertex: { ...emptyAgentRuntime().vertex, ...(rt.vertex ?? {}) },
-          providers: rt.providers ?? [],
-          quality_gates: rt.quality_gates ?? [],
           branch_prefix: rt.branch_prefix || "honr",
         });
         setError(null);
@@ -958,14 +878,9 @@ function AgentRuntimePanel() {
             setDraft({
               ...emptyAgentRuntime(),
               ...saved,
-              vertex: { ...emptyAgentRuntime().vertex, ...(saved.vertex ?? {}) },
-              providers: saved.providers ?? [],
-              quality_gates: saved.quality_gates ?? [],
               branch_prefix: saved.branch_prefix || "honr",
             });
-            setSavedHint(
-              "Saved. Next sandbox create / agent_env use these providers, Vertex, prefix, and gates.",
-            );
+            setSavedHint("Saved. Next runs use this engine, prefix, and timeouts.");
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));
@@ -977,45 +892,72 @@ function AgentRuntimePanel() {
 /** Presentational OpenShell panel — exported for UI tests without fetch. */
 export function OpenShellPanelView({
   status,
-  binaryPath,
+  gatewayEndpoint,
+  caPem,
+  clientCertPem,
+  clientKeyPem,
+  mtls,
   busy,
   error,
   savedHint,
-  onBinaryPathChange,
+  onGatewayEndpointChange,
+  onCaPemChange,
+  onClientCertPemChange,
+  onClientKeyPemChange,
   onRefresh,
-  onSaveBinary,
+  onSave,
+  onImportCliMtls,
+  onClearMtls,
+  providers,
+  profiles,
 }: {
   status: OpenShellStatus | null;
-  binaryPath: string;
+  gatewayEndpoint: string;
+  caPem: string;
+  clientCertPem: string;
+  clientKeyPem: string;
+  mtls?: OpenShellSettings["mtls"];
   busy?: boolean;
   error?: string | null;
   savedHint?: string | null;
-  onBinaryPathChange: (next: string) => void;
+  onGatewayEndpointChange: (next: string) => void;
+  onCaPemChange: (next: string) => void;
+  onClientCertPemChange: (next: string) => void;
+  onClientKeyPemChange: (next: string) => void;
   onRefresh: () => void;
-  onSaveBinary: () => void;
+  onSave: () => void;
+  onImportCliMtls: () => void;
+  onClearMtls: () => void;
+  /** Optional providers band (live panel passes a mounted subview). */
+  providers?: ReactNode;
+  /** Optional profiles band (live panel passes SandboxesPanel). */
+  profiles?: ReactNode;
 }) {
   const healthLabel = !status
     ? "…"
-    : status.cli_missing
-      ? "CLI missing"
-      : status.healthy
-        ? "Healthy"
-        : "Unhealthy";
+    : status.healthy
+      ? "Healthy"
+      : "Unhealthy";
   const healthClass = !status
     ? "dim"
-    : status.cli_missing
-      ? "openshell-health-missing"
-      : status.healthy
-        ? "openshell-health-ok"
-        : "openshell-health-bad";
+    : status.healthy
+      ? "openshell-health-ok"
+      : "openshell-health-bad";
+  const mtlsLabel = mtls?.complete
+    ? "Configured (encrypted in board DB)"
+    : mtls?.ca || mtls?.client_cert || mtls?.client_key
+      ? "Incomplete"
+      : "Not configured";
 
   return (
     <section aria-labelledby="openshell-title" data-testid="openshell-panel">
       <h2 id="openshell-title">OpenShell</h2>
       <p className="dim">
-        Gateway connectivity on this host. Dispatch will not claim cards while
-        the gateway is unhealthy. Compute driver, providers, and image stay
-        host/ops setup — see the operating docs.
+        Gateway connectivity, providers, and sandbox profiles. Paste endpoint +
+        certs (or import from the local OpenShell config dir). PEMs are sealed
+        into the board database with a host master key (
+        <code>~/.config/honr/master.key</code>); the API never returns private
+        key material. Host Docker / Colima stay outside honr.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -1032,20 +974,18 @@ export function OpenShellPanelView({
             className={healthClass}
             data-testid="openshell-health-label"
             data-healthy={status?.healthy ? "true" : "false"}
-            data-cli-missing={status?.cli_missing ? "true" : "false"}
           >
             {healthLabel}
           </strong>
         </div>
-        {status && (
-          <>
-            <p className="dim openshell-health-bin" data-testid="openshell-health-binary">
-              Binary: <code>{status.binary}</code>
-            </p>
-            <pre className="openshell-health-summary" data-testid="openshell-health-summary">
-              {status.summary}
-            </pre>
-          </>
+        <div className="openshell-health-row">
+          <span className="dim">mTLS material</span>
+          <strong data-testid="openshell-mtls-label">{mtlsLabel}</strong>
+        </div>
+        {status?.summary && (
+          <pre className="openshell-health-summary" data-testid="openshell-health-summary">
+            {status.summary}
+          </pre>
         )}
         <div className="btns">
           <button
@@ -1062,40 +1002,103 @@ export function OpenShellPanelView({
 
       <form
         className="sandbox-profile-form workspace-form"
-        data-testid="openshell-binary-form"
+        data-testid="openshell-gateway-form"
         onSubmit={(e) => {
           e.preventDefault();
-          onSaveBinary();
+          onSave();
         }}
       >
         <label>
-          Binary path (optional)
+          Gateway endpoint
           <input
             className="search-input"
-            value={binaryPath}
+            value={gatewayEndpoint}
             disabled={busy}
-            placeholder="openshell — leave empty to use PATH"
-            onChange={(e) => onBinaryPathChange(e.target.value)}
-            data-testid="openshell-field-binary"
+            placeholder="https://127.0.0.1:17670"
+            onChange={(e) => onGatewayEndpointChange(e.target.value)}
+            data-testid="openshell-field-endpoint"
           />
-          <span className="dim sandbox-field-hint">
-            Override only when the CLI is not on PATH. Host Docker / Colima /
-            podman and <code>DOCKER_HOST</code> stay outside honr — configure
-            them for the OpenShell gateway process, not here.
-          </span>
+        </label>
+        <label>
+          CA certificate (PEM)
+          <textarea
+            className="search-input"
+            rows={4}
+            value={caPem}
+            disabled={busy}
+            placeholder={
+              mtls?.ca
+                ? "Configured — paste to replace"
+                : "-----BEGIN CERTIFICATE-----"
+            }
+            onChange={(e) => onCaPemChange(e.target.value)}
+            data-testid="openshell-field-ca"
+          />
+        </label>
+        <label>
+          Client certificate (PEM)
+          <textarea
+            className="search-input"
+            rows={4}
+            value={clientCertPem}
+            disabled={busy}
+            placeholder={
+              mtls?.client_cert
+                ? "Configured — paste to replace"
+                : "-----BEGIN CERTIFICATE-----"
+            }
+            onChange={(e) => onClientCertPemChange(e.target.value)}
+            data-testid="openshell-field-client-cert"
+          />
+        </label>
+        <label>
+          Client private key (PEM)
+          <textarea
+            className="search-input"
+            rows={4}
+            value={clientKeyPem}
+            disabled={busy}
+            placeholder={
+              mtls?.client_key
+                ? "Configured — paste to replace"
+                : "-----BEGIN PRIVATE KEY-----"
+            }
+            onChange={(e) => onClientKeyPemChange(e.target.value)}
+            data-testid="openshell-field-client-key"
+          />
         </label>
         <div className="btns">
-          <button type="submit" className="primary" disabled={busy} data-testid="openshell-save-binary">
-            Save binary path
+          <button type="submit" className="primary" disabled={busy} data-testid="openshell-save">
+            Save
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onImportCliMtls}
+            data-testid="openshell-import-cli-mtls"
+          >
+            Import from local config
+          </button>
+          <button
+            type="button"
+            disabled={busy || !mtls?.complete}
+            onClick={onClearMtls}
+            data-testid="openshell-clear-mtls"
+          >
+            Clear mTLS
           </button>
         </div>
       </form>
 
+      {providers}
+
+      {profiles}
+
       <aside className="workspace-webhook-hint" data-testid="openshell-ops-hint">
         <h3>Host setup</h3>
         <p className="dim">
-          Role checklist: compute driver → OpenShell gateway → providers →
-          sandbox image. Details in <code>docs/agents.md</code> and{" "}
+          Role checklist: compute driver → gateway (mTLS) → providers → profiles
+          (image/policy). Details in <code>docs/agents.md</code> and{" "}
           <code>docs/sandbox.md</code>.
         </p>
       </aside>
@@ -1103,20 +1106,478 @@ export function OpenShellPanelView({
   );
 }
 
+/** Presentational providers band — exported for UI tests without fetch. */
+export function OpenShellProvidersPanelView({
+  providers,
+  gatewayReachable,
+  profiles,
+  busy,
+  error,
+  hint,
+  draft,
+  onDraftChange,
+  onSave,
+  onCancelEdit,
+  onEdit,
+  onDelete,
+  onSync,
+  onImportAdc,
+  onToggleAttach,
+}: {
+  providers: OpenShellProviderView[];
+  gatewayReachable: boolean;
+  profiles: ProviderTypeProfile[];
+  busy?: boolean;
+  error?: string | null;
+  hint?: string | null;
+  draft: OpenShellProviderWrite | null;
+  onDraftChange: (next: OpenShellProviderWrite | null) => void;
+  onSave: () => void;
+  onCancelEdit: () => void;
+  onEdit: (p: OpenShellProviderView) => void;
+  onDelete: (name: string) => void;
+  onSync: () => void;
+  onImportAdc: () => void;
+  onToggleAttach: (p: OpenShellProviderView, attach: boolean) => void;
+}) {
+  const typeOptions = profiles.length
+    ? profiles.map((p) => p.id)
+    : ["github", "google-vertex-ai", "cursor", "claude"];
+  const selectedProfile = draft
+    ? profiles.find((p) => p.id === draft.type)
+    : undefined;
+  const credKeys =
+    selectedProfile?.credential_env_vars?.length
+      ? selectedProfile.credential_env_vars
+      : draft?.type === "github"
+        ? ["GITHUB_TOKEN"]
+        : [];
+
+  return (
+    <div className="openshell-providers" data-testid="openshell-providers">
+      <div className="openshell-providers-head">
+        <h3 id="openshell-providers-title">Providers</h3>
+        <p className="dim">
+          Desired providers live on the board (credentials sealed). Save applies
+          to the gateway when it is reachable; Sync recreates after a wipe.
+        </p>
+      </div>
+
+      {error && <div className="err">{error}</div>}
+      {hint && (
+        <p className="dim" data-testid="openshell-providers-hint">
+          {hint}
+        </p>
+      )}
+
+      <div className="btns" style={{ marginBottom: 12 }}>
+        <button
+          type="button"
+          className="primary"
+          disabled={busy}
+          onClick={() =>
+            onDraftChange({
+              name: "",
+              type: typeOptions[0] ?? "github",
+              config: {},
+              credentials: {},
+              attach_to_sandboxes: true,
+            })
+          }
+          data-testid="openshell-providers-add"
+        >
+          Add provider
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onSync}
+          data-testid="openshell-providers-sync"
+        >
+          Sync all to gateway
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onImportAdc}
+          data-testid="openshell-providers-import-adc"
+        >
+          Import gcloud ADC
+        </button>
+        <span className="dim" data-testid="openshell-providers-gateway-badge">
+          {gatewayReachable ? "gateway reachable" : "gateway offline — local only"}
+        </span>
+      </div>
+
+      {providers.length === 0 && !draft ? (
+        <p className="dim" data-testid="openshell-providers-empty">
+          No providers yet. Add one, or import Vertex from gcloud ADC.
+        </p>
+      ) : (
+        <ul className="openshell-provider-list" data-testid="openshell-provider-list">
+          {providers.map((p) => (
+            <li key={p.name} className="openshell-provider-row" data-testid={`openshell-provider-${p.name}`}>
+              <div className="openshell-provider-main">
+                <strong>{p.name}</strong>
+                <span className="dim">{p.type}</span>
+                <span
+                  className={
+                    p.gateway_synced === true
+                      ? "openshell-health-ok"
+                      : p.gateway_synced === false
+                        ? "openshell-health-bad"
+                        : "dim"
+                  }
+                  data-testid={`openshell-provider-sync-${p.name}`}
+                >
+                  {p.gateway_synced === true
+                    ? "on gateway"
+                    : p.gateway_synced === false
+                      ? "not on gateway"
+                      : "sync unknown"}
+                </span>
+              </div>
+              <div className="openshell-provider-meta dim">
+                {p.has_credentials || p.has_refresh
+                  ? `secrets: ${(p.credential_keys ?? []).join(", ") || "refresh"}`
+                  : "no secrets"}
+              </div>
+              <label className="agent-runtime-check">
+                <input
+                  type="checkbox"
+                  checked={p.attach_to_sandboxes}
+                  disabled={busy}
+                  onChange={(e) => onToggleAttach(p, e.target.checked)}
+                  data-testid={`openshell-provider-attach-${p.name}`}
+                />
+                Attach to sandboxes
+              </label>
+              <div className="btns">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onEdit(p)}
+                  data-testid={`openshell-provider-edit-${p.name}`}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onDelete(p.name)}
+                  data-testid={`openshell-provider-delete-${p.name}`}
+                >
+                  Delete
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {draft && (
+        <form
+          className="sandbox-profile-form workspace-form openshell-provider-form"
+          data-testid="openshell-provider-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onSave();
+          }}
+        >
+          <label>
+            Name
+            <input
+              className="search-input"
+              value={draft.name}
+              disabled={busy}
+              onChange={(e) => onDraftChange({ ...draft, name: e.target.value })}
+              data-testid="openshell-provider-field-name"
+            />
+          </label>
+          <label>
+            Type
+            <select
+              className="search-input"
+              value={draft.type}
+              disabled={busy}
+              onChange={(e) => onDraftChange({ ...draft, type: e.target.value })}
+              data-testid="openshell-provider-field-type"
+            >
+              {typeOptions.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+          {credKeys.map((key) => (
+            <label key={key}>
+              {key}
+              <input
+                className="search-input"
+                type="password"
+                autoComplete="off"
+                placeholder="write-only — leave blank to keep existing"
+                value={draft.credentials?.[key] ?? ""}
+                disabled={busy}
+                onChange={(e) =>
+                  onDraftChange({
+                    ...draft,
+                    credentials: { ...(draft.credentials ?? {}), [key]: e.target.value },
+                  })
+                }
+                data-testid={`openshell-provider-cred-${key}`}
+              />
+            </label>
+          ))}
+          {draft.type === "google-vertex-ai" && (
+            <>
+              <label>
+                VERTEX_AI_PROJECT_ID
+                <input
+                  className="search-input"
+                  value={draft.config?.VERTEX_AI_PROJECT_ID ?? ""}
+                  disabled={busy}
+                  onChange={(e) =>
+                    onDraftChange({
+                      ...draft,
+                      config: { ...(draft.config ?? {}), VERTEX_AI_PROJECT_ID: e.target.value },
+                    })
+                  }
+                  data-testid="openshell-provider-config-project"
+                />
+              </label>
+              <label>
+                VERTEX_AI_LOCATION
+                <input
+                  className="search-input"
+                  value={draft.config?.VERTEX_AI_LOCATION ?? "global"}
+                  disabled={busy}
+                  onChange={(e) =>
+                    onDraftChange({
+                      ...draft,
+                      config: { ...(draft.config ?? {}), VERTEX_AI_LOCATION: e.target.value },
+                    })
+                  }
+                  data-testid="openshell-provider-config-location"
+                />
+              </label>
+            </>
+          )}
+          <label className="agent-runtime-check">
+            <input
+              type="checkbox"
+              checked={draft.attach_to_sandboxes ?? true}
+              disabled={busy}
+              onChange={(e) =>
+                onDraftChange({ ...draft, attach_to_sandboxes: e.target.checked })
+              }
+              data-testid="openshell-provider-field-attach"
+            />
+            Attach to sandboxes
+          </label>
+          <div className="btns">
+            <button type="submit" className="primary" disabled={busy} data-testid="openshell-provider-save">
+              Save provider
+            </button>
+            <button type="button" disabled={busy} onClick={onCancelEdit}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: boolean }) {
+  const [providers, setProviders] = useState<OpenShellProviderView[]>([]);
+  const [gatewayReachable, setGatewayReachable] = useState(gatewayHealthy);
+  const [profiles, setProfiles] = useState<ProviderTypeProfile[]>([]);
+  const [draft, setDraft] = useState<OpenShellProviderWrite | null>(null);
+  const [editingName, setEditingName] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    return api
+      .listOpenShellProviders()
+      .then((out) => {
+        setProviders(out.providers);
+        setGatewayReachable(out.gateway_reachable);
+        setError(null);
+      })
+      .catch((e) => setError(String(e)));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    api
+      .listOpenShellProviderProfiles()
+      .then(setProfiles)
+      .catch(() => setProfiles([]));
+  }, [refresh]);
+
+  const stripEmptyCreds = (body: OpenShellProviderWrite): OpenShellProviderWrite => {
+    const credentials = Object.fromEntries(
+      Object.entries(body.credentials ?? {}).filter(([, v]) => v.trim().length > 0),
+    );
+    return {
+      ...body,
+      name: body.name.trim(),
+      type: body.type.trim(),
+      credentials: Object.keys(credentials).length ? credentials : null,
+    };
+  };
+
+  return (
+    <OpenShellProvidersPanelView
+      providers={providers}
+      gatewayReachable={gatewayHealthy || gatewayReachable}
+      profiles={profiles}
+      busy={busy}
+      error={error}
+      hint={hint}
+      draft={draft}
+      onDraftChange={setDraft}
+      onCancelEdit={() => {
+        setDraft(null);
+        setEditingName(null);
+      }}
+      onEdit={(p) => {
+        setEditingName(p.name);
+        setDraft({
+          name: p.name,
+          type: p.type,
+          config: { ...p.config },
+          credentials: {},
+          attach_to_sandboxes: p.attach_to_sandboxes,
+        });
+        setHint(null);
+        setError(null);
+      }}
+      onSave={() => {
+        if (!draft) return;
+        const body = stripEmptyCreds(draft);
+        if (!body.name) {
+          setError("name is required");
+          return;
+        }
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        const req = editingName
+          ? api.updateOpenShellProvider(editingName, body)
+          : api.createOpenShellProvider(body);
+        req
+          .then(() => {
+            setDraft(null);
+            setEditingName(null);
+            setHint(
+              gatewayReachable
+                ? "Provider saved and applied to the gateway when possible."
+                : "Provider saved locally. Sync when the gateway is up.",
+            );
+            return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onDelete={(name) => {
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .deleteOpenShellProvider(name)
+          .then(() => {
+            if (editingName === name) {
+              setDraft(null);
+              setEditingName(null);
+            }
+            setHint(`Deleted ${name}.`);
+            return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onSync={() => {
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .syncOpenShellProviders()
+          .then((out) => {
+            const errBits = out.errors.map((e) => `${e.name}: ${e.error}`).join("; ");
+            setHint(
+              errBits
+                ? `Synced ${out.applied.length}; errors: ${errBits}`
+                : `Synced ${out.applied.length} provider(s) to the gateway.`,
+            );
+            if (out.errors.length) setError(errBits);
+            return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onImportAdc={() => {
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .importGcloudAdcProvider()
+          .then((p) => {
+            setHint(`Imported ADC as provider ${p.name}.`);
+            return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onToggleAttach={(p, attach) => {
+        setBusy(true);
+        setError(null);
+        api
+          .updateOpenShellProvider(p.name, {
+            name: p.name,
+            type: p.type,
+            config: p.config,
+            credentials: null,
+            attach_to_sandboxes: attach,
+          })
+          .then(() => refresh())
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+    />
+  );
+}
+
 function OpenShellPanel() {
   const [status, setStatus] = useState<OpenShellStatus | null>(null);
-  const [binaryPath, setBinaryPath] = useState("");
+  const [gatewayEndpoint, setGatewayEndpoint] = useState("");
+  const [caPem, setCaPem] = useState("");
+  const [clientCertPem, setClientCertPem] = useState("");
+  const [clientKeyPem, setClientKeyPem] = useState("");
+  const [mtls, setMtls] = useState<OpenShellSettings["mtls"]>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedHint, setSavedHint] = useState<string | null>(null);
+
+  const applySaved = useCallback((cfg: OpenShellSettings, st?: OpenShellStatus) => {
+    setGatewayEndpoint(cfg.gateway_endpoint ?? st?.gateway_endpoint ?? "");
+    setMtls(cfg.mtls ?? st?.mtls);
+    setCaPem("");
+    setClientCertPem("");
+    setClientKeyPem("");
+  }, []);
 
   const refresh = useCallback(() => {
     setBusy(true);
     return Promise.all([api.getOpenShellStatus(), api.getOpenShell()])
       .then(([st, cfg]: [OpenShellStatus, OpenShellSettings]) => {
         setStatus(st);
-        setBinaryPath(cfg.binary_path ?? st.binary_path ?? "");
+        applySaved(cfg, st);
         setError(null);
       })
       .catch((e) => setError(String(e)))
@@ -1124,54 +1585,88 @@ function OpenShellPanel() {
         setBusy(false);
         setLoading(false);
       });
-  }, []);
+  }, [applySaved]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  if (loading && !error && !status) {
-    return (
-      <section aria-labelledby="openshell-title" data-testid="openshell-panel">
-        <h2 id="openshell-title">OpenShell</h2>
-        <p className="dim">loading…</p>
-      </section>
-    );
-  }
+  const put = (body: OpenShellSettings, hint: string) => {
+    setBusy(true);
+    setError(null);
+    setSavedHint(null);
+    api
+      .putOpenShell(body)
+      .then((saved) => {
+        applySaved(saved);
+        setSavedHint(hint);
+        return api.getOpenShellStatus();
+      })
+      .then((st) => setStatus(st))
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(false));
+  };
 
   return (
     <OpenShellPanelView
       status={status}
-      binaryPath={binaryPath}
-      busy={busy}
+      gatewayEndpoint={gatewayEndpoint}
+      caPem={caPem}
+      clientCertPem={clientCertPem}
+      clientKeyPem={clientKeyPem}
+      mtls={mtls}
+      busy={busy || loading}
       error={error}
       savedHint={savedHint}
-      onBinaryPathChange={(next) => {
+      onGatewayEndpointChange={(next) => {
         setSavedHint(null);
-        setBinaryPath(next);
+        setGatewayEndpoint(next);
+      }}
+      onCaPemChange={(next) => {
+        setSavedHint(null);
+        setCaPem(next);
+      }}
+      onClientCertPemChange={(next) => {
+        setSavedHint(null);
+        setClientCertPem(next);
+      }}
+      onClientKeyPemChange={(next) => {
+        setSavedHint(null);
+        setClientKeyPem(next);
       }}
       onRefresh={() => {
         setSavedHint(null);
         refresh();
       }}
-      onSaveBinary={() => {
-        setBusy(true);
-        setError(null);
-        setSavedHint(null);
+      onSave={() => {
         const body: OpenShellSettings = {
-          binary_path: binaryPath.trim() || null,
+          gateway_endpoint: gatewayEndpoint.trim() || null,
         };
-        api
-          .putOpenShell(body)
-          .then((saved) => {
-            setBinaryPath(saved.binary_path ?? "");
-            setSavedHint("Saved. Status and dispatch health checks use this binary.");
-            return api.getOpenShellStatus();
-          })
-          .then((st) => setStatus(st))
-          .catch((e) => setError(String(e)))
-          .finally(() => setBusy(false));
+        if (caPem.trim()) body.ca_pem = caPem;
+        if (clientCertPem.trim()) body.client_cert_pem = clientCertPem;
+        if (clientKeyPem.trim()) body.client_key_pem = clientKeyPem;
+        put(body, "Saved. mTLS PEMs are sealed in the board database.");
       }}
+      onImportCliMtls={() => {
+        put(
+          {
+            gateway_endpoint: gatewayEndpoint.trim() || null,
+            import_openshell_cli_mtls: true,
+          },
+          "Imported mTLS from local OpenShell config and sealed it.",
+        );
+      }}
+      onClearMtls={() => {
+        put(
+          {
+            gateway_endpoint: gatewayEndpoint.trim() || null,
+            clear_mtls: true,
+          },
+          "Cleared sealed mTLS material.",
+        );
+      }}
+      providers={<OpenShellProvidersPanel gatewayHealthy={!!status?.healthy} />}
+      profiles={<SandboxesPanel />}
     />
   );
 }

@@ -107,7 +107,7 @@ pub struct UpdateArg {
     pub intent: Option<String>,
     #[serde(default)]
     pub definition_of_done: Option<String>,
-    /// Agent CLI engine for the next claim (`agy`, `claude`, `cursor`).
+    /// Ignored — engine is on the sandbox profile, not the card.
     #[serde(default)]
     pub engine: Option<String>,
     /// Standing instructions — Project cards only.
@@ -549,7 +549,7 @@ impl Operator {
         description = "Seed a Project's Initial plan Task with durable product remotes \
                        (upstream owner/name required; optional fork; base defaults to main). \
                        Creates exactly one Backlog Initial plan bound to that Task repo so \
-                       dispatch can pre-clone. Refuses empty upstream and refuses if an \
+                       the agent knows what to clone. Refuses empty upstream and refuses if an \
                        Initial plan already exists. create_project must come first."
     )]
     fn init_plan(&self, Parameters(a): Parameters<InitPlanArg>) -> Out<Ack> {
@@ -682,41 +682,43 @@ impl Operator {
 
     #[tool(
         name = "update",
-        description = "Edit fields on a card. Use `engine` to choose the sandbox CLI for the \
-                       next claim (`agy`, `claude`, or `cursor`) — set before dispatch. \
-                       `project_prompt` only applies to Project cards."
+        description = "Edit fields on a card. Agent engine is chosen on the sandbox profile \
+                       (Settings → OpenShell → Profiles), not via `engine` on the card — that \
+                       field is ignored. `project_prompt` only applies to Project cards."
     )]
     fn update(&self, Parameters(a): Parameters<UpdateArg>) -> Out<Ack> {
         if a.title.is_none()
             && a.intent.is_none()
             && a.definition_of_done.is_none()
-            && a.engine.is_none()
             && a.project_prompt.is_none()
             && a.repo.is_none()
         {
+            if a.engine.is_some() {
+                return Err(bad(
+                    "engine is set on the sandbox profile (Settings → OpenShell → Profiles), not the card",
+                ));
+            }
             return Err(bad("update needs at least one field"));
         }
         // product_repo is intentionally ignored (task-scoped remotes only).
         let _ = a.product_repo;
-        let item = self
+        // Engine lives on SandboxProfile; ignore stale card-level writes.
+        let _ = a.engine;
+        let _item = self
             .board
             .update_item(
                 a.id,
                 a.title,
                 a.intent,
                 a.definition_of_done,
-                a.engine,
+                None,
                 a.project_prompt,
             )
             .map_err(bad)?;
         if let Some(repo) = a.repo {
             self.board.set_task_repo(a.id, Some(repo)).map_err(bad)?;
         }
-        let note = match item.engine.as_deref() {
-            Some(e) => format!("updated (engine={e})"),
-            None => "updated".into(),
-        };
-        self.ack(a.id, note)
+        self.ack(a.id, "updated")
     }
 
     #[tool(

@@ -40,7 +40,6 @@ execution:
     # Needs a Rust toolchain to build honr: docker build -f sandbox/Containerfile .
     image: honr-sandbox:latest
     policy: sandbox/policy.yaml
-    providers: [vertex, gh-clankr, cursor-honr]
 
     # Legacy optional seed only — work remotes come from each card's
     # pull_request (report.json url/base/head). Not required for first clone.
@@ -51,18 +50,6 @@ execution:
 
     # Branch / sandbox name stem (default honr → honr/card-N / honr-card-N-a1).
     # branch_prefix: honr
-
-    # Install-wide briefing quality gates. Empty → agents follow Project prompt
-    # only (no assumed cargo). Self-hosting honr keeps Rust gates here.
-    quality_gates:
-      - cargo test --offline --locked
-      - cargo clippy --offline -- -D warnings
-
-    # us-east5 is quota-exhausted and us-central1 does not serve the model.
-    vertex:
-      project: shanemcd-rh
-      location: global
-      model: claude-opus-5
 
     cpu: "2"
     memory: 4Gi

@@ -125,27 +125,6 @@ impl RepoConfig {
     }
 }
 
-/// Vertex settings passed into the sandbox. Values that are wrong here fail as
-/// a hang, so they are configuration rather than constants — see
-/// `docs/sandbox.md` / `docs/agents.md` for which combination actually works.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VertexConfig {
-    pub project: String,
-    #[serde(default = "d_location")]
-    pub location: String,
-    #[serde(default = "d_model")]
-    pub model: String,
-}
-
-fn d_location() -> String { "global".into() }
-fn d_model() -> String { "claude-opus-5".into() }
-
-impl Default for VertexConfig {
-    fn default() -> Self {
-        Self { project: String::new(), location: d_location(), model: d_model() }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -159,11 +138,7 @@ pub struct AgentConfig {
     #[serde(default = "d_policy")]
     pub policy: String,
     #[serde(default)]
-    pub providers: Vec<String>,
-    #[serde(default)]
     pub repo: RepoConfig,
-    #[serde(default)]
-    pub vertex: VertexConfig,
     #[serde(default)]
     pub cpu: Option<String>,
     #[serde(default)]
@@ -185,12 +160,6 @@ pub struct AgentConfig {
     /// sandboxes are `{slug}-card-{id}-a{n}`. Default `honr`.
     #[serde(default = "d_branch_prefix")]
     pub branch_prefix: String,
-    /// Shell commands the briefing lists as mandatory pre-publish checks.
-    /// Empty → briefing does not invent cargo (or any other toolchain). Prefer
-    /// naming gates in Project `project_prompt` for per-repo installs; this
-    /// list is the install-wide Settings / yaml default.
-    #[serde(default)]
-    pub quality_gates: Vec<String>,
 }
 
 fn d_image() -> String { "honr-sandbox:latest".into() }
@@ -237,9 +206,7 @@ impl Default for AgentConfig {
             enabled: false,
             image: d_image(),
             policy: d_policy(),
-            providers: Vec::new(),
             repo: RepoConfig::default(),
-            vertex: VertexConfig::default(),
             cpu: None,
             memory: None,
             engine: d_engine(),
@@ -247,7 +214,6 @@ impl Default for AgentConfig {
             agent_timeout_secs: d_agent_timeout(),
             max_attempts: d_max_attempts(),
             branch_prefix: d_branch_prefix(),
-            quality_gates: Vec::new(),
         }
     }
 }
@@ -263,12 +229,6 @@ impl AgentConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
-        }
-        if self.vertex.project.is_empty() {
-            return Err("execution.agents.vertex.project is required".into());
-        }
-        if self.providers.is_empty() {
-            return Err("execution.agents.providers is empty; need at least a Vertex and a GitHub provider".into());
         }
         if !std::path::Path::new(&self.policy).exists() {
             return Err(format!("execution.agents.policy {:?} does not exist", self.policy));
@@ -353,13 +313,11 @@ mod tests {
     fn workable() -> AgentConfig {
         AgentConfig {
             enabled: true,
-            providers: vec!["vertex".into(), "gh-clankr".into()],
             repo: RepoConfig {
                 upstream: "shanemcd/honr".into(),
                 fork: "clankrshq/honr".into(),
                 base: "main".into(),
             },
-            vertex: VertexConfig { project: "shanemcd-rh".into(), ..Default::default() },
             ..Default::default()
         }
     }
@@ -383,26 +341,9 @@ mod tests {
         no_fork.repo.fork = String::new();
         assert!(no_fork.validate().is_ok());
 
-        let mut no_project = workable();
-        no_project.vertex.project = String::new();
-        assert!(no_project.validate().is_err());
-
-        let mut no_providers = workable();
-        no_providers.providers.clear();
-        assert!(no_providers.validate().is_err());
-
         let mut bad_policy = workable();
         bad_policy.policy = "sandbox/does-not-exist.yaml".into();
         assert!(bad_policy.validate().is_err());
-    }
-
-    /// The location and model defaults are load-bearing: us-east5 is
-    /// quota-exhausted and us-central1 does not serve the model.
-    #[test]
-    fn vertex_defaults_match_what_actually_works() {
-        let v = VertexConfig::default();
-        assert_eq!(v.location, "global");
-        assert_eq!(v.model, "claude-opus-5");
     }
 
     /// honr.yaml must parse into the config the code expects — the file is the

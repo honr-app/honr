@@ -8,7 +8,7 @@ slugs: ready to map to a docs site later.
 | [Concepts](concepts.md) | What honr is: board as control plane, Project + Tasks, operator vs worker |
 | [Quickstart](quickstart.md) | Board-only `cargo run`, UI, MCP connect, empty board |
 | [Workflow](workflow.md) | Day-to-day: Project → plan → Approve → dispatch; Needs You / Review; park / steer / halt |
-| [Agents](agents.md) | Enabling real agents: compute driver, OpenShell, providers, `honr.yaml` / Settings |
+| [Agents](agents.md) | Enabling real agents: compute driver, OpenShell, `honr.yaml` / Settings |
 | [Sandbox](sandbox.md) | How a sandboxed run works and the gotchas that matter |
 | [Architecture](architecture.md) | One page: Board / store, supervisor, MCP / REST, beads, persistence |
 | [Task repo binding](task-repo-binding.md) | Task-scoped remotes: init_plan, resolve order, multi-repo under one Project |

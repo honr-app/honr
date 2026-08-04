@@ -592,7 +592,6 @@ export function DetailDrawer({
   const [editTitle, setEditTitle] = useState("");
   const [editIntent, setEditIntent] = useState("");
   const [editDod, setEditDod] = useState("");
-  const [editEngine, setEditEngine] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [sandboxProfiles, setSandboxProfiles] = useState<SandboxProfile[]>([]);
   const [defaultSandboxProfileId, setDefaultSandboxProfileId] = useState<string | null>(null);
@@ -604,11 +603,11 @@ export function DetailDrawer({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmHalt, setConfirmHalt] = useState(false);
-  const [logs, setLogs] = useState<{ claude: string[]; openshell: string[] }>({
-    claude: [],
+  const [logs, setLogs] = useState<{ agent: string[]; openshell: string[] }>({
+    agent: [],
     openshell: [],
   });
-  const [logTab, setLogTab] = useState<"claude" | "openshell">("claude");
+  const [logTab, setLogTab] = useState<"agent" | "openshell">("agent");
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -650,7 +649,6 @@ export function DetailDrawer({
         setEditTitle(item.title);
         setEditIntent(item.intent);
         setEditDod(item.definition_of_done ?? "");
-        setEditEngine(item.engine ?? item.default_engine ?? defaultEngine ?? "");
         setEditPrompt(item.project_prompt ?? "");
         setPlanTasks(
           planTasksFromArtifact(item.proposal?.tasks ?? item.plan?.tasks),
@@ -951,7 +949,7 @@ export function DetailDrawer({
       )}
 
       {(d.environment || ["running", "claimed"].includes(d.state)) && (() => {
-        const parsedClaudeLogs = coalesceAgentLogLines(logs.claude);
+        const parsedAgentLogs = coalesceAgentLogLines(logs.agent);
 
         const agentTabLabel =
           resolvedEngine === "agy"
@@ -976,11 +974,11 @@ export function DetailDrawer({
             <div style={{ position: "relative" }}>
               <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
                 <button
-                  className={logTab === "claude" ? "primary" : ""}
+                  className={logTab === "agent" ? "primary" : ""}
                   style={{ fontSize: "11px", padding: "3px 10px" }}
-                  onClick={() => setLogTab("claude")}
+                  onClick={() => setLogTab("agent")}
                 >
-                  {agentTabLabel} ({parsedClaudeLogs.length})
+                  {agentTabLabel} ({parsedAgentLogs.length})
                 </button>
                 <button
                   className={logTab === "openshell" ? "primary" : ""}
@@ -1003,17 +1001,17 @@ export function DetailDrawer({
                   fontFamily: "'JetBrains Mono', monospace, monospace",
                   fontSize: "11px",
                   lineHeight: "1.4",
-                  color: logTab === "claude" ? "var(--ok)" : "var(--accent)",
+                  color: logTab === "agent" ? "var(--ok)" : "var(--accent)",
                   maxHeight: "220px",
                   overflowY: "auto",
                   whiteSpace: "pre-wrap",
                   wordBreak: "break-all",
                 }}
               >
-                {logTab === "claude" ? (
-                  parsedClaudeLogs.length > 0 ? (
+                {logTab === "agent" ? (
+                  parsedAgentLogs.length > 0 ? (
                     <>
-                      {parsedClaudeLogs.map((parsed, i) => (
+                      {parsedAgentLogs.map((parsed, i) => (
                         <div
                           key={i}
                           style={{
@@ -1035,7 +1033,7 @@ export function DetailDrawer({
                         </div>
                       ))}
                       {(() => {
-                        const last = parsedClaudeLogs[parsedClaudeLogs.length - 1];
+                        const last = parsedAgentLogs[parsedAgentLogs.length - 1];
                         let statusText = `${engineDisplayName} is thinking / evaluating response...`;
                         if (last.type === "thinking") statusText = `${engineDisplayName} is thinking…`;
                         if (last.type === "tool") statusText = `Executing ${last.text.replace("🔨 ", "")}...`;
@@ -1175,21 +1173,6 @@ export function DetailDrawer({
                   onChange={(e) => setEditIntent(e.target.value)}
                 />
               </div>
-              <div>
-                <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
-                  Agent Engine
-                </label>
-                <select
-                  className="search-input"
-                  style={{ width: "100%", background: "var(--panel)", color: "var(--ink)", padding: "6px" }}
-                  value={editEngine}
-                  onChange={(e) => setEditEngine(e.target.value)}
-                >
-                  <option value="claude">Claude Code (Anthropic)</option>
-                  <option value="agy">Antigravity CLI (agy)</option>
-                  <option value="cursor">Cursor Agent (cursor)</option>
-                </select>
-              </div>
               <ProjectSandboxPicker
                 projectId={d.id}
                 value={d.sandbox_profile_id}
@@ -1210,6 +1193,10 @@ export function DetailDrawer({
                     .finally(() => setSandboxPickerBusy(false));
                 }}
               />
+              <p className="dim" style={{ marginTop: 6, fontSize: 12 }}>
+                Agent engine comes from the sandbox profile (Settings → OpenShell →
+                Profiles), not per card.
+              </p>
               <div className="btns">
                 <button
                   onClick={() =>
@@ -1217,7 +1204,6 @@ export function DetailDrawer({
                       api.update(d.id, {
                         title: editTitle,
                         intent: editIntent,
-                        engine: editEngine,
                         project_prompt: editPrompt,
                       }),
                     )
@@ -1426,19 +1412,6 @@ export function DetailDrawer({
               />
             </div>
 
-            <div>
-              <label className="section-title" style={{ display: "block", marginBottom: 2 }}>Agent Engine</label>
-              <select
-                className="search-input"
-                style={{ width: "100%", background: "var(--panel)", color: "var(--ink)", padding: "6px" }}
-                value={editEngine}
-                onChange={(e) => setEditEngine(e.target.value)}
-              >
-                <option value="claude">Claude Code (Anthropic)</option>
-                <option value="agy">Antigravity CLI (agy)</option>
-                <option value="cursor">Cursor Agent (cursor)</option>
-              </select>
-            </div>
           </div>
 
           {d.state !== "review" && (
@@ -1450,7 +1423,6 @@ export function DetailDrawer({
                       title: editTitle,
                       intent: editIntent,
                       definition_of_done: editDod,
-                      engine: editEngine,
                     })
                   );
                 }}
@@ -1465,7 +1437,6 @@ export function DetailDrawer({
                       title: editTitle,
                       intent: editIntent,
                       definition_of_done: editDod,
-                      engine: editEngine,
                     });
                     act(saveP.then(() => api.transition(d.id, "backlog", "human approved")));
                   }}
@@ -1549,7 +1520,6 @@ export function DetailDrawer({
                       title: editTitle,
                       intent: editIntent,
                       definition_of_done: editDod,
-                      engine: editEngine,
                     })
                     .then(() => api.requestChanges(d.id, note)),
                 );

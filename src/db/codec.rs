@@ -73,8 +73,16 @@ pub const META_WORKSPACE_BINDING: &str = "workspace_binding";
 /// Optional OpenShell CLI path override (empty string means use PATH default).
 pub const META_OPENSHELL_BIN: &str = "openshell_bin";
 
+/// OpenShell gateway URL (e.g. `https://127.0.0.1:17670`). Not secret.
+pub const META_OPENSHELL_GATEWAY_ENDPOINT: &str = "openshell_gateway_endpoint";
+
+/// Sealed OpenShell mTLS PEM bundle (ChaCha20-Poly1305 via `secrets`). Never log.
+pub const META_OPENSHELL_MTLS_SEALED: &str = "openshell_mtls_sealed";
+
 /// JSON blob: optional [`crate::model::AgentRuntimeConfig`].
 pub const META_AGENT_RUNTIME: &str = "agent_runtime";
+/// JSON array of [`crate::model::OpenShellProviderDesired`].
+pub const META_OPENSHELL_PROVIDERS: &str = "openshell_providers";
 
 /// Fields without dedicated columns — portable JSON blob on `items.extras_json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

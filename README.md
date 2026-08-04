@@ -79,7 +79,8 @@ cargo run                 # http://127.0.0.1:8080  (API, SSE, MCP, UI)
 Or with the Makefile:
 
 ```bash
-make run                  # release build of API + web/dist, then serve
+make run                  # debug API + web/dist, then serve
+make release              # cargo build --release
 make dev-ui               # Vite on :5173 (proxies to :8080)
 ```
 
@@ -116,7 +117,7 @@ Start at **[`docs/index.md`](docs/index.md)**.
 | [Concepts](docs/concepts.md) | Board as control plane, operator vs worker, invariants |
 | [Quickstart](docs/quickstart.md) | Board-only run, database, MCP connect |
 | [Workflow](docs/workflow.md) | Project → plan → Approve → dispatch; triage; park / steer / halt |
-| [Agents](docs/agents.md) | OpenShell, providers, Settings / `honr.yaml` |
+| [Agents](docs/agents.md) | OpenShell, Settings / `honr.yaml` |
 | [Sandbox](docs/sandbox.md) | How a sandboxed run works and the gotchas that matter |
 | [Architecture](docs/architecture.md) | Board / store, supervisor, MCP / REST, beads, persistence |
 

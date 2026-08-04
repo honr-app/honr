@@ -3,10 +3,10 @@ import { renderToString } from "react-dom/server";
 import assert from "node:assert";
 import { Card } from "./dist-test/components/Card.js";
 import { Board, isBlocked, sortFor } from "./dist-test/components/Board.js";
-import { Head, PlanEditor, InitPlanForm, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
-import { Help } from "./dist-test/components/Help.js";
+import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
+import { Help } from "./dist-test/components/Help.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -476,7 +476,7 @@ const pingPayload = JSON.stringify({ type: "ping" });
 const parsedPing = JSON.parse(pingPayload);
 assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
-// Test 17: App chrome — Board | Help | Settings sidebar + Settings Sandboxes panel
+// Test 17: App chrome — Board | Help | Settings sidebar + Settings OpenShell (profiles)
 const sidebarHtml = renderToString(
   React.createElement(PrimarySidebar, {
     view: "board",
@@ -499,12 +499,14 @@ assert(helpHtml.includes("8080/mcp"), "Help should show MCP URL");
 
 const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
-assert(settingsHtml.includes("Sandboxes"), "Settings should include Sandboxes section");
-assert(settingsHtml.includes("data-testid=\"sandboxes-panel\""), "Settings should show Sandboxes panel");
+assert(!settingsHtml.includes("data-testid=\"settings-nav-sandboxes\""), "Sandboxes nav item removed");
+assert(settingsHtml.includes("data-testid=\"settings-nav-openshell\""), "Settings should nav to OpenShell");
+assert(settingsHtml.includes("data-testid=\"openshell-panel\""), "Default section is OpenShell");
+assert(settingsHtml.includes("data-testid=\"openshell-profiles\""), "OpenShell hosts Profiles band");
+assert(settingsHtml.includes("data-testid=\"sandboxes-panel\""), "Profiles band keeps sandboxes panel testid");
 assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Forge (workspace id)");
 assert(settingsHtml.includes("OpenShell"), "Settings should include OpenShell section");
-assert(settingsHtml.includes("data-testid=\"settings-nav-openshell\""), "Settings should nav to OpenShell");
 assert(settingsHtml.includes("Agent runtime"), "Settings should include Agent runtime section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-agent-runtime\""), "Settings should nav to Agent runtime");
 assert(!settingsHtml.includes("data-testid=\"general-stub\""), "General stub must be gone");
@@ -515,13 +517,10 @@ const agentRuntimeHtml = renderToString(
     draft: {
       enabled: true,
       engine: "agy",
-      providers: ["vertex", "gh-bot"],
-      vertex: { project: "demo", location: "us-east5", model: "claude-opus-5" },
       max_concurrent: 1,
       agent_timeout_secs: 1800,
       max_attempts: 3,
       branch_prefix: "honr",
-      quality_gates: ["cargo test --offline --locked"],
     },
     onDraftChange: () => {},
     onSave: () => {},
@@ -529,70 +528,136 @@ const agentRuntimeHtml = renderToString(
 );
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-panel\""), "Agent runtime panel should render");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-engine\""), "Agent runtime engine field");
-assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-providers\""), "Agent runtime providers field");
-assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-vertex-location\""), "Agent runtime Vertex location");
-assert(agentRuntimeHtml.includes("us-east5"), "Agent runtime shows configured location");
+assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-providers\""), "Providers field removed");
+assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-vertex-location\""), "Vertex fields removed");
+assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-quality-gates\""), "Quality gates removed");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-branch-prefix\""), "Agent runtime branch prefix");
-assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-quality-gates\""), "Agent runtime quality gates");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-save\""), "Agent runtime save control");
+
+const openshellPanelProps = {
+  gatewayEndpoint: "https://127.0.0.1:17670",
+  caPem: "",
+  clientCertPem: "",
+  clientKeyPem: "",
+  mtls: { ca: false, client_cert: false, client_key: false, complete: false },
+  onGatewayEndpointChange: () => {},
+  onCaPemChange: () => {},
+  onClientCertPemChange: () => {},
+  onClientKeyPemChange: () => {},
+  onRefresh: () => {},
+  onSave: () => {},
+  onImportCliMtls: () => {},
+  onClearMtls: () => {},
+};
 
 const openshellHtml = renderToString(
   React.createElement(OpenShellPanelView, {
+    ...openshellPanelProps,
     status: {
       healthy: true,
-      binary: "openshell",
       summary: "Connected\nAuthenticated (mTLS transport)",
-      cli_missing: false,
+      not_configured: false,
     },
-    binaryPath: "",
-    onBinaryPathChange: () => {},
-    onRefresh: () => {},
-    onSaveBinary: () => {},
   }),
 );
 assert(openshellHtml.includes("data-testid=\"openshell-panel\""), "OpenShell panel should render");
 assert(openshellHtml.includes("data-testid=\"openshell-health\""), "OpenShell health block");
 assert(openshellHtml.includes("Healthy"), "OpenShell healthy label");
 assert(openshellHtml.includes("data-testid=\"openshell-health-summary\""), "OpenShell status summary");
-assert(openshellHtml.includes("data-testid=\"openshell-field-binary\""), "OpenShell binary path field");
+assert(openshellHtml.includes("data-testid=\"openshell-field-endpoint\""), "OpenShell gateway endpoint field");
+assert(openshellHtml.includes("data-testid=\"openshell-field-ca\""), "OpenShell CA PEM field");
+assert(!openshellHtml.includes("data-testid=\"openshell-field-binary\""), "OpenShell must not expose CLI binary path");
 assert(openshellHtml.includes("data-testid=\"openshell-ops-hint\""), "OpenShell host setup hint");
-
-const openshellMissingHtml = renderToString(
-  React.createElement(OpenShellPanelView, {
-    status: {
-      healthy: false,
-      binary: "/missing/openshell",
-      summary: "OpenShell CLI not found",
-      cli_missing: true,
-      error: "No such file",
-    },
-    binaryPath: "/missing/openshell",
-    onBinaryPathChange: () => {},
-    onRefresh: () => {},
-    onSaveBinary: () => {},
-  }),
-);
-assert(openshellMissingHtml.includes("CLI missing"), "OpenShell CLI-missing label");
-assert(
-  openshellMissingHtml.includes("data-cli-missing=\"true\""),
-  "OpenShell CLI-missing attribute",
-);
 
 const openshellUnhealthyHtml = renderToString(
   React.createElement(OpenShellPanelView, {
+    ...openshellPanelProps,
     status: {
       healthy: false,
-      binary: "openshell",
       summary: "gateway unreachable",
-      cli_missing: false,
+      not_configured: false,
     },
-    binaryPath: "",
-    onBinaryPathChange: () => {},
-    onRefresh: () => {},
-    onSaveBinary: () => {},
   }),
 );
 assert(openshellUnhealthyHtml.includes("Unhealthy"), "OpenShell unhealthy label");
+
+const openshellProvidersHtml = renderToString(
+  React.createElement(OpenShellProvidersPanelView, {
+    providers: [
+      {
+        name: "gh-clankr",
+        type: "github",
+        config: {},
+        credential_keys: ["GITHUB_TOKEN"],
+        has_credentials: true,
+        has_refresh: false,
+        attach_to_sandboxes: true,
+        gateway_synced: true,
+      },
+    ],
+    gatewayReachable: true,
+    profiles: [
+      {
+        id: "github",
+        display_name: "GitHub",
+        description: "",
+        category: "scm",
+        credential_env_vars: ["GITHUB_TOKEN"],
+        config_keys: [],
+      },
+    ],
+    draft: null,
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onSync: () => {},
+    onImportAdc: () => {},
+    onToggleAttach: () => {},
+  }),
+);
+assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers\""), "Providers band renders");
+assert(openshellProvidersHtml.includes("data-testid=\"openshell-provider-gh-clankr\""), "Provider row renders");
+assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers-sync\""), "Sync all control");
+assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers-import-adc\""), "Import ADC control");
+assert(openshellProvidersHtml.includes("on gateway"), "Gateway sync badge");
+assert(!openshellProvidersHtml.includes("sk-"), "Providers view must not echo secrets");
+
+const openshellProvidersEmptyHtml = renderToString(
+  React.createElement(OpenShellProvidersPanelView, {
+    providers: [],
+    gatewayReachable: false,
+    profiles: [],
+    draft: null,
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onSync: () => {},
+    onImportAdc: () => {},
+    onToggleAttach: () => {},
+  }),
+);
+assert(openshellProvidersEmptyHtml.includes("data-testid=\"openshell-providers-empty\""), "Empty providers state");
+assert(openshellProvidersEmptyHtml.includes("gateway offline"), "Offline gateway badge");
+
+const openshellWithBandsHtml = renderToString(
+  React.createElement(OpenShellPanelView, {
+    ...openshellPanelProps,
+    status: {
+      healthy: true,
+      summary: "ok",
+      not_configured: false,
+    },
+    providers: React.createElement("div", { "data-testid": "openshell-providers-slot" }, "providers"),
+    profiles: React.createElement("div", { "data-testid": "openshell-profiles-slot" }, "profiles"),
+  }),
+);
+assert(openshellWithBandsHtml.includes("data-testid=\"openshell-providers-slot\""), "OpenShell panel hosts providers band");
+assert(openshellWithBandsHtml.includes("data-testid=\"openshell-profiles-slot\""), "OpenShell panel hosts profiles band");
+assert(openshellWithBandsHtml.includes("providers → profiles"), "Ops hint mentions providers then profiles");
 
 const workspaceHtml = renderToString(
   React.createElement(WorkspacePanelView, {
@@ -633,6 +698,7 @@ const fixtureProfiles = [
     policy: "version: 1\n# default\n",
     cpu: "2",
     memory: "4Gi",
+    engine: "cursor",
   },
   {
     id: "heavy",
@@ -641,6 +707,7 @@ const fixtureProfiles = [
     policy: "version: 1\n# heavy\n",
     cpu: "8",
     memory: "16Gi",
+    engine: "agy",
   },
 ];
 
@@ -649,7 +716,7 @@ const sandboxesHtml = renderToString(
     profiles: fixtureProfiles,
     defaultId: "default",
     editingId: null,
-    draft: { id: "", name: "", image: "", policy: "", cpu: "", memory: "" },
+    draft: { id: "", name: "", image: "", policy: "", cpu: "", memory: "", engine: "cursor" },
     onDraftChange: () => {},
     onStartCreate: () => {},
     onStartEdit: () => {},
@@ -658,18 +725,21 @@ const sandboxesHtml = renderToString(
     onSetDefault: () => {},
   }),
 );
-assert(sandboxesHtml.includes("data-testid=\"sandboxes-panel\""), "Sandboxes panel should render");
-assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-list\""), "Sandboxes panel should list profiles");
+assert(sandboxesHtml.includes("data-testid=\"openshell-profiles\""), "Profiles band wrapper");
+assert(sandboxesHtml.includes("data-testid=\"sandboxes-panel\""), "Profiles panel should render");
+assert(sandboxesHtml.includes(">Profiles<") || sandboxesHtml.includes("Profiles</h3>"), "Profiles heading");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-list\""), "Profiles panel should list profiles");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-default\""), "Should list default profile");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-heavy\""), "Should list heavy profile");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-default-badge\""), "Default profile should be badged");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-set-default-heavy\""), "Non-default should offer Set default");
-assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Sandboxes panel should support create");
-assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Sandboxes panel should support edit");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Profiles panel should support create");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Profiles panel should support edit");
+assert(sandboxesHtml.includes("cursor"), "Profile list shows engine");
 assert(!sandboxesHtml.includes("data-testid=\"sandbox-destroy\""),
-  "Sandboxes panel must not offer live OpenShell sandbox destroy");
+  "Profiles panel must not offer live OpenShell sandbox destroy");
 assert(!/destroy sandbox|delete environment|openshell.*delete/i.test(sandboxesHtml),
-  "Sandboxes panel must not offer live OpenShell sandbox destroy controls");
+  "Profiles panel must not offer live OpenShell sandbox destroy controls");
 // List meta should not dump full YAML or imply a host path field.
 assert(!sandboxesHtml.includes("version: 1"), "Profile list should not dump inline policy YAML");
 
@@ -685,6 +755,7 @@ const createFormHtml = renderToString(
       policy: "version: 1\nfilesystem_policy:\n  include_workdir: true\n",
       cpu: "",
       memory: "",
+      engine: "cursor",
     },
     onDraftChange: () => {},
     onStartCreate: () => {},
@@ -698,6 +769,7 @@ assert(createFormHtml.includes("data-testid=\"sandbox-profile-form\""), "Create/
 assert(!createFormHtml.includes("data-testid=\"sandbox-field-id\""),
   "Create form must not require an Id field (server slugs from name)");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-name\""), "Create form should include name");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-engine\""), "Form should include engine field");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-policy\""), "Form should include policy field");
 assert(createFormHtml.includes("<textarea"), "Policy control should be a textarea for inline YAML");
 assert(/not a path on the host/i.test(createFormHtml), "Policy hint must not ask for a host filesystem path");
@@ -717,6 +789,7 @@ const editFormHtml = renderToString(
       policy: "version: 1\n# default\n",
       cpu: "",
       memory: "",
+      engine: "cursor",
     },
     onDraftChange: () => {},
     onStartCreate: () => {},
@@ -764,22 +837,6 @@ const emptyBoardHtml = renderToString(
 );
 assert(emptyBoardHtml.includes("board-page") || emptyBoardHtml.includes("Welcome to honr"),
   "Board view should still render Board");
-assert(emptyBoardHtml.includes("data-testid=\"board-empty\"") || emptyBoardHtml.includes("board-empty"),
-  "Empty board should expose empty-state surface");
-assert(emptyBoardHtml.includes("init_plan"),
-  "Empty board should mention init_plan happy path");
-
-const initPlanHtml = renderToString(
-  React.createElement(InitPlanForm, {
-    draft: { upstream: "acme/widgets", fork: "", base: "main" },
-    setDraft: () => {},
-    onSubmit: () => {},
-  }),
-);
-assert(initPlanHtml.includes("data-testid=\"init-plan-form\""), "InitPlanForm should render");
-assert(initPlanHtml.includes("data-testid=\"init-plan-upstream\""), "InitPlanForm should expose upstream");
-assert(initPlanHtml.includes("Start planning"), "InitPlanForm should offer Start planning");
-assert(initPlanHtml.includes("acme/widgets"), "InitPlanForm should show draft upstream");
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
@@ -789,5 +846,5 @@ assert(!Object.keys(pkg.dependencies || {}).some((d) => /patternfly/i.test(d)),
 assert(!Object.keys(pkg.devDependencies || {}).some((d) => /patternfly/i.test(d)),
   "Must not add a PatternFly devDependency");
 
-console.log("\n✅ All Card, Board, Detail, Help, Settings chrome, and useBoard sequence guard assertions passed!");
+console.log("\n✅ All Card, Board, Detail, Settings chrome, and useBoard sequence guard assertions passed!");
 

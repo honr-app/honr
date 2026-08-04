@@ -8,6 +8,7 @@ mod machine;
 mod mcp;
 mod model;
 mod openshell;
+mod secrets;
 mod schema;
 mod sse;
 mod store;
