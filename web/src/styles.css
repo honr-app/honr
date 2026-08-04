@@ -646,7 +646,6 @@ main > :first-child { flex: 1; min-width: 0; }
   padding: 0 2px 14px;
   border-bottom: 1px solid var(--line);
 }
-.board-attention .board-hero { padding-bottom: 12px; }
 .board-hero h1 {
   margin: 0 0 8px;
   font-size: 22px;
