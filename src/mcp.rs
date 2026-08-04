@@ -91,6 +91,14 @@ pub struct CreateProjectArg {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct InitPlanArg {
+    /// Project id (`#167` is `167`). Container must already exist.
+    pub project: ItemId,
+    /// Product remotes for the Initial plan Task (`upstream` required).
+    pub repo: crate::schema::RepoConfig,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateArg {
     pub id: ItemId,
     #[serde(default)]
@@ -500,10 +508,9 @@ impl Operator {
 
     #[tool(
         name = "create_project",
-        description = "Create a Project (top-level container). Seeds an Initial plan Task in \
-                       Backlog — dispatch it; the agent writes plan.json + a plan/docs PR \
-                       (Review). Approve creates sibling Tasks. Optional project_prompt overrides \
-                       the default standing instructions."
+        description = "Create a Project (top-level container only — no child Tasks). Call \
+                       init_plan with a repo next to seed the Initial plan Task. Optional \
+                       project_prompt overrides the default standing instructions."
     )]
     fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
         if a.parent.is_some() {
@@ -528,12 +535,26 @@ impl Operator {
         }
         let _ = self.board.transition(item.id, State::Shaping, "operator", None);
         self.board.schedule_beads_mirror(item.id);
-        for cid in self.board.children_of(item.id) {
-            self.board.schedule_beads_mirror(cid);
-        }
         self.ack(
             item.id,
-            "Project created in shaping with Initial plan Task in Backlog — dispatch to start",
+            "Project created in shaping — call init_plan with a repo to seed Initial plan",
+        )
+    }
+
+    #[tool(
+        name = "init_plan",
+        description = "Seed a Project's Initial plan Task with durable product remotes \
+                       (upstream owner/name required; optional fork; base defaults to main). \
+                       Creates exactly one Backlog Initial plan bound to that Task repo so \
+                       dispatch can pre-clone. Refuses empty upstream and refuses if an \
+                       Initial plan already exists. create_project must come first."
+    )]
+    fn init_plan(&self, Parameters(a): Parameters<InitPlanArg>) -> Out<Ack> {
+        let seed = self.board.init_plan(a.project, a.repo).map_err(bad)?;
+        self.board.schedule_beads_mirror(seed.id);
+        self.ack(
+            seed.id,
+            "Initial plan Task created in Backlog with Task repo — dispatch to start planning",
         )
     }
 
@@ -1268,6 +1289,16 @@ mod tests {
     fn propose_breakdown_and_approve_plan_return_record_with_items() {
         let (board, goal_id) = test_board();
         let operator = Operator::new(board.clone());
+        let _ = board
+            .init_plan(
+                goal_id,
+                crate::schema::RepoConfig {
+                    upstream: "acme/widgets".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                },
+            )
+            .expect("init_plan");
 
         let breakdown_arg = BreakdownArg {
             parent: goal_id,
