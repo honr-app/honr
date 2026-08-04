@@ -38,11 +38,6 @@ RUN curl -fsSL https://antigravity.google/cli/install.sh | bash \
  && (mv /root/.local/bin/agy /usr/local/bin/agy 2>/dev/null || cp ~/.local/bin/agy /usr/local/bin/agy 2>/dev/null || true) \
  && chmod 0755 /usr/local/bin/agy 2>/dev/null || true
 
-# Bake beads CLI (bd) into the image for task graph management
-RUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash \
- && (mv /root/.local/bin/bd /usr/local/bin/bd 2>/dev/null || cp ~/.local/bin/bd /usr/local/bin/bd 2>/dev/null || true) \
- && chmod 0755 /usr/local/bin/bd 2>/dev/null || true
-
 # Bake Cursor Agent CLI. Install lands under $HOME/.local; move under /opt so
 # the sandbox user's /sandbox HOME overlay does not hide it, and put a stable
 # /usr/local/bin/agent on the default PATH (exec env does not inherit image ENV).
