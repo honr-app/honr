@@ -3830,6 +3830,55 @@ mod tests {
             !b.contains("Clone into `/sandbox/repo` per the Project prompt"),
             "old invite-to-guess wording must be gone: {b}"
         );
+        assert!(
+            !b.contains("Remotes for this run:"),
+            "unbound must not claim structured Remotes: {b}"
+        );
+    }
+
+    /// Task.repo (via resolve_card_repo) yields a complete RepoConfig — Remotes
+    /// name clone_target and must not order escalate-for-missing-clone.
+    #[test]
+    fn task_repo_briefing_includes_clone_target_without_escalate() {
+        let task_repo = crate::schema::RepoConfig {
+            upstream: "acme/widgets".into(),
+            fork: String::new(),
+            base: "main".into(),
+        };
+        assert!(task_repo.is_complete());
+        let clone = task_repo.clone_target();
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-189", &task_repo, &[]);
+        assert!(
+            b.contains("Remotes for this run:"),
+            "must use structured Remotes for bound Task repo: {b}"
+        );
+        assert!(
+            b.contains(clone) || b.contains("acme/widgets"),
+            "Remotes must include clone_target: {b}"
+        );
+        assert!(
+            !b.contains("Do **not** guess which repository"),
+            "must not order escalate-for-missing-clone when Task repo is set: {b}"
+        );
+        assert!(
+            !b.contains("only if the Project prompt names")
+                && !b.contains("only when the Project prompt names"),
+            "must not keep unbound escalate gate when Task repo resolves: {b}"
+        );
+
+        let resume = resume_briefing(&grant(), &task_repo);
+        assert!(
+            resume.contains("Remotes for this run:"),
+            "resume must carry structured Remotes too: {resume}"
+        );
+        assert!(
+            resume.contains(clone) || resume.contains("acme/widgets"),
+            "resume Remotes must include clone_target: {resume}"
+        );
+        assert!(
+            !resume.contains("Do **not** guess which repository"),
+            "resume must not escalate for missing clone: {resume}"
+        );
     }
 
     /// Answering "Clone owner/name" must stop the Remotes block from

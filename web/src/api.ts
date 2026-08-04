@@ -63,6 +63,11 @@ export const api = {
   approve: (id: number): Promise<WorkItem> => post(`/items/${id}/approve`),
   /** Approve Initial plan proposal → Backlog Tasks. Id = Project or Initial plan. */
   approvePlan: (id: number): Promise<number[]> => post(`/items/${id}/approve-plan`),
+  /** Seed Initial plan Task with Task-scoped remotes. Id = Project. */
+  initPlan: (
+    id: number,
+    repo: { upstream: string; fork?: string; base?: string },
+  ): Promise<WorkItem> => post(`/items/${id}/init-plan`, { repo }),
   /** Queue a Backlog card for the supervisor to claim. Explicit start. */
   dispatch: (id: number): Promise<WorkItem> => post(`/items/${id}/dispatch`),
   /** Play/pause Project auto mode (queue claimable Backlog leaves). */

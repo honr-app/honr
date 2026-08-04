@@ -7,7 +7,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "shots": "node screenshots.mjs",
-    "test": "./node_modules/.bin/tsc --outDir dist-test --target es2022 --module esnext --moduleResolution node --jsx react-jsx src/vite-env.d.ts src/useBoard.ts src/components/Card.tsx src/components/Board.tsx src/components/DependencyGraph.tsx src/components/Detail.tsx src/components/PrimarySidebar.tsx src/components/Settings.tsx src/api.ts src/types.ts src/humanize.ts && node test-card.mjs && node test-graph.mjs && rm -rf dist-test"
+    "test": "./node_modules/.bin/tsc --outDir dist-test --target es2022 --module esnext --moduleResolution node --jsx react-jsx src/vite-env.d.ts src/useBoard.ts src/components/Card.tsx src/components/Board.tsx src/components/DependencyGraph.tsx src/components/Detail.tsx src/components/Help.tsx src/components/PrimarySidebar.tsx src/components/Settings.tsx src/api.ts src/types.ts src/humanize.ts && node test-card.mjs && node test-graph.mjs && rm -rf dist-test"
   },
   "dependencies": {
     "react": "^19.2.0",

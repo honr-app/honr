@@ -63,7 +63,7 @@ impl Default for ExecutionConfig {
 ///
 /// `upstream` = PR base repo; `fork` = head/push repo (same as upstream for
 /// same-repo). Yaml `execution.agents.repo` is legacy/optional. Containment is
-/// forge token permissions; branching policy is Project `project_prompt`.
+/// forge token permissions; remotes are Task-scoped (`init_plan` / Task.repo).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RepoConfig {
     /// `owner/name` that PRs target.

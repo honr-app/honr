@@ -669,6 +669,32 @@ main > :first-child { flex: 1; min-width: 0; }
 .board-empty-card h2 { margin: 0 0 8px; font-size: 16px; }
 .board-empty-card p { margin: 0; line-height: 1.55; }
 
+.help-page {
+  padding: 24px 28px 48px;
+  max-width: 640px;
+}
+.help-section {
+  margin-top: 28px;
+}
+.help-section h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.help-section p {
+  margin: 0;
+  line-height: 1.55;
+}
+.help-steps {
+  margin: 0;
+  padding-left: 22px;
+  line-height: 1.65;
+}
+.help-steps li { margin-bottom: 6px; }
+.help-steps code {
+  font-size: 0.92em;
+}
+
 .board-section-head {
   display: flex;
   align-items: baseline;
