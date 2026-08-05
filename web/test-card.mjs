@@ -774,8 +774,8 @@ assert(!workspaceHtml.includes("data-testid=\"workspace-webhook-hint\""), "no gh
 assert(!workspaceHtml.includes("gh webhook forward"), "no gh webhook forward copy");
 assert(!workspaceHtml.includes("shanemcd/honr"), "Forge panel must not hardcode Shane repo");
 assert(
-  (workspaceHtml.includes("pull_request") || workspaceHtml.includes("pr_url")) && workspaceHtml.includes("not"),
-  "Forge copy must say Settings is not the work repo",
+  workspaceHtml.includes("pull_request") || workspaceHtml.includes("Work remotes"),
+  "Forge copy must mention card pull_request / work remotes",
 );
 assert(workspaceHtml.includes("data-testid=\"workspace-save\""), "Forge save control");
 
@@ -861,7 +861,10 @@ assert(createFormHtml.includes("data-testid=\"sandbox-field-name\""), "Create fo
 assert(createFormHtml.includes("data-testid=\"sandbox-field-engine\""), "Form should include engine field");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-policy\""), "Form should include policy field");
 assert(createFormHtml.includes("<textarea"), "Policy control should be a textarea for inline YAML");
-assert(/not a path on the host/i.test(createFormHtml), "Policy hint must not ask for a host filesystem path");
+assert(
+  /Inline OpenShell policy YAML/i.test(createFormHtml),
+  "Policy hint should describe inline YAML",
+);
 assert(!/policy path|path to.*policy|host path/i.test(createFormHtml),
   "Settings must not ask for a host filesystem policy path");
 assert(createFormHtml.includes("data-testid=\"sandbox-save\""), "Form should include save");

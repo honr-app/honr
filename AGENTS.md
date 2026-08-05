@@ -36,15 +36,25 @@ without evidence and throw away the property that makes the signal trustworthy.
 
 **Merging is human.** Approving in honr surfaces the PR. It never merges.
 
-**The bot may push feature branches, not main.** Containment is the GitHub
-ruleset on the default branch (owner-only) plus human merge — not “no write on
-the repo.” Use the App installation on `shanemcd`, same-repo fork=upstream.
+**Feature branches are writable; `main` is human-gated.** The GitHub ruleset
+keeps the default branch owner-only. Agents use the App installation on
+`shanemcd` with `fork` = `upstream` = `shanemcd/honr`, push `honr/card-*`, and
+open PRs; humans merge.
 
 ## Conventions
 
 Comments explain **why**, not what. The existing code reads like prose and
 argues with itself where a decision was close; match that. A comment that
 restates the line below it is noise.
+
+**Write the current contract, not the archaeology.** Docs, UI copy, MCP
+descriptions, briefings, and comments must make sense to a reader who never
+saw the previous design. Prefer “Initial plan finishes with `plan.json`;
+Approve creates Tasks” over “plan.json only (no docs PR)” / “Task.repo is
+retired” / “not X anymore.” Negating a removed path is decision memory dumped
+into the product — fix it when you notice it. Bug-history *why* notes that
+justify a still-present invariant (“this race used to bounce cards”) are fine;
+teaching the product by arguing with the past is not.
 
 Tests live next to what they test. `machine.rs` holds the lifecycle
 invariants; other modules test the things that break silently — argv shape,
@@ -63,10 +73,10 @@ must both be clean. Both run `--offline` inside a sandbox.
 egress, a missing credential, a wedged relay — all silence. Every exec needs a
 deadline; treat silence as failure. This shaped `openshell.rs` entirely.
 
-**Don't script what the agent can drive.** The supervisor used to push and open
-PRs itself; four separate failures came from that shell being wrong about tools
-the agent already knew. It now only *asks GitHub what happened*. Before adding
-a shell script to the supervisor, ask whether the briefing could say it instead.
+**Don't script what the agent can drive.** The supervisor asks GitHub what
+happened after publish; it does not run `gh pr create` / push itself. Before
+adding a shell script to the supervisor, ask whether the briefing could say it
+instead.
 
 **The image's `ENV` does not reach `openshell sandbox exec`.** Pass what the
 agent needs explicitly in `agent_env`, or install wrappers on the default PATH.
@@ -77,8 +87,8 @@ already exist.
 **The podman machine stops on its own.** Classify that as infrastructure, not
 as the card failing — see `is_infrastructure`.
 
-**Rebase onto upstream `main`.** Same-repo still fetches/rebases onto the
-default branch tip; do not treat a stale local main as truth.
+**Rebase onto upstream `main`.** Fetch and rebase onto the default-branch tip;
+do not treat a stale local `main` as truth.
 
 ## Where things are
 
@@ -95,15 +105,10 @@ default branch tip; do not treat a stale local main as truth.
 
 ## Environment
 
-Agent model / Vertex-style credentials are no longer configured in
-`honr.yaml` or Settings → Agent runtime. They will come back through OpenShell
-configuration managed in honr. Until then, sandboxed Claude/agy runs that
-depended on Vertex env injection are expected to fail.
-
-GitHub work uses a bot account, configured as `execution.agents.repo.fork`.
-Its token currently carries broad `repo` scope across that account — a
-fine-grained PAT scoped to the fork alone is the right hardening step and has
-not been done.
+Model credentials for sandboxed agents come from OpenShell providers (Settings
+→ OpenShell / GitHub App), not from `honr.yaml` Agent runtime fields. GitHub
+git + `gh` in the sandbox use the App installation token (`GH_TOKEN`) for
+`execution.agents.repo` (`upstream` / `fork` / `base`).
 
 ## Working with the human here
 

@@ -202,8 +202,7 @@ pub struct PlanTaskSpec {
     pub blocked_by_keys: Vec<String>,
     #[serde(default)]
     pub capability: Option<String>,
-    /// Legacy wire field — ignored on materialize. Name the clone target in
-    /// intent/DoD instead.
+    /// Optional wire field; materialize uses intent/DoD for clone targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<crate::schema::RepoConfig>,
     /// Set when Approve Plan materializes (or updates) a board Task.
@@ -292,20 +291,19 @@ mod initial_plan_title_tests {
 }
 
 /// Default standing instructions seeded on every new Project (`project_prompt`).
-/// Replaces the old pin soup for policy the agent must always see.
 ///
-/// Clone targets are named in each Task's intent/DoD (prose). After report,
-/// card `pull_request` drives resume remotes. Keep quality gates here.
+/// Clone targets are named in each Task's intent/DoD. After report, card
+/// `pull_request` drives resume remotes. Keep quality gates here.
 pub const DEFAULT_PROJECT_PROMPT: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
 Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/policy.yaml; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
 Name the repository to clone in each Task's intent and/or definition of done \
-(`owner/name`, and fork if cross-fork). Do not invent an owner/name from context; \
+(`owner/name`, and push remote when it differs). Do not invent an owner/name from context; \
 if the card text is silent or ambiguous, escalate.\n\
 Name this Project's quality gates (test/lint commands) here when agents should run them before \
 publish — do not assume cargo or any other toolchain unless named.\n\
-Initial plan: write /sandbox/.honr/plan.json only (no docs PR); each proposed task names its \
+Initial plan: write /sandbox/.honr/plan.json; each proposed task names its \
 clone target in intent/DoD; human Approve creates Tasks.\n\
 If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape; name \
 clone targets in each child's intent/DoD); card goes to Review — Approve creates siblings. \
@@ -317,19 +315,19 @@ mod default_project_prompt_tests {
     use super::DEFAULT_PROJECT_PROMPT;
 
     #[test]
-    fn clone_targets_are_prose_not_structured_binding() {
+    fn clone_targets_are_named_in_task_prose() {
         let p = DEFAULT_PROJECT_PROMPT;
         assert!(
             p.contains("intent") && p.contains("definition of done"),
             "must point at task text for clone targets: {p}"
         );
         assert!(
-            p.contains("plan.json") && p.contains("no docs PR"),
-            "Initial plan must be plan.json without docs PR: {p}"
+            p.contains("plan.json") && p.contains("Approve creates Tasks"),
+            "Initial plan must use plan.json then Approve: {p}"
         );
         assert!(
-            !p.contains("Task.repo") && !p.contains("Task-scoped"),
-            "must not describe retired Task.repo binding: {p}"
+            p.contains("Name the repository to clone"),
+            "must instruct naming the clone target: {p}"
         );
     }
 }
@@ -628,8 +626,8 @@ impl WebhookPollConfig {
 }
 
 /// Per-install forge identity + beads Issue sync (Settings → Forge).
-/// Work remotes are **not** stored here — they live on each card's
-/// [`PullRequest`] after the agent reports. See `docs/architecture.md`.
+/// Work remotes live on each card's [`PullRequest`] after the agent reports.
+/// See `docs/architecture.md`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkspaceBinding {
     /// Forge provider. Only `github` is implemented; `gitlab` is a future seam.
@@ -661,10 +659,10 @@ impl<'de> Deserialize<'de> for WorkspaceBinding {
             forge: String,
             #[serde(default)]
             beads_sync_repo: Option<String>,
-            /// Legacy install-wide work upstream — migrate into beads when unset.
+            /// Older wire name for beads sync target when `beads_sync_repo` is absent.
             #[serde(default)]
             upstream: Option<String>,
-            /// Ignored legacy field from a brief Settings experiment.
+            /// Accepted and discarded for forward-compatible Settings payloads.
             #[serde(default)]
             #[allow(dead_code)]
             branching_prompt: Option<String>,
@@ -713,14 +711,14 @@ impl WorkspaceBinding {
 }
 
 /// Named create-spec for OpenShell sandboxes. Board-state catalog entries;
-/// YAML `execution.agents` image/policy/cpu/memory/engine is seed/fallback only.
+/// yaml `execution.agents` seeds the catalog when empty at boot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxProfile {
     pub id: String,
     pub name: String,
     /// Passed to `openshell sandbox create --from`.
     pub image: String,
-    /// Inline OpenShell policy YAML text (not a host filesystem path).
+    /// Inline OpenShell policy YAML text.
     /// The supervisor writes a temp file from this at sandbox create.
     pub policy: String,
     #[serde(default)]
@@ -818,8 +816,8 @@ pub fn is_inline_policy_yaml(s: &str) -> bool {
 
 /// Turn `execution.agents.policy` (path or already-inline YAML) into content.
 ///
-/// Profiles persist the YAML text. The host path in honr.yaml is seed/fallback
-/// only — never the board's source of truth after catalog seed.
+/// Resolve policy to YAML text: accept inline content, or read a file path
+/// (used when seeding profiles from honr.yaml).
 pub fn resolve_policy_yaml(path_or_yaml: &str) -> String {
     if is_inline_policy_yaml(path_or_yaml) {
         return path_or_yaml.to_string();

@@ -92,12 +92,12 @@ export function Settings() {
       <header className="settings-hero">
         <h1>Settings</h1>
         <p className="settings-lede">
-          Control-plane preferences. Forge holds Issue sync — not a work repo.
-          Each card’s <code>pull_request</code> (after report) holds remotes.
-          OpenShell holds gateway connectivity, providers, and sandbox profiles
-          (including which agent engine a profile runs). GitHub App holds the
-          sealed App credentials for installation tokens. Agent runtime holds
-          concurrency, timeouts, and the fallback engine.
+          Control-plane preferences. Forge holds beads Issue sync. Each card’s
+          <code>pull_request</code> (after report) holds work remotes. OpenShell
+          holds gateway connectivity, providers, and sandbox profiles (including
+          which agent engine a profile runs). GitHub App holds sealed App
+          credentials for installation tokens. Agent runtime holds concurrency,
+          timeouts, and the fallback engine.
         </p>
       </header>
 
@@ -335,7 +335,7 @@ export function SandboxesPanelView({
               data-testid="sandbox-field-policy"
             />
             <span className="dim sandbox-field-hint">
-              Inline OpenShell policy YAML — not a path on the host.
+              Inline OpenShell policy YAML pasted into the profile.
             </span>
           </label>
           <div className="sandbox-profile-form-row">
@@ -884,7 +884,7 @@ export function GitHubAppPanelView({
             ))}
           </select>
           <span className="dim sandbox-field-hint">
-            Installation used to mint sandbox <code>GH_TOKEN</code> into the
+            Installation that mints sandbox <code>GH_TOKEN</code> into the
             OpenShell <code>github</code> provider.
           </span>
         </label>
@@ -1129,10 +1129,8 @@ export function WorkspacePanelView({
     <section aria-labelledby="workspace-title" data-testid="workspace-panel">
       <h2 id="workspace-title">Forge</h2>
       <p className="dim">
-        Where beads mirrors Issues, and which forge provider you use. This is
-        not the product repo agents open PRs against — that comes from each
-        card’s <code>pull_request</code> (url / base / head) after the agent
-        reports.
+        Beads Issue sync and forge provider. Work remotes live on each card’s
+        <code>pull_request</code> (url / base / head) after the agent reports.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -1178,8 +1176,7 @@ export function WorkspacePanelView({
             data-testid="workspace-field-beads"
           />
           <span className="dim sandbox-field-hint">
-            Explicit beads ↔ GitHub Issues mirror. Independent of which product
-            repos agents open PRs against.
+            Beads ↔ GitHub Issues mirror repository (`owner/name`).
           </span>
         </label>
 
@@ -1216,8 +1213,7 @@ export function WorkspacePanelView({
             />
             <span className="dim sandbox-field-hint">
               Minimum 15s. Uses the GitHub App installation token. Completes
-              merged Review cards and advances main when the tip moves — same
-              effects as the webhook path when delivery is delayed or missing.
+              merged Review cards and advances main when the tip moves.
             </span>
           </label>
         </fieldset>
@@ -1758,7 +1754,7 @@ export function OpenShellPanelView({
   );
 }
 
-/** Fixed OpenShell provider name filled by Settings → GitHub App (not a PAT). */
+/** Fixed OpenShell provider name filled by Settings → GitHub App. */
 const GITHUB_APP_PROVIDER_NAME = "github";
 
 function isGitHubAppManagedProvider(name: string, type?: string): boolean {
@@ -1826,7 +1822,7 @@ export function OpenShellProvidersPanelView({
           Desired providers live on the board (credentials sealed). Save applies
           to the gateway when it is reachable; Sync recreates after a wipe.
           Provider <code>github</code> attaches <code>GH_TOKEN</code> from
-          Settings → GitHub App (installation token), not a pasted PAT.
+          Settings → GitHub App (installation token).
         </p>
       </div>
 

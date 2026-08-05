@@ -52,7 +52,7 @@ pub struct BoardState {
     /// Sealed GitHub App credentials (DB ciphertext). Decrypt only via `secrets`.
     #[serde(default)]
     pub github_app_sealed: Option<String>,
-    /// GitHub App installation used to mint sandbox `GH_TOKEN`s.
+    /// GitHub App installation id for minting sandbox `GH_TOKEN`s.
     #[serde(default)]
     pub github_app_installation_id: Option<u64>,
     /// Sealed local-admin auth (password hash + session key). Decrypt via `secrets`.
@@ -1142,7 +1142,7 @@ impl Board {
 
         self.emit(&item);
 
-        // Projects auto-seed a claimable Initial plan (no product-repo binding).
+        // Projects auto-seed a claimable Initial plan Task.
         if item.is_project() {
             if let Err(e) = self.seed_initial_plan(item.id) {
                 tracing::warn!(project = item.id, error = %e, "auto-seed Initial plan failed");
@@ -1153,8 +1153,8 @@ impl Board {
 
     /// Seed the Project's claimable Initial plan Task (idempotent).
     ///
-    /// No structured Task.repo — the planner names clone targets in each proposed
-    /// task's intent/DoD. Does not open a PR; finish with `plan.json` → Review.
+    /// The planner names clone targets in each proposed task's intent/DoD and
+    /// finishes with `plan.json` → Review → Approve.
     pub fn seed_initial_plan(&self, project_id: ItemId) -> Result<WorkItem, String> {
         let project = self
             .get(project_id)
@@ -1181,7 +1181,7 @@ impl Board {
                  Do **not** open a PR. Do not write split.json. Card goes to Review — \
                  human Approve creates those Tasks."
             ),
-            Some("plan.json in Review; Approve creates Tasks. No plan/docs PR.".into()),
+            Some("Write plan.json with proposed Tasks (each names clone target). Approve creates them.".into()),
             Origin::Planner,
             false,
             None,
@@ -2049,10 +2049,8 @@ impl Board {
         }
     }
 
-    /// Legacy test helper — Task.repo binding is retired (clone targets are prose).
-    ///
-    /// Still clears/sets the unused field for old tests and DB round-trips;
-    /// [`Self::resolve_card_repo`] ignores it.
+    /// Test helper: write the unused `WorkItem.repo` field for DB round-trips.
+    /// [`Self::resolve_card_repo`] reads `pull_request` only.
     #[cfg(test)]
     pub fn set_task_repo(
         &self,
@@ -2256,7 +2254,7 @@ impl Board {
     // ------------------------------------------------ workspace binding (board state)
 
     /// Seed Forge binding (beads sync) from env / yaml when unbound.
-    /// Work remotes stay in yaml `execution.agents.repo` only — not Settings.
+    /// Work remotes come from yaml `execution.agents.repo` and card `pull_request`.
     pub fn seed_workspace_binding_if_empty(&self) -> bool {
         self.seed_workspace_binding_from(&self.schema.execution.agents)
     }
@@ -2673,12 +2671,12 @@ impl Board {
                 return Some(r);
             }
         }
-        // Legacy yaml upstream as beads fallback only — not a work-remote binding.
+        // Fallback beads repo from yaml `execution.agents.repo.upstream`.
         self.yaml_work_repo().map(|r| r.upstream)
     }
 
-    /// Legacy yaml `execution.agents.repo` when upstream is set. Not used for
-    /// work remotes once a card has [`crate::model::PullRequest`] facts.
+    /// Yaml `execution.agents.repo` when upstream is set (seed / beads fallback).
+    /// Card work remotes come from [`crate::model::PullRequest`] when present.
     pub fn yaml_work_repo(&self) -> Option<RepoConfig> {
         let yaml = &self.schema.execution.agents.repo;
         if yaml.is_complete() {
@@ -2721,8 +2719,8 @@ impl Board {
     /// 2. else `Ok(None)` — unbound; briefing tells the agent to clone from
     ///    card intent/DoD/notes or escalate
     ///
-    /// `Err` only for a malformed `pull_request.url`. No Task.repo or Project
-    /// product-repo step; does not invent a bot fork from yaml or Settings.
+    /// `Err` only for a malformed `pull_request.url`. Does not invent remotes
+    /// from yaml or Settings when the card has no `pull_request`.
     pub fn resolve_card_repo(&self, item_id: ItemId) -> Result<Option<RepoConfig>, String> {
         let item = self
             .get(item_id)
@@ -2749,8 +2747,7 @@ impl Board {
             }
         }
 
-        // Create-time Task.repo binding is retired — clone targets live in card
-        // prose until pull_request exists. Unbound → Ok(None) → escalate.
+        // Unbound until pull_request exists — briefing uses card prose / escalate.
         Ok(None)
     }
 
@@ -3667,7 +3664,7 @@ fn check_split_relatedness(
     /// Initial plan: keep proposal and stamp `item_id`s (freeze for briefings).
     /// Impl splits: clear the proposal. Does not transition the parent card.
     ///
-    /// Clone targets live in each task's intent/DoD prose — no structured Task.repo.
+    /// Each materialized task carries clone targets in its intent/DoD prose.
     fn materialize_proposal(
         &self,
         id: ItemId,
@@ -4304,8 +4301,7 @@ facts are pasted, then unpark";
             .is_some_and(|p| !p.tasks.is_empty());
 
         if has_proposal {
-            // UI: "Approve — create Tasks". Materialize now; clone targets live in
-            // each task's intent/DoD prose (no structured Task.repo gate).
+            // UI: "Approve — create Tasks". Materialize now from the proposal.
             let done = self
                 .transition(id, State::Done, "human", Some("proposal approved".into()))
                 .map_err(|e| e.to_string())?;
@@ -6227,7 +6223,7 @@ mod tests {
         assert_eq!(seed.title, initial_plan_title("Phase X"));
         assert_eq!(seed.state, State::Backlog);
         assert!(seed.is_initial_plan_task());
-        assert!(seed.repo.is_none(), "Initial plan has no structured Task.repo");
+        assert!(seed.repo.is_none(), "Initial plan remotes come from prose until PR");
         assert!(b.resolve_card_repo(seed.id).unwrap().is_none());
         assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
     }
@@ -6296,7 +6292,7 @@ mod tests {
             let task = b.get(*id).expect("sibling");
             assert!(
                 task.repo.is_none(),
-                "siblings must not get structured Task.repo"
+                "siblings resolve remotes from prose until pull_request"
             );
             assert!(b.resolve_card_repo(*id).unwrap().is_none());
         }
@@ -9491,10 +9487,10 @@ mod tests {
                 base: "develop".into(),
             }),
         )
-        .expect("set_task_repo still writes legacy field");
+        .expect("set_task_repo writes unused field");
         assert!(
             b.resolve_card_repo(t.id).unwrap().is_none(),
-            "legacy Task.repo must not bind remotes"
+            "WorkItem.repo alone does not bind remotes"
         );
     }
 
@@ -9832,7 +9828,7 @@ mod tests {
             let project = b
                 .create(None, "Bound Proj", "why", None, Origin::Human, true, None)
                 .expect("project");
-            assert!(project.repo.is_none(), "Projects carry no product-repo");
+            assert!(project.repo.is_none(), "Projects are containers; remotes live on Tasks");
             let task = b
                 .create(
                     Some(project.id),
@@ -9922,7 +9918,7 @@ mod tests {
         );
         assert!(b.get(project.id).unwrap().repo.is_none());
 
-        // WorkspaceBinding stays beads-only (no work-remote fields on wire).
+        // WorkspaceBinding carries forge + beads sync.
         let ws = WorkspaceBinding {
             forge: "github".into(),
             beads_sync_repo: Some("acme/beads".into()),

@@ -7,24 +7,25 @@ Day-to-day operation once the board is up. For enabling sandboxed agents, see
 ## Happy path
 
 1. **Create a Project** (`create_project` or UI): auto-seeds a claimable
-   Initial plan Task. No product-repo field.
+   Initial plan Task.
 2. **Dispatch** Initial plan (`dispatch` / UI **Start**): agent writes
-   `plan.json` only (no docs PR). Each proposed task names its clone target
-   in intent/DoD.
+   `plan.json` with proposed sibling Tasks (each names its clone target in
+   intent/DoD). The card moves to **Review**.
 3. **Approve** that card: creates sibling Tasks under the Project. Approve
    does not auto-dispatch unless Project auto mode is already on.
 4. **Dispatch** each Ready / Backlog Task (or turn on Project auto mode).
 5. Worker clones from card text, opens a PR → card lands in **Review**.
-6. You merge on GitHub. With webhook forwarding, merged cards move to Done.
+6. You merge on GitHub. Webhooks or Settings → Forge polling move merged
+   cards to Done.
 
 `propose_breakdown` is for manual Project replan only. Impl oversize uses the
 same split path: `split.json` → Review with proposal → Approve creates siblings.
 
 Standing policy lives in Project `project_prompt` (edit via `update`) — quality
-gates and invariants, not the clone target. Name the repo to clone in each
-Task's intent/DoD. After `report.json`, card `pull_request` drives resume.
-Read `item_detail`'s proposal / Plan before approving. A card that passes its
-gates can still be building the wrong thing.
+gates and invariants. Name the repo to clone in each Task's intent/DoD. After
+`report.json`, card `pull_request` drives resume. Read `item_detail`'s proposal
+/ Plan before approving. A card that passes its gates can still be building the
+wrong thing.
 
 ## Triage order
 
@@ -98,17 +99,15 @@ gh webhook forward \
   --url=http://127.0.0.1:8080/api/webhooks/github
 ```
 
-Only one forwarder per repo at a time. Settings → Forge shows the same
-placeholder template.
+Only one forwarder per repo at a time.
 
 ### Polling fallback
 
-When `gh webhook forward` (or GitHub delivery) is down, enable **Webhook
-polling fallback** in Settings → Forge. honr then polls on an interval **in
-addition to** webhooks (default 60s, minimum 15s), using the GitHub App
-installation token. Same Board effects: merged Review/NeedsHuman cards → Done
-(`by: github-poll`), default-branch tip change → `MainAdvanced`. Requires a
-configured GitHub App + installation id.
+Settings → Forge can enable **Webhook polling fallback**: honr polls GitHub on
+an interval **in addition to** webhooks (default 60s, minimum 15s) with the App
+installation token. Same Board effects — merged Review/NeedsHuman cards → Done,
+default-branch tip change → `MainAdvanced`. Needs a configured GitHub App +
+installation id.
 
 ## Looking at the UI
 

@@ -189,10 +189,10 @@ pub struct CreateItem {
     capability: Option<String>,
     #[serde(default)]
     above_line: bool,
-    /// Task product remotes. Ignored when creating a Project root.
+    /// Accepted on create; clone targets are named in intent/DoD.
     #[serde(default)]
     repo: Option<crate::schema::RepoConfig>,
-    /// Ignored — Projects have no product-repo field.
+    /// Accepted and unused on create.
     #[serde(default)]
     product_repo: Option<serde_json::Value>,
 }
@@ -202,7 +202,7 @@ async fn create_item(
     Json(req): Json<CreateItem>,
 ) -> ApiResult<WorkItem> {
     let _ = req.product_repo;
-    let _ = req.repo; // Task.repo binding retired — name clone target in intent/DoD.
+    let _ = req.repo; // name clone target in intent/DoD
     let item = b
         .create(
             req.parent,
@@ -237,7 +237,7 @@ async fn approve_plan(
 
 #[derive(Deserialize, Default)]
 pub struct InitPlanReq {
-    /// Ignored — Task.repo binding retired. Body may be empty `{}`.
+    /// Accepted; body may be empty `{}`.
     #[serde(default)]
     #[allow(dead_code)]
     repo: Option<crate::schema::RepoConfig>,
@@ -298,7 +298,7 @@ pub struct PlanTaskBody {
     blocked_by_keys: Vec<String>,
     #[serde(default)]
     capability: Option<String>,
-    /// Ignored — clone targets live in intent/DoD prose.
+    /// Accepted; clone targets are named in intent/DoD.
     #[serde(default)]
     repo: Option<crate::schema::RepoConfig>,
 }
@@ -352,10 +352,10 @@ pub struct UpdateItemReq {
     engine: Option<String>,
     #[serde(default)]
     project_prompt: Option<String>,
-    /// Task product remotes (`upstream` required). Refused on Projects.
+    /// Accepted and unused — name clone targets in intent/DoD.
     #[serde(default)]
     repo: Option<crate::schema::RepoConfig>,
-    /// Ignored — Projects have no product-repo field.
+    /// Accepted and unused on update.
     #[serde(default)]
     product_repo: Option<serde_json::Value>,
 }
@@ -365,7 +365,7 @@ async fn update_item(
     Path(id): Path<ItemId>,
     Json(req): Json<UpdateItemReq>,
 ) -> ApiResult<WorkItem> {
-    let _ = req.product_repo; // task-scoped remotes only
+    let _ = req.product_repo;
     let item = b
         .update_item(
             id,
@@ -376,7 +376,7 @@ async fn update_item(
             req.project_prompt,
         )
         .map_err(ApiError)?;
-    let _ = req.repo; // Task.repo binding retired
+    let _ = req.repo;
     Ok(Json(item))
 }
 
@@ -1609,7 +1609,7 @@ mod tests {
         let proj_v = serde_json::to_value(&proj_detail).expect("proj json");
         assert!(
             proj_v.get("repo").is_none() || proj_v["repo"].is_null(),
-            "Project detail must not expose a product-repo: {proj_v}"
+            "Project detail JSON should omit unused product_repo: {proj_v}"
         );
 
         // create Project with accidental product_repo — ignored.
@@ -1672,7 +1672,7 @@ mod tests {
             panic!("init_plan");
         };
         assert!(seed.is_initial_plan_task());
-        assert!(seed.repo.is_none(), "no structured Task.repo");
+        assert!(seed.repo.is_none(), "Initial plan carries clone targets in prose");
         assert!(b.children_of(created.id).contains(&seed.id));
     }
 
@@ -1713,7 +1713,7 @@ mod tests {
         assert!(created.repo.is_none());
         assert!(b.resolve_card_repo(created.id).unwrap().is_none());
 
-        // Accidental repo body is ignored (binding retired).
+        // Extra repo body on create is accepted and unused.
         let Ok(Json(ignored)) = create_item(
             AxState(b.clone()),
             Json(CreateItem {

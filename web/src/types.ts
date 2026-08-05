@@ -55,7 +55,7 @@ export interface SandboxProfile {
   id: string;
   name: string;
   image: string;
-  /** Inline OpenShell policy YAML text (not a host filesystem path). */
+  /** Inline OpenShell policy YAML text. */
   policy: string;
   cpu?: string | null;
   memory?: string | null;
@@ -74,7 +74,7 @@ export interface SandboxProfilesOut {
  */
 export interface WorkspaceBinding {
   forge: string;
-  /** Beads ↔ GitHub Issues sync target (independent of work remotes). */
+  /** Beads ↔ GitHub Issues sync target. */
   beads_sync_repo?: string | null;
 }
 
@@ -272,11 +272,11 @@ export interface TaskProposal {
   tasks: PlanTaskSpec[];
 }
 
-/** Card / Task product remotes (clone + PR target). Not on Projects. */
+/** Card / Task product remotes (clone + PR target). */
 export interface RepoConfig {
   /** owner/name that PRs target (required when set). */
   upstream: string;
-  /** Optional distinct push remote; empty/omit → same-repo. */
+  /** Push remote; empty/omit means same as upstream. */
   fork?: string;
   /** Default main. */
   base?: string;

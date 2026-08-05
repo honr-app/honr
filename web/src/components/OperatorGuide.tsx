@@ -89,8 +89,8 @@ export function OperatorGuide() {
           </li>
           <li>
             <code>dispatch</code> the Initial plan — the agent writes{" "}
-            <code>plan.json</code> only (no docs PR). Each proposed task names
-            its clone target in intent/DoD (no Task.repo field).
+            <code>plan.json</code>. Each proposed task names its clone target
+            in intent/DoD.
           </li>
           <li>
             <strong>Approve</strong> — creates sibling Tasks under the Project.

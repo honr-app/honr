@@ -2,7 +2,7 @@
 #
 # Project is the only container. Tasks are flat siblings under a Project,
 # related by dependency edges (blocks / relates-to), not nested hierarchy.
-# Vision / Epic / Story are retired.
+# Schema is Project + Task only.
 
 # Board persistence. Default is local SQLite (`sqlite:honr.db`). Set a
 # postgres:// or postgresql:// URL (or HONR_DATABASE_URL) for Postgres.
@@ -41,12 +41,12 @@ execution:
     image: honr-sandbox:latest
     policy: sandbox/policy.yaml
 
-    # Legacy optional seed only — work remotes come from each card's
-    # pull_request (report.json url/base/head). Not required for first clone.
+    # Default remotes when a card already has pull_request facts; first clone
+    # still follows intent/DoD prose until report sets pull_request.
     repo:
       upstream: shanemcd/honr
-      # Same-repo: GitHub App install on shanemcd pushes honr/card-* and opens PRs.
-      # main stays owner-only via ruleset; bot must not merge.
+      # App install on shanemcd; push honr/card-* and open PRs into main.
+      # Default branch is owner-only (ruleset); humans merge.
       fork: shanemcd/honr
       base: main
 
@@ -57,7 +57,7 @@ execution:
     memory: 4Gi
 
     # Sandboxes are heavy and OpenShell is alpha. Do not start at seven.
-    # Deliberately 1 until gates are supervisor-run rather than agent-claimed.
+    # Keep low while OpenShell is alpha and agents claim their own gates.
     max_concurrent: 1
 
     agent_timeout_secs: 1800

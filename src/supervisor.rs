@@ -694,8 +694,7 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     let os = &os_owned;
     let id = grant.item_id;
     // Live Settings → Agent runtime; per-card remotes from pull_request
-    // (resolve_card_repo). Remotes go in the briefing — the agent clones from
-    // prose when unbound; the supervisor never pre-clones.
+    // (resolve_card_repo). Briefing tells the agent how to clone.
     let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
         Ok(Some(repo)) => agents.repo = repo,
@@ -1326,7 +1325,7 @@ struct RawPlanTask {
     blocked_by_keys: Vec<String>,
     #[serde(default)]
     capability: Option<String>,
-    /// Legacy — ignored. Name clone targets in intent/DoD.
+    /// Optional wire field; clone targets are taken from intent/DoD.
     #[serde(default)]
     repo: Option<crate::schema::RepoConfig>,
 }
@@ -1413,7 +1412,7 @@ async fn apply_initial_plan_sidecar(
         tracing::warn!("#{id}: Initial plan missing plan.json ({e})");
         return escalate_missing(format!(
             "Initial plan must write {VERDICT_DIR}/plan.json (proposed Tasks; each names \
-             the repo to clone in intent/DoD). No plan/docs PR — Approve creates Tasks."
+             the repo to clone in intent/DoD). Approve on that Review card creates the Tasks."
         ));
     }
 
@@ -1454,9 +1453,9 @@ async fn apply_initial_plan_sidecar(
 }
 
 fn probe_verdict_script() -> String {
-    // Prefer /sandbox/.honr (writable HOME). Keep /work and /tmp as legacy
-    // fallbacks; /tmp often cannot be downloaded by OpenShell.
-    // Initial plan finishes with plan.json alone (no PR / report required).
+    // Prefer /sandbox/.honr (writable HOME). Also probe /work and /tmp;
+    // /tmp often cannot be downloaded by OpenShell.
+    // Initial plan completes when plan.json is present.
     r#"for dir in /sandbox/.honr /work/.honr /tmp/.honr; do
   if [ -f "$dir/escalate.json" ]; then
     echo "escalate:$dir/escalate.json"
@@ -1544,9 +1543,8 @@ async fn process_verdict(
                         id,
                         agent_id,
                         format!(
-                            "Initial plan must finish with {VERDICT_DIR}/plan.json only \
-                             (Review). Approve materializes sibling Tasks — not split.json, \
-                             and not a docs PR."
+                            "Initial plan finishes by writing {VERDICT_DIR}/plan.json \
+                             (moves to Review). Approve materializes sibling Tasks from that proposal."
                         ),
                         vec![
                             crate::model::EscalationOption {
@@ -1665,7 +1663,7 @@ async fn process_verdict(
                 return Ok(true);
             }
             board.report(id, agent_id, 0, 0, vec!["plan.json".into()])?;
-            tracing::info!("#{id}: Initial plan accepted via plan.json (no PR)");
+            tracing::info!("#{id}: Initial plan accepted via plan.json");
             Ok(true)
         }
         "report" => {
@@ -1678,7 +1676,7 @@ async fn process_verdict(
             }
 
             let is_initial = board.get(id).is_some_and(|i| i.is_initial_plan_task());
-            // Initial plan: prefer plan.json beside report (legacy agents).
+            // Initial plan may also ship plan.json beside report.json.
             if is_initial {
                 let plan_remote = {
                     let p = std::path::Path::new(remote_path);
@@ -1702,7 +1700,7 @@ async fn process_verdict(
                         rep.gates
                     },
                 )?;
-                tracing::info!("#{id}: Initial plan accepted via report+plan.json (no PR required)");
+                tracing::info!("#{id}: Initial plan accepted via report+plan.json");
                 return Ok(true);
             }
             // Impl cards: proposal and publish are mutually exclusive.
@@ -1836,21 +1834,8 @@ async fn finish(
     // ---- verify what the agent published ---------------------------------
     //
     // The agent pushes and opens the PR; the supervisor only asks GitHub what
-    // happened. That split is deliberate, and it is a reversal.
-    //
-    // The supervisor used to script the publish itself, justified as
-    // "deterministic, and it keeps gh out of the agent's hands". The second
-    // half was never true — gh is in the image and GH_TOKEN is in the
-    // environment, so the agent always had this capability. And the
-    // determinism bought nothing: every one of upload-dest-is-a-directory,
-    // non-idempotent `gh pr create`, URL-scraped-from-stdout and
-    // --force-with-lease-against-a-URL was a failure in *our* shell, not in
-    // the agent. Meanwhile the agent resolved a seven-commit rebase conflict
-    // unaided.
-    //
-    // What is left here is a *query*, not a script that has to keep working.
-    // Containment comes from GitHub: the bot has no write access to upstream,
-    // so the worst it can do is make a mess of a disposable fork.
+    // happened. Containment is the owner-only default-branch ruleset plus human
+    // merge — not a supervisor shell that re-implements `gh`.
     let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
     anyhow::ensure!(pr.ok(), "could not ask GitHub about the PR: {}", outerr(&pr));
     let url = parse_pr_url(&pr.stdout)
@@ -2077,7 +2062,7 @@ pub fn parse_conflict_files(stdout: &str) -> Vec<String> {
     Vec::new()
 }
 
-/// Empty `/sandbox/repo` for the agent to clone into. Supervisor never pre-clones.
+/// Empty `/sandbox/repo` directory for the agent to clone into.
 fn empty_workdir_script() -> String {
     format!(
         r#"set -e
@@ -2122,8 +2107,8 @@ test -d {VERDICT_DIR}"#
     Ok(())
 }
 
-/// Reference clone recipe (unit-tested). Runtime setup no longer runs this —
-/// the agent clones. Kept so the intended remote/branch layout stays documented.
+/// Reference clone recipe (unit-tested). Documents the intended remote/branch
+/// layout; the agent performs the clone from the briefing.
 #[allow(dead_code)]
 fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
     let clone = cfg.repo.clone_target();
@@ -2587,16 +2572,16 @@ target: `{target}`. Clone that into `/sandbox/repo` and continue the card. Do **
 re-escalate asking which repository to clone.\n"
             );
         }
-        // Clone target is prose on the card (intent/DoD/notes) — not Task.repo.
-        // Needs You is correct when still unnamed; never invent owner/name.
+        // Clone target comes from card intent/DoD/notes. Escalate when unnamed.
         return "\nNo card pull_request yet (first run). Clone into `/sandbox/repo` **only** \
 when this card's intent, definition of done, or notes name an exact repository \
-(`owner/name` or git URL) — including fork vs upstream when cross-fork. Do **not** \
-guess from context, history, or the card title. If the clone target is missing or \
-ambiguous, write `/sandbox/.honr/escalate.json` with a short question, at least two \
-concrete options, and a recommended index, then exit — do not clone and do not \
-open a PR. When you do clone and finish, write `/sandbox/.honr/report.json` with \
-`url`, `base`, and `head` (schema: `/sandbox/.honr/report.schema.json`).\n"
+(`owner/name` or git URL), including distinct push vs PR-target remotes when both \
+are named. Do **not** guess from context, history, or the card title. If the clone \
+target is missing or ambiguous, write `/sandbox/.honr/escalate.json` with a short \
+question, at least two concrete options, and a recommended index, then exit — do not \
+clone and do not open a PR. When you do clone and finish, write \
+`/sandbox/.honr/report.json` with `url`, `base`, and `head` (schema: \
+`/sandbox/.honr/report.schema.json`).\n"
             .into();
     }
     let base = repo.base.trim();
@@ -2604,14 +2589,14 @@ open a PR. When you do clone and finish, write `/sandbox/.honr/report.json` with
     let clone = repo.clone_target();
     if repo.uses_cross_fork() {
         format!(
-            "\nThe supervisor does **not** pre-clone. Clone into `/sandbox/repo` yourself. \
+            "\nClone into `/sandbox/repo` yourself (empty workspace on claim). \
 Remotes for this run: `origin` is `{clone}` (push); add `upstream` = `{upstream}` and \
 rebase onto `upstream/{base}` (PR target). Never treat `origin/{base}` alone as the \
 merge base when head and base repos differ.\n"
         )
     } else {
         format!(
-            "\nThe supervisor does **not** pre-clone. Clone into `/sandbox/repo` yourself. \
+            "\nClone into `/sandbox/repo` yourself (empty workspace on claim). \
 Remotes for this run: `origin` is `{upstream}` (clone and push). Rebase onto \
 `origin/{base}`. Open the PR against the same repo, base `{base}`.\n"
         )
@@ -2746,7 +2731,7 @@ fn briefing(
         BranchState::Fresh => {
             if repo.is_complete() {
                 b.push_str(&format!(
-                    "\nFirst run: `/sandbox/repo` is empty (supervisor does not pre-clone). \
+                    "\nFirst run: `/sandbox/repo` is empty. \
 Clone using the Remotes below, create or resume branch `{branch_name}` off the base, \
 then do the card. Nothing has been done on this card yet.\n"
                 ));
@@ -2788,18 +2773,15 @@ names an exact product repo; otherwise escalate (see Remotes) — do not guess.\
 
     if is_initial_plan {
         b.push_str(
-            "\nThis is the Project's **Initial plan** card. You do **not** open a pull request \
-             and you do **not** need to clone a product repo for this card.\n\
+            "\nThis is the Project's **Initial plan** card.\n\
              Propose the sibling Tasks that should be created: write `/sandbox/.honr/plan.json` \
              with a `summary` and `tasks` (each: `key`, `title`, `intent`, \
              `definition_of_done`, optional `blocked_by_keys`). In **each** task's intent \
              and/or definition_of_done, name the exact repository to clone \
-             (`owner/name`, and fork if cross-fork). Then exit — the supervisor picks up \
-             plan.json and moves this card to Review. **Approve** creates those Tasks \
-             (not via split.json).\n\
-             Do **not** write `/sandbox/.honr/split.json` or `report.json` on this card.\n\
-             If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` \
-             with options (at least two) and a recommended index, then exit.\n",
+             (`owner/name`, and push remote when it differs). Then exit — the supervisor \
+             picks up plan.json and moves this card to Review. **Approve** creates those Tasks.\n\
+             Finish this card with `plan.json` (use `escalate.json` only for a real human \
+             decision). Skip `split.json` and `report.json` here.\n",
         );
     } else {
         b.push_str(
@@ -3127,8 +3109,8 @@ mod tests {
             "cross-fork needs owner:branch: {s}"
         );
         assert!(s.contains(PR_URL_MARK), "url must come from a marked line: {s}");
-        assert!(!s.contains("gh pr create"), "creating is the agent's job now: {s}");
-        assert!(!s.contains("push"), "pushing is the agent's job now: {s}");
+        assert!(!s.contains("gh pr create"), "supervisor looks up PRs; agent creates them: {s}");
+        assert!(!s.contains("push"), "supervisor looks up PRs; agent pushes: {s}");
     }
 
     /// If the agent did not open a PR, the card must not reach Review looking
@@ -3155,7 +3137,7 @@ mod tests {
         assert!(b.to_lowercase().contains("pull request"), "{b}");
     }
 
-    /// Supervisor must not imply a pre-cloned checkout on Fresh + complete repo.
+    /// Fresh + complete repo: agent clones into an empty `/sandbox/repo`.
     #[test]
     fn complete_repo_fresh_briefing_makes_agent_clone() {
         let b = briefing(
@@ -3165,16 +3147,14 @@ mod tests {
             &cross_fork_repo(),
         );
         assert!(
-            b.contains("does not pre-clone") || b.contains("does **not** pre-clone"),
-            "must say supervisor does not pre-clone: {b}"
-        );
-        assert!(
-            b.contains("Clone into `/sandbox/repo`") || b.contains("Clone using the Remotes"),
-            "must tell the agent to clone: {b}"
+            b.contains("`/sandbox/repo` is empty")
+                || b.contains("Clone into `/sandbox/repo`")
+                || b.contains("Clone using the Remotes"),
+            "must tell the agent to clone into an empty workdir: {b}"
         );
         assert!(
             !b.contains("You are on a new branch off the base"),
-            "old pre-cloned Fresh wording must be gone: {b}"
+            "must not imply a pre-populated checkout: {b}"
         );
     }
 
@@ -4103,18 +4083,13 @@ mod tests {
             "briefing must require plan.json for Initial plan: {b}"
         );
         assert!(
-            b.contains("do **not** open a pull request")
-                || b.contains("do **not** need to clone"),
-            "briefing must forbid PR/clone on Initial plan: {b}"
+            b.contains("Finish this card with `plan.json`")
+                || b.contains("write `/sandbox/.honr/plan.json`"),
+            "briefing must center plan.json for Initial plan: {b}"
         );
         assert!(
-            b.contains("Do **not** write `/sandbox/.honr/split.json`")
-                || b.contains("not via split.json"),
-            "briefing must forbid split on Initial plan: {b}"
-        );
-        assert!(
-            b.contains("Do **not** write") && b.contains("report.json"),
-            "briefing must forbid report.json on Initial plan: {b}"
+            b.contains("Skip `split.json` and `report.json`"),
+            "briefing must tell Initial plan to skip split/report: {b}"
         );
         assert!(
             b.contains("Approve") && b.contains("Tasks"),
@@ -4122,7 +4097,7 @@ mod tests {
         );
         assert!(
             !b.contains("Split and publish are mutually exclusive"),
-            "Initial plan briefing must not use the implementation exclusivity rule: {b}"
+            "Initial plan briefing must use the plan.json path, not impl exclusivity: {b}"
         );
     }
 

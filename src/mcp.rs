@@ -105,17 +105,17 @@ pub struct UpdateArg {
     pub intent: Option<String>,
     #[serde(default)]
     pub definition_of_done: Option<String>,
-    /// Ignored — engine is on the sandbox profile, not the card.
+    /// Accepted and unused — engine lives on the sandbox profile.
     #[serde(default)]
     pub engine: Option<String>,
     /// Standing instructions — Project cards only.
     #[serde(default)]
     pub project_prompt: Option<String>,
-    /// Ignored — Task.repo binding retired; name the clone target in intent/DoD.
+    /// Accepted and unused — name the clone target in intent/DoD.
     #[serde(default)]
     #[schemars(skip)]
     pub repo: Option<crate::schema::RepoConfig>,
-    /// Ignored — Projects have no product-repo field.
+    /// Accepted and unused on Project/Task update.
     #[serde(default)]
     #[schemars(skip)]
     pub product_repo: Option<serde_json::Value>,
@@ -511,16 +511,15 @@ impl Operator {
 
     #[tool(
         name = "create_project",
-        description = "Create a Project container. Auto-seeds one Backlog Initial plan Task \
-                       (no product-repo field — clone targets are named in task text). Optional \
-                       project_prompt overrides default standing instructions. Dispatch the \
-                       Initial plan when ready; the planner writes plan.json (no PR)."
+        description = "Create a Project container. Auto-seeds one Backlog Initial plan Task. \
+                       Optional project_prompt overrides default standing instructions. \
+                       Dispatch the Initial plan when ready; the planner writes plan.json \
+                       (proposed Tasks name clone targets in intent/DoD)."
     )]
     fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
         if a.parent.is_some() {
             return Err(bad("Projects are roots; omit parent"));
         }
-        // product_repo is intentionally ignored (no Project-owned remotes).
         let _ = a.product_repo;
         let item = self
             .board
@@ -551,16 +550,16 @@ impl Operator {
     #[tool(
         name = "init_plan",
         description = "Ensure a Project has an Initial plan Task (usually already auto-seeded \
-                       by create_project). Idempotent. No repo argument — each proposed task \
-                       must name the repository to clone in its intent/DoD. Dispatch the \
-                       Initial plan to write plan.json (no docs PR)."
+                       by create_project). Idempotent. Each proposed task must name the \
+                       repository to clone in its intent/DoD. Dispatch the Initial plan to \
+                       write plan.json."
     )]
     fn init_plan(&self, Parameters(a): Parameters<InitPlanArg>) -> Out<Ack> {
         let seed = self.board.init_plan(a.project).map_err(bad)?;
         self.board.schedule_beads_mirror(seed.id);
         self.ack(
             seed.id,
-            "Initial plan Task ready in Backlog — dispatch to start planning (plan.json, no PR)",
+            "Initial plan Task ready in Backlog — dispatch to write plan.json",
         )
     }
 
@@ -625,7 +624,7 @@ impl Operator {
                     }
                 }
             }
-            let _ = c.repo; // structured per-task repo retired — name clone in intent/DoD
+            let _ = c.repo;
             specs.push(PlanTaskSpec {
                 key,
                 title: c.title,
@@ -706,7 +705,7 @@ impl Operator {
             return Err(bad("update needs at least one field"));
         }
         let _ = a.product_repo;
-        let _ = a.repo; // Task.repo binding retired
+        let _ = a.repo;
         let _ = a.engine;
         let _item = self
             .board

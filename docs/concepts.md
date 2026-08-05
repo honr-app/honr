@@ -40,8 +40,8 @@ One node type, two roles:
 | **Project** | Container. Holds the Plan, optional `project_prompt`, sandbox profile override, auto-dispatch. Never sits in Backlog as claimable work. |
 | **Task** | Claimable leaf. Initial plan, implementation cards, and follow-ups are Tasks under a Project. |
 
-Task↔task links are dependency edges (via beads). Vision / Epic / Story levels
-are not part of the product schema.
+Task↔task links are dependency edges (via beads). The product schema is
+Project + Task.
 
 ## Operator vs worker
 
@@ -64,10 +64,10 @@ evidence.
 
 **Merging is human.** Approving in honr surfaces the PR. It never merges.
 
-**The bot may push feature branches, not main.** Containment is the
-repository ruleset (owner-only default branch) plus human merge. Agents push
-`honr/card-*` on `shanemcd/honr` with the App installation on that account and
-open PRs into `main`; they never merge.
+**Feature branches are writable; `main` is human-gated.** The repository
+ruleset keeps the default branch owner-only. Agents push `honr/card-*` on
+`shanemcd/honr` (App installation on that account) and open PRs into `main`;
+humans merge.
 
 ## Where to go next
 
