@@ -3,6 +3,11 @@
 Inputs to `src/openshell.rs` and `src/supervisor.rs`. How a run works and what
 breaks if you change them: [`docs/sandbox.md`](../docs/sandbox.md).
 
+The agent image has **no `bd`** (beads CLI). Do not bake beads into
+`Containerfile`, allowlist `/usr/local/bin/bd` in `policy.yaml`, or restore a
+sandbox `BEADS_DIR` upload. Card context is briefing-only; see
+[`docs/sandbox.md`](../docs/sandbox.md).
+
 ## `policy.yaml`
 
 The sandbox network policy: Vertex for inference, GitHub for code, default-deny for everything else.

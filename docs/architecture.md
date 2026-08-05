@@ -67,9 +67,11 @@ stays one-tap in the UI is answering an escalation and approving a review.
 
 Beads (`bd`) holds issue identity and the dependency graph. honr dual-writes
 board mutations into beads so Projects / Tasks stay addressable outside the
-board DB. Sandboxes get a mirrored `BEADS_DIR`. Beads sync
-(`refs/dolt/data`) is separate from git code refs. See the beads docs linked
-from `AGENTS.md`.
+board DB. That mirror is **host/operator only** — agent sandboxes do not get
+a `bd` binary, beads DB, or `BEADS_DIR`. Card context reaches the agent via
+the supervisor briefing (and `/sandbox/.honr` contracts), not tracker CLI.
+Beads sync (`refs/dolt/data`) is separate from git code refs. See the beads
+docs linked from `AGENTS.md`.
 
 ## Persistence
 
