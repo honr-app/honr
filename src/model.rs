@@ -745,7 +745,8 @@ pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) 
         cpu: Some(COCKPIT_SANDBOX_CPU.into()),
         memory: Some(COCKPIT_SANDBOX_MEMORY.into()),
         engine,
-        provider_names: Vec::new(),
+        // GitHub App identity (`GH_TOKEN`) — cockpit policy allow-lists GitHub.
+        provider_names: vec!["github".into()],
     }
 }
 
@@ -1215,8 +1216,8 @@ mod tests {
             "cockpit host MCP must use OpenShell protocol: mcp (rest+access:full 403s /mcp)"
         );
         assert!(
-            !cockpit_pol.contains("name: github") && !cockpit_pol.contains("api.github.com"),
-            "cockpit must not copy worker GitHub egress"
+            cockpit_pol.contains("name: github") && cockpit_pol.contains("api.github.com"),
+            "cockpit allow-lists GitHub for App GH_TOKEN / gh / git"
         );
         assert!(
             !cockpit_pol.contains("package-registries") && !cockpit_pol.contains("index.crates.io"),
@@ -1248,6 +1249,7 @@ mod tests {
         assert_eq!(profile.id, COCKPIT_SANDBOX_PROFILE_ID);
         assert_eq!(profile.cpu.as_deref(), Some(COCKPIT_SANDBOX_CPU));
         assert_eq!(profile.memory.as_deref(), Some(COCKPIT_SANDBOX_MEMORY));
+        assert_eq!(profile.provider_names, vec!["github".to_string()]);
         assert_ne!(profile.cpu, agents.cpu);
         assert_ne!(profile.memory, agents.memory);
         assert_eq!(profile.policy, cockpit_pol);

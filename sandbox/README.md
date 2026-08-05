@@ -21,12 +21,13 @@ set them at create time.
 
 ## `cockpit-policy.yaml`
 
-The **cockpit** control-plane seat policy: narrow egress to the host honr MCP
-endpoint (`host.docker.internal` / `127.0.0.1` / `localhost` on port 8080) plus
-inference. It does not include GitHub or package-registry egress — those stay
-on the worker identity. Seeded into the sandbox-profile catalog as id `cockpit`
-(Settings → OpenShell → Profiles) with lighter cpu/memory than the worker
-default. After seed, the board profile is authoritative for cockpit too.
+The **cockpit** control-plane seat policy: egress to the host honr MCP
+endpoint (`host.docker.internal` / `127.0.0.1` / `localhost` on port 8080),
+inference, and GitHub (App `GH_TOKEN` via the `github` provider). Package
+registries stay on the worker identity. Seeded into the sandbox-profile catalog
+as id `cockpit` (Settings → OpenShell → Profiles) with lighter cpu/memory than
+the worker default. After seed, the board profile is authoritative for cockpit
+too.
 
 ## `Containerfile`
 

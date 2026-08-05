@@ -111,7 +111,7 @@ generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 | Catalog id | Seed source | Egress |
 |---|---|---|
 | `default` (worker) | Built-in `src/seed_policies.rs` when catalog empty; then **board profile only** | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
-| `cockpit` | [`cockpit-policy.yaml`](../sandbox/cockpit-policy.yaml) at seed; then **board profile only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference. **No** GitHub or package-registry allow-list. |
+| `cockpit` | [`cockpit-policy.yaml`](../sandbox/cockpit-policy.yaml) at seed; then **board profile only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
 
 Settings → OpenShell → Profiles is the live source of truth for both. The cockpit
 profile seeds with distinct cpu/memory (`1` / `2Gi`) from the worker default.

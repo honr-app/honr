@@ -2821,19 +2821,6 @@ fn sandbox_spec_for_cockpit(
     }
 }
 
-/// Inference providers only — cockpit policy has no GitHub egress; do not attach
-/// the card-worker GitHub App identity.
-fn cockpit_attach_providers(
-    board: &SharedBoard,
-    resolved: &crate::model::ResolvedSandboxCreate,
-) -> Vec<String> {
-    board
-        .attach_providers_for_resolved(resolved)
-        .into_iter()
-        .filter(|n| n != crate::github_app::PROVIDER_NAME)
-        .collect()
-}
-
 fn cockpit_engine(board: &SharedBoard, resolved: &crate::model::ResolvedSandboxCreate) -> String {
     if let Some(e) = resolved
         .engine
@@ -2905,7 +2892,7 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<()> {
 
     let agents = board.effective_agents();
     let resolved = board.resolve_cockpit_sandbox_create();
-    let attach = cockpit_attach_providers(&board, &resolved);
+    let attach = board.attach_providers_for_resolved(&resolved);
     let engine = cockpit_engine(&board, &resolved);
 
     let session = board
