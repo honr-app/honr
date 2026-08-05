@@ -1,11 +1,17 @@
-# Ops seat (TTY attach)
+# Ops seat (Cockpit chat)
 
 The durable control-plane ops chatbot: a privileged OpenShell sandbox on the
-`ops` profile, with narrow egress to host honr MCP (operator tools only). Chat
-and TTY are faces over the Board **ops session** singleton — they do not own
-lifecycle. Mutations go through `Board` in `store.rs` via REST
+`ops` profile, with narrow egress to host honr MCP (operator tools only).
+**Cockpit in-browser chat** is the primary attach path — you steer the board by
+talking to the ops seat in the browser. Optional CLI
+`openshell sandbox connect` and [`scripts/ops-seat.sh`](../scripts/ops-seat.sh)
+`attach` are TTY fallbacks, not the product.
+
+Chat and TTY are faces over the Board **ops session** singleton — they do not
+own lifecycle. Mutations go through `Board` in `store.rs` via REST
 `/api/ops-session*`. The supervisor materializes sandbox + detached agent from
-that record.
+that record. Cockpit and the host chat bridge (`POST /api/ops-chat`) read
+`environment` / `conversation_id` / `status` only from that Board record.
 
 Prerequisites: [Agents](agents.md) path is live (`execution.agents.enabled:
 true`, OpenShell gateway healthy, `ops` profile seeded). Containment:
@@ -25,7 +31,10 @@ wrapper, is a second state machine — do not.
 
 ## Start
 
-With honr listening and agents enabled:
+Primary UI: open the **Cockpit** primary-nav tab and use **Start**. That calls
+`POST /api/ops-session` only — no local session file.
+
+With honr listening and agents enabled, the same call from the shell:
 
 ```bash
 # Session cookie (same login as the UI). Cookie jar is auth only — not lifecycle.
@@ -43,7 +52,8 @@ curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
 
 Within a few seconds the supervisor creates or reuses the `ops` sandbox, starts
 the ops agent detached, and writes `environment` / `conversation_id` back onto
-the session. Confirm:
+the session. Confirm in Cockpit (status Running, environment, conversation id)
+or:
 
 ```bash
 curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
@@ -56,11 +66,31 @@ openshell sandbox list --selector honr.ops=1
 Optional thin shim (same Board calls; no local lifecycle file):
 [`scripts/ops-seat.sh`](../scripts/ops-seat.sh) `start`.
 
-## Attach / TTY reconnect
+## Cockpit chat (primary attach)
 
-Read the Board-named environment, then open an OpenShell SSH/TTY session into
-that sandbox. Disconnecting does **not** stop the seat — sandbox + conversation
-stay under the Board session (park-like keep). Re-attach with the same command.
+With a **Running** session and an `environment` on the Board, Cockpit’s message
+list + composer forward prompts through the authenticated host bridge
+`POST /api/ops-chat` (SSE). The bridge injects into the existing ops-seat
+conversation; it does not spawn a parallel agent or store lifecycle.
+
+- Absent or **Parked** session: composer disabled / empty states — start or
+  resume on the Board first.
+- Leaving the Cockpit tab does **not** stop the seat; sandbox + conversation
+  stay under the Board session.
+- After honr restart, the supervisor reconciles a still-`Running` session and
+  keeps `conversation_id`. Open Cockpit again and continue chatting — you do
+  not recreate the session to reconnect.
+
+Inside the seat the agent talks MCP at `$HONR_MCP_URL` (default
+`http://host.docker.internal:8080/mcp`) — operator tools only. Host MCP clients
+(Cursor / Claude Code on `/mcp`) share that operator tool surface; Cockpit chat
+is how you sit with the sandboxed liaison in the browser.
+
+## Optional TTY / CLI attach (fallback)
+
+When you need a raw shell into the sandbox instead of Cockpit chat, read the
+Board-named environment and open an OpenShell SSH/TTY session. Disconnecting
+does **not** stop the seat. Re-attach with the same command.
 
 ```bash
 ENV=$(curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
@@ -72,19 +102,13 @@ openshell sandbox connect "$ENV"
 # or: openshell sandbox connect "$ENV" --editor cursor
 ```
 
-After honr restart, the supervisor reconciles: if the Board session is still
-`Running` and the sandbox is live, it re-adopts the detached agent and keeps
-`conversation_id`. Attach again with `openshell sandbox connect` on the same
-`environment`. You do not recreate the session to reconnect.
-
-Shim: `scripts/ops-seat.sh attach`.
-
-Inside the seat the agent talks MCP at `$HONR_MCP_URL` (default
-`http://host.docker.internal:8080/mcp`) — operator tools only. Host chat
-clients (Cursor / Claude Code on `/mcp`) are the same ops-seat tool surface;
-TTY is how you sit with the sandboxed liaison.
+Shim: `scripts/ops-seat.sh attach`. Prefer Cockpit chat for day-to-day steering;
+use TTY only when the shell itself is the goal.
 
 ## Park, resume, stop
+
+Cockpit exposes **Park** / **Resume** / **Stop** as thin faces over the same
+Board endpoints. From the shell:
 
 | Intent | Board call | Effect |
 |---|---|---|
@@ -125,7 +149,7 @@ curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
   -d '{"username":"admin","password":"…"}' \
   http://127.0.0.1:8080/auth/login >/dev/null
 
-# 2. Start seat
+# 2. Start seat (or Cockpit → Start)
 curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
   -H 'Content-Type: application/json' -d '{}' \
   http://127.0.0.1:8080/api/ops-session
@@ -138,24 +162,24 @@ for i in $(seq 1 30); do
 done
 echo "environment=$ENV"
 
-# 3. Attach (TTY) — Ctrl-D / exit leaves the seat Running
-openshell sandbox connect "$ENV"
+# 3. Primary attach: open Cockpit in the browser and send a chat prompt
+#    (POST /api/ops-chat streams replies while status is Running)
 
-# 4. Reconnect proves durability (optional second attach)
-openshell sandbox connect "$ENV"
+# 4. Optional TTY fallback — Ctrl-D / exit leaves the seat Running
+# openshell sandbox connect "$ENV"
 
-# 5. Stop
+# 5. Stop (or Cockpit → Stop)
 curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
   -X DELETE http://127.0.0.1:8080/api/ops-session
 openshell sandbox list --selector honr.ops=1   # expect empty after reconcile
 ```
 
-Or: `scripts/ops-seat.sh start && scripts/ops-seat.sh attach` then
-`scripts/ops-seat.sh stop`.
+Or: Cockpit Start → chat → Stop. CLI shim alternative:
+`scripts/ops-seat.sh start` then optional `attach`, then `stop`.
 
 ## Related
 
 - [Concepts](concepts.md) — operator vs ops seat vs worker
 - [Agents](agents.md) — enable compute + `ops` profile
-- [Architecture](architecture.md) — one state machine; supervisor ops loop
+- [Architecture](architecture.md) — one state machine; supervisor ops loop; chat bridge
 - [Quickstart](quickstart.md) — host `/mcp` OAuth as the same operator tool surface
