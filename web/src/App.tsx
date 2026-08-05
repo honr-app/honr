@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, AuthRequiredError } from "./api.js";
 import { Board } from "./components/Board";
+import { Cockpit } from "./components/Cockpit";
 import { DetailDrawer } from "./components/Detail";
 import { Help } from "./components/Help";
 import { Login } from "./components/Login";
@@ -243,6 +244,8 @@ function AuthedApp({
                 />
               )}
             </>
+          ) : view === "cockpit" ? (
+            <Cockpit />
           ) : view === "help" ? (
             <Help />
           ) : (
