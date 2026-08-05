@@ -79,8 +79,10 @@ agent mcp login honr
 ```
 
 That opens a browser for board login + consent. Or use **Cursor Settings →
-Tools & MCP → Authenticate**. Reload if the tools list stays empty. With the
-operator rule in
+Tools & MCP → Authenticate**. Reload if the tools list stays empty. Access and
+refresh tokens are JWTs signed with the admin session key, so restarting honr
+does **not** require logging in again (until the refresh token expires). With
+the operator rule in
 [`.cursor/rules/honr-operator.mdc`](../.cursor/rules/honr-operator.mdc), the
 chat agent drives Projects / Plans via MCP; sandboxed workers claim Ready Tasks
 and open PRs.

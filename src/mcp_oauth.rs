@@ -3,6 +3,11 @@
 //! Cursor (and other HTTP MCP clients) cannot send session cookies, so `/mcp`
 //! is gated with Bearer tokens discovered via Protected Resource Metadata
 //! rather than the web session middleware.
+//!
+//! Access and refresh tokens are JWTs HMAC-signed with the admin session key
+//! (persisted in the auth bundle). Auth codes and DCR clients stay in process
+//! memory — that is fine; refresh must survive `cargo run` restarts so Cursor
+//! is not forced through browser login every boot.
 
 use crate::auth;
 use crate::store::SharedBoard;
@@ -68,19 +73,11 @@ struct CodeRecord {
     exp: u64,
 }
 
-#[derive(Clone)]
-struct RefreshRecord {
-    client_id: String,
-    resource: String,
-    sub: String,
-    exp: u64,
-}
-
 #[derive(Default)]
 struct OAuthStore {
     clients: HashMap<String, ClientRecord>,
+    /// One-time authorization codes (short-lived; OK to lose on restart).
     codes: HashMap<String, CodeRecord>,
-    refresh: HashMap<String, RefreshRecord>,
 }
 
 fn store() -> &'static Mutex<OAuthStore> {
@@ -190,13 +187,33 @@ struct AccessClaims {
     typ: String,
 }
 
+/// Refresh JWT — same signing key as access / web sessions so a honr restart
+/// does not wipe Cursor's stored refresh token.
+#[derive(Debug, Serialize, Deserialize)]
+struct RefreshClaims {
+    sub: String,
+    aud: String,
+    client_id: String,
+    scope: String,
+    exp: u64,
+    iat: u64,
+    #[serde(rename = "typ")]
+    typ: String,
+}
+
+fn session_hmac_key(board: &SharedBoard) -> Result<Vec<u8>, String> {
+    let auth = board
+        .auth_bundle()
+        .ok_or_else(|| "auth not configured".to_string())?;
+    auth.session_key_bytes().map_err(|e| e.to_string())
+}
+
 fn mint_access_token(
     board: &SharedBoard,
     sub: &str,
     resource: &str,
 ) -> Result<String, String> {
-    let auth = board.auth_bundle().ok_or_else(|| "auth not configured".to_string())?;
-    let key = auth.session_key_bytes().map_err(|e| e.to_string())?;
+    let key = session_hmac_key(board)?;
     let now = now_secs();
     let claims = AccessClaims {
         sub: sub.to_string(),
@@ -211,9 +228,30 @@ fn mint_access_token(
     encode(&header, &claims, &EncodingKey::from_secret(&key)).map_err(|e| e.to_string())
 }
 
+fn mint_refresh_token(
+    board: &SharedBoard,
+    sub: &str,
+    client_id: &str,
+    resource: &str,
+) -> Result<String, String> {
+    let key = session_hmac_key(board)?;
+    let now = now_secs();
+    let claims = RefreshClaims {
+        sub: sub.to_string(),
+        aud: resource.to_string(),
+        client_id: client_id.to_string(),
+        scope: SCOPE.to_string(),
+        exp: now.saturating_add(REFRESH_TTL_SECS),
+        iat: now,
+        typ: "mcp_refresh".into(),
+    };
+    let mut header = Header::new(Algorithm::HS256);
+    header.typ = Some("JWT".into());
+    encode(&header, &claims, &EncodingKey::from_secret(&key)).map_err(|e| e.to_string())
+}
+
 fn verify_access_token(board: &SharedBoard, token: &str, resource: &str) -> Option<String> {
-    let auth = board.auth_bundle()?;
-    let key = auth.session_key_bytes().ok()?;
+    let key = session_hmac_key(board).ok()?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_aud = false;
     validation.set_required_spec_claims(&["exp", "sub"]);
@@ -228,6 +266,28 @@ fn verify_access_token(board: &SharedBoard, token: &str, resource: &str) -> Opti
         return None;
     }
     Some(data.claims.sub)
+}
+
+fn verify_refresh_token(
+    board: &SharedBoard,
+    token: &str,
+    client_id: &str,
+) -> Option<RefreshClaims> {
+    let key = session_hmac_key(board).ok()?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_aud = false;
+    validation.set_required_spec_claims(&["exp", "sub"]);
+    let data = decode::<RefreshClaims>(token, &DecodingKey::from_secret(&key), &validation).ok()?;
+    if data.claims.typ != "mcp_refresh" {
+        return None;
+    }
+    if data.claims.scope != SCOPE {
+        return None;
+    }
+    if data.claims.client_id != client_id {
+        return None;
+    }
+    Some(data.claims)
 }
 
 /// Axum middleware: require Bearer when admin auth is configured.
@@ -949,32 +1009,13 @@ async fn token_refresh(board: &SharedBoard, headers: &HeaderMap, form: TokenForm
             "refresh_token and client_id required",
         );
     }
-    let record = {
-        let mut st = store().lock();
-        // Rotate: remove old refresh.
-        st.refresh.remove(refresh)
-    };
-    let Some(record) = record else {
+    let Some(claims) = verify_refresh_token(board, refresh, client_id) else {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_grant",
-            "unknown refresh_token",
+            "invalid or expired refresh_token",
         );
     };
-    if record.exp < now_secs() {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "refresh_token expired",
-        );
-    }
-    if record.client_id != client_id {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "refresh_token client mismatch",
-        );
-    }
     let origin = public_origin(headers);
     let default_resource = canonical_resource(&origin);
     let resource = form
@@ -982,8 +1023,8 @@ async fn token_refresh(board: &SharedBoard, headers: &HeaderMap, form: TokenForm
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(record.resource.as_str());
-    if !resources_equivalent(resource, &record.resource)
+        .unwrap_or(claims.aud.as_str());
+    if !resources_equivalent(resource, &claims.aud)
         && !resources_equivalent(resource, &default_resource)
     {
         return oauth_error(
@@ -992,7 +1033,7 @@ async fn token_refresh(board: &SharedBoard, headers: &HeaderMap, form: TokenForm
             "resource mismatch",
         );
     }
-    issue_tokens(board, client_id, &record.sub, resource)
+    issue_tokens(board, client_id, &claims.sub, resource)
 }
 
 fn issue_tokens(board: &SharedBoard, client_id: &str, sub: &str, resource: &str) -> Response {
@@ -1002,19 +1043,12 @@ fn issue_tokens(board: &SharedBoard, client_id: &str, sub: &str, resource: &str)
             return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e);
         }
     };
-    let refresh = random_token();
-    {
-        let mut st = store().lock();
-        st.refresh.insert(
-            refresh.clone(),
-            RefreshRecord {
-                client_id: client_id.to_string(),
-                resource: resource.to_string(),
-                sub: sub.to_string(),
-                exp: now_secs().saturating_add(REFRESH_TTL_SECS),
-            },
-        );
-    }
+    let refresh = match mint_refresh_token(board, sub, client_id, resource) {
+        Ok(t) => t,
+        Err(e) => {
+            return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e);
+        }
+    };
     Json(serde_json::json!({
         "access_token": access,
         "token_type": "Bearer",
@@ -1036,6 +1070,17 @@ pub fn reset_store_for_tests() {
 #[cfg(test)]
 pub fn mint_test_access_token(board: &SharedBoard, sub: &str, resource: &str) -> String {
     mint_access_token(board, sub, resource).expect("mint")
+}
+
+/// Test helper: mint a refresh JWT (survives process-memory store clear).
+#[cfg(test)]
+fn mint_test_refresh_token(
+    board: &SharedBoard,
+    sub: &str,
+    client_id: &str,
+    resource: &str,
+) -> String {
+    mint_refresh_token(board, sub, client_id, resource).expect("mint refresh")
 }
 
 #[cfg(test)]
@@ -1460,5 +1505,101 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["error"], "invalid_target");
+    }
+
+    /// Refresh JWTs are signed with the persisted session key — clearing the
+    /// in-memory OAuth store (codes / DCR) must not force a new browser login.
+    #[tokio::test]
+    async fn refresh_token_survives_oauth_store_reset() {
+        reset_store_for_tests();
+        let (board, _env) = board_with_admin();
+        let client_id = CURSOR_CLIENT_ID;
+        let resource = "http://127.0.0.1:8080/mcp";
+        let refresh = mint_test_refresh_token(&board, "admin", client_id, resource);
+
+        // Simulate honr restart: ephemeral store wiped; auth bundle (session key) kept.
+        reset_store_for_tests();
+
+        let app = Router::new()
+            .nest("/oauth", oauth_routes())
+            .with_state(board.clone());
+
+        let token_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header(header::HOST, "127.0.0.1:8080")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "grant_type=refresh_token&refresh_token={refresh}&client_id={client_id}&resource={}",
+                        urlencoding_encode(resource)
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            token_res.status(),
+            StatusCode::OK,
+            "refresh must work after store reset"
+        );
+        let token_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(token_res.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let access = token_body["access_token"].as_str().expect("access_token");
+        assert!(
+            token_body["refresh_token"].as_str().is_some(),
+            "rotate refresh JWT on use"
+        );
+
+        let mcp = Router::new()
+            .route("/mcp", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                board.clone(),
+                require_mcp_bearer,
+            ))
+            .with_state(board)
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .header(header::HOST, "127.0.0.1:8080")
+                    .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mcp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn access_token_cannot_be_used_as_refresh() {
+        reset_store_for_tests();
+        let (board, _env) = board_with_admin();
+        let access = mint_test_access_token(&board, "admin", "http://127.0.0.1:8080/mcp");
+        let app = Router::new()
+            .nest("/oauth", oauth_routes())
+            .with_state(board);
+
+        let token_res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header(header::HOST, "127.0.0.1:8080")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "grant_type=refresh_token&refresh_token={access}&client_id={CURSOR_CLIENT_ID}&resource=http%3A%2F%2F127.0.0.1%3A8080%2Fmcp"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(token_res.status(), StatusCode::BAD_REQUEST);
     }
 }
