@@ -5,6 +5,7 @@ import { Card } from "./dist-test/components/Card.js";
 import { Board, isBlocked, sortFor } from "./dist-test/components/Board.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
+import { Cockpit } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
@@ -477,7 +478,7 @@ const pingPayload = JSON.stringify({ type: "ping" });
 const parsedPing = JSON.parse(pingPayload);
 assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
-// Test 17: App chrome — Board | Help | Settings sidebar + Settings OpenShell (profiles)
+// Test 17: App chrome — Board | Cockpit | Help | Settings sidebar + Settings OpenShell (profiles)
 const sidebarHtml = renderToString(
   React.createElement(PrimarySidebar, {
     view: "board",
@@ -486,11 +487,17 @@ const sidebarHtml = renderToString(
 );
 assert(sidebarHtml.includes("data-testid=\"app-sidebar\""), "App should render primary sidebar");
 assert(sidebarHtml.includes("Board"), "Sidebar should include Board nav");
+assert(sidebarHtml.includes("Cockpit"), "Sidebar should include Cockpit nav");
 assert(sidebarHtml.includes("Help"), "Sidebar should include Help nav");
 assert(sidebarHtml.includes("Settings"), "Sidebar should include Settings nav");
 assert(sidebarHtml.includes("data-testid=\"nav-board\""), "Sidebar should expose Board control");
+assert(sidebarHtml.includes("data-testid=\"nav-cockpit\""), "Sidebar should expose Cockpit control");
 assert(sidebarHtml.includes("data-testid=\"nav-help\""), "Sidebar should expose Help control");
 assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should expose Settings control");
+
+const cockpitHtml = renderToString(React.createElement(Cockpit));
+assert(cockpitHtml.includes("data-testid=\"cockpit-page\""), "Cockpit view should render");
+assert(cockpitHtml.includes("Cockpit"), "Cockpit page should title the surface");
 
 const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
