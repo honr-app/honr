@@ -3217,7 +3217,10 @@ mod tests {
 
         let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo());
         assert!(!fresh.contains("CONFLICTS"));
-        assert!(fresh.contains("new branch"));
+        assert!(
+            !fresh.contains("You are on a new branch off the base"),
+            "Fresh is empty-workdir clone, not pre-branched: {fresh}"
+        );
     }
 
     /// Conflicted + conversation resume still gets the cold CONFLICTS briefing;
@@ -3875,7 +3878,7 @@ mod tests {
         };
         assert!(task_repo.is_complete());
         let clone = task_repo.clone_target();
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-189", &task_repo, &[]);
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-189", &task_repo);
         assert!(
             b.contains("Remotes for this run:"),
             "must use structured Remotes for bound Task repo: {b}"

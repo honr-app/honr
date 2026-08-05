@@ -1,11 +1,13 @@
-//! At-rest encryption for operator secrets (OpenShell mTLS PEMs, etc.).
+//! At-rest encryption for operator secrets (OpenShell mTLS PEMs, GitHub App
+//! private key, etc.).
 //!
 //! Ciphertext lives in the board database. The only host file is a 32-byte
 //! master key at `~/.config/honr/master.key` (mode 0600), auto-created on first
 //! use. Override with `HONR_MASTER_KEY_PATH` or `HONR_MASTER_KEY` (64 hex chars)
 //! for tests / alternate installs.
 //!
-//! GET APIs must never return decrypted PEMs — only presence flags.
+//! GET APIs must never return decrypted PEMs / webhook secrets / client secrets
+//! — only presence flags (plus non-secret identifiers like App ID).
 
 use chacha20poly1305::{
     aead::{Aead, Key, KeyInit},
@@ -86,6 +88,101 @@ impl From<&OpenShellMtlsBundle> for OpenShellMtlsStatus {
             client_key,
             complete: ca && client_cert && client_key,
         }
+    }
+}
+
+/// GitHub App credentials for installation-token minting (plaintext, in memory only).
+///
+/// App ID / Client ID are not secret, but live in the same sealed blob so one
+/// meta row is the source of truth. GET APIs may echo those identifiers after
+/// decrypt; never echo the private key, webhook secret, or client secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubAppBundle {
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub private_key_pem: String,
+    #[serde(default)]
+    pub webhook_secret: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+impl GitHubAppBundle {
+    /// Soft check: App ID + private key PEM shape. Optional fields may be empty.
+    pub fn validate_for_seal(&self) -> Result<(), SecretsError> {
+        if self.app_id.trim().is_empty() {
+            return Err(SecretsError::Encrypt("app_id: empty".into()));
+        }
+        let pem = self.private_key_pem.trim();
+        if pem.is_empty() {
+            return Err(SecretsError::Encrypt("private_key: empty".into()));
+        }
+        if !pem.contains("BEGIN") || !pem.contains("END") || !pem.contains("PRIVATE KEY") {
+            return Err(SecretsError::Encrypt(
+                "private_key: expected PEM block (BEGIN … PRIVATE KEY … END)".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Presence flags safe to return over the API (plus complete = app_id + key).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubAppStatus {
+    pub app_id: bool,
+    pub private_key: bool,
+    pub webhook_secret: bool,
+    pub client_id: bool,
+    pub client_secret: bool,
+    pub complete: bool,
+}
+
+impl From<&GitHubAppBundle> for GitHubAppStatus {
+    fn from(b: &GitHubAppBundle) -> Self {
+        let app_id = !b.app_id.trim().is_empty();
+        let private_key = !b.private_key_pem.trim().is_empty();
+        let webhook_secret = !b.webhook_secret.trim().is_empty();
+        let client_id = !b.client_id.trim().is_empty();
+        let client_secret = !b.client_secret.trim().is_empty();
+        Self {
+            app_id,
+            private_key,
+            webhook_secret,
+            client_id,
+            client_secret,
+            complete: app_id && private_key,
+        }
+    }
+}
+
+/// Local admin credentials + session signing key (plaintext, in memory only).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthBundle {
+    #[serde(default)]
+    pub admin_username: String,
+    /// PHC string from Argon2id.
+    #[serde(default)]
+    pub password_hash: String,
+    /// 32 random bytes, base64 — HMAC key for session cookies.
+    #[serde(default)]
+    pub session_key_b64: String,
+}
+
+impl AuthBundle {
+    pub fn is_configured(&self) -> bool {
+        !self.admin_username.trim().is_empty() && !self.password_hash.trim().is_empty()
+    }
+
+    pub fn session_key_bytes(&self) -> Result<Vec<u8>, SecretsError> {
+        let raw = self.session_key_b64.trim();
+        if raw.is_empty() {
+            return Err(SecretsError::Decrypt("session_key: empty".into()));
+        }
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw)
+            .map_err(|e| SecretsError::Decrypt(format!("session_key base64: {e}")))
     }
 }
 
@@ -255,6 +352,62 @@ pub fn mtls_status_from_sealed(sealed: Option<&str>) -> OpenShellMtlsStatus {
             },
         },
     }
+}
+
+pub fn seal_github_app(bundle: &GitHubAppBundle) -> Result<String, SecretsError> {
+    bundle.validate_for_seal()?;
+    let json = serde_json::to_vec(bundle)?;
+    seal(&json)
+}
+
+pub fn open_github_app(sealed_b64: &str) -> Result<GitHubAppBundle, SecretsError> {
+    let plain = open(sealed_b64)?;
+    let bundle: GitHubAppBundle = serde_json::from_slice(&plain)?;
+    Ok(bundle)
+}
+
+pub fn github_app_status_from_sealed(sealed: Option<&str>) -> GitHubAppStatus {
+    match sealed.map(str::trim).filter(|s| !s.is_empty()) {
+        None => GitHubAppStatus::default(),
+        Some(s) => match open_github_app(s) {
+            Ok(b) => GitHubAppStatus::from(&b),
+            Err(_) => GitHubAppStatus::default(),
+        },
+    }
+}
+
+/// Decrypt for public fields + status. `None` when unset or unreadable.
+pub fn github_app_view_from_sealed(sealed: Option<&str>) -> Option<GitHubAppBundle> {
+    sealed
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| open_github_app(s).ok())
+}
+
+pub fn seal_auth(bundle: &AuthBundle) -> Result<String, SecretsError> {
+    if !bundle.is_configured() {
+        return Err(SecretsError::Encrypt(
+            "auth: admin_username and password_hash required".into(),
+        ));
+    }
+    if bundle.session_key_b64.trim().is_empty() {
+        return Err(SecretsError::Encrypt("auth: session_key required".into()));
+    }
+    let json = serde_json::to_vec(bundle)?;
+    seal(&json)
+}
+
+pub fn open_auth(sealed_b64: &str) -> Result<AuthBundle, SecretsError> {
+    let plain = open(sealed_b64)?;
+    Ok(serde_json::from_slice(&plain)?)
+}
+
+pub fn auth_from_sealed(sealed: Option<&str>) -> Option<AuthBundle> {
+    sealed
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| open_auth(s).ok())
+        .filter(|b| b.is_configured())
 }
 
 /// OpenShell CLI config root (`$XDG_CONFIG_HOME/openshell` or `~/.config/openshell`).
@@ -433,5 +586,55 @@ mod tests {
         let sealed = seal_string_map(&map).expect("seal");
         assert!(!sealed.contains("ghp_secret_value"));
         assert_eq!(open_string_map(&sealed).expect("open"), map);
+    }
+
+    #[test]
+    fn seal_github_app_round_trip() {
+        let hex = "cc".repeat(KEY_LEN);
+        let _env = master_key_env::Guard::with_hex_key(&hex);
+        let bundle = GitHubAppBundle {
+            app_id: "123456".into(),
+            private_key_pem: "-----BEGIN RSA PRIVATE KEY-----\nKEY\n-----END RSA PRIVATE KEY-----\n"
+                .into(),
+            webhook_secret: "whsec_test".into(),
+            client_id: "Iv1.abc".into(),
+            client_secret: "cs_secret".into(),
+        };
+        let sealed = seal_github_app(&bundle).expect("seal");
+        assert!(!sealed.contains("BEGIN"));
+        assert!(!sealed.contains("whsec_test"));
+        assert!(!sealed.contains("cs_secret"));
+        assert_eq!(open_github_app(&sealed).expect("open"), bundle);
+        let st = github_app_status_from_sealed(Some(&sealed));
+        assert!(st.complete);
+        assert!(st.webhook_secret);
+    }
+
+    #[test]
+    fn github_app_rejects_missing_key() {
+        let b = GitHubAppBundle {
+            app_id: "1".into(),
+            private_key_pem: String::new(),
+            ..Default::default()
+        };
+        assert!(b.validate_for_seal().is_err());
+    }
+
+    #[test]
+    fn seal_auth_round_trip() {
+        let hex = "dd".repeat(KEY_LEN);
+        let _env = master_key_env::Guard::with_hex_key(&hex);
+        let bundle = AuthBundle {
+            admin_username: "admin".into(),
+            password_hash: "$argon2id$v=19$m=16,t=2,p=1$test$testhash".into(),
+            session_key_b64: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                [7u8; 32],
+            ),
+        };
+        let sealed = seal_auth(&bundle).expect("seal");
+        assert!(!sealed.contains("admin"));
+        assert_eq!(open_auth(&sealed).expect("open"), bundle);
+        assert!(auth_from_sealed(Some(&sealed)).is_some());
     }
 }

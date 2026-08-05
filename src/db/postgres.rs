@@ -3,8 +3,9 @@
 use super::codec::{
     item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME, META_DEFAULT_SANDBOX_PROFILE_ID,
     META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_BIN, META_OPENSHELL_GATEWAY_ENDPOINT,
-    META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS, META_SANDBOX_PROFILES,
-    META_WORKSPACE_BINDING,
+    META_AUTH_ALLOWED_TEAMS, META_AUTH_ALLOWED_USERS, META_AUTH_SEALED,
+    META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS,
+    META_SANDBOX_PROFILES, META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
@@ -61,6 +62,10 @@ impl PostgresBoardStore {
         let openshell_bin = self.load_openshell_bin().await?;
         let openshell_gateway_endpoint = self.load_openshell_gateway_endpoint().await?;
         let openshell_mtls_sealed = self.load_openshell_mtls_sealed().await?;
+        let github_app_sealed = self.load_github_app_sealed().await?;
+        let auth_sealed = self.load_auth_sealed().await?;
+        let auth_allowed_users = self.load_auth_allowed_users().await?;
+        let auth_allowed_teams = self.load_auth_allowed_teams().await?;
         let agent_runtime = self.load_agent_runtime().await?;
         let openshell_providers = self.load_openshell_providers().await?;
         let mut state = BoardState {
@@ -73,6 +78,10 @@ impl PostgresBoardStore {
             openshell_bin,
             openshell_gateway_endpoint,
             openshell_mtls_sealed,
+            github_app_sealed,
+            auth_sealed,
+            auth_allowed_users,
+            auth_allowed_teams,
             agent_runtime,
             openshell_providers,
             agent_logs: BTreeMap::new(),
@@ -164,6 +173,24 @@ impl PostgresBoardStore {
             state.openshell_mtls_sealed.as_deref().unwrap_or(""),
         )
         .await?;
+        set_meta_tx(
+            &mut tx,
+            META_GITHUB_APP_SEALED,
+            state.github_app_sealed.as_deref().unwrap_or(""),
+        )
+        .await?;
+        set_meta_tx(
+            &mut tx,
+            META_AUTH_SEALED,
+            state.auth_sealed.as_deref().unwrap_or(""),
+        )
+        .await?;
+        let users_json = serde_json::to_string(&state.auth_allowed_users)
+            .map_err(|e| StoreError::Query(format!("serialize auth_allowed_users: {e}")))?;
+        set_meta_tx(&mut tx, META_AUTH_ALLOWED_USERS, &users_json).await?;
+        let teams_json = serde_json::to_string(&state.auth_allowed_teams)
+            .map_err(|e| StoreError::Query(format!("serialize auth_allowed_teams: {e}")))?;
+        set_meta_tx(&mut tx, META_AUTH_ALLOWED_TEAMS, &teams_json).await?;
         let agent_runtime_json = match &state.agent_runtime {
             None => String::new(),
             Some(rt) => serde_json::to_string(rt)
@@ -254,6 +281,40 @@ impl PostgresBoardStore {
             .await?
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_github_app_sealed(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .meta_get(META_GITHUB_APP_SEALED)
+            .await?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_auth_sealed(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .meta_get(META_AUTH_SEALED)
+            .await?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_auth_allowed_users(&self) -> Result<Vec<String>, StoreError> {
+        match self.meta_get(META_AUTH_ALLOWED_USERS).await? {
+            None => Ok(Vec::new()),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(Vec::new()),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode auth_allowed_users: {e}"))),
+        }
+    }
+
+    async fn load_auth_allowed_teams(&self) -> Result<Vec<String>, StoreError> {
+        match self.meta_get(META_AUTH_ALLOWED_TEAMS).await? {
+            None => Ok(Vec::new()),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(Vec::new()),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode auth_allowed_teams: {e}"))),
+        }
     }
 
     async fn load_agent_runtime(&self) -> Result<Option<AgentRuntimeConfig>, StoreError> {

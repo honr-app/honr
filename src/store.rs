@@ -49,6 +49,18 @@ pub struct BoardState {
     /// Sealed mTLS PEMs (DB ciphertext). Decrypt only via `secrets`; never expose on GET.
     #[serde(default)]
     pub openshell_mtls_sealed: Option<String>,
+    /// Sealed GitHub App credentials (DB ciphertext). Decrypt only via `secrets`.
+    #[serde(default)]
+    pub github_app_sealed: Option<String>,
+    /// Sealed local-admin auth (password hash + session key). Decrypt via `secrets`.
+    #[serde(default)]
+    pub auth_sealed: Option<String>,
+    /// GitHub logins allowed to Sign in with GitHub (not secret).
+    #[serde(default)]
+    pub auth_allowed_users: Vec<String>,
+    /// Org teams (`org/team_slug`) whose members may Sign in with GitHub.
+    #[serde(default)]
+    pub auth_allowed_teams: Vec<String>,
     /// Process agent knobs (Settings → Agent runtime). Seeded from yaml; Board SoT after.
     #[serde(default)]
     pub agent_runtime: Option<AgentRuntimeConfig>,
@@ -80,6 +92,10 @@ impl BoardState {
             openshell_bin: self.openshell_bin.clone(),
             openshell_gateway_endpoint: self.openshell_gateway_endpoint.clone(),
             openshell_mtls_sealed: self.openshell_mtls_sealed.clone(),
+            github_app_sealed: self.github_app_sealed.clone(),
+            auth_sealed: self.auth_sealed.clone(),
+            auth_allowed_users: self.auth_allowed_users.clone(),
+            auth_allowed_teams: self.auth_allowed_teams.clone(),
             agent_runtime: self.agent_runtime.clone(),
             openshell_providers: self.openshell_providers.clone(),
             agent_logs: BTreeMap::new(),
@@ -2351,6 +2367,89 @@ impl Board {
 
     pub fn openshell_mtls_status(&self) -> crate::secrets::OpenShellMtlsStatus {
         crate::secrets::mtls_status_from_sealed(self.openshell_mtls_sealed().as_deref())
+    }
+
+    pub fn github_app_sealed(&self) -> Option<String> {
+        self.state
+            .read()
+            .github_app_sealed
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Replace or clear the sealed GitHub App blob. `None` / empty clears.
+    pub fn set_github_app_sealed(&self, sealed: Option<String>) -> Option<String> {
+        let stored = sealed
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        {
+            let mut s = self.state.write();
+            s.github_app_sealed = stored.clone();
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    pub fn github_app_status(&self) -> crate::secrets::GitHubAppStatus {
+        crate::secrets::github_app_status_from_sealed(self.github_app_sealed().as_deref())
+    }
+
+    /// Decrypt sealed GitHub App credentials (in-process only).
+    pub fn github_app_bundle(&self) -> Option<crate::secrets::GitHubAppBundle> {
+        crate::secrets::github_app_view_from_sealed(self.github_app_sealed().as_deref())
+    }
+
+    pub fn auth_sealed(&self) -> Option<String> {
+        self.state
+            .read()
+            .auth_sealed
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn set_auth_sealed(&self, sealed: Option<String>) -> Option<String> {
+        let stored = sealed
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        {
+            let mut s = self.state.write();
+            s.auth_sealed = stored.clone();
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    pub fn auth_bundle(&self) -> Option<crate::secrets::AuthBundle> {
+        crate::secrets::auth_from_sealed(self.auth_sealed().as_deref())
+    }
+
+    pub fn auth_allowed_users(&self) -> Vec<String> {
+        self.state.read().auth_allowed_users.clone()
+    }
+
+    pub fn auth_allowed_teams(&self) -> Vec<String> {
+        self.state.read().auth_allowed_teams.clone()
+    }
+
+    pub fn set_auth_allowlists(&self, users: Vec<String>, teams: Vec<String>) {
+        let users: Vec<String> = users
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let teams: Vec<String> = teams
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        {
+            let mut s = self.state.write();
+            s.auth_allowed_users = users;
+            s.auth_allowed_teams = teams;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// Desired OpenShell providers (credentials sealed).

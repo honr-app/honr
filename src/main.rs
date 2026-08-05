@@ -1,6 +1,7 @@
 //! honr — an agent orchestrator whose board is a control plane, not a report.
 
 mod api;
+mod auth;
 mod beads;
 mod db;
 mod events;
@@ -18,6 +19,7 @@ mod ws;
 use crate::schema::Schema;
 use crate::store::{Board, SharedBoard};
 
+use axum::middleware;
 use axum::routing::get;
 use axum::Router;
 use std::path::PathBuf;
@@ -120,12 +122,14 @@ async fn main() -> anyhow::Result<()> {
 
     let web_dist = PathBuf::from("web/dist");
     let mut app = Router::new()
+        .nest("/auth", auth::routes())
         .nest("/api", api::routes())
         .route("/api/events", get(sse::events))
         .route("/api/ws", get(ws::ws_handler))
         .route("/healthz", get(|| async { "ok" }));
 
     // The operator MCP endpoint. Same process, same port, same state.
+    // Exempt from session auth (localhost-bound; Cursor cannot do cookie OAuth).
     app = app.nest("/mcp", mcp::router(board.clone()));
 
     if web_dist.exists() {
@@ -137,6 +141,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = app
+        .layer(middleware::from_fn_with_state(
+            board.clone(),
+            auth::require_session,
+        ))
         // The Vite dev server lives on another origin.
         .layer(CorsLayer::permissive())
         .with_state(board);

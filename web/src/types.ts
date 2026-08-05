@@ -99,6 +99,51 @@ export interface OpenShellSettings {
   mtls?: OpenShellMtlsStatus;
 }
 
+/** Presence flags for sealed GitHub App credentials (GET never returns secrets). */
+export interface GitHubAppStatus {
+  app_id: boolean;
+  private_key: boolean;
+  webhook_secret: boolean;
+  client_id: boolean;
+  client_secret: boolean;
+  complete: boolean;
+}
+
+/** Settings → GitHub App (installation-token material). */
+export interface GitHubAppSettings {
+  /** Non-secret — returned on GET when configured. */
+  app_id?: string | null;
+  client_id?: string | null;
+  /** Write-only on PUT. */
+  private_key_pem?: string | null;
+  webhook_secret?: string | null;
+  client_secret?: string | null;
+  clear?: boolean;
+  status?: GitHubAppStatus;
+}
+
+export interface AuthUser {
+  kind: "admin" | "github";
+  login: string;
+}
+
+/** GET /auth/status */
+export interface AuthStatus {
+  enabled: boolean;
+  bootstrap: boolean;
+  github_login_enabled: boolean;
+  user?: AuthUser | null;
+}
+
+/** GET/PUT /api/auth/settings (local admin only). */
+export interface AuthSettings {
+  admin_username: string;
+  allowed_users: string[];
+  allowed_teams: string[];
+  github_login_enabled: boolean;
+  has_client_secret: boolean;
+}
+
 /** Settings → Agent runtime (process knobs; seeded from honr.yaml). */
 export interface AgentRuntimeConfig {
   enabled: boolean;

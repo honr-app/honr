@@ -1,5 +1,8 @@
 import type {
   AgentRuntimeConfig,
+  AuthSettings,
+  AuthStatus,
+  GitHubAppSettings,
   OpenShellProviderView,
   OpenShellProviderWrite,
   OpenShellProvidersOut,
@@ -14,14 +17,32 @@ import type {
   WorkspaceBinding,
 } from "./types";
 
+export class AuthRequiredError extends Error {
+  bootstrap: boolean;
+  constructor(message: string, bootstrap = false) {
+    super(message);
+    this.name = "AuthRequiredError";
+    this.bootstrap = bootstrap;
+  }
+}
+
+const fetchOpts: RequestInit = { credentials: "include" };
+
 async function jsonOrThrow(r: Response) {
   const body = await r.json().catch(() => ({}));
+  if (r.status === 401) {
+    throw new AuthRequiredError(
+      body?.error ?? "authentication required",
+      !!body?.bootstrap,
+    );
+  }
   if (!r.ok) throw new Error(body?.error ?? `${r.status} ${r.statusText}`);
   return body;
 }
 
 const post = (path: string, body?: unknown) =>
   fetch(`/api${path}`, {
+    ...fetchOpts,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
@@ -29,22 +50,53 @@ const post = (path: string, body?: unknown) =>
 
 const put = (path: string, body?: unknown) =>
   fetch(`/api${path}`, {
+    ...fetchOpts,
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
   }).then(jsonOrThrow);
 
 const del = (path: string) =>
-  fetch(`/api${path}`, { method: "DELETE" }).then(async (r) => {
+  fetch(`/api${path}`, { ...fetchOpts, method: "DELETE" }).then(async (r) => {
     if (r.status === 204) return null;
     return jsonOrThrow(r);
   });
 
 export const api = {
-  board: (): Promise<Snapshot> => fetch("/api/board").then(jsonOrThrow),
-  digest: () => fetch("/api/digest").then(jsonOrThrow),
-  detail: (id: number) => fetch(`/api/items/${id}`).then(jsonOrThrow),
-  logs: (id: number): Promise<{ agent: string[]; openshell: string[] }> => fetch(`/api/items/${id}/logs`).then(jsonOrThrow),
+  getAuthStatus: (): Promise<AuthStatus> =>
+    fetch("/auth/status", fetchOpts).then(jsonOrThrow),
+  bootstrap: (body: { username: string; password: string }): Promise<AuthStatus> =>
+    fetch("/auth/bootstrap", {
+      ...fetchOpts,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(jsonOrThrow),
+  login: (body: { username: string; password: string }): Promise<AuthStatus> =>
+    fetch("/auth/login", {
+      ...fetchOpts,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(jsonOrThrow),
+  logout: (): Promise<void> =>
+    fetch("/auth/logout", { ...fetchOpts, method: "POST" }).then(async (r) => {
+      if (r.status === 204) return;
+      await jsonOrThrow(r);
+    }),
+  getAuthSettings: (): Promise<AuthSettings> =>
+    fetch("/api/auth/settings", fetchOpts).then(jsonOrThrow),
+  putAuthSettings: (body: {
+    allowed_users?: string[];
+    allowed_teams?: string[];
+    new_password?: string | null;
+  }): Promise<AuthSettings> => put("/auth/settings", body),
+
+  board: (): Promise<Snapshot> => fetch("/api/board", fetchOpts).then(jsonOrThrow),
+  digest: () => fetch("/api/digest", fetchOpts).then(jsonOrThrow),
+  detail: (id: number) => fetch(`/api/items/${id}`, fetchOpts).then(jsonOrThrow),
+  logs: (id: number): Promise<{ agent: string[]; openshell: string[] }> =>
+    fetch(`/api/items/${id}/logs`, fetchOpts).then(jsonOrThrow),
   // The human verbs. Each costs the system something different.
   steer: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/steer`, { text }),
@@ -101,10 +153,10 @@ export const api = {
   cut: (id: number, reason?: string): Promise<number[]> =>
     post(`/items/${id}/cut`, { reason }),
   deleteItem: (id: number): Promise<void> =>
-    fetch(`/api/items/${id}`, { method: "DELETE" }).then(jsonOrThrow),
+    fetch(`/api/items/${id}`, { ...fetchOpts, method: "DELETE" }).then(jsonOrThrow),
 
   listSandboxProfiles: (): Promise<SandboxProfilesOut> =>
-    fetch("/api/sandbox-profiles").then(jsonOrThrow),
+    fetch("/api/sandbox-profiles", fetchOpts).then(jsonOrThrow),
   upsertSandboxProfile: (profile: {
     /** Omit on create — server derives a slug from `name`. */
     id?: string;
@@ -124,24 +176,29 @@ export const api = {
     post(`/items/${id}/sandbox-profile`, { sandbox_profile_id }),
 
   getWorkspace: (): Promise<WorkspaceBinding> =>
-    fetch("/api/workspace").then(jsonOrThrow),
+    fetch("/api/workspace", fetchOpts).then(jsonOrThrow),
   putWorkspace: (binding: WorkspaceBinding): Promise<WorkspaceBinding> =>
     put("/workspace", binding),
 
   getAgentRuntime: (): Promise<AgentRuntimeConfig> =>
-    fetch("/api/agent-runtime").then(jsonOrThrow),
+    fetch("/api/agent-runtime", fetchOpts).then(jsonOrThrow),
   putAgentRuntime: (settings: AgentRuntimeConfig): Promise<AgentRuntimeConfig> =>
     put("/agent-runtime", settings),
 
   getOpenShell: (): Promise<OpenShellSettings> =>
-    fetch("/api/openshell").then(jsonOrThrow),
+    fetch("/api/openshell", fetchOpts).then(jsonOrThrow),
   putOpenShell: (settings: OpenShellSettings): Promise<OpenShellSettings> =>
     put("/openshell", settings),
   getOpenShellStatus: (): Promise<OpenShellStatus> =>
-    fetch("/api/openshell/status").then(jsonOrThrow),
+    fetch("/api/openshell/status", fetchOpts).then(jsonOrThrow),
+
+  getGitHubApp: (): Promise<GitHubAppSettings> =>
+    fetch("/api/github-app", fetchOpts).then(jsonOrThrow),
+  putGitHubApp: (settings: GitHubAppSettings): Promise<GitHubAppSettings> =>
+    put("/github-app", settings),
 
   listOpenShellProviders: (): Promise<OpenShellProvidersOut> =>
-    fetch("/api/openshell/providers").then(jsonOrThrow),
+    fetch("/api/openshell/providers", fetchOpts).then(jsonOrThrow),
   createOpenShellProvider: (body: OpenShellProviderWrite): Promise<OpenShellProviderView> =>
     post("/openshell/providers", body),
   updateOpenShellProvider: (
@@ -154,7 +211,7 @@ export const api = {
   syncOpenShellProviders: (): Promise<SyncProvidersOut> =>
     post("/openshell/providers/sync"),
   listOpenShellProviderProfiles: (): Promise<ProviderTypeProfile[]> =>
-    fetch("/api/openshell/provider-profiles").then(jsonOrThrow),
+    fetch("/api/openshell/provider-profiles", fetchOpts).then(jsonOrThrow),
 };
 
 /** `4s`, `12m`, `3h 5m` — matches the server's own formatting. */
