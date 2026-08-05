@@ -7213,75 +7213,87 @@ mod tests {
 
     #[test]
     fn complete_for_merged_pr_by_queues_sibling_review_catch_up() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-merge-done-sibling-{}.json",
-                std::process::id()
-            )),
-        );
-        let project = b
-            .create(
-                None,
-                "Merge Done Sibling Proj",
-                "intent",
-                None,
-                Origin::Human,
-                true,
-                None,
-            )
-            .unwrap();
-        let merged = b
-            .create(
-                Some(project.id),
-                "Merging Now",
-                "intent",
-                Some("dod".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .unwrap();
-        let sibling = b
-            .create(
-                Some(project.id),
-                "Sibling Review",
-                "intent",
-                Some("dod".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .unwrap();
+        // Shared Board path: webhook and poll actors must queue the same sibling
+        // Review catch-up (no poll-only skip of trigger_rebase_for_behind_siblings).
+        for by in ["github-webhook", "github-poll"] {
+            let b = Board::new(
+                Schema::default(),
+                std::env::temp_dir().join(format!(
+                    "honr-test-merge-done-sibling-{by}-{}.json",
+                    std::process::id()
+                )),
+            );
+            let project = b
+                .create(
+                    None,
+                    "Merge Done Sibling Proj",
+                    "intent",
+                    None,
+                    Origin::Human,
+                    true,
+                    None,
+                )
+                .unwrap();
+            let merged = b
+                .create(
+                    Some(project.id),
+                    "Merging Now",
+                    "intent",
+                    Some("dod".into()),
+                    Origin::Human,
+                    false,
+                    None,
+                )
+                .unwrap();
+            let sibling = b
+                .create(
+                    Some(project.id),
+                    "Sibling Review",
+                    "intent",
+                    Some("dod".into()),
+                    Origin::Human,
+                    false,
+                    None,
+                )
+                .unwrap();
 
-        for (id, url) in [
-            (merged.id, "https://github.com/shanemcd/honr/pull/601"),
-            (sibling.id, "https://github.com/shanemcd/honr/pull/602"),
-        ] {
-            b.transition(id, State::Shaping, "test", None).unwrap();
-            b.transition(id, State::Backlog, "test", None).unwrap();
-            b.transition(id, State::Claimed, "agent", None).unwrap();
-            b.transition(id, State::Review, "agent", None).unwrap();
-            b.set_pr_url(id, Some(url.into()));
+            for (id, url) in [
+                (merged.id, "https://github.com/shanemcd/honr/pull/601"),
+                (sibling.id, "https://github.com/shanemcd/honr/pull/602"),
+            ] {
+                b.transition(id, State::Shaping, "test", None).unwrap();
+                b.transition(id, State::Backlog, "test", None).unwrap();
+                b.transition(id, State::Claimed, "agent", None).unwrap();
+                b.transition(id, State::Review, "agent", None).unwrap();
+                b.set_pr_url(id, Some(url.into()));
+            }
+
+            let completed = b
+                .complete_for_merged_pr_by(
+                    "https://github.com/shanemcd/honr/pull/601",
+                    Some(601),
+                    by,
+                )
+                .unwrap_or_else(|| panic!("{by}: merged card Done"));
+            assert_eq!(completed, merged.id, "{by}");
+            assert_eq!(b.get(merged.id).unwrap().state, State::Done, "{by}");
+
+            let sibling_after = b.get(sibling.id).unwrap();
+            assert_eq!(sibling_after.state, State::Review, "{by}");
+            assert!(
+                sibling_after.rebase_requested,
+                "{by}: merge→Done must queue sibling Review catch-up"
+            );
+            assert!(sibling_after.awaiting_dispatch, "{by}");
+            let hist_by = b
+                .get(merged.id)
+                .unwrap()
+                .history
+                .last()
+                .map(|h| h.by.clone())
+                .unwrap_or_default();
+            assert_eq!(hist_by, by, "{by}: history actor must match ingress");
         }
-
-        let completed = b
-            .complete_for_merged_pr_by(
-                "https://github.com/shanemcd/honr/pull/601",
-                Some(601),
-                "github-webhook",
-            )
-            .expect("merged card Done");
-        assert_eq!(completed, merged.id);
-        assert_eq!(b.get(merged.id).unwrap().state, State::Done);
-
-        let sibling_after = b.get(sibling.id).unwrap();
-        assert_eq!(sibling_after.state, State::Review);
-        assert!(
-            sibling_after.rebase_requested,
-            "merge→Done must queue sibling Review catch-up"
-        );
-        assert!(sibling_after.awaiting_dispatch);
     }
 
     #[test]
