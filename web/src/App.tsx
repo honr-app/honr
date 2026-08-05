@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api, AuthRequiredError } from "./api.js";
 import { Board } from "./components/Board";
 import { DetailDrawer } from "./components/Detail";
 import { Help } from "./components/Help";
+import { Login } from "./components/Login";
 import { PrimarySidebar, type AppView } from "./components/PrimarySidebar";
 import { Settings } from "./components/Settings";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
-import type { WorkItem } from "./types";
+import type { AuthStatus, WorkItem } from "./types";
 import {
   applyThemePreference,
   readThemePreference,
@@ -13,6 +15,81 @@ import {
 } from "./theme";
 
 export default function App() {
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const refreshAuth = useCallback(() => {
+    setAuthLoading(true);
+    return api
+      .getAuthStatus()
+      .then((st) => {
+        setAuth(st);
+        setAuthError(null);
+      })
+      .catch((e) => setAuthError(String(e)))
+      .finally(() => setAuthLoading(false));
+  }, []);
+
+  useEffect(() => {
+    refreshAuth();
+  }, [refreshAuth]);
+
+  const needsLogin = !authLoading && (!auth?.user || auth.bootstrap);
+
+  if (authLoading) {
+    return (
+      <div className="login-shell">
+        <p className="dim">loading…</p>
+      </div>
+    );
+  }
+
+  if (authError && !auth) {
+    return (
+      <div className="login-shell">
+        <div className="err">{authError}</div>
+        <button type="button" className="primary" onClick={() => refreshAuth()}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (needsLogin && auth) {
+    return (
+      <Login
+        status={auth}
+        onAuthed={(next) => {
+          setAuth(next);
+        }}
+      />
+    );
+  }
+
+  return (
+    <AuthedApp
+      auth={auth!}
+      onLogout={() => {
+        api
+          .logout()
+          .catch(() => {})
+          .finally(() => refreshAuth());
+      }}
+      onAuthLost={() => refreshAuth()}
+    />
+  );
+}
+
+function AuthedApp({
+  auth,
+  onLogout,
+  onAuthLost,
+}: {
+  auth: AuthStatus;
+  onLogout: () => void;
+  onAuthLost: () => void;
+}) {
   const b = useBoard();
   const now = useNow();
   const [open, setOpen] = useState<number | null>(null);
@@ -29,6 +106,22 @@ export default function App() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, [themePref]);
+
+  useEffect(() => {
+    if (b.error && /authentication required/i.test(b.error)) {
+      onAuthLost();
+    }
+  }, [b.error, onAuthLost]);
+
+  useEffect(() => {
+    const onUnhandled = (ev: PromiseRejectionEvent) => {
+      if (ev.reason instanceof AuthRequiredError) {
+        onAuthLost();
+      }
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+    return () => window.removeEventListener("unhandledrejection", onUnhandled);
+  }, [onAuthLost]);
 
   const { goalOf, breadcrumbOf } = useMemo(() => buildLookups(b.items), [b.items]);
 
@@ -51,6 +144,18 @@ export default function App() {
           <span className={b.connected ? "conn ok" : "conn off"}>
             {b.connected ? "live" : "reconnecting…"}
           </span>
+          <span className="dim" data-testid="auth-user">
+            {auth.user?.login}
+            {auth.user?.kind === "admin" ? " (admin)" : ""}
+          </span>
+          <button
+            type="button"
+            className="link"
+            onClick={onLogout}
+            data-testid="auth-logout"
+          >
+            Sign out
+          </button>
           <label className="theme-picker">
             <span className="dim">Theme</span>
             <select

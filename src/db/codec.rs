@@ -79,6 +79,18 @@ pub const META_OPENSHELL_GATEWAY_ENDPOINT: &str = "openshell_gateway_endpoint";
 /// Sealed OpenShell mTLS PEM bundle (ChaCha20-Poly1305 via `secrets`). Never log.
 pub const META_OPENSHELL_MTLS_SEALED: &str = "openshell_mtls_sealed";
 
+/// Sealed GitHub App credentials (ChaCha20-Poly1305 via `secrets`). Never log.
+pub const META_GITHUB_APP_SEALED: &str = "github_app_sealed";
+
+/// Sealed local-admin auth (password hash + session key). Never log.
+pub const META_AUTH_SEALED: &str = "auth_sealed";
+
+/// JSON array of GitHub logins allowed for OAuth sign-in.
+pub const META_AUTH_ALLOWED_USERS: &str = "auth_allowed_users";
+
+/// JSON array of `org/team_slug` teams allowed for OAuth sign-in.
+pub const META_AUTH_ALLOWED_TEAMS: &str = "auth_allowed_teams";
+
 /// JSON blob: optional [`crate::model::AgentRuntimeConfig`].
 pub const META_AGENT_RUNTIME: &str = "agent_runtime";
 /// JSON array of [`crate::model::OpenShellProviderDesired`].

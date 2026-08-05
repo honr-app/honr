@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "../api.js";
 import type {
   AgentRuntimeConfig,
+  AuthSettings,
+  GitHubAppSettings,
   OpenShellProviderView,
   OpenShellProviderWrite,
   OpenShellSettings,
@@ -11,10 +13,17 @@ import type {
   WorkspaceBinding,
 } from "../types.js";
 
-type SettingsSection = "workspace" | "agent-runtime" | "openshell";
+type SettingsSection =
+  | "workspace"
+  | "agent-runtime"
+  | "openshell"
+  | "github-app"
+  | "access";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "openshell", label: "OpenShell" },
+  { id: "github-app", label: "GitHub App" },
+  { id: "access", label: "Access" },
   // Nav label is Forge — "Workspace" implied a single work repo (upstream/fork).
   { id: "workspace", label: "Forge" },
   { id: "agent-runtime", label: "Agent runtime" },
@@ -67,7 +76,7 @@ const emptyAgentRuntime = (): AgentRuntimeConfig => ({
 });
 
 /**
- * Settings shell — OpenShell (gateway / providers / profiles), Forge, Agent runtime.
+ * Settings shell — OpenShell, GitHub App, Forge, Agent runtime.
  */
 export function Settings() {
   const [section, setSection] = useState<SettingsSection>("openshell");
@@ -80,7 +89,8 @@ export function Settings() {
           Control-plane preferences. Forge holds Issue sync — not a work repo.
           Each card’s <code>pull_request</code> (after report) holds remotes.
           OpenShell holds gateway connectivity, providers, and sandbox profiles
-          (including which agent engine a profile runs). Agent runtime holds
+          (including which agent engine a profile runs). GitHub App holds the
+          sealed App credentials for installation tokens. Agent runtime holds
           concurrency, timeouts, and the fallback engine.
         </p>
       </header>
@@ -105,6 +115,10 @@ export function Settings() {
         <div className="settings-panel" data-testid={`settings-panel-${section}`}>
           {section === "openshell" ? (
             <OpenShellPanel />
+          ) : section === "github-app" ? (
+            <GitHubAppPanel />
+          ) : section === "access" ? (
+            <AccessPanel />
           ) : section === "workspace" ? (
             <WorkspacePanel />
           ) : (
@@ -497,6 +511,490 @@ export function ProjectSandboxPicker({
         ))}
       </select>
     </div>
+  );
+}
+
+/** Presentational Access form — local admin allowlists + password. */
+export function AccessPanelView({
+  adminUsername,
+  allowedUsers,
+  allowedTeams,
+  newPassword,
+  githubLoginEnabled,
+  hasClientSecret,
+  busy,
+  error,
+  savedHint,
+  onAllowedUsersChange,
+  onAllowedTeamsChange,
+  onNewPasswordChange,
+  onSave,
+}: {
+  adminUsername: string;
+  allowedUsers: string;
+  allowedTeams: string;
+  newPassword: string;
+  githubLoginEnabled: boolean;
+  hasClientSecret: boolean;
+  busy?: boolean;
+  error?: string | null;
+  savedHint?: string | null;
+  onAllowedUsersChange: (next: string) => void;
+  onAllowedTeamsChange: (next: string) => void;
+  onNewPasswordChange: (next: string) => void;
+  onSave: () => void;
+}) {
+  return (
+    <section aria-labelledby="access-title" data-testid="access-panel">
+      <h2 id="access-title">Access</h2>
+      <p className="dim">
+        Local admin <strong>{adminUsername || "…"}</strong> can always sign in.
+        GitHub sign-in is limited to the users and org teams below. Any signed-in
+        operator can edit this for now.
+      </p>
+
+      {error && <div className="err">{error}</div>}
+      {savedHint && (
+        <p className="dim" data-testid="access-saved-hint">
+          {savedHint}
+        </p>
+      )}
+
+      <div className="openshell-health" data-testid="access-github-status">
+        <div className="openshell-health-row">
+          <span className="dim">GitHub login</span>
+          <strong>
+            {githubLoginEnabled
+              ? "Enabled"
+              : hasClientSecret
+                ? "Incomplete App config"
+                : "Needs Client secret (GitHub App)"}
+          </strong>
+        </div>
+      </div>
+
+      <form
+        className="sandbox-profile-form workspace-form"
+        data-testid="access-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSave();
+        }}
+      >
+        <label>
+          Allowed GitHub users
+          <textarea
+            className="search-input"
+            rows={3}
+            value={allowedUsers}
+            disabled={busy}
+            placeholder="one login per line, e.g. shanemcd"
+            onChange={(e) => onAllowedUsersChange(e.target.value)}
+            data-testid="access-field-users"
+          />
+        </label>
+        <label>
+          Allowed org teams
+          <textarea
+            className="search-input"
+            rows={3}
+            value={allowedTeams}
+            disabled={busy}
+            placeholder="one org/team_slug per line"
+            onChange={(e) => onAllowedTeamsChange(e.target.value)}
+            data-testid="access-field-teams"
+          />
+        </label>
+        <label>
+          New admin password
+          <input
+            className="search-input"
+            type="password"
+            autoComplete="new-password"
+            value={newPassword}
+            disabled={busy}
+            placeholder="leave blank to keep current"
+            onChange={(e) => onNewPasswordChange(e.target.value)}
+            data-testid="access-field-password"
+          />
+        </label>
+        <div className="btns">
+          <button type="submit" className="primary" disabled={busy} data-testid="access-save">
+            Save
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function AccessPanel() {
+  const [adminUsername, setAdminUsername] = useState("");
+  const [allowedUsers, setAllowedUsers] = useState("");
+  const [allowedTeams, setAllowedTeams] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [githubLoginEnabled, setGithubLoginEnabled] = useState(false);
+  const [hasClientSecret, setHasClientSecret] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedHint, setSavedHint] = useState<string | null>(null);
+
+  const apply = useCallback((cfg: AuthSettings) => {
+    setAdminUsername(cfg.admin_username);
+    setAllowedUsers(cfg.allowed_users.join("\n"));
+    setAllowedTeams(cfg.allowed_teams.join("\n"));
+    setGithubLoginEnabled(cfg.github_login_enabled);
+    setHasClientSecret(cfg.has_client_secret);
+    setNewPassword("");
+  }, []);
+
+  const refresh = useCallback(() => {
+    setBusy(true);
+    return api
+      .getAuthSettings()
+      .then((cfg) => {
+        apply(cfg);
+        setError(null);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => {
+        setBusy(false);
+        setLoading(false);
+      });
+  }, [apply]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  return (
+    <AccessPanelView
+      adminUsername={adminUsername}
+      allowedUsers={allowedUsers}
+      allowedTeams={allowedTeams}
+      newPassword={newPassword}
+      githubLoginEnabled={githubLoginEnabled}
+      hasClientSecret={hasClientSecret}
+      busy={busy || loading}
+      error={error}
+      savedHint={savedHint}
+      onAllowedUsersChange={(next) => {
+        setSavedHint(null);
+        setAllowedUsers(next);
+      }}
+      onAllowedTeamsChange={(next) => {
+        setSavedHint(null);
+        setAllowedTeams(next);
+      }}
+      onNewPasswordChange={(next) => {
+        setSavedHint(null);
+        setNewPassword(next);
+      }}
+      onSave={() => {
+        setBusy(true);
+        setError(null);
+        setSavedHint(null);
+        const users = allowedUsers
+          .split(/[\n,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const teams = allowedTeams
+          .split(/[\n,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const body: {
+          allowed_users: string[];
+          allowed_teams: string[];
+          new_password?: string;
+        } = { allowed_users: users, allowed_teams: teams };
+        if (newPassword.trim()) body.new_password = newPassword.trim();
+        api
+          .putAuthSettings(body)
+          .then((cfg) => {
+            apply(cfg);
+            setSavedHint("Saved access settings.");
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+    />
+  );
+}
+
+/** Presentational GitHub App form — exported for UI tests without fetch. */
+export function GitHubAppPanelView({
+  appId,
+  clientId,
+  privateKeyPem,
+  webhookSecret,
+  clientSecret,
+  status,
+  busy,
+  error,
+  savedHint,
+  onAppIdChange,
+  onClientIdChange,
+  onPrivateKeyPemChange,
+  onWebhookSecretChange,
+  onClientSecretChange,
+  onSave,
+  onClear,
+}: {
+  appId: string;
+  clientId: string;
+  privateKeyPem: string;
+  webhookSecret: string;
+  clientSecret: string;
+  status?: GitHubAppSettings["status"];
+  busy?: boolean;
+  error?: string | null;
+  savedHint?: string | null;
+  onAppIdChange: (next: string) => void;
+  onClientIdChange: (next: string) => void;
+  onPrivateKeyPemChange: (next: string) => void;
+  onWebhookSecretChange: (next: string) => void;
+  onClientSecretChange: (next: string) => void;
+  onSave: () => void;
+  onClear: () => void;
+}) {
+  const statusLabel = status?.complete
+    ? "Configured (encrypted in board DB)"
+    : status?.app_id || status?.private_key
+      ? "Incomplete"
+      : "Not configured";
+
+  return (
+    <section aria-labelledby="github-app-title" data-testid="github-app-panel">
+      <h2 id="github-app-title">GitHub App</h2>
+      <p className="dim">
+        App credentials for installation tokens (act as the App bot, not your
+        user) and for Sign in with GitHub. The private key, webhook secret, and
+        client secret are sealed into the board database with{" "}
+        <code>~/.config/honr/master.key</code>; the API never returns them.
+        App ID and Client ID are not secret and are shown when configured.
+        Paste the <strong>Client secret</strong> here to enable GitHub login;
+        allowlists live under Settings → Access.
+      </p>
+
+      {error && <div className="err">{error}</div>}
+      {savedHint && (
+        <p className="dim" data-testid="github-app-saved-hint">
+          {savedHint}
+        </p>
+      )}
+
+      <div className="openshell-health" data-testid="github-app-status">
+        <div className="openshell-health-row">
+          <span className="dim">Credentials</span>
+          <strong data-testid="github-app-status-label">{statusLabel}</strong>
+        </div>
+        {status?.complete && (
+          <div className="openshell-health-row">
+            <span className="dim">Webhook secret</span>
+            <strong data-testid="github-app-webhook-flag">
+              {status.webhook_secret ? "Set" : "Not set"}
+            </strong>
+          </div>
+        )}
+      </div>
+
+      <form
+        className="sandbox-profile-form workspace-form"
+        data-testid="github-app-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSave();
+        }}
+      >
+        <label>
+          App ID
+          <input
+            className="search-input"
+            value={appId}
+            disabled={busy}
+            placeholder="123456"
+            onChange={(e) => onAppIdChange(e.target.value)}
+            data-testid="github-app-field-app-id"
+          />
+        </label>
+        <label>
+          Private key (PEM)
+          <textarea
+            className="search-input"
+            rows={6}
+            value={privateKeyPem}
+            disabled={busy}
+            placeholder={
+              status?.private_key
+                ? "Configured — paste to replace"
+                : "-----BEGIN RSA PRIVATE KEY-----"
+            }
+            onChange={(e) => onPrivateKeyPemChange(e.target.value)}
+            data-testid="github-app-field-private-key"
+          />
+        </label>
+        <label>
+          Webhook secret
+          <input
+            className="search-input"
+            type="password"
+            autoComplete="off"
+            value={webhookSecret}
+            disabled={busy}
+            placeholder={
+              status?.webhook_secret ? "Configured — paste to replace" : "optional"
+            }
+            onChange={(e) => onWebhookSecretChange(e.target.value)}
+            data-testid="github-app-field-webhook-secret"
+          />
+        </label>
+        <label>
+          Client ID
+          <input
+            className="search-input"
+            value={clientId}
+            disabled={busy}
+            placeholder="Iv1.… (optional, for user OAuth later)"
+            onChange={(e) => onClientIdChange(e.target.value)}
+            data-testid="github-app-field-client-id"
+          />
+        </label>
+        <label>
+          Client secret
+          <input
+            className="search-input"
+            type="password"
+            autoComplete="off"
+            value={clientSecret}
+            disabled={busy}
+            placeholder={
+              status?.client_secret
+                ? "Configured — paste to replace"
+                : "optional"
+            }
+            onChange={(e) => onClientSecretChange(e.target.value)}
+            data-testid="github-app-field-client-secret"
+          />
+        </label>
+        <div className="btns">
+          <button type="submit" className="primary" disabled={busy} data-testid="github-app-save">
+            Save
+          </button>
+          <button
+            type="button"
+            disabled={busy || !status?.complete}
+            onClick={onClear}
+            data-testid="github-app-clear"
+          >
+            Clear
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function GitHubAppPanel() {
+  const [appId, setAppId] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [privateKeyPem, setPrivateKeyPem] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [status, setStatus] = useState<GitHubAppSettings["status"]>();
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedHint, setSavedHint] = useState<string | null>(null);
+
+  const applySaved = useCallback((cfg: GitHubAppSettings) => {
+    setAppId(cfg.app_id ?? "");
+    setClientId(cfg.client_id ?? "");
+    setStatus(cfg.status);
+    setPrivateKeyPem("");
+    setWebhookSecret("");
+    setClientSecret("");
+  }, []);
+
+  const refresh = useCallback(() => {
+    setBusy(true);
+    return api
+      .getGitHubApp()
+      .then((cfg) => {
+        applySaved(cfg);
+        setError(null);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => {
+        setBusy(false);
+        setLoading(false);
+      });
+  }, [applySaved]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const put = (body: GitHubAppSettings, hint: string) => {
+    setBusy(true);
+    setError(null);
+    setSavedHint(null);
+    api
+      .putGitHubApp(body)
+      .then((saved) => {
+        applySaved(saved);
+        setSavedHint(hint);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <GitHubAppPanelView
+      appId={appId}
+      clientId={clientId}
+      privateKeyPem={privateKeyPem}
+      webhookSecret={webhookSecret}
+      clientSecret={clientSecret}
+      status={status}
+      busy={busy || loading}
+      error={error}
+      savedHint={savedHint}
+      onAppIdChange={(next) => {
+        setSavedHint(null);
+        setAppId(next);
+      }}
+      onClientIdChange={(next) => {
+        setSavedHint(null);
+        setClientId(next);
+      }}
+      onPrivateKeyPemChange={(next) => {
+        setSavedHint(null);
+        setPrivateKeyPem(next);
+      }}
+      onWebhookSecretChange={(next) => {
+        setSavedHint(null);
+        setWebhookSecret(next);
+      }}
+      onClientSecretChange={(next) => {
+        setSavedHint(null);
+        setClientSecret(next);
+      }}
+      onSave={() => {
+        const body: GitHubAppSettings = {
+          app_id: appId.trim() || null,
+          // Empty string clears; omit would leave the sealed value unchanged.
+          client_id: clientId.trim(),
+        };
+        if (privateKeyPem.trim()) body.private_key_pem = privateKeyPem;
+        if (webhookSecret.trim()) body.webhook_secret = webhookSecret;
+        if (clientSecret.trim()) body.client_secret = clientSecret;
+        put(body, "Saved. GitHub App credentials are sealed in the board database.");
+      }}
+      onClear={() => {
+        put({ clear: true }, "Cleared sealed GitHub App credentials.");
+      }}
+    />
   );
 }
 

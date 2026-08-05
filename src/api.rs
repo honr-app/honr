@@ -96,6 +96,8 @@ pub fn routes() -> Router<SharedBoard> {
             "/openshell/provider-profiles",
             get(list_openshell_provider_profiles),
         )
+        .route("/github-app", get(get_github_app).put(put_github_app))
+        .nest("/auth", crate::auth::api_settings_routes())
 }
 
 #[derive(Serialize)]
@@ -721,6 +723,102 @@ async fn openshell_status(AxState(b): AxState<SharedBoard>) -> Json<OpenShellSta
         gateway_endpoint: b.openshell_gateway_endpoint(),
         mtls: b.openshell_mtls_status(),
     })
+}
+
+// ---------------------------------------------------------------- GitHub App credentials
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubAppSettings {
+    /// Non-secret App ID — returned on GET when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// Non-secret OAuth Client ID — returned on GET when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Write-only — accepted on PUT, never returned on GET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_pem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// When true on PUT, wipe sealed GitHub App material.
+    #[serde(default)]
+    pub clear: bool,
+    /// Read-only presence flags (GET / after PUT).
+    #[serde(default)]
+    pub status: crate::secrets::GitHubAppStatus,
+}
+
+fn github_app_settings_view(b: &SharedBoard) -> GitHubAppSettings {
+    let bundle = b.github_app_bundle();
+    GitHubAppSettings {
+        app_id: bundle
+            .as_ref()
+            .map(|x| x.app_id.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        client_id: bundle
+            .as_ref()
+            .map(|x| x.client_id.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        private_key_pem: None,
+        webhook_secret: None,
+        client_secret: None,
+        clear: false,
+        status: b.github_app_status(),
+    }
+}
+
+async fn get_github_app(AxState(b): AxState<SharedBoard>) -> Json<GitHubAppSettings> {
+    Json(github_app_settings_view(&b))
+}
+
+async fn put_github_app(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<GitHubAppSettings>,
+) -> Result<Json<GitHubAppSettings>, (axum::http::StatusCode, String)> {
+    if req.clear {
+        b.set_github_app_sealed(None);
+        return Ok(Json(github_app_settings_view(&b)));
+    }
+
+    let touching = req.app_id.as_ref().is_some_and(|s| !s.trim().is_empty())
+        || req.client_id.as_ref().is_some()
+        || req
+            .private_key_pem
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+        || req.webhook_secret.as_ref().is_some()
+        || req.client_secret.as_ref().is_some();
+
+    if touching {
+        let mut bundle = b.github_app_bundle().unwrap_or_default();
+        if let Some(id) = req.app_id.filter(|s| !s.trim().is_empty()) {
+            bundle.app_id = id.trim().to_string();
+        }
+        // Explicit empty string clears optional client_id.
+        if let Some(id) = req.client_id {
+            bundle.client_id = id.trim().to_string();
+        }
+        if let Some(pem) = req.private_key_pem.filter(|s| !s.trim().is_empty()) {
+            bundle.private_key_pem = pem;
+        }
+        if let Some(sec) = req.webhook_secret {
+            bundle.webhook_secret = sec;
+        }
+        if let Some(sec) = req.client_secret {
+            bundle.client_secret = sec;
+        }
+        let sealed = crate::secrets::seal_github_app(&bundle).map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("seal GitHub App: {e}"),
+            )
+        })?;
+        b.set_github_app_sealed(Some(sealed));
+    }
+
+    Ok(Json(github_app_settings_view(&b)))
 }
 
 // ---------------------------------------------------------------- OpenShell providers
@@ -2563,6 +2661,70 @@ mod tests {
         let Json(got) = get_openshell(AxState(b.clone())).await;
         assert!(got.mtls.complete);
         assert!(got.ca_pem.is_none());
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn github_app_put_seals_and_never_echoes_secrets() {
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-api-gh-app-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let key_path = dir.join("master.key");
+        let _env = crate::secrets::master_key_env::Guard::with_key_path(&key_path);
+
+        let path = dir.join("board.json");
+        let b = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let Json(saved) = put_github_app(
+            AxState(b.clone()),
+            Json(GitHubAppSettings {
+                app_id: Some("424242".into()),
+                client_id: Some("Iv1.test".into()),
+                private_key_pem: Some(
+                    "-----BEGIN RSA PRIVATE KEY-----\nKEY\n-----END RSA PRIVATE KEY-----\n"
+                        .into(),
+                ),
+                webhook_secret: Some("whsec_never_echo".into()),
+                client_secret: Some("cs_never_echo".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("put github app");
+        assert_eq!(saved.app_id.as_deref(), Some("424242"));
+        assert_eq!(saved.client_id.as_deref(), Some("Iv1.test"));
+        assert!(saved.status.complete);
+        assert!(saved.status.webhook_secret);
+        assert!(saved.private_key_pem.is_none());
+        assert!(saved.webhook_secret.is_none());
+        assert!(saved.client_secret.is_none());
+        let sealed = b.github_app_sealed().expect("sealed stored");
+        assert!(!sealed.contains("BEGIN"));
+        assert!(!sealed.contains("whsec_never_echo"));
+        let Json(got) = get_github_app(AxState(b.clone())).await;
+        assert_eq!(got.app_id.as_deref(), Some("424242"));
+        assert!(got.private_key_pem.is_none());
+
+        let Json(cleared) = put_github_app(
+            AxState(b.clone()),
+            Json(GitHubAppSettings {
+                clear: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("clear");
+        assert!(!cleared.status.complete);
+        assert!(b.github_app_sealed().is_none());
 
         drop(_env);
         let _ = std::fs::remove_dir_all(&dir);

@@ -173,7 +173,8 @@ export function useBoard() {
     load();
 
     const attachEventSource = () => {
-      const es = new EventSource("/api/events");
+      // Same-origin so the session cookie is sent (auth middleware).
+      const es = new EventSource("/api/events", { withCredentials: true });
       wsRef.current = es;
       socket = es;
 
@@ -215,11 +216,8 @@ export function useBoard() {
     };
 
     const attachWebSocket = () => {
-      // Dev: hit honr directly. Vite's `/api/ws` proxy is unreliable in Safari
-      // (failed upgrades show up as "closed before the connection is established").
-      const wsUrl = import.meta.env.DEV
-        ? "ws://127.0.0.1:8080/api/ws"
-        : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/ws`;
+      // Same-origin (incl. Vite proxy) so the session cookie reaches auth middleware.
+      const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/ws`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
       socket = ws;
