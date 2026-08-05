@@ -52,6 +52,9 @@ pub struct BoardState {
     /// Sealed GitHub App credentials (DB ciphertext). Decrypt only via `secrets`.
     #[serde(default)]
     pub github_app_sealed: Option<String>,
+    /// GitHub App installation used to mint sandbox `GITHUB_TOKEN`s.
+    #[serde(default)]
+    pub github_app_installation_id: Option<u64>,
     /// Sealed local-admin auth (password hash + session key). Decrypt via `secrets`.
     #[serde(default)]
     pub auth_sealed: Option<String>,
@@ -93,6 +96,7 @@ impl BoardState {
             openshell_gateway_endpoint: self.openshell_gateway_endpoint.clone(),
             openshell_mtls_sealed: self.openshell_mtls_sealed.clone(),
             github_app_sealed: self.github_app_sealed.clone(),
+            github_app_installation_id: self.github_app_installation_id,
             auth_sealed: self.auth_sealed.clone(),
             auth_allowed_users: self.auth_allowed_users.clone(),
             auth_allowed_teams: self.auth_allowed_teams.clone(),
@@ -374,6 +378,8 @@ pub struct Board {
         std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     >,
     pushed_beads_ids: RwLock<std::collections::HashSet<String>>,
+    /// Last minted installation-token expiry (in-process; not durable).
+    github_app_token_cache: Mutex<crate::github_app::TokenCache>,
 }
 
 pub type SharedBoard = Arc<Board>;
@@ -471,6 +477,7 @@ impl Board {
             openshell: None,
             in_flight_github_pushes: Mutex::new(std::collections::HashMap::new()),
             pushed_beads_ids: RwLock::new(std::collections::HashSet::new()),
+            github_app_token_cache: Mutex::new(crate::github_app::TokenCache::default()),
         }
     }
 
@@ -1127,40 +1134,30 @@ impl Board {
 
         self.emit(&item);
 
-        // Projects are containers only — no auto-seeded Initial plan. Operators
-        // call [`Self::init_plan`] with a Task-scoped repo when ready to plan.
+        // Projects auto-seed a claimable Initial plan (no product-repo binding).
+        if item.is_project() {
+            if let Err(e) = self.seed_initial_plan(item.id) {
+                tracing::warn!(project = item.id, error = %e, "auto-seed Initial plan failed");
+            }
+        }
         Ok(self.get(item.id).unwrap_or(item))
     }
 
-    /// Seed the Project's claimable Initial plan Task bound to `repo`.
+    /// Seed the Project's claimable Initial plan Task (idempotent).
     ///
-    /// `create` no longer auto-seeds: remotes must be known before planning so
-    /// the agent can clone from a named target. Refuses incomplete `upstream` and refuses
-    /// when an Initial plan already exists under the Project.
-    pub fn init_plan(
-        &self,
-        project_id: ItemId,
-        repo: RepoConfig,
-    ) -> Result<WorkItem, String> {
+    /// No structured Task.repo — the planner names clone targets in each proposed
+    /// task's intent/DoD. Does not open a PR; finish with `plan.json` → Review.
+    pub fn seed_initial_plan(&self, project_id: ItemId) -> Result<WorkItem, String> {
         let project = self
             .get(project_id)
             .ok_or_else(|| format!("no work item #{project_id}"))?;
         if !project.is_project() {
             return Err(format!(
-                "init_plan requires a Project; card #{project_id} is not one"
+                "seed_initial_plan requires a Project; card #{project_id} is not one"
             ));
         }
-        if self.initial_plan_of(project_id).is_some() {
-            return Err(format!(
-                "Project #{project_id} already has an Initial plan Task — refuse duplicate seed"
-            ));
-        }
-        let repo = repo.normalized();
-        if !repo.is_complete() {
-            return Err(
-                "init_plan requires non-empty upstream (owner/name) for the Initial plan Task"
-                    .into(),
-            );
+        if let Some(existing) = self.initial_plan_of(project_id) {
+            return Ok(existing);
         }
 
         let project_title = project.title.clone();
@@ -1169,26 +1166,32 @@ impl Board {
             Some(project_id),
             title.clone(),
             format!(
-                "Propose sibling Tasks for «{project_title}» (plan.json: keys, deps, \
-                 mechanically checkable DoDs). Open one plan/docs PR, then finish with \
-                 report.json (Review). Merging the plan PR creates those Tasks — do not write \
-                 split.json on this card."
+                "Propose sibling Tasks for «{project_title}»: write /sandbox/.honr/plan.json \
+                 (summary + tasks with key, title, intent, definition_of_done, \
+                 optional blocked_by_keys). In each task's intent and/or DoD, name the \
+                 exact repository to clone (`owner/name`, and fork if cross-fork). \
+                 Do **not** open a PR. Do not write split.json. Card goes to Review — \
+                 human Approve creates those Tasks."
             ),
-            Some("plan.json + docs PR in Review; merge creates Tasks.".into()),
+            Some("plan.json in Review; Approve creates Tasks. No plan/docs PR.".into()),
             Origin::Planner,
             false,
             None,
         )?;
-        let seed = self.set_task_repo(seed.id, Some(repo))?;
         let _ = self.transition(seed.id, State::Shaping, "operator", Some("init plan".into()));
         let seed = self
             .transition(seed.id, State::Backlog, "operator", Some("init plan".into()))
             .map_err(|e| e.to_string())?;
         self.story(
             project_id,
-            format!("Seeded {title} Task #{} with Task repo.", seed.id),
+            format!("Seeded {title} Task #{}.", seed.id),
         );
         Ok(seed)
+    }
+
+    /// Compatibility alias — same as [`Self::seed_initial_plan`] (no repo arg).
+    pub fn init_plan(&self, project_id: ItemId) -> Result<WorkItem, String> {
+        self.seed_initial_plan(project_id)
     }
 
     /// Resolve a Project id or Initial plan id to the Initial plan Task id.
@@ -2038,10 +2041,11 @@ impl Board {
         }
     }
 
-    /// Replace a claimable Task's durable product remotes (`RepoConfig`).
+    /// Legacy test helper — Task.repo binding is retired (clone targets are prose).
     ///
-    /// Projects refuse this — remotes are task-scoped (no `product_repo`).
-    /// `Some` must be complete (`upstream` non-empty); `None` clears.
+    /// Still clears/sets the unused field for old tests and DB round-trips;
+    /// [`Self::resolve_card_repo`] ignores it.
+    #[cfg(test)]
     pub fn set_task_repo(
         &self,
         id: ItemId,
@@ -2067,7 +2071,7 @@ impl Board {
                 .ok_or_else(|| format!("no such item #{id}"))?;
             if it.is_project() {
                 return Err(format!(
-                    "card #{id} is a Project — product remotes live on Tasks, not Projects"
+                    "card #{id} is a Project — product remotes are not Project-owned"
                 ));
             }
             it.repo = normalized;
@@ -2400,6 +2404,28 @@ impl Board {
         crate::secrets::github_app_view_from_sealed(self.github_app_sealed().as_deref())
     }
 
+    pub fn github_app_installation_id(&self) -> Option<u64> {
+        self.state.read().github_app_installation_id
+    }
+
+    pub fn set_github_app_installation_id(&self, id: Option<u64>) {
+        {
+            let mut s = self.state.write();
+            s.github_app_installation_id = id.filter(|&n| n > 0);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        // Force remint on next ensure.
+        *self.github_app_token_cache.lock() = crate::github_app::TokenCache::default();
+    }
+
+    pub fn github_app_token_cache(&self) -> crate::github_app::TokenCache {
+        self.github_app_token_cache.lock().clone()
+    }
+
+    pub fn set_github_app_token_cache(&self, cache: crate::github_app::TokenCache) {
+        *self.github_app_token_cache.lock() = cache;
+    }
+
     pub fn auth_sealed(&self) -> Option<String> {
         self.state
             .read()
@@ -2642,11 +2668,11 @@ impl Board {
     ///
     /// Resolution order:
     /// 1. `pull_request` base/head (or URL-only same-repo stub)
-    /// 2. else Task `repo` binding (durable, set before first claim)
-    /// 3. else `Ok(None)` — unbound; briefing tells the agent to escalate or clone from notes
+    /// 2. else `Ok(None)` — unbound; briefing tells the agent to clone from
+    ///    card intent/DoD/notes or escalate
     ///
-    /// `Err` only for a malformed `pull_request.url`. No Project product-repo
-    /// step; does not invent a bot fork from yaml or Settings.
+    /// `Err` only for a malformed `pull_request.url`. No Task.repo or Project
+    /// product-repo step; does not invent a bot fork from yaml or Settings.
     pub fn resolve_card_repo(&self, item_id: ItemId) -> Result<Option<RepoConfig>, String> {
         let item = self
             .get(item_id)
@@ -2673,13 +2699,8 @@ impl Board {
             }
         }
 
-        if let Some(repo) = item.repo.as_ref() {
-            let repo = repo.clone().normalized();
-            if repo.is_complete() {
-                return Ok(Some(repo));
-            }
-        }
-
+        // Create-time Task.repo binding is retired — clone targets live in card
+        // prose until pull_request exists. Unbound → Ok(None) → escalate.
         Ok(None)
     }
 
@@ -3447,8 +3468,8 @@ fn check_split_relatedness(
 
         if card.is_initial_plan_task() {
             return Err(
-                "Initial plan cannot use split.json; finish with plan.json + report.json + \
-                 plan/docs PR (Review); Approve materializes sibling Tasks"
+                "Initial plan cannot use split.json; finish with plan.json (Review); \
+                 Approve materializes sibling Tasks"
                     .into(),
             );
         }
@@ -3592,59 +3613,11 @@ fn check_split_relatedness(
         Ok(item)
     }
 
-    /// Resolve remotes for a sibling Task created from a proposal row.
-    ///
-    /// Prefer an explicit complete per-child `repo`; otherwise copy the parent
-    /// card's Task binding (Initial plan or splitting parent). Never reads a
-    /// Project product-repo field (there isn't one).
-    fn resolve_sibling_repo(
-        parent: &WorkItem,
-        spec: &PlanTaskSpec,
-    ) -> Result<RepoConfig, String> {
-        if let Some(r) = &spec.repo {
-            let r = r.clone().normalized();
-            if r.is_complete() {
-                return Ok(r);
-            }
-            return Err(format!(
-                "task '{}' has incomplete repo (upstream owner/name required)",
-                spec.title
-            ));
-        }
-        if let Some(r) = parent.repo.as_ref() {
-            let r = r.clone().normalized();
-            if r.is_complete() {
-                return Ok(r);
-            }
-        }
-        Err(format!(
-            "cannot materialize '{}': no Task repo on child and parent card #{} has none — \
-             bind repo on the Initial plan / parent Task or set per-task repo in the plan",
-            spec.title, parent.id
-        ))
-    }
-
-    /// Every proposal row must resolve to a complete Task repo before Approve
-    /// (or merge-driven materialize) creates siblings.
-    fn validate_proposal_repos(&self, id: ItemId) -> Result<(), String> {
-        let card = self.get(id).ok_or_else(|| format!("no such item #{id}"))?;
-        let proposal = card
-            .proposal
-            .as_ref()
-            .filter(|p| !p.tasks.is_empty())
-            .ok_or_else(|| format!("card #{id} has no proposal to materialize"))?;
-        for spec in &proposal.tasks {
-            let _ = Self::resolve_sibling_repo(&card, spec)?;
-        }
-        Ok(())
-    }
-
     /// Materialize `item.proposal` into sibling Tasks under the parent Project.
     /// Initial plan: keep proposal and stamp `item_id`s (freeze for briefings).
     /// Impl splits: clear the proposal. Does not transition the parent card.
     ///
-    /// Each new sibling gets a Task repo: per-child override when complete,
-    /// else the parent card's binding. Refuses if any new sibling would remain unbound.
+    /// Clone targets live in each task's intent/DoD prose — no structured Task.repo.
     fn materialize_proposal(
         &self,
         id: ItemId,
@@ -3674,20 +3647,8 @@ fn check_split_relatedness(
                 .collect()
         };
 
-        // Resolve repos for rows we will create before mutating the board.
-        let mut create_plan: Vec<(&PlanTaskSpec, RepoConfig)> = Vec::new();
-        for spec in &proposal.tasks {
-            let title_key = Self::normalize_title(&spec.title);
-            if existing_by_title.contains_key(&title_key) {
-                continue;
-            }
-            let repo = Self::resolve_sibling_repo(&card, spec)?;
-            create_plan.push((spec, repo));
-        }
-
         let mut made = Vec::new();
         let mut key_to_id: BTreeMap<String, ItemId> = BTreeMap::new();
-        let mut create_repos: HashMap<ItemId, RepoConfig> = HashMap::new();
         for spec in &proposal.tasks {
             let title_key = Self::normalize_title(&spec.title);
             if let Some(existing) = existing_by_title.get(&title_key) {
@@ -3709,23 +3670,8 @@ fn check_split_relatedness(
             let sibling = self
                 .transition(sibling.id, State::Backlog, by, Some("from proposal".into()))
                 .map_err(|e| e.to_string())?;
-            let repo = create_plan
-                .iter()
-                .find(|(s, _)| s.key == spec.key)
-                .map(|(_, r)| r.clone())
-                .ok_or_else(|| {
-                    format!("internal: missing resolved repo for proposal key {}", spec.key)
-                })?;
-            create_repos.insert(sibling.id, repo);
             key_to_id.insert(spec.key.clone(), sibling.id);
             made.push(sibling);
-        }
-
-        for (sid, repo) in create_repos {
-            let bound = self.set_task_repo(sid, Some(repo))?;
-            if let Some(slot) = made.iter_mut().find(|i| i.id == sid) {
-                *slot = bound;
-            }
         }
 
         for spec in &proposal.tasks {
@@ -4308,11 +4254,8 @@ facts are pasted, then unpark";
             .is_some_and(|p| !p.tasks.is_empty());
 
         if has_proposal {
-            // Refuse before Done when siblings would land without a Task repo.
-            self.validate_proposal_repos(id)?;
-            // UI: "Approve — create Tasks". Materialize now even when a plan/docs
-            // PR is attached — waiting on the merge webhook strands the operator
-            // whenever the forwarder is down. Merge → Done stays idempotent.
+            // UI: "Approve — create Tasks". Materialize now; clone targets live in
+            // each task's intent/DoD prose (no structured Task.repo gate).
             let done = self
                 .transition(id, State::Done, "human", Some("proposal approved".into()))
                 .map_err(|e| e.to_string())?;
@@ -5194,14 +5137,14 @@ mod tests {
         }
     }
 
-    /// Project + Initial plan (via `init_plan`) — replaces the old auto-seed path.
+    /// Project + auto-seeded Initial plan.
     fn project_with_initial_plan(b: &Board, title: &str) -> (WorkItem, WorkItem) {
         let project = b
             .create(None, title, "why", None, Origin::Human, true, None)
             .expect("project");
         let seed = b
-            .init_plan(project.id, test_task_repo())
-            .expect("init_plan");
+            .initial_plan_of(project.id)
+            .expect("auto-seeded Initial plan");
         (project, seed)
     }
 
@@ -6204,119 +6147,61 @@ mod tests {
     }
 
     #[test]
-    fn project_create_does_not_auto_seed_initial_plan() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-no-auto-seed.json"));
+    fn project_create_auto_seeds_initial_plan() {
+        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-auto-seed.json"));
         let project = b
             .create(None, "Phase X", "why", None, Origin::Human, true, None)
             .expect("project");
         assert!(project.plan.is_none(), "Plan lives on Initial plan, not Project");
-        assert!(
-            b.children_of(project.id).is_empty(),
-            "create_project is container-only — no Initial plan until init_plan"
-        );
+        let seed = b
+            .initial_plan_of(project.id)
+            .expect("create_project auto-seeds Initial plan");
+        assert_eq!(seed.title, initial_plan_title("Phase X"));
+        assert_eq!(seed.state, State::Backlog);
+        assert!(seed.is_initial_plan_task());
+        assert!(seed.repo.is_none(), "Initial plan has no structured Task.repo");
+        assert!(b.resolve_card_repo(seed.id).unwrap().is_none());
         assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
     }
 
     #[test]
-    fn init_plan_binds_repo_and_resolve_card_repo() {
+    fn init_plan_is_idempotent_after_auto_seed() {
         let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-init-plan.json"));
         let project = b
             .create(None, "Phase X", "why", None, Origin::Human, true, None)
             .expect("project");
-
         let seed = b
-            .init_plan(
-                project.id,
-                RepoConfig {
-                    upstream: "acme/widgets".into(),
-                    fork: "bot/widgets".into(),
-                    base: "develop".into(),
-                },
-            )
-            .expect("init_plan");
-
-        assert_eq!(b.children_of(project.id), vec![seed.id]);
-        assert_eq!(seed.title, initial_plan_title("Phase X"));
-        assert_eq!(seed.state, State::Backlog);
-        assert!(seed.is_initial_plan_task());
+            .initial_plan_of(project.id)
+            .expect("auto-seed");
         assert!(b.may_claim(seed.id));
         assert!(
             b.list_ready(&["any".into()]).iter().any(|i| i.id == seed.id),
             "Initial plan must appear in list_ready"
         );
 
-        let repo = seed.repo.expect("Task repo set");
-        assert_eq!(repo.upstream, "acme/widgets");
-        assert_eq!(repo.fork, "bot/widgets");
-        assert_eq!(repo.base, "develop");
-
-        let resolved = b
-            .resolve_card_repo(seed.id)
-            .expect("resolve")
-            .expect("bound");
-        assert_eq!(resolved.upstream, "acme/widgets");
-        assert_eq!(resolved.fork, "bot/widgets");
-        assert_eq!(resolved.base, "develop");
-
-        let dup = b
-            .init_plan(project.id, test_task_repo())
-            .unwrap_err();
-        assert!(
-            dup.contains("already has an Initial plan"),
-            "got: {dup}"
-        );
+        let again = b.init_plan(project.id).expect("idempotent init_plan");
+        assert_eq!(again.id, seed.id);
+        assert_eq!(b.children_of(project.id), vec![seed.id]);
     }
 
     #[test]
-    fn init_plan_refuses_empty_upstream() {
+    fn approve_creates_siblings_without_structured_repo() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join("honr-test-init-plan-empty.json"),
+            std::env::temp_dir().join("honr-test-approve-no-repo.json"),
         );
-        let project = b
-            .create(None, "Phase Empty", "why", None, Origin::Human, true, None)
-            .expect("project");
-        let err = b
-            .init_plan(
-                project.id,
-                RepoConfig {
-                    upstream: "  ".into(),
-                    fork: String::new(),
-                    base: "main".into(),
-                },
-            )
-            .unwrap_err();
-        assert!(
-            err.contains("upstream") || err.contains("init_plan"),
-            "got: {err}"
-        );
-        assert!(
-            b.children_of(project.id).is_empty(),
-            "failed init_plan must not leave a child"
-        );
-    }
-
-    #[test]
-    fn approve_defaults_child_repos_from_initial_plan_task() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join("honr-test-approve-default-repo.json"),
-        );
-        let (project, seed) = project_with_initial_plan(&b, "Phase Default Repo");
-        assert_eq!(
-            seed.repo.as_ref().map(|r| r.upstream.as_str()),
-            Some("acme/widgets")
-        );
+        let (project, seed) = project_with_initial_plan(&b, "Phase Prose Repo");
+        assert!(seed.repo.is_none());
 
         b.propose_plan(
             project.id,
-            "all omit repo",
+            "prose clone targets",
             vec![
                 PlanTaskSpec {
                     key: "t1".into(),
                     title: "Sibling One".into(),
-                    intent: "do one".into(),
-                    definition_of_done: "one done".into(),
+                    intent: "Clone acme/widgets and do one".into(),
+                    definition_of_done: "one done in acme/widgets".into(),
                     blocked_by_keys: vec![],
                     capability: None,
                     repo: None,
@@ -6325,7 +6210,7 @@ mod tests {
                 PlanTaskSpec {
                     key: "t2".into(),
                     title: "Sibling Two".into(),
-                    intent: "do two".into(),
+                    intent: "Clone acme/other and do two".into(),
                     definition_of_done: "two done".into(),
                     blocked_by_keys: vec![],
                     capability: None,
@@ -6341,150 +6226,25 @@ mod tests {
         assert_eq!(published.len(), 2);
         for id in &published {
             let task = b.get(*id).expect("sibling");
-            let repo = task.repo.expect("sibling must inherit Initial plan Task repo");
-            assert_eq!(repo.upstream, "acme/widgets");
-            assert_eq!(repo.base, "main");
+            assert!(
+                task.repo.is_none(),
+                "siblings must not get structured Task.repo"
+            );
+            assert!(b.resolve_card_repo(*id).unwrap().is_none());
         }
     }
 
     #[test]
-    fn approve_preserves_per_child_repo_overrides() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join("honr-test-approve-per-child-repo.json"),
-        );
-        let (project, _seed) = project_with_initial_plan(&b, "Phase Multi Repo");
-
-        b.propose_plan(
-            project.id,
-            "mixed repos",
-            vec![
-                PlanTaskSpec {
-                    key: "t1".into(),
-                    title: "Widgets Task".into(),
-                    intent: "default repo".into(),
-                    definition_of_done: "widgets done".into(),
-                    blocked_by_keys: vec![],
-                    capability: None,
-                    repo: None,
-                    item_id: None,
-                },
-                PlanTaskSpec {
-                    key: "t2".into(),
-                    title: "Other Product Task".into(),
-                    intent: "override repo".into(),
-                    definition_of_done: "other done".into(),
-                    blocked_by_keys: vec![],
-                    capability: None,
-                    repo: Some(RepoConfig {
-                        upstream: "acme/other".into(),
-                        fork: "bot/other".into(),
-                        base: "develop".into(),
-                    }),
-                    item_id: None,
-                },
-            ],
-            vec![],
-        )
-        .expect("propose");
-
-        let published = b.approve_plan(project.id).expect("approve");
-        assert_eq!(published.len(), 2);
-        let by_title: HashMap<_, _> = published
-            .iter()
-            .filter_map(|id| b.get(*id).map(|i| (i.title.clone(), i)))
-            .collect();
-        let widgets = by_title.get("Widgets Task").expect("widgets");
-        assert_eq!(
-            widgets.repo.as_ref().map(|r| r.upstream.as_str()),
-            Some("acme/widgets"),
-            "omitted child must default from Initial plan"
-        );
-        let other = by_title.get("Other Product Task").expect("other");
-        let other_repo = other.repo.as_ref().expect("override");
-        assert_eq!(other_repo.upstream, "acme/other");
-        assert_eq!(other_repo.fork, "bot/other");
-        assert_eq!(other_repo.base, "develop");
-    }
-
-    #[test]
-    fn approve_refuses_when_initial_plan_and_children_lack_repo() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join("honr-test-approve-refuse-incomplete-repo.json"),
-        );
-        let (project, seed) = project_with_initial_plan(&b, "Phase Unbound");
-        b.set_task_repo(seed.id, None)
-            .expect("clear Initial plan repo");
-
-        b.propose_plan(
-            project.id,
-            "unbound",
-            vec![
-                PlanTaskSpec {
-                    key: "t1".into(),
-                    title: "Unbound A".into(),
-                    intent: "a".into(),
-                    definition_of_done: "a done".into(),
-                    blocked_by_keys: vec![],
-                    capability: None,
-                    repo: None,
-                    item_id: None,
-                },
-                PlanTaskSpec {
-                    key: "t2".into(),
-                    title: "Unbound B".into(),
-                    intent: "b".into(),
-                    definition_of_done: "b done".into(),
-                    blocked_by_keys: vec![],
-                    capability: None,
-                    repo: None,
-                    item_id: None,
-                },
-            ],
-            vec![],
-        )
-        .expect("propose");
-
-        let err = b.approve_plan(project.id).unwrap_err();
-        assert!(
-            err.contains("no Task repo") || err.contains("incomplete repo"),
-            "got: {err}"
-        );
-        assert_eq!(
-            b.get(seed.id).unwrap().state,
-            State::Backlog,
-            "Approve must not move Initial plan to Done when repo binding fails"
-        );
-        let siblings: Vec<_> = b
-            .children_of(project.id)
-            .into_iter()
-            .filter_map(|cid| b.get(cid))
-            .filter(|i| !i.is_initial_plan_task())
-            .collect();
-        assert!(
-            siblings.is_empty(),
-            "refuse must not create unbound siblings"
-        );
-    }
-
-    #[test]
-    fn split_approve_defaults_from_parent_task_repo() {
+    fn split_approve_creates_siblings_without_structured_repo() {
         let (b, id) = claimed_leaf();
         let project_id = b.get(id).unwrap().parent.expect("under project");
-        let parent_repo = b.get(id).unwrap().repo.clone().expect("claimed_leaf binds repo");
         let _ = b.transition(id, State::Running, "agent", None);
         b.propose_split(
             id,
             "agent",
             vec![
-                SplitChildSpec::new("Split A", "a", "a done"),
-                SplitChildSpec::new("Split B", "b", "b done")
-                    .with_repo(RepoConfig {
-                        upstream: "acme/override".into(),
-                        fork: String::new(),
-                        base: "main".into(),
-                    }),
+                SplitChildSpec::new("Split A", "clone acme/a — a", "a done"),
+                SplitChildSpec::new("Split B", "clone acme/b — b", "b done"),
             ],
             5,
         )
@@ -6497,13 +6257,10 @@ mod tests {
             .filter(|i| !i.is_initial_plan_task() && i.id != id)
             .collect();
         assert_eq!(siblings.len(), 2);
-        let a = siblings.iter().find(|s| s.title == "Split A").unwrap();
-        assert_eq!(a.repo.as_ref(), Some(&parent_repo));
-        let bb = siblings.iter().find(|s| s.title == "Split B").unwrap();
-        assert_eq!(
-            bb.repo.as_ref().map(|r| r.upstream.as_str()),
-            Some("acme/override")
-        );
+        for s in &siblings {
+            assert!(s.repo.is_none());
+            assert!(b.resolve_card_repo(s.id).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -6603,7 +6360,7 @@ mod tests {
                 None,
             )
             .expect("project");
-        let _ = board.init_plan(project.id, test_task_repo()).expect("init_plan");
+        let _ = board.init_plan(project.id).expect("init_plan");
         let _ = board.transition(project.id, State::Shaping, "t", None);
 
         // Simulate an in-flight dolt push / create storm — request path must not wait.
@@ -7704,7 +7461,7 @@ mod tests {
             .create(None, "Seeded Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
         let seed = board
-            .init_plan(project.id, test_task_repo())
+            .init_plan(project.id)
             .expect("init_plan");
         let seed_id = seed.id;
 
@@ -7818,7 +7575,7 @@ mod tests {
             .create(None, "New Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
         let seed = board
-            .init_plan(project.id, test_task_repo())
+            .init_plan(project.id)
             .expect("init_plan");
         let seed_id = seed.id;
 
@@ -7927,16 +7684,20 @@ mod tests {
 
         // Force placeholders on open cards (+ keep retired as placeholder) so heal
         // has work — create already leaves placeholders; overwrite for stable ids.
-        // No auto-seeded Initial plan — only project + task (+ retired ignored).
+        // Auto-seeded Initial plan is also open and healable.
+        let seed = board
+            .initial_plan_of(project.id)
+            .expect("auto-seeded Initial plan");
         board.set_beads_id(project.id, "bd-honr-heal-project");
         board.set_beads_id(task.id, "bd-honr-heal-task");
+        board.set_beads_id(seed.id, "bd-honr-heal-seed");
         board.set_beads_id(retired.id, "bd-honr-heal-retired");
 
         // 2. Execute heal
         let healed_count = board.heal_placeholder_beads_ids().await;
         assert_eq!(
-            healed_count, 2,
-            "should heal project and task (not retired); no auto-seeded Initial plan"
+            healed_count, 3,
+            "should heal project, Initial plan, and task (not retired)"
         );
 
         // 3. Assert open cards have real beads IDs
@@ -8185,7 +7946,7 @@ mod tests {
             .create(None, "Test Project", "Goal", None, Origin::Human, true, None)
             .unwrap();
 
-        // create_project is container-only — no auto-seeded Initial plan.
+        // create_project auto-seeds Initial plan in Backlog — counts include it.
         let t1 = b
             .create(Some(project.id), "Task One", "Unblocked", Some("DOD".into()), Origin::Human, false, None)
             .unwrap();
@@ -8200,7 +7961,11 @@ mod tests {
                 .iter()
                 .find(|c| c.column == Column::Backlog)
                 .expect("ready col");
-            assert!(ready_col.summary.text.contains("1 in backlog"));
+            assert!(
+                ready_col.summary.text.contains("2 in backlog"),
+                "Initial plan + Task One: {}",
+                ready_col.summary.text
+            );
             assert!(!ready_col.summary.text.contains("blocked on"));
         }
 
@@ -8219,7 +7984,11 @@ mod tests {
                 .iter()
                 .find(|c| c.column == Column::Backlog)
                 .expect("ready col");
-            assert!(ready_col.summary.text.contains("2 in backlog"));
+            assert!(
+                ready_col.summary.text.contains("3 in backlog"),
+                "got: {}",
+                ready_col.summary.text
+            );
             assert!(
                 ready_col.summary.text.contains(&format!("1 blocked on #{}: Task One", t1.id)),
                 "Summary was: {}",
@@ -8474,7 +8243,7 @@ mod tests {
             .create(None, "No Orphan GH Project", "intent", None, Origin::Human, true, None)
             .expect("create project");
         let seed = board
-            .init_plan(project.id, test_task_repo())
+            .init_plan(project.id)
             .expect("init_plan");
         let seed_id = seed.id;
 
@@ -8714,22 +8483,21 @@ mod tests {
 
         assert_eq!(b.current_seq(), 0);
 
-        // 1. create_project is container-only — one Upsert for the Project.
+        // create_project auto-seeds Initial plan (several Upserts + story).
         let p = b
             .create(None, "Test Seq", "intent", None, Origin::Human, true, None)
             .unwrap();
 
-        let initial_seq = b.current_seq();
-        assert_eq!(initial_seq, 1);
+        let after_create = b.current_seq();
+        assert!(after_create >= 1);
 
-        // 2. Story event (seq 2)
         b.story(p.id, "Story line 1".to_string());
-        assert_eq!(b.current_seq(), 2);
+        let after_story = b.current_seq();
+        assert_eq!(after_story, after_create + 1);
 
-        // At seq 2 with capacity 10, event_buffer contains seq 1..2
         match b.catch_up(0) {
             CatchUpResult::Events(events) => {
-                assert_eq!(events.len(), 2);
+                assert_eq!(events.len() as u64, after_story);
                 for (i, ev) in events.iter().enumerate() {
                     assert_eq!(ev.seq(), (i + 1) as u64);
                 }
@@ -8737,53 +8505,52 @@ mod tests {
             CatchUpResult::Reset { .. } => panic!("expected events for last_seq 0"),
         }
 
-        // Request catchup from seq 1 (should return seq 2)
-        match b.catch_up(1) {
+        match b.catch_up(after_create) {
             CatchUpResult::Events(events) => {
                 assert_eq!(events.len(), 1);
-                assert_eq!(events[0].seq(), 2);
+                assert_eq!(events[0].seq(), after_story);
             }
-            CatchUpResult::Reset { .. } => panic!("expected events for last_seq 1"),
+            CatchUpResult::Reset { .. } => panic!("expected events for last_seq after_create"),
         }
 
-        // Request catchup from current_seq (seq 2) (should return empty vec)
-        match b.catch_up(2) {
+        match b.catch_up(after_story) {
             CatchUpResult::Events(events) => {
                 assert!(events.is_empty());
             }
-            CatchUpResult::Reset { .. } => panic!("expected empty events for last_seq 2"),
+            CatchUpResult::Reset { .. } => panic!("expected empty events for last_seq after_story"),
         }
 
-        // 3. Emit 9 more events to overflow buffer capacity 10 (total 11: seq 1..11, buffer holds 2..11)
+        // Overflow buffer capacity 10: emit until current_seq is after_story + 9.
         for i in 0..9 {
             b.story(p.id, format!("Story line extra {i}"));
         }
-        assert_eq!(b.current_seq(), 11);
+        let final_seq = after_story + 9;
+        assert_eq!(b.current_seq(), final_seq);
 
-        // Catchup from last_seq = 0 (needs seq 1, which was popped) -> should return Reset
+        // Catchup from 0 needs seq 1, which was popped once we exceed capacity.
         match b.catch_up(0) {
             CatchUpResult::Reset { seq } => {
-                assert_eq!(seq, 11);
+                assert_eq!(seq, final_seq);
             }
             CatchUpResult::Events(_) => panic!("expected Reset frame for lagged last_seq 0"),
         }
 
-        // Catchup from last_seq = 1 (needs seq 2, which is still in buffer) -> should return seq 2..11
-        match b.catch_up(1) {
+        // Oldest retained seq is final_seq - 9 (capacity 10 holds final_seq-9 ..= final_seq).
+        let oldest_kept = final_seq - 9;
+        match b.catch_up(oldest_kept - 1) {
             CatchUpResult::Events(events) => {
                 assert_eq!(events.len(), 10);
-                assert_eq!(events[0].seq(), 2);
-                assert_eq!(events.last().unwrap().seq(), 11);
+                assert_eq!(events[0].seq(), oldest_kept);
+                assert_eq!(events.last().unwrap().seq(), final_seq);
             }
-            CatchUpResult::Reset { .. } => panic!("expected events for last_seq 1"),
+            CatchUpResult::Reset { .. } => panic!("expected events for last_seq oldest_kept-1"),
         }
 
-        // Catchup from future seq (last_seq = 20 when current = 11) -> should return Reset
-        match b.catch_up(20) {
+        match b.catch_up(final_seq + 9) {
             CatchUpResult::Reset { seq } => {
-                assert_eq!(seq, 11);
+                assert_eq!(seq, final_seq);
             }
-            CatchUpResult::Events(_) => panic!("expected Reset for future last_seq 20"),
+            CatchUpResult::Events(_) => panic!("expected Reset for future last_seq"),
         }
     }
 
@@ -9626,7 +9393,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_card_repo_uses_task_repo_when_no_pull_request() {
+    fn resolve_card_repo_ignores_legacy_task_repo_field() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -9640,7 +9407,7 @@ mod tests {
         let t = b
             .create(
                 Some(p.id),
-                "Initial Plan for P",
+                "T",
                 "intent",
                 Some("dod".into()),
                 Origin::Human,
@@ -9656,18 +9423,15 @@ mod tests {
                 base: "develop".into(),
             }),
         )
-        .expect("set_task_repo");
-
-        let repo = b.resolve_card_repo(t.id).expect("resolve").expect("bound");
-        assert_eq!(repo.upstream, "acme/widgets");
-        assert_eq!(repo.fork, "bot/widgets");
-        assert_eq!(repo.base, "develop");
-        assert!(repo.is_complete());
-        assert!(repo.uses_cross_fork());
+        .expect("set_task_repo still writes legacy field");
+        assert!(
+            b.resolve_card_repo(t.id).unwrap().is_none(),
+            "legacy Task.repo must not bind remotes"
+        );
     }
 
     #[test]
-    fn resolve_card_repo_pull_request_wins_over_task_repo() {
+    fn resolve_card_repo_uses_pull_request_only() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -9715,7 +9479,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_card_repo_sibling_tasks_resolve_independently() {
+    fn resolve_card_repo_sibling_prs_resolve_independently() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -9748,41 +9512,36 @@ mod tests {
                 None,
             )
             .unwrap();
-        b.set_task_repo(
+        b.set_pull_request(
             a.id,
-            Some(RepoConfig {
-                upstream: "acme/frontend".into(),
-                fork: String::new(),
-                base: "main".into(),
+            Some(crate::model::PullRequest {
+                url: "https://github.com/acme/frontend/pull/1".into(),
+                base: Some(crate::model::PullRequestEnd::new("acme/frontend", "main")),
+                head: Some(crate::model::PullRequestEnd::new("acme/frontend", "honr/a")),
             }),
-        )
-        .unwrap();
-        b.set_task_repo(
+        );
+        b.set_pull_request(
             c.id,
-            Some(RepoConfig {
-                upstream: "acme/backend".into(),
-                fork: "bot/backend".into(),
-                base: "develop".into(),
+            Some(crate::model::PullRequest {
+                url: "https://github.com/acme/backend/pull/2".into(),
+                base: Some(crate::model::PullRequestEnd::new("acme/backend", "develop")),
+                head: Some(crate::model::PullRequestEnd::new("bot/backend", "honr/c")),
             }),
-        )
-        .unwrap();
+        );
 
         let ra = b.resolve_card_repo(a.id).unwrap().unwrap();
         let rc = b.resolve_card_repo(c.id).unwrap().unwrap();
         assert_eq!(ra.upstream, "acme/frontend");
-        assert_eq!(ra.fork, "");
         assert_eq!(ra.base, "main");
         assert_eq!(rc.upstream, "acme/backend");
         assert_eq!(rc.fork, "bot/backend");
         assert_eq!(rc.base, "develop");
-        // Project itself has no remotes step.
         assert!(b.resolve_card_repo(p.id).unwrap().is_none());
     }
 
-    /// `run_card` assigns `resolve_card_repo` into `cfg.repo` for the briefing;
-    /// Task binding on first claim must be `is_complete()` so remotes are named.
+    /// After report, `pull_request` must yield complete remotes for resume briefings.
     #[test]
-    fn resolve_card_repo_task_binding_is_complete_for_agent_clone() {
+    fn resolve_card_repo_pull_request_is_complete_for_resume() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -9804,17 +9563,15 @@ mod tests {
                 None,
             )
             .unwrap();
-        b.set_task_repo(
+        b.set_pull_request(
             t.id,
-            Some(RepoConfig {
-                upstream: "acme/widgets".into(),
-                fork: String::new(),
-                base: "main".into(),
+            Some(crate::model::PullRequest {
+                url: "https://github.com/acme/widgets/pull/1".into(),
+                base: Some(crate::model::PullRequestEnd::new("acme/widgets", "main")),
+                head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/t")),
             }),
-        )
-        .unwrap();
+        );
 
-        // Mirror run_card / adopt_card assignment.
         let mut agents = b.effective_agents();
         match b.resolve_card_repo(t.id) {
             Ok(Some(repo)) => agents.repo = repo,
@@ -9823,11 +9580,10 @@ mod tests {
         }
         assert!(
             agents.repo.is_complete(),
-            "agent-clone remotes gate (is_complete) must pass for Task repo"
+            "resume remotes gate (is_complete) must pass for pull_request"
         );
         assert_eq!(agents.repo.clone_target(), "acme/widgets");
 
-        // Unbound sibling → no remotes in briefing (agent escalates or uses notes).
         let u = b
             .create(
                 Some(p.id),

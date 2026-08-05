@@ -109,6 +109,10 @@ async fn sweeper_loop(
         )
         .await;
         let _ = process_awaiting_rebases(&board, &os, &cfg.agents).await;
+        // Refresh installation token into the gateway well before the ~1h expiry.
+        if let Err(e) = crate::github_app::ensure_github_provider(&board).await {
+            tracing::warn!("GitHub App provider sync: {e}");
+        }
     }
 }
 
@@ -203,7 +207,7 @@ const INFRA_COOLDOWN: Duration = Duration::from_secs(60);
 /// run 3 times without producing any work" about a card that never got the
 /// chance to run at all, which is exactly what it did report.
 fn is_infrastructure(err: &str) -> bool {
-    const SIGNS: [&str; 11] = [
+    const SIGNS: [&str; 12] = [
         "podman.sock",
         "connection error",
         "connection closed before message completed",
@@ -216,6 +220,7 @@ fn is_infrastructure(err: &str) -> bool {
         "ssh tar extract exited",
         "ssh exited with status",
         "phase: Deleting",
+        "GitHub App token sync failed (infrastructure)",
     ];
     SIGNS.iter().any(|s| err.contains(s))
 }
@@ -684,9 +689,9 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     let os_owned = f.os();
     let os = &os_owned;
     let id = grant.item_id;
-    // Live Settings → Agent runtime; per-card remotes from pull_request or
-    // Task.repo (resolve_card_repo). Remotes go in the briefing — the agent
-    // clones; the supervisor never pre-clones.
+    // Live Settings → Agent runtime; per-card remotes from pull_request
+    // (resolve_card_repo). Remotes go in the briefing — the agent clones from
+    // prose when unbound; the supervisor never pre-clones.
     let mut agents = board.effective_agents();
     match board.resolve_card_repo(id) {
         Ok(Some(repo)) => agents.repo = repo,
@@ -741,6 +746,11 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
             (new_name, false)
         }
     };
+
+    // Keep OpenShell `github` provider stocked with a live App installation token.
+    if let Err(e) = crate::github_app::ensure_github_provider(board).await {
+        anyhow::bail!("GitHub App token sync failed (infrastructure): {e}");
+    }
 
     let resolved = board.resolve_sandbox_create(id);
     let attach = board.sandbox_attach_provider_names();
@@ -1312,7 +1322,7 @@ struct RawPlanTask {
     blocked_by_keys: Vec<String>,
     #[serde(default)]
     capability: Option<String>,
-    /// Optional per-task remotes; Approve defaults from Initial plan Task repo.
+    /// Legacy — ignored. Name clone targets in intent/DoD.
     #[serde(default)]
     repo: Option<crate::schema::RepoConfig>,
 }
@@ -1350,25 +1360,16 @@ fn plan_file_to_specs(plan: PlanFile) -> Result<(String, Vec<crate::model::PlanT
     Ok((summary, specs))
 }
 
-/// Download `/sandbox/.honr/plan.json` (same directory as report) and propose it
-/// on the parent Project. Returns `Ok(true)` if the card was escalated instead.
+/// Download `plan.json` and store it as the Initial plan proposal.
+/// Returns `Ok(true)` if the card was escalated instead of accepting the plan.
 async fn apply_initial_plan_sidecar(
     board: &SharedBoard,
     os: &OpenShell,
     agent_id: &str,
     id: ItemId,
     name: &str,
-    report_remote_path: &str,
+    plan_remote: &str,
 ) -> anyhow::Result<bool> {
-    let plan_remote = {
-        let p = std::path::Path::new(report_remote_path);
-        p.parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("plan.json")
-            .to_string_lossy()
-            .into_owned()
-    };
-
     let escalate_missing = |detail: String| -> anyhow::Result<bool> {
         board
             .escalate(
@@ -1377,10 +1378,10 @@ async fn apply_initial_plan_sidecar(
                 detail,
                 vec![
                     crate::model::EscalationOption {
-                        label: "Write plan.json and report".into(),
+                        label: "Write plan.json".into(),
                         detail: format!(
-                            "Write {VERDICT_DIR}/plan.json (tasks with key, intent, DoD, \
-                             blocked_by_keys) plus report.json, then exit."
+                            "Write {VERDICT_DIR}/plan.json (tasks with key, intent, DoD naming \
+                             the clone repo, blocked_by_keys). No PR. Then exit."
                         ),
                     },
                     crate::model::EscalationOption {
@@ -1403,12 +1404,12 @@ async fn apply_initial_plan_sidecar(
     let local_plan = tmp_dir.join("plan.json");
     let local_plan_str = local_plan.to_string_lossy().to_string();
 
-    if let Err(e) = os.download(name, &plan_remote, &local_plan_str).await {
+    if let Err(e) = os.download(name, plan_remote, &local_plan_str).await {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         tracing::warn!("#{id}: Initial plan missing plan.json ({e})");
         return escalate_missing(format!(
-            "Initial plan must write {VERDICT_DIR}/plan.json (proposed Tasks) before \
-             report.json. Merging the plan PR creates those Tasks — do not finish with an empty Plan."
+            "Initial plan must write {VERDICT_DIR}/plan.json (proposed Tasks; each names \
+             the repo to clone in intent/DoD). No plan/docs PR — Approve creates Tasks."
         ));
     }
 
@@ -1451,12 +1452,16 @@ async fn apply_initial_plan_sidecar(
 fn probe_verdict_script() -> String {
     // Prefer /sandbox/.honr (writable HOME). Keep /work and /tmp as legacy
     // fallbacks; /tmp often cannot be downloaded by OpenShell.
+    // Initial plan finishes with plan.json alone (no PR / report required).
     r#"for dir in /sandbox/.honr /work/.honr /tmp/.honr; do
   if [ -f "$dir/escalate.json" ]; then
     echo "escalate:$dir/escalate.json"
     exit 0
   elif [ -f "$dir/split.json" ]; then
     echo "split:$dir/split.json"
+    exit 0
+  elif [ -f "$dir/plan.json" ]; then
+    echo "plan:$dir/plan.json"
     exit 0
   elif [ -f "$dir/report.json" ]; then
     echo "report:$dir/report.json"
@@ -1535,15 +1540,15 @@ async fn process_verdict(
                         id,
                         agent_id,
                         format!(
-                            "Initial plan must finish with {VERDICT_DIR}/plan.json + \
-                             report.json and a plan/docs PR (Review). Approve materializes \
-                             sibling Tasks — not split.json."
+                            "Initial plan must finish with {VERDICT_DIR}/plan.json only \
+                             (Review). Approve materializes sibling Tasks — not split.json, \
+                             and not a docs PR."
                         ),
                         vec![
                             crate::model::EscalationOption {
-                                label: "Write plan.json and report".into(),
+                                label: "Write plan.json".into(),
                                 detail: format!(
-                                    "Write {VERDICT_DIR}/plan.json and report.json with the docs PR."
+                                    "Write {VERDICT_DIR}/plan.json (tasks name clone repos in intent/DoD)."
                                 ),
                             },
                             crate::model::EscalationOption {
@@ -1626,6 +1631,39 @@ async fn process_verdict(
                 }
             }
         }
+        "plan" => {
+            if !board.get(id).is_some_and(|i| i.is_initial_plan_task()) {
+                board
+                    .escalate(
+                        id,
+                        agent_id,
+                        "plan.json is only for Initial plan cards. Impl cards use report.json \
+                         (with a PR) or split.json."
+                            .into(),
+                        vec![
+                            crate::model::EscalationOption {
+                                label: "Write report.json".into(),
+                                detail: "Open/update the PR, then write report.json with url/base/head."
+                                    .into(),
+                            },
+                            crate::model::EscalationOption {
+                                label: "Write split.json".into(),
+                                detail: "If the work is too large, propose sibling Tasks via split.json."
+                                    .into(),
+                            },
+                        ],
+                        0,
+                    )
+                    .map_err(|e| anyhow::anyhow!("plan.json on non-initial: {e}"))?;
+                return Ok(true);
+            }
+            if apply_initial_plan_sidecar(board, os, agent_id, id, name, remote_path).await? {
+                return Ok(true);
+            }
+            board.report(id, agent_id, 0, 0, vec!["plan.json".into()])?;
+            tracing::info!("#{id}: Initial plan accepted via plan.json (no PR)");
+            Ok(true)
+        }
         "report" => {
             let rep: ReportFile = serde_json::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("invalid report.json: {e}"))?;
@@ -1636,12 +1674,37 @@ async fn process_verdict(
             }
 
             let is_initial = board.get(id).is_some_and(|i| i.is_initial_plan_task());
+            // Initial plan: prefer plan.json beside report (legacy agents).
+            if is_initial {
+                let plan_remote = {
+                    let p = std::path::Path::new(remote_path);
+                    p.parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .join("plan.json")
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                if apply_initial_plan_sidecar(board, os, agent_id, id, name, &plan_remote).await? {
+                    return Ok(true);
+                }
+                board.report(
+                    id,
+                    agent_id,
+                    rep.added,
+                    rep.removed,
+                    if rep.gates.is_empty() {
+                        vec!["plan.json".into()]
+                    } else {
+                        rep.gates
+                    },
+                )?;
+                tracing::info!("#{id}: Initial plan accepted via report+plan.json (no PR required)");
+                return Ok(true);
+            }
             // Impl cards: proposal and publish are mutually exclusive.
-            if !is_initial
-                && board.get(id).is_some_and(|i| {
-                    i.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty())
-                })
-            {
+            if board.get(id).is_some_and(|i| {
+                i.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty())
+            }) {
                 board
                     .escalate(
                         id,
@@ -1665,11 +1728,6 @@ async fn process_verdict(
                         0,
                     )
                     .map_err(|e| anyhow::anyhow!("proposal/report exclusivity: {e}"))?;
-                return Ok(true);
-            }
-            if is_initial
-                && apply_initial_plan_sidecar(board, os, agent_id, id, name, remote_path).await?
-            {
                 return Ok(true);
             }
 
@@ -2231,7 +2289,7 @@ pub async fn process_awaiting_rebases(
             Ok(Some(repo)) => card_cfg.repo = repo,
             Ok(None) => {
                 tracing::warn!(
-                    "rebase skipped for card #{}: no pull_request or Task repo remotes",
+                    "rebase skipped for card #{}: no pull_request remotes",
                     item.id
                 );
                 continue;
@@ -2527,14 +2585,13 @@ target: `{target}`. Clone that into `/sandbox/repo` and continue the card. Do **
 re-escalate asking which repository to clone.\n"
             );
         }
-        // Unbound cards used to say "clone per the Project prompt", and agents
-        // invented owner/name from ambient context (this product's own repo).
-        // Needs You is the correct outcome when the clone target is not named.
-        return "\nNo card pull_request yet (first run). Do **not** guess which repository \
-to clone — never invent an `owner/name` (including this product's own repo) from \
-context, history, or the card title. Clone into `/sandbox/repo` **only** when the \
-Project prompt names an exact clone target (`owner/name` or git URL). If it does \
-not, write `/sandbox/.honr/escalate.json` with a short question, at least two \
+        // Clone target is prose on the card (intent/DoD/notes) — not Task.repo.
+        // Needs You is correct when still unnamed; never invent owner/name.
+        return "\nNo card pull_request yet (first run). Clone into `/sandbox/repo` **only** \
+when this card's intent, definition of done, or notes name an exact repository \
+(`owner/name` or git URL) — including fork vs upstream when cross-fork. Do **not** \
+guess from context, history, or the card title. If the clone target is missing or \
+ambiguous, write `/sandbox/.honr/escalate.json` with a short question, at least two \
 concrete options, and a recommended index, then exit — do not clone and do not \
 open a PR. When you do clone and finish, write `/sandbox/.honr/report.json` with \
 `url`, `base`, and `head` (schema: `/sandbox/.honr/report.schema.json`).\n"
@@ -2619,8 +2676,6 @@ fn briefing(
     branch_name: &str,
     repo: &crate::schema::RepoConfig,
 ) -> String {
-    let upstream = repo.upstream.trim();
-    let base = repo.base.trim();
     let mut b = String::new();
     b.push_str("You are working on one card. Do exactly this card.\n\n");
 
@@ -2705,8 +2760,8 @@ Document from those facts — do **not** re-escalate asking for another Board pr
                 );
             } else {
                 b.push_str(
-                    "\nFirst run: `/sandbox/repo` is empty. Clone only if the Project prompt names \
-an exact product repo; otherwise escalate (see Remotes) — do not guess.\n",
+                    "\nFirst run: `/sandbox/repo` is empty. Clone only if this card's intent/DoD \
+names an exact product repo; otherwise escalate (see Remotes) — do not guess.\n",
                 );
             }
         }
@@ -2731,34 +2786,19 @@ an exact product repo; otherwise escalate (see Remotes) — do not guess.\n",
 
     if is_initial_plan {
         b.push_str(
-            "\nThis is the Project's **Initial plan** card. Propose the sibling Tasks that \
-             should be created: write `/sandbox/.honr/plan.json` with a `summary` and `tasks` \
-             (each: `key`, `title`, `intent`, `definition_of_done`, optional `blocked_by_keys`). \
-             Open **one** plan/docs PR against the product base as written rationale, then \
-             finish with `/sandbox/.honr/report.json` (`url`, `base`, `head` per \
-             `/sandbox/.honr/report.schema.json`). The card goes to Review — \
-             **Approve** creates those Tasks from your plan.json (merge webhook is a \
-             backup if Approve never ran; not via split.json).\n\
-             Do **not** write `/sandbox/.honr/split.json` on this card.\n\
+            "\nThis is the Project's **Initial plan** card. You do **not** open a pull request \
+             and you do **not** need to clone a product repo for this card.\n\
+             Propose the sibling Tasks that should be created: write `/sandbox/.honr/plan.json` \
+             with a `summary` and `tasks` (each: `key`, `title`, `intent`, \
+             `definition_of_done`, optional `blocked_by_keys`). In **each** task's intent \
+             and/or definition_of_done, name the exact repository to clone \
+             (`owner/name`, and fork if cross-fork). Then exit — the supervisor picks up \
+             plan.json and moves this card to Review. **Approve** creates those Tasks \
+             (not via split.json).\n\
+             Do **not** write `/sandbox/.honr/split.json` or `report.json` on this card.\n\
              If you hit a real decision that needs a human, write `/sandbox/.honr/escalate.json` \
              with options (at least two) and a recommended index, then exit.\n",
         );
-        if repo.is_complete() {
-            b.push_str(&format!(
-                "\nPublish: commit on `{branch}`, push to `origin`, open **one** PR against \
-             `{upstream}` base `{base}` (or update that PR). Write plan.json, then report.json \
-             with url/base/head, and exit. Leave `{base}` alone.\n",
-                branch = branch_name,
-                upstream = upstream,
-                base = base,
-            ));
-        } else {
-            b.push_str(
-                "\nPublish: only after a named clone — commit on the card branch, push, open one \
-PR, write plan.json then report.json with url/base/head, and exit. If the Project prompt \
-does not name a clone target, escalate instead (see Remotes).\n",
-            );
-        }
     } else {
         b.push_str(
             "\nIf you hit a real decision or ambiguity that requires human input, do not guess. \
@@ -3600,6 +3640,9 @@ mod tests {
         assert!(is_infrastructure(
             "code: 'The service is currently unavailable', message: \"exec relay closed\""
         ));
+        assert!(is_infrastructure(
+            "GitHub App token sync failed (infrastructure): github api: boom"
+        ));
         assert!(!is_infrastructure("agent panicked in user code"));
     }
 
@@ -3895,7 +3938,8 @@ mod tests {
             "must send unbound ambiguity to escalate: {b}"
         );
         assert!(
-            b.contains("only if the Project prompt names")
+            b.contains("only if this card's intent/DoD")
+                || b.contains("only if the Project prompt names")
                 || b.contains("only when the Project prompt names"),
             "must gate clone on an explicit name: {b}"
         );
@@ -3909,21 +3953,21 @@ mod tests {
         );
     }
 
-    /// Task.repo (via resolve_card_repo) yields a complete RepoConfig — Remotes
-    /// name clone_target and must not order escalate-for-missing-clone.
+    /// Complete RepoConfig (from pull_request after report) — Remotes name
+    /// clone_target and must not order escalate-for-missing-clone.
     #[test]
-    fn task_repo_briefing_includes_clone_target_without_escalate() {
-        let task_repo = crate::schema::RepoConfig {
+    fn bound_remotes_briefing_includes_clone_target_without_escalate() {
+        let bound = crate::schema::RepoConfig {
             upstream: "acme/widgets".into(),
             fork: String::new(),
             base: "main".into(),
         };
-        assert!(task_repo.is_complete());
-        let clone = task_repo.clone_target();
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-189", &task_repo);
+        assert!(bound.is_complete());
+        let clone = bound.clone_target();
+        let b = briefing(&grant(), BranchState::Fresh, "honr/card-189", &bound);
         assert!(
             b.contains("Remotes for this run:"),
-            "must use structured Remotes for bound Task repo: {b}"
+            "must use structured Remotes when pull_request resolves: {b}"
         );
         assert!(
             b.contains(clone) || b.contains("acme/widgets"),
@@ -3931,15 +3975,16 @@ mod tests {
         );
         assert!(
             !b.contains("Do **not** guess which repository"),
-            "must not order escalate-for-missing-clone when Task repo is set: {b}"
+            "must not order escalate-for-missing-clone when remotes are bound: {b}"
         );
         assert!(
             !b.contains("only if the Project prompt names")
-                && !b.contains("only when the Project prompt names"),
-            "must not keep unbound escalate gate when Task repo resolves: {b}"
+                && !b.contains("only when the Project prompt names")
+                && !b.contains("only if this card's intent/DoD"),
+            "must not keep unbound escalate gate when remotes resolve: {b}"
         );
 
-        let resume = resume_briefing(&grant(), &task_repo);
+        let resume = resume_briefing(&grant(), &bound);
         assert!(
             resume.contains("Remotes for this run:"),
             "resume must carry structured Remotes too: {resume}"
@@ -4046,23 +4091,28 @@ mod tests {
     }
 
     #[test]
-    fn briefing_initial_plan_requires_report_not_split() {
+    fn briefing_initial_plan_requires_plan_json_not_pr() {
         let mut g = grant();
         g.title = crate::model::initial_plan_title("Test Project");
         let b = briefing(&g, BranchState::Fresh, "honr/card-92", &cross_fork_repo());
         assert!(b.contains("Initial plan"), "briefing must identify Initial plan: {b}");
         assert!(
-            b.contains("report.json"),
-            "briefing must require report.json for Initial plan: {b}"
-        );
-        assert!(
             b.contains("plan.json"),
             "briefing must require plan.json for Initial plan: {b}"
+        );
+        assert!(
+            b.contains("do **not** open a pull request")
+                || b.contains("do **not** need to clone"),
+            "briefing must forbid PR/clone on Initial plan: {b}"
         );
         assert!(
             b.contains("Do **not** write `/sandbox/.honr/split.json`")
                 || b.contains("not via split.json"),
             "briefing must forbid split on Initial plan: {b}"
+        );
+        assert!(
+            b.contains("Do **not** write") && b.contains("report.json"),
+            "briefing must forbid report.json on Initial plan: {b}"
         );
         assert!(
             b.contains("Approve") && b.contains("Tasks"),
@@ -4357,14 +4407,7 @@ mod tests {
             .create(None, "Proj", "why", None, Origin::Human, true, None)
             .unwrap();
         let seed = board
-            .init_plan(
-                project.id,
-                crate::schema::RepoConfig {
-                    upstream: "acme/widgets".into(),
-                    fork: String::new(),
-                    base: "main".into(),
-                },
-            )
+            .init_plan(project.id)
             .expect("init_plan");
         let seed_id = seed.id;
         let _ = board.transition(project.id, State::Shaping, "t", None);
@@ -4423,14 +4466,7 @@ mod tests {
             .create(None, "Proj", "why", None, Origin::Human, true, None)
             .unwrap();
         let seed = board
-            .init_plan(
-                project.id,
-                crate::schema::RepoConfig {
-                    upstream: "acme/widgets".into(),
-                    fork: String::new(),
-                    base: "main".into(),
-                },
-            )
+            .init_plan(project.id)
             .expect("init_plan");
         let seed_id = seed.id;
         let _ = board.transition(project.id, State::Shaping, "t", None);

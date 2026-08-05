@@ -127,17 +127,17 @@ export function Board(props: BoardProps) {
           <h1>Welcome to honr</h1>
           <p className="board-lede">
             This is the control plane for agent work. Create a Project
-            (container only), bind a product repo with init_plan, then dispatch
-            the Initial plan. Agents stay idle until you dispatch.
+            (auto-seeds Initial plan), dispatch that card, Approve the plan,
+            then dispatch Tasks. Agents stay idle until you dispatch.
           </p>
         </header>
         <div className="board-empty-card" data-testid="board-empty">
           <h2>No projects yet</h2>
           <p className="dim">
             Via the honr MCP:{" "}
-            <code>create_project</code> → <code>init_plan(repo)</code> →{" "}
-            <code>dispatch</code> Initial plan → Approve (creates Tasks). Then
-            dispatch Backlog tasks. Or open Help for the same loop.
+            <code>create_project</code> → <code>dispatch</code> Initial plan →
+            Approve (creates Tasks). Then dispatch Backlog tasks. Or open Help
+            for the same loop.
           </p>
           {archivedGoals.length > 0 && (
             <p style={{ marginTop: 12 }}>

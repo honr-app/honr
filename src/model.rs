@@ -202,9 +202,8 @@ pub struct PlanTaskSpec {
     pub blocked_by_keys: Vec<String>,
     #[serde(default)]
     pub capability: Option<String>,
-    /// Optional per-task product remotes. On Approve/materialize, missing or
-    /// incomplete values default from the Initial plan (or splitting parent)
-    /// Task repo — never from a Project field.
+    /// Legacy wire field — ignored on materialize. Name the clone target in
+    /// intent/DoD instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<crate::schema::RepoConfig>,
     /// Set when Approve Plan materializes (or updates) a board Task.
@@ -295,20 +294,22 @@ mod initial_plan_title_tests {
 /// Default standing instructions seeded on every new Project (`project_prompt`).
 /// Replaces the old pin soup for policy the agent must always see.
 ///
-/// Product remotes are **Task-scoped** (`init_plan` / Task.repo / card
-/// `pull_request`) — not owned by this prompt. Keep quality gates and standing
-/// policy here; do not treat prose in `project_prompt` as the remotes SoT.
+/// Clone targets are named in each Task's intent/DoD (prose). After report,
+/// card `pull_request` drives resume remotes. Keep quality gates here.
 pub const DEFAULT_PROJECT_PROMPT: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
 Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/policy.yaml; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
-Product remotes are Task-scoped (init_plan / Task.repo / card pull_request) — not Project-owned. \
-Do not invent an owner/name from context; if Remotes are unbound, escalate.\n\
+Name the repository to clone in each Task's intent and/or definition of done \
+(`owner/name`, and fork if cross-fork). Do not invent an owner/name from context; \
+if the card text is silent or ambiguous, escalate.\n\
 Name this Project's quality gates (test/lint commands) here when agents should run them before \
 publish — do not assume cargo or any other toolchain unless named.\n\
-Initial plan: write /sandbox/.honr/plan.json (proposed Tasks); human Approve creates them \
-(siblings inherit or override the Initial plan Task repo).\n\
-If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape); card goes to Review — Approve creates siblings. Never nest under a Task.\n\
+Initial plan: write /sandbox/.honr/plan.json only (no docs PR); each proposed task names its \
+clone target in intent/DoD; human Approve creates Tasks.\n\
+If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape; name \
+clone targets in each child's intent/DoD); card goes to Review — Approve creates siblings. \
+Never nest under a Task.\n\
 ";
 
 #[cfg(test)]
@@ -316,23 +317,19 @@ mod default_project_prompt_tests {
     use super::DEFAULT_PROJECT_PROMPT;
 
     #[test]
-    fn does_not_treat_prompt_as_repo_binding_sot() {
+    fn clone_targets_are_prose_not_structured_binding() {
         let p = DEFAULT_PROJECT_PROMPT;
         assert!(
-            p.contains("Task-scoped"),
-            "must say remotes are Task-scoped: {p}"
+            p.contains("intent") && p.contains("definition of done"),
+            "must point at task text for clone targets: {p}"
         );
         assert!(
-            p.contains("init_plan") || p.contains("Task.repo"),
-            "must point at Task binding path: {p}"
+            p.contains("plan.json") && p.contains("no docs PR"),
+            "Initial plan must be plan.json without docs PR: {p}"
         );
         assert!(
-            !p.contains("Name the product repo as an exact"),
-            "must not imply Project prompt owns clone target: {p}"
-        );
-        assert!(
-            !p.contains("if this prompt names a clone target"),
-            "must not teach Project prompt as first-run remotes SoT: {p}"
+            !p.contains("Task.repo") && !p.contains("Task-scoped"),
+            "must not describe retired Task.repo binding: {p}"
         );
     }
 }

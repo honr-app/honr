@@ -82,6 +82,9 @@ pub const META_OPENSHELL_MTLS_SEALED: &str = "openshell_mtls_sealed";
 /// Sealed GitHub App credentials (ChaCha20-Poly1305 via `secrets`). Never log.
 pub const META_GITHUB_APP_SEALED: &str = "github_app_sealed";
 
+/// GitHub App installation id for sandbox token minting.
+pub const META_GITHUB_APP_INSTALLATION_ID: &str = "github_app_installation_id";
+
 /// Sealed local-admin auth (password hash + session key). Never log.
 pub const META_AUTH_SEALED: &str = "auth_sealed";
 

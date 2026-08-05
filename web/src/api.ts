@@ -126,11 +126,9 @@ export const api = {
   approve: (id: number): Promise<WorkItem> => post(`/items/${id}/approve`),
   /** Approve Initial plan proposal → Backlog Tasks. Id = Project or Initial plan. */
   approvePlan: (id: number): Promise<number[]> => post(`/items/${id}/approve-plan`),
-  /** Seed Initial plan Task with Task-scoped remotes. Id = Project. */
-  initPlan: (
-    id: number,
-    repo: { upstream: string; fork?: string; base?: string },
-  ): Promise<WorkItem> => post(`/items/${id}/init-plan`, { repo }),
+  /** Seed Initial plan if missing (usually auto-seeded on create). Id = Project. */
+  initPlan: (id: number): Promise<WorkItem> =>
+    post(`/items/${id}/init-plan`, {}),
   /** Queue a Backlog card for the supervisor to claim. Explicit start. */
   dispatch: (id: number): Promise<WorkItem> => post(`/items/${id}/dispatch`),
   /** Play/pause Project auto mode (queue claimable Backlog leaves). */
@@ -196,6 +194,8 @@ export const api = {
     fetch("/api/github-app", fetchOpts).then(jsonOrThrow),
   putGitHubApp: (settings: GitHubAppSettings): Promise<GitHubAppSettings> =>
     put("/github-app", settings),
+  syncGitHubAppToken: (): Promise<GitHubAppSettings> =>
+    post("/github-app/sync-token"),
 
   listOpenShellProviders: (): Promise<OpenShellProvidersOut> =>
     fetch("/api/openshell/providers", fetchOpts).then(jsonOrThrow),

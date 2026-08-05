@@ -68,9 +68,8 @@ claude mcp add --transport http honr http://localhost:8080/mcp
 ## Empty board
 
 The board starts empty. Nothing claims cards until you enable agents. See
-[Agents](agents.md). You can still create Projects (`create_project`), seed an
-Initial plan with remotes (`init_plan`), inspect columns in the UI, and exercise
-MCP tools that do not need a sandbox. Help in the sidebar documents the same
-loop.
+[Agents](agents.md). You can still create Projects (`create_project` auto-seeds
+Initial plan), dispatch that card, inspect columns in the UI, and exercise MCP
+tools that do not need a sandbox. Help in the sidebar documents the same loop.
 
 Next: [Workflow](workflow.md) for the day-to-day loop.

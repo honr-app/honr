@@ -58,12 +58,12 @@ impl Default for ExecutionConfig {
     }
 }
 
-/// Resolved remotes for one card run (from card `pull_request` base/head),
-/// or a durable Task binding before a PR exists.
+/// Resolved remotes for one card run (from card `pull_request` base/head).
 ///
-/// `upstream` = PR base repo; `fork` = head/push repo (same as upstream for
-/// same-repo). Yaml `execution.agents.repo` is legacy/optional. Containment is
-/// forge token permissions; remotes are Task-scoped (`init_plan` / Task.repo).
+/// Before a PR exists, `resolve_card_repo` returns `None` and the agent clones
+/// from card prose. `upstream` = PR base repo; `fork` = head/push repo (same
+/// as upstream for same-repo). Yaml `execution.agents.repo` is legacy/optional.
+/// Containment is forge token permissions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RepoConfig {
     /// `owner/name` that PRs target.

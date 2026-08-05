@@ -5,6 +5,7 @@ mod auth;
 mod beads;
 mod db;
 mod events;
+mod github_app;
 mod machine;
 mod mcp;
 mod model;

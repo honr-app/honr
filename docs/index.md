@@ -11,7 +11,7 @@ slugs: ready to map to a docs site later.
 | [Agents](agents.md) | Enabling real agents: compute driver, OpenShell, `honr.yaml` / Settings |
 | [Sandbox](sandbox.md) | How a sandboxed run works and the gotchas that matter |
 | [Architecture](architecture.md) | One page: Board / store, supervisor, MCP / REST, beads, persistence |
-| [Task repo binding](task-repo-binding.md) | Task-scoped remotes: init_plan, resolve order, multi-repo under one Project |
+| [Clone targets](task-repo-binding.md) | Clone from task prose; pull_request after report; Initial plan is plan.json only |
 | [Sandbox without beads](sandbox-without-beads.md) | Contract: no bd/image/upload in agent sandboxes; briefing-only context |
 
 Machine contracts (not prose): [`schemas/report.schema.json`](schemas/report.schema.json).

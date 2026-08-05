@@ -493,8 +493,9 @@ assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should exp
 
 const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
-assert(helpHtml.includes("init_plan"), "Help should document init_plan");
 assert(helpHtml.includes("create_project"), "Help should document create_project");
+assert(helpHtml.includes("plan.json"), "Help should document plan.json");
+assert(helpHtml.includes("dispatch"), "Help should document dispatch");
 assert(helpHtml.includes("8080/mcp"), "Help should show MCP URL");
 
 const settingsHtml = renderToString(React.createElement(Settings));
@@ -622,6 +623,63 @@ assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers-sync\"
 assert(!openshellProvidersHtml.includes("openshell-providers-import-adc"), "Import ADC control removed");
 assert(openshellProvidersHtml.includes("on gateway"), "Gateway sync badge");
 assert(!openshellProvidersHtml.includes("sk-"), "Providers view must not echo secrets");
+assert(
+  openshellProvidersHtml.includes("Settings → GitHub App"),
+  "Providers intro points at GitHub App for tokens",
+);
+
+const openshellManagedGithubHtml = renderToString(
+  React.createElement(OpenShellProvidersPanelView, {
+    providers: [
+      {
+        name: "github",
+        type: "github",
+        config: {},
+        credential_keys: ["GITHUB_TOKEN"],
+        has_credentials: true,
+        has_refresh: false,
+        attach_to_sandboxes: true,
+        gateway_synced: true,
+      },
+    ],
+    gatewayReachable: true,
+    profiles: [],
+    draft: {
+      name: "github",
+      type: "github",
+      config: {},
+      credentials: {},
+      attach_to_sandboxes: true,
+    },
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onSync: () => {},
+    onToggleAttach: () => {},
+  }),
+);
+assert(
+  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-managed-github\""),
+  "Managed github row marks App source",
+);
+assert(
+  openshellManagedGithubHtml.includes("secrets: GITHUB_TOKEN · GitHub App"),
+  "Managed github row lists attached env vars like other providers",
+);
+assert(
+  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-cred-GITHUB_TOKEN\""),
+  "Managed github form still shows GITHUB_TOKEN field",
+);
+assert(
+  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-app-managed-note\""),
+  "Managed github field hint points at GitHub App mint",
+);
+assert(
+  openshellManagedGithubHtml.includes("Edit"),
+  "Managed github keeps Edit control like other providers",
+);
 
 const openshellProvidersEmptyHtml = renderToString(
   React.createElement(OpenShellProvidersPanelView, {

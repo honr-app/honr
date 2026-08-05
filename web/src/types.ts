@@ -109,6 +109,19 @@ export interface GitHubAppStatus {
   complete: boolean;
 }
 
+export interface GitHubAppInstallation {
+  id: number;
+  account_login: string;
+  account_type?: string;
+}
+
+export interface GitHubAppTokenStatus {
+  configured: boolean;
+  provider_attached: boolean;
+  expires_at?: string | null;
+  error?: string | null;
+}
+
 /** Settings → GitHub App (installation-token material). */
 export interface GitHubAppSettings {
   /** Non-secret — returned on GET when configured. */
@@ -118,8 +131,12 @@ export interface GitHubAppSettings {
   private_key_pem?: string | null;
   webhook_secret?: string | null;
   client_secret?: string | null;
+  installation_id?: number | null;
+  clear_installation_id?: boolean;
   clear?: boolean;
   status?: GitHubAppStatus;
+  installations?: GitHubAppInstallation[];
+  token_status?: GitHubAppTokenStatus;
 }
 
 export interface AuthUser {
@@ -227,7 +244,7 @@ export interface PlanTaskSpec {
   definition_of_done: string;
   blocked_by_keys: string[];
   capability: string | null;
-  /** Optional per-task remotes; Approve defaults from Initial plan / parent Task. */
+  /** Legacy — ignored. Name clone targets in intent/DoD. */
   repo?: RepoConfig | null;
   item_id: number | null;
 }
@@ -303,7 +320,7 @@ export interface WorkItem {
   pull_request?: PullRequest | null;
   /** @deprecated legacy wire — prefer pull_request.url */
   pr_url?: string | null;
-  /** Task-scoped product remotes. Absent on Projects. */
+  /** Legacy unused field; remotes come from pull_request after report. */
   repo?: RepoConfig | null;
   plan?: PlanArtifact | null;
   proposal?: TaskProposal | null;

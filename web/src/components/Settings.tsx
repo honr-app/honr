@@ -729,6 +729,9 @@ export function GitHubAppPanelView({
   privateKeyPem,
   webhookSecret,
   clientSecret,
+  installationId,
+  installations,
+  tokenStatus,
   status,
   busy,
   error,
@@ -738,14 +741,19 @@ export function GitHubAppPanelView({
   onPrivateKeyPemChange,
   onWebhookSecretChange,
   onClientSecretChange,
+  onInstallationIdChange,
   onSave,
   onClear,
+  onSyncToken,
 }: {
   appId: string;
   clientId: string;
   privateKeyPem: string;
   webhookSecret: string;
   clientSecret: string;
+  installationId: string;
+  installations: NonNullable<GitHubAppSettings["installations"]>;
+  tokenStatus?: GitHubAppSettings["token_status"];
   status?: GitHubAppSettings["status"];
   busy?: boolean;
   error?: string | null;
@@ -755,26 +763,35 @@ export function GitHubAppPanelView({
   onPrivateKeyPemChange: (next: string) => void;
   onWebhookSecretChange: (next: string) => void;
   onClientSecretChange: (next: string) => void;
+  onInstallationIdChange: (next: string) => void;
   onSave: () => void;
   onClear: () => void;
+  onSyncToken: () => void;
 }) {
   const statusLabel = status?.complete
     ? "Configured (encrypted in board DB)"
     : status?.app_id || status?.private_key
       ? "Incomplete"
       : "Not configured";
+  const tokenLabel = !tokenStatus?.configured
+    ? "Pick an installation, then Mint / sync"
+    : tokenStatus.error
+      ? `Error: ${tokenStatus.error}`
+      : tokenStatus.expires_at
+        ? `OK until ${tokenStatus.expires_at}`
+        : tokenStatus.provider_attached
+          ? "Provider attached"
+          : "Configured — sync to gateway";
 
   return (
     <section aria-labelledby="github-app-title" data-testid="github-app-panel">
       <h2 id="github-app-title">GitHub App</h2>
       <p className="dim">
-        App credentials for installation tokens (act as the App bot, not your
-        user) and for Sign in with GitHub. The private key, webhook secret, and
-        client secret are sealed into the board database with{" "}
-        <code>~/.config/honr/master.key</code>; the API never returns them.
-        App ID and Client ID are not secret and are shown when configured.
-        Paste the <strong>Client secret</strong> here to enable GitHub login;
-        allowlists live under Settings → Access.
+        Sealed App credentials mint short-lived{" "}
+        <strong>installation tokens</strong> into the OpenShell{" "}
+        <code>github</code> provider (no PAT paste). Also used for Sign in with
+        GitHub. Private key / secrets stay in the board DB under{" "}
+        <code>~/.config/honr/master.key</code>.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -788,6 +805,10 @@ export function GitHubAppPanelView({
         <div className="openshell-health-row">
           <span className="dim">Credentials</span>
           <strong data-testid="github-app-status-label">{statusLabel}</strong>
+        </div>
+        <div className="openshell-health-row">
+          <span className="dim">Sandbox token</span>
+          <strong data-testid="github-app-token-label">{tokenLabel}</strong>
         </div>
         {status?.complete && (
           <div className="openshell-health-row">
@@ -835,6 +856,33 @@ export function GitHubAppPanelView({
           />
         </label>
         <label>
+          Installation (sandbox git)
+          <select
+            className="search-input"
+            value={installationId}
+            disabled={busy}
+            onChange={(e) => onInstallationIdChange(e.target.value)}
+            data-testid="github-app-field-installation"
+          >
+            <option value="">Select installation…</option>
+            {installationId &&
+              !installations.some((i) => String(i.id) === installationId) && (
+                <option value={installationId}>
+                  Installation {installationId}
+                </option>
+              )}
+            {installations.map((inst) => (
+              <option key={inst.id} value={String(inst.id)}>
+                {inst.account_login || "unknown"} ({inst.id})
+              </option>
+            ))}
+          </select>
+          <span className="dim sandbox-field-hint">
+            Prefer the fork account install (e.g. clankrshq). Honr mints tokens
+            into OpenShell provider <code>github</code> automatically.
+          </span>
+        </label>
+        <label>
           Webhook secret
           <input
             className="search-input"
@@ -855,7 +903,7 @@ export function GitHubAppPanelView({
             className="search-input"
             value={clientId}
             disabled={busy}
-            placeholder="Iv1.… (optional, for user OAuth later)"
+            placeholder="Iv1.… (optional, for user OAuth)"
             onChange={(e) => onClientIdChange(e.target.value)}
             data-testid="github-app-field-client-id"
           />
@@ -883,6 +931,14 @@ export function GitHubAppPanelView({
           </button>
           <button
             type="button"
+            disabled={busy || !status?.complete || !installationId}
+            onClick={onSyncToken}
+            data-testid="github-app-sync-token"
+          >
+            Mint / sync token
+          </button>
+          <button
+            type="button"
             disabled={busy || !status?.complete}
             onClick={onClear}
             data-testid="github-app-clear"
@@ -901,6 +957,12 @@ function GitHubAppPanel() {
   const [privateKeyPem, setPrivateKeyPem] = useState("");
   const [webhookSecret, setWebhookSecret] = useState("");
   const [clientSecret, setClientSecret] = useState("");
+  const [installationId, setInstallationId] = useState("");
+  const [installations, setInstallations] = useState<
+    NonNullable<GitHubAppSettings["installations"]>
+  >([]);
+  const [tokenStatus, setTokenStatus] =
+    useState<GitHubAppSettings["token_status"]>();
   const [status, setStatus] = useState<GitHubAppSettings["status"]>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -911,6 +973,11 @@ function GitHubAppPanel() {
     setAppId(cfg.app_id ?? "");
     setClientId(cfg.client_id ?? "");
     setStatus(cfg.status);
+    setInstallationId(
+      cfg.installation_id != null ? String(cfg.installation_id) : "",
+    );
+    setInstallations(cfg.installations ?? []);
+    setTokenStatus(cfg.token_status);
     setPrivateKeyPem("");
     setWebhookSecret("");
     setClientSecret("");
@@ -956,6 +1023,9 @@ function GitHubAppPanel() {
       privateKeyPem={privateKeyPem}
       webhookSecret={webhookSecret}
       clientSecret={clientSecret}
+      installationId={installationId}
+      installations={installations}
+      tokenStatus={tokenStatus}
       status={status}
       busy={busy || loading}
       error={error}
@@ -980,6 +1050,10 @@ function GitHubAppPanel() {
         setSavedHint(null);
         setClientSecret(next);
       }}
+      onInstallationIdChange={(next) => {
+        setSavedHint(null);
+        setInstallationId(next);
+      }}
       onSave={() => {
         const body: GitHubAppSettings = {
           app_id: appId.trim() || null,
@@ -989,7 +1063,31 @@ function GitHubAppPanel() {
         if (privateKeyPem.trim()) body.private_key_pem = privateKeyPem;
         if (webhookSecret.trim()) body.webhook_secret = webhookSecret;
         if (clientSecret.trim()) body.client_secret = clientSecret;
+        if (installationId.trim()) {
+          body.installation_id = Number(installationId);
+        } else {
+          body.clear_installation_id = true;
+        }
         put(body, "Saved. GitHub App credentials are sealed in the board database.");
+      }}
+      onSyncToken={() => {
+        setBusy(true);
+        setError(null);
+        setSavedHint(null);
+        const saveFirst: GitHubAppSettings = {};
+        if (installationId.trim()) {
+          saveFirst.installation_id = Number(installationId);
+        }
+        const chain = installationId.trim()
+          ? api.putGitHubApp(saveFirst).then(() => api.syncGitHubAppToken())
+          : api.syncGitHubAppToken();
+        chain
+          .then((saved) => {
+            applySaved(saved);
+            setSavedHint("Installation token minted and synced to OpenShell provider github.");
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
       }}
       onClear={() => {
         put({ clear: true }, "Cleared sealed GitHub App credentials.");
@@ -1604,6 +1702,13 @@ export function OpenShellPanelView({
   );
 }
 
+/** Fixed OpenShell provider name filled by Settings → GitHub App (not a PAT). */
+const GITHUB_APP_PROVIDER_NAME = "github";
+
+function isGitHubAppManagedProvider(name: string, type?: string): boolean {
+  return name.trim() === GITHUB_APP_PROVIDER_NAME && (type == null || type === "github");
+}
+
 /** Presentational providers band — exported for UI tests without fetch. */
 export function OpenShellProvidersPanelView({
   providers,
@@ -1639,15 +1744,24 @@ export function OpenShellProvidersPanelView({
   const typeOptions = profiles.length
     ? profiles.map((p) => p.id)
     : ["github", "google-vertex-ai", "cursor", "claude"];
+  // Prefer a non-App type for "Add" — github/GITHUB_TOKEN is owned by GitHub App.
+  const defaultAddType =
+    typeOptions.find((t) => t !== "github") ?? typeOptions[0] ?? "google-vertex-ai";
   const selectedProfile = draft
     ? profiles.find((p) => p.id === draft.type)
     : undefined;
+  const draftManaged = draft
+    ? isGitHubAppManagedProvider(draft.name, draft.type)
+    : false;
+  // Same env-var list as other providers; App-managed only changes how values are set.
   const credKeys =
     selectedProfile?.credential_env_vars?.length
       ? selectedProfile.credential_env_vars
       : draft?.type === "github"
         ? ["GITHUB_TOKEN"]
-        : [];
+        : draftManaged
+          ? ["GITHUB_TOKEN"]
+          : [];
 
   return (
     <div className="openshell-providers" data-testid="openshell-providers">
@@ -1656,6 +1770,8 @@ export function OpenShellProvidersPanelView({
         <p className="dim">
           Desired providers live on the board (credentials sealed). Save applies
           to the gateway when it is reachable; Sync recreates after a wipe.
+          Provider <code>github</code> attaches <code>GITHUB_TOKEN</code> from
+          Settings → GitHub App (installation token), not a pasted PAT.
         </p>
       </div>
 
@@ -1674,7 +1790,7 @@ export function OpenShellProvidersPanelView({
           onClick={() =>
             onDraftChange({
               name: "",
-              type: typeOptions[0] ?? "github",
+              type: defaultAddType,
               config: {},
               credentials: {},
               attach_to_sandboxes: true,
@@ -1703,7 +1819,15 @@ export function OpenShellProvidersPanelView({
         </p>
       ) : (
         <ul className="openshell-provider-list" data-testid="openshell-provider-list">
-          {providers.map((p) => (
+          {providers.map((p) => {
+            const managed = isGitHubAppManagedProvider(p.name, p.type);
+            const secretKeys =
+              (p.credential_keys ?? []).length > 0
+                ? (p.credential_keys ?? [])
+                : managed
+                  ? ["GITHUB_TOKEN"]
+                  : [];
+            return (
             <li key={p.name} className="openshell-provider-row" data-testid={`openshell-provider-${p.name}`}>
               <div className="openshell-provider-main">
                 <strong>{p.name}</strong>
@@ -1725,9 +1849,16 @@ export function OpenShellProvidersPanelView({
                       : "sync unknown"}
                 </span>
               </div>
-              <div className="openshell-provider-meta dim">
-                {p.has_credentials || p.has_refresh
-                  ? `secrets: ${(p.credential_keys ?? []).join(", ") || "refresh"}`
+              <div
+                className="openshell-provider-meta dim"
+                data-testid={
+                  managed ? `openshell-provider-managed-${p.name}` : undefined
+                }
+              >
+                {p.has_credentials || p.has_refresh || managed
+                  ? `secrets: ${secretKeys.join(", ") || "refresh"}${
+                      managed ? " · GitHub App" : ""
+                    }`
                   : "no secrets"}
               </div>
               <label className="agent-runtime-check">
@@ -1759,7 +1890,8 @@ export function OpenShellProvidersPanelView({
                 </button>
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
 
@@ -1777,7 +1909,7 @@ export function OpenShellProvidersPanelView({
             <input
               className="search-input"
               value={draft.name}
-              disabled={busy}
+              disabled={busy || draftManaged}
               onChange={(e) => onDraftChange({ ...draft, name: e.target.value })}
               data-testid="openshell-provider-field-name"
             />
@@ -1787,7 +1919,7 @@ export function OpenShellProvidersPanelView({
             <select
               className="search-input"
               value={draft.type}
-              disabled={busy}
+              disabled={busy || draftManaged}
               onChange={(e) => onDraftChange({ ...draft, type: e.target.value })}
               data-testid="openshell-provider-field-type"
             >
@@ -1805,9 +1937,14 @@ export function OpenShellProvidersPanelView({
                 className="search-input"
                 type="password"
                 autoComplete="off"
-                placeholder="write-only — leave blank to keep existing"
+                placeholder={
+                  draftManaged
+                    ? "set by Settings → GitHub App (Mint / sync)"
+                    : "write-only — leave blank to keep existing"
+                }
                 value={draft.credentials?.[key] ?? ""}
-                disabled={busy}
+                disabled={busy || draftManaged}
+                readOnly={draftManaged}
                 onChange={(e) =>
                   onDraftChange({
                     ...draft,
@@ -1816,6 +1953,15 @@ export function OpenShellProvidersPanelView({
                 }
                 data-testid={`openshell-provider-cred-${key}`}
               />
+              {draftManaged && (
+                <span
+                  className="dim sandbox-field-hint"
+                  data-testid="openshell-provider-app-managed-note"
+                >
+                  Attached into sandboxes as <code>{key}</code>. Value comes from
+                  the App installation token — mint under Settings → GitHub App.
+                </span>
+              )}
             </label>
           ))}
           {draft.type === "google-vertex-ai" && (
