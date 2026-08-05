@@ -7079,6 +7079,8 @@ mod tests {
         assert_eq!(awaiting_rebase[0].id, t2.id);
     }
 
+    /// MainAdvanced with a Done sibling + Review PR sets rebase_requested
+    /// while keeping the card in Review (not parked to Backlog).
     #[test]
     fn notify_main_advanced_dispatches_rebase_for_sibling_prs_in_review() {
         let b = Board::new(
@@ -7179,8 +7181,9 @@ mod tests {
         assert!(after.awaiting_dispatch);
     }
 
-    /// Review catch-up must not be skipped when MainAdvanced also steers a
-    /// Running card — park/unpark is for live runs only.
+    /// Regression: Review is not left behind when only Running was steered.
+    /// MainAdvanced must queue `rebase_requested` on the Review PR and still
+    /// steer + park/unpark the Running card — park/unpark is for live runs only.
     #[test]
     fn notify_main_advanced_queues_review_while_steering_running() {
         let b = Board::new(
