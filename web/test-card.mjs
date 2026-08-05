@@ -923,7 +923,50 @@ const emptyBoardHtml = renderToString(
 );
 assert(emptyBoardHtml.includes("board-page") || emptyBoardHtml.includes("Welcome to honr"),
   "Board view should still render Board");
+assert(emptyBoardHtml.includes("Welcome to honr"), "Board empty keeps Welcome hero");
+assert(emptyBoardHtml.includes("data-testid=\"board-empty\""), "Board empty shell testid");
+assert(emptyBoardHtml.includes("data-testid=\"operator-guide\""), "Board empty embeds OperatorGuide");
+assert(emptyBoardHtml.includes("data-testid=\"operator-guide-mcp\""), "Board empty shows MCP section");
+assert(emptyBoardHtml.includes("data-testid=\"operator-guide-loop\""), "Board empty shows Project loop");
 
+// Archived toggle on empty board when only retired projects exist.
+const archivedEmptyBoardHtml = renderToString(
+  React.createElement(Board, {
+    goals: [
+      {
+        id: 7,
+        title: "Old project",
+        intent: "done",
+        progress: 1,
+        leaves_done: 1,
+        leaves_total: 1,
+        agents_live: 0,
+        needs_you: 0,
+        plan_status: "approved_v1",
+        archived: true,
+        columns: [],
+        story: [],
+      },
+    ],
+    items: new Map(),
+    stories: new Map(),
+    goalOf: (id) => id,
+    breadcrumbOf: () => "",
+    now: Date.now(),
+    agentTimeout: 300,
+    onOpen: () => {},
+  }),
+);
+assert(archivedEmptyBoardHtml.includes("data-testid=\"board-empty\""),
+  "Archived-only board still shows empty shell");
+assert(archivedEmptyBoardHtml.includes("data-testid=\"operator-guide\""),
+  "Archived-only empty embeds OperatorGuide");
+assert(archivedEmptyBoardHtml.includes("data-testid=\"board-empty-show-archived\""),
+  "Archived toggle present on empty board");
+assert(
+  /Show\s*(?:<!-- -->)?1(?:<!-- -->)?\s*archived/.test(archivedEmptyBoardHtml),
+  "Archived toggle labels count",
+);
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
 );

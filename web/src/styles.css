@@ -757,15 +757,14 @@ main > :first-child { flex: 1; min-width: 0; }
   max-width: 58ch;
   line-height: 1.55;
 }
-.board-empty-card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  padding: 20px 22px;
-  max-width: 520px;
+.board-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
-.board-empty-card h2 { margin: 0 0 8px; font-size: 16px; }
-.board-empty-card p { margin: 0; line-height: 1.55; }
+.board-empty-archived {
+  margin: 0;
+}
 
 .help-page {
   padding: 24px 28px 48px;
