@@ -3461,6 +3461,48 @@ mod tests {
         );
     }
 
+    /// Sandbox image/policy/runtime must not reintroduce beads (t3 regression).
+    #[test]
+    fn sandbox_assets_have_no_beads_surface() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let containerfile =
+            std::fs::read_to_string(root.join("sandbox/Containerfile")).expect("Containerfile");
+        let policy = std::fs::read_to_string(root.join("sandbox/policy.yaml")).expect("policy.yaml");
+        let supervisor_src =
+            std::fs::read_to_string(root.join("src/supervisor.rs")).expect("supervisor.rs");
+        // Only the production module — this test's own source mentions the
+        // forbidden identifiers as negative assertions.
+        let prod = supervisor_src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("supervisor has a test module");
+
+        assert!(
+            !containerfile.contains("/usr/local/bin/bd")
+                && !containerfile.to_lowercase().contains("beads"),
+            "Containerfile must not bake bd/beads"
+        );
+        assert!(
+            !policy.contains("/usr/local/bin/bd") && !policy.to_lowercase().contains("beads"),
+            "policy.yaml must not allowlist bd/beads"
+        );
+        assert!(
+            !prod.contains("sync_beads_into_sandbox") && !prod.contains("BEADS_SANDBOX_DIR"),
+            "supervisor must not upload beads DB or set BEADS_SANDBOX_DIR"
+        );
+
+        let env = agent_env();
+        assert!(
+            env.iter().all(|(k, _)| k != "BEADS_DIR"),
+            "agent_env must not export BEADS_DIR: {env:?}"
+        );
+        let script = start_script(&repo_cfg(), "briefing", "claude", None);
+        assert!(
+            !script.contains("BEADS_DIR"),
+            "start script must not export BEADS_DIR: {script}"
+        );
+    }
+
     /// Following is a *reader*. It can start part-way through, which is what
     /// lets a restarted honr take over a run instead of killing it.
     #[test]
