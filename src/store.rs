@@ -2399,6 +2399,24 @@ impl Board {
         Ok(())
     }
 
+    /// Create knobs for the ops seat: always the `ops` catalog profile (never
+    /// the card-worker default). Falls back to
+    /// [`crate::model::ops_sandbox_profile_from_agents`] when the catalog lacks
+    /// `ops`.
+    pub fn resolve_ops_sandbox_create(&self) -> ResolvedSandboxCreate {
+        let s = self.state.read();
+        if let Some(p) = s
+            .sandbox_profiles
+            .get(crate::model::OPS_SANDBOX_PROFILE_ID)
+        {
+            return ResolvedSandboxCreate::from_profile(p);
+        }
+        drop(s);
+        ResolvedSandboxCreate::from_profile(&crate::model::ops_sandbox_profile_from_agents(
+            &self.effective_agents(),
+        ))
+    }
+
     /// Resolve create knobs for a card at sandbox create.
     ///
     /// Order: Project `sandbox_profile_id` → board `default_sandbox_profile_id`
@@ -4797,6 +4815,32 @@ mod tests {
             .expect("recreate");
         assert_eq!(again.environment.as_deref(), Some("honr-ops-2"));
         assert_eq!(again.conversation_id.as_deref(), Some("conv-2"));
+    }
+
+    #[test]
+    fn resolve_ops_sandbox_create_uses_ops_profile_not_worker_default() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-ops-{}",
+                std::process::id()
+            )),
+        );
+        assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
+        let worker = b.get_sandbox_profile("default").expect("default");
+        let ops = b.resolve_ops_sandbox_create();
+        assert_eq!(ops.profile_id.as_deref(), Some("ops"));
+        assert_eq!(ops.cpu.as_deref(), Some(crate::model::OPS_SANDBOX_CPU));
+        assert_eq!(ops.memory.as_deref(), Some(crate::model::OPS_SANDBOX_MEMORY));
+        assert_ne!(
+            ops.cpu,
+            worker.cpu,
+            "ops create must not use worker default cpu"
+        );
+        assert!(
+            !ops.policy.contains("name: github"),
+            "ops policy must not be the worker GitHub allow-list"
+        );
     }
 
     #[test]
