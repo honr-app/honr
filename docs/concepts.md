@@ -47,14 +47,9 @@ Task.
 
 | Role | Who | Reach |
 |---|---|---|
-<<<<<<< HEAD
-| **Operator / ops seat** | Human + chat agent on the host | MCP `/mcp`: shape Projects, triage Needs You / Review, dispatch, park / steer / halt. No worker verbs. |
-| **Worker** | Agent inside an OpenShell sandbox | No network path to honr. Supervisor calls `claim` / `heartbeat` / `report` on its behalf |
-=======
-| **Operator (host)** | Human + chat agent on the host | MCP into honr: shape Projects, triage Needs You / Review, dispatch, park / steer / halt |
-| **Ops seat** | Privileged agent in an OpenShell sandbox on the `ops` profile | Narrow egress to host honr MCP (+ inference). No GitHub / package-registry identity. Selectable in Settings → OpenShell → Profiles |
+| **Operator (host)** | Human + chat agent on the host | MCP `/mcp`: shape Projects, triage Needs You / Review, dispatch, park / steer / halt. No worker verbs. |
+| **Ops seat** | Privileged agent in an OpenShell sandbox on the `ops` profile | Narrow egress to host honr MCP (+ inference); operator tools only. No GitHub / package-registry identity. Selectable in Settings → OpenShell → Profiles |
 | **Worker** | Agent inside an OpenShell sandbox on the default / project profile | GitHub + inference egress. No network path to honr. Supervisor calls `claim` / `heartbeat` / `report` on its behalf |
->>>>>>> 43d29d2 (Add ops sandbox policy and seedable catalog profile.)
 
 An agent that could reach honr's MCP could approve its own review. Worker
 containment is intentional: the card worker is material, not a participant. The
