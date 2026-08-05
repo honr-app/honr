@@ -27,8 +27,9 @@ export function OperatorGuide() {
       >
         <h2 id="operator-guide-mcp-title">Connect MCP</h2>
         <p className="dim">
-          Drive Projects and Tasks from any MCP client. honr must already be
-          listening before you add the server.
+          Drive Projects and Tasks from any MCP client. `/mcp` is the ops seat:
+          operator tools only (no worker verbs). honr must already be listening
+          before you add the server.
         </p>
         <ol className="operator-guide-steps" data-testid="operator-guide-mcp-steps">
           <li>
