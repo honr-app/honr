@@ -5710,5 +5710,173 @@ mod tests {
         let q = &updated.escalation.as_ref().unwrap().question;
         assert!(q.contains("sandbox unavailable"), "{q}");
     }
+
+    /// BINDING regression: after MainAdvanced, Running is steered (park/unpark)
+    /// while Review only has `rebase_requested`. If the Review sandbox is down,
+    /// delayed catch-up must recover (or escalate) — Review must not look idle
+    /// forever with only the Running path having visibly moved.
+    #[tokio::test]
+    async fn main_advanced_review_not_idle_when_sandbox_down_after_running_steered() {
+        let env = "honr-card-rebase-idle-race-a1";
+        let board = Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-adv-sandbox-down-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+        let project = board
+            .create(
+                None,
+                "Idle Race Proj",
+                "why",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let done = board
+            .create(
+                Some(project.id),
+                "Already Merged",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let review = board
+            .create(
+                Some(project.id),
+                "Still In Review",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let running = board
+            .create(
+                Some(project.id),
+                "Live Run",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+
+        board.transition(done.id, State::Shaping, "test", None).unwrap();
+        board.transition(done.id, State::Done, "test", None).unwrap();
+
+        board.transition(review.id, State::Shaping, "test", None).unwrap();
+        board.transition(review.id, State::Backlog, "test", None).unwrap();
+        board.transition(review.id, State::Claimed, "agent", None).unwrap();
+        board.transition(review.id, State::Review, "agent", None).unwrap();
+        board.set_pull_request(
+            review.id,
+            Some(crate::model::PullRequest {
+                url: format!("https://github.com/shanemcd/honr/pull/{}", review.id),
+                base: Some(crate::model::PullRequestEnd::new("shanemcd/honr", "main")),
+                head: Some(crate::model::PullRequestEnd::new(
+                    "shanemcd/honr",
+                    crate::schema::card_branch_name("honr", review.id),
+                )),
+            }),
+        );
+        board.set_environment(review.id, Some(env.into()));
+
+        board.transition(running.id, State::Shaping, "test", None).unwrap();
+        board.transition(running.id, State::Backlog, "test", None).unwrap();
+        board.transition(running.id, State::Claimed, "agent", None).unwrap();
+        board.transition(running.id, State::Running, "agent", None).unwrap();
+
+        board.notify_main_advanced("refs/heads/main", Some("idle-race-sha".into()));
+
+        let running_after = board.get(running.id).unwrap();
+        assert_eq!(running_after.state, State::Backlog);
+        assert!(running_after.awaiting_dispatch);
+        assert!(
+            running_after
+                .notes
+                .iter()
+                .any(|n| n.text.contains("idle-race-sha") && n.text.contains("upstream/main")),
+            "Running still gets steer + park/unpark: {:?}",
+            running_after.notes
+        );
+
+        let review_queued = board.get(review.id).unwrap();
+        assert_eq!(review_queued.state, State::Review);
+        assert!(
+            review_queued.rebase_requested,
+            "MainAdvanced + Done sibling must set rebase_requested on Review"
+        );
+        assert!(
+            !review_queued
+                .notes
+                .iter()
+                .any(|n| n.text.contains("Main advanced")),
+            "Review must not reuse the Running steer path: {:?}",
+            review_queued.notes
+        );
+
+        let created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let created_flag = created.clone();
+        let os = OpenShell::mock(
+            move |args| match (
+                args.first().map(String::as_str),
+                args.get(1).map(String::as_str),
+            ) {
+                (Some("sandbox"), Some("delete")) => ok_out(""),
+                (Some("sandbox"), Some("create")) => {
+                    created_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    ok_out("")
+                }
+                (Some("sandbox"), Some("exec")) => {
+                    let script = args.last().map(String::as_str).unwrap_or("");
+                    if script == "true" {
+                        if created_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            return ok_out("");
+                        }
+                        return fail_out("sandbox gone");
+                    }
+                    if script.contains("git clone") {
+                        return ok_out(&format!("{MARK_REBASED}\n"));
+                    }
+                    if script.contains("git rebase") {
+                        return ok_out(&format!("{MARK_REBASED}\n"));
+                    }
+                    fail_out("unexpected exec")
+                }
+                _ => fail_out("unexpected"),
+            },
+            Duration::from_secs(5),
+        );
+
+        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
+        assert!(
+            created.load(std::sync::atomic::Ordering::SeqCst),
+            "sandbox-down must recreate, not silent-continue"
+        );
+        assert_eq!(results.len(), 1);
+        let updated = results[0].as_ref().unwrap();
+        assert_eq!(
+            updated.state,
+            State::Review,
+            "clean delayed catch-up keeps Review"
+        );
+        assert!(
+            !updated.rebase_requested,
+            "Review must not stay queued forever looking idle"
+        );
+        assert!(!updated.awaiting_dispatch);
+    }
 }
 
