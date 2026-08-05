@@ -16,8 +16,8 @@ succeeds). How you provide that is a **host choice**:
 | **Docker Desktop / engine** | Ensure the daemon is up and the gateway process can reach its socket |
 
 `DOCKER_HOST`, `~/.config/openshell/gateway.env`, and similar knobs belong to
-the **gateway process**, not to honr Settings. Honr only needs the gateway to
-answer `openshell status`.
+the **gateway process**, not to honr Settings. Honr reaches the gateway over
+in-process gRPC using endpoint + mTLS from Settings → OpenShell.
 
 The driver can stop on its own. The supervisor health-checks before claiming
 and pauses after an infrastructure failure rather than burning a card’s retry
@@ -25,27 +25,44 @@ budget, but it cannot prevent the outage.
 
 ## 2. OpenShell gateway
 
+Start the OpenShell gateway on the host (Homebrew service, systemd, or your
+install’s equivalent). Honr does **not** spawn an `openshell` CLI for board
+traffic: `src/openshell.rs` talks to the gateway in-process over gRPC with
+client certificates.
+
+**Settings → OpenShell** is the source of truth for connectivity:
+
+- **Gateway endpoint** (often `https://127.0.0.1:17670` — deliberately not
+  honr’s `8080`; your install may differ)
+- **mTLS PEMs** (CA, client cert, client key) sealed into the board DB with
+  `~/.config/honr/master.key`. Paste them or use **Import from local config**
+  (`~/.config/openshell/gateways/<name>/mtls/`). The API never returns private
+  key material.
+- **Health** via Refresh status (`GET /api/openshell/status`) — Healthy /
+  Unhealthy / not configured. Host Docker / Colima stay outside honr.
+
 ```bash
-# Example (Homebrew service). Use whatever starts *your* gateway:
+# Optional host check of the gateway process itself (not how honr connects):
 #   brew services start openshell
 openshell status       # expect Connected + Authenticated (mTLS transport)
 ```
 
-Confirm in **Settings → OpenShell** (healthy / unhealthy, or an explicit
-connectivity error). Gateway talk is in-process gRPC with sealed mTLS — Settings
-does not offer an OpenShell CLI binary path override.
+Settings does not offer an OpenShell CLI binary path override.
 
-Default local gateway port is often `17670`: deliberately not honr’s `8080`.
-Your install may differ; trust `openshell status`, not a hardcoded URL.
+## 3. Providers
 
-## 3. Providers (temporarily out of honr)
+**Settings → OpenShell → Providers** holds the desired provider list on the
+board (credentials sealed). That list is the source of truth; Sync applies it
+to the gateway (`POST /api/openshell/providers/sync`). Save also applies when
+the gateway is reachable. Providers marked **attach** are passed on sandbox
+create.
 
-Honr no longer stores OpenShell provider names or Vertex/GitHub secrets in
-yaml or Settings. Sandbox create passes an empty provider list until providers
-can be created and attached entirely through the honr UI/API.
+Provider **`github`** is owned by **Settings → GitHub App**: installation
+tokens sync into the OpenShell `github` provider as `GH_TOKEN`. Do not manage
+that provider’s credentials by hand in the OpenShell providers band.
 
-Until that lands, wipe and recreate gateway providers yourself if you need a
-manual smoke test — but do not expect honr to wire them.
+REST: `/api/openshell/providers` (list/create/update/delete) and
+`/api/openshell/providers/sync`.
 
 ## 4. Sandbox image
 
