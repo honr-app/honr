@@ -534,6 +534,10 @@ impl Board {
             tracing::info!("seeded sandbox profile catalog from execution.agents");
             board.flush();
         }
+        if board.ensure_ops_sandbox_profile() {
+            tracing::info!("seeded ops sandbox profile for control-plane seat");
+            board.flush();
+        }
         if board.seed_workspace_binding_if_empty() {
             tracing::info!("seeded workspace binding from execution.agents.repo");
             board.flush();
@@ -588,6 +592,10 @@ impl Board {
         }
         if board.seed_sandbox_profiles_if_empty() {
             tracing::info!("seeded sandbox profile catalog from execution.agents");
+            board.flush();
+        }
+        if board.ensure_ops_sandbox_profile() {
+            tracing::info!("seeded ops sandbox profile for control-plane seat");
             board.flush();
         }
         if board.seed_workspace_binding_if_empty() {
@@ -1611,10 +1619,11 @@ impl Board {
     // Public surface for the follow-on api-supervisor card. Unit tests exercise
     // it; production callers land with REST/MCP wiring.
 
-    /// Seed one profile from YAML AgentConfig when the catalog is empty.
-    /// Returns true when a profile was inserted. YAML remains fallback only
-    /// after the catalog is populated. Policy is stored as YAML **content**
-    /// (file at `agents.policy` is read once at seed).
+    /// Seed worker `default` + ops seat profiles from YAML when the catalog is
+    /// empty. Returns true when profiles were inserted. YAML remains fallback
+    /// only after the catalog is populated. Policy is stored as YAML **content**
+    /// (file at `agents.policy` / [`crate::model::OPS_SANDBOX_POLICY_PATH`]
+    /// is read once at seed).
     pub fn seed_sandbox_profiles_if_empty(&self) -> bool {
         self.seed_sandbox_profiles_from(&self.schema.execution.agents)
     }
@@ -1647,7 +1656,31 @@ impl Board {
                 engine,
             },
         );
+        let ops = crate::model::ops_sandbox_profile_from_agents(agents);
+        s.sandbox_profiles.insert(ops.id.clone(), ops);
         s.default_sandbox_profile_id = Some(id);
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// Insert the `ops` catalog entry when missing (never overwrite). Lets
+    /// boards that already have a worker default still select the ops seat in
+    /// Settings. Returns true when a profile was inserted.
+    pub fn ensure_ops_sandbox_profile(&self) -> bool {
+        self.ensure_ops_sandbox_profile_from(&self.schema.execution.agents)
+    }
+
+    /// Same as [`Self::ensure_ops_sandbox_profile`] with an explicit AgentConfig.
+    pub fn ensure_ops_sandbox_profile_from(&self, agents: &AgentConfig) -> bool {
+        let mut s = self.state.write();
+        if s.sandbox_profiles
+            .contains_key(crate::model::OPS_SANDBOX_PROFILE_ID)
+        {
+            return false;
+        }
+        let ops = crate::model::ops_sandbox_profile_from_agents(agents);
+        s.sandbox_profiles.insert(ops.id.clone(), ops);
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         true
@@ -7429,17 +7462,64 @@ mod tests {
         assert!(b.list_sandbox_profiles().is_empty());
         assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
         let profiles = b.list_sandbox_profiles();
-        assert_eq!(profiles.len(), 1);
-        let p = &profiles[0];
-        assert_eq!(p.id, "default");
+        assert_eq!(profiles.len(), 2);
+        let p = b.get_sandbox_profile("default").expect("default");
         assert_eq!(p.image, "seed-image:test");
         assert_eq!(p.policy, SEED_POLICY_YAML);
         assert_eq!(p.cpu.as_deref(), Some("4"));
         assert_eq!(p.memory.as_deref(), Some("8Gi"));
         assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
+        let ops = b.get_sandbox_profile("ops").expect("ops");
+        assert_eq!(ops.name, "Ops");
+        assert_eq!(ops.image, "seed-image:test");
+        assert_eq!(ops.cpu.as_deref(), Some(crate::model::OPS_SANDBOX_CPU));
+        assert_eq!(ops.memory.as_deref(), Some(crate::model::OPS_SANDBOX_MEMORY));
+        assert_ne!(
+            ops.cpu, p.cpu,
+            "ops cpu must stay distinct from worker default"
+        );
+        assert_ne!(
+            ops.memory, p.memory,
+            "ops memory must stay distinct from worker default"
+        );
+        assert!(
+            !ops.policy.contains("github.com") && !ops.policy.contains("name: github"),
+            "ops policy must not copy worker GitHub egress"
+        );
         // Second seed is a no-op.
         assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
-        assert_eq!(b.list_sandbox_profiles().len(), 1);
+        assert_eq!(b.list_sandbox_profiles().len(), 2);
+    }
+
+    #[test]
+    fn sandbox_profiles_ensure_ops_when_catalog_already_has_default() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-sbx-ensure-ops-{}",
+                std::process::id()
+            )),
+        );
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "worker:1".into(),
+            policy: SEED_POLICY_YAML.into(),
+            cpu: Some("2".into()),
+            memory: Some("4Gi".into()),
+            engine: Some("cursor".into()),
+        })
+        .expect("default");
+        b.set_default_sandbox_profile("default").unwrap();
+        assert!(b.get_sandbox_profile("ops").is_none());
+        assert!(b.ensure_ops_sandbox_profile_from(&agents_for_seed()));
+        let ops = b.get_sandbox_profile("ops").expect("ops");
+        assert_eq!(ops.cpu.as_deref(), Some(crate::model::OPS_SANDBOX_CPU));
+        assert_eq!(ops.memory.as_deref(), Some(crate::model::OPS_SANDBOX_MEMORY));
+        // Never overwrite an existing ops entry.
+        assert!(!b.ensure_ops_sandbox_profile_from(&agents_for_seed()));
+        assert_eq!(b.list_sandbox_profiles().len(), 2);
+        assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
     }
 
     fn agents_with_repo() -> AgentConfig {
@@ -8166,7 +8246,10 @@ mod tests {
             ..Default::default()
         };
         assert!(b.seed_sandbox_profiles_from(&agents));
-        assert_eq!(b.list_sandbox_profiles()[0].policy, yaml);
+        assert_eq!(
+            b.get_sandbox_profile("default").expect("default").policy,
+            yaml
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8297,7 +8380,7 @@ mod tests {
             restored.default_sandbox_profile_id().as_deref(),
             Some("ci")
         );
-        assert_eq!(restored.list_sandbox_profiles().len(), 2);
+        assert_eq!(restored.list_sandbox_profiles().len(), 3);
         let p = restored.get(project.id).expect("project");
         assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
         // Catalog already populated — must not re-seed over existing profiles.

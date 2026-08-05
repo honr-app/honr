@@ -80,6 +80,13 @@ order:
    / `engine` in `honr.yaml` (also used to seed the catalog when it is empty at
    load)
 
+Empty-catalog seed inserts two profiles: **`default`** (card worker, from
+`execution.agents` image/policy/cpu/memory) and **`ops`** (control-plane seat,
+from [`sandbox/ops-policy.yaml`](../sandbox/ops-policy.yaml) with lighter
+cpu/memory). Boards that already have a worker catalog still get `ops` via
+`ensure_ops_sandbox_profile` at boot when it is missing. The global default
+stays the worker profile; pick `ops` in Settings when starting an ops seat.
+
 Profile `policy` is **inline YAML text** stored on the board (edited in Settings
 as a textarea). At create, the supervisor writes a temp file for OpenShell's
 `--policy` flag. The host path in `execution.agents.policy` is seed/fallback
