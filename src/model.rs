@@ -720,6 +720,38 @@ pub struct SandboxProfile {
     pub engine: Option<String>,
 }
 
+/// Catalog id for the privileged ops control-plane seat (not the card worker).
+pub const OPS_SANDBOX_PROFILE_ID: &str = "ops";
+
+/// Host-path seed source for the ops profile policy (inline after seed).
+pub const OPS_SANDBOX_POLICY_PATH: &str = "sandbox/ops-policy.yaml";
+
+/// Lighter create knobs than the worker default — chat seat, not a build box.
+pub const OPS_SANDBOX_CPU: &str = "1";
+pub const OPS_SANDBOX_MEMORY: &str = "2Gi";
+
+/// Build the seedable `ops` catalog entry from AgentConfig image/engine and
+/// [`OPS_SANDBOX_POLICY_PATH`]. Cpu/memory stay distinct from the worker default.
+pub fn ops_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) -> SandboxProfile {
+    let engine = {
+        let e = agents.engine.trim();
+        if e.is_empty() {
+            None
+        } else {
+            Some(e.to_string())
+        }
+    };
+    SandboxProfile {
+        id: OPS_SANDBOX_PROFILE_ID.into(),
+        name: "Ops".into(),
+        image: agents.image.clone(),
+        policy: resolve_policy_yaml(OPS_SANDBOX_POLICY_PATH),
+        cpu: Some(OPS_SANDBOX_CPU.into()),
+        memory: Some(OPS_SANDBOX_MEMORY.into()),
+        engine,
+    }
+}
+
 /// Stable id slug from a display name. Lowercase ASCII alphanumerics; runs of
 /// whitespace/`_`/`-` become a single hyphen. Empty/punctuation-only names
 /// fall back to `profile` so create never invents a blank key.
@@ -1165,5 +1197,50 @@ mod tests {
         assert_eq!(slugify_sandbox_profile_id("!!!"), "profile");
         assert_eq!(slugify_sandbox_profile_id(""), "profile");
         assert_eq!(slugify_sandbox_profile_id("A"), "a");
+    }
+
+    #[test]
+    fn ops_sandbox_policy_file_is_distinct_from_worker() {
+        let ops = std::fs::read_to_string(OPS_SANDBOX_POLICY_PATH)
+            .unwrap_or_else(|e| panic!("read {OPS_SANDBOX_POLICY_PATH}: {e}"));
+        let worker = std::fs::read_to_string("sandbox/policy.yaml")
+            .unwrap_or_else(|e| panic!("read sandbox/policy.yaml: {e}"));
+        assert!(
+            ops.contains("honr-mcp") && ops.contains("host.docker.internal"),
+            "ops policy must allow host honr MCP egress"
+        );
+        assert!(
+            !ops.contains("name: github") && !ops.contains("api.github.com"),
+            "ops must not copy worker GitHub egress"
+        );
+        assert!(
+            !ops.contains("package-registries") && !ops.contains("index.crates.io"),
+            "ops must not copy worker package-registry egress"
+        );
+        assert!(
+            !worker.contains("honr-mcp") && !worker.contains("host.docker.internal"),
+            "worker policy stays air-gapped from honr MCP"
+        );
+        assert!(
+            worker.contains("name: github") && worker.contains("api.github.com"),
+            "worker keeps GitHub code egress"
+        );
+        openshell_policy::parse_sandbox_policy(&ops).expect("ops-policy.yaml parses");
+        openshell_policy::parse_sandbox_policy(&worker).expect("policy.yaml parses");
+
+        let agents = crate::schema::AgentConfig {
+            image: "honr-sandbox:latest".into(),
+            engine: "cursor".into(),
+            cpu: Some("2".into()),
+            memory: Some("4Gi".into()),
+            ..Default::default()
+        };
+        let profile = ops_sandbox_profile_from_agents(&agents);
+        assert_eq!(profile.id, OPS_SANDBOX_PROFILE_ID);
+        assert_eq!(profile.cpu.as_deref(), Some(OPS_SANDBOX_CPU));
+        assert_eq!(profile.memory.as_deref(), Some(OPS_SANDBOX_MEMORY));
+        assert_ne!(profile.cpu, agents.cpu);
+        assert_ne!(profile.memory, agents.memory);
+        assert_eq!(profile.policy, ops);
     }
 }
