@@ -89,8 +89,8 @@ Boards that already have a worker catalog still get `ops` via
 stays the worker profile; pick `ops` in Settings when starting an ops seat.
 The supervisor materializes that seat from the Board ops-session record
 (create/reuse sandbox, detached agent, park-like keep across restart, stop)
-without the card claim/heartbeat/report path. Start, TTY attach/reconnect, and
-stop: [Ops seat](ops-seat.md).
+without the card claim/heartbeat/report path. Cockpit chat is the primary
+attach; start / park / stop and optional TTY: [Ops seat](ops-seat.md).
 
 Profile `policy` is **inline YAML text** stored on the board (edited in Settings
 as a textarea). That is the source of truth. At create, the supervisor writes a
