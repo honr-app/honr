@@ -52,7 +52,7 @@ pub struct BoardState {
     /// Sealed GitHub App credentials (DB ciphertext). Decrypt only via `secrets`.
     #[serde(default)]
     pub github_app_sealed: Option<String>,
-    /// GitHub App installation used to mint sandbox `GITHUB_TOKEN`s.
+    /// GitHub App installation used to mint sandbox `GH_TOKEN`s.
     #[serde(default)]
     pub github_app_installation_id: Option<u64>,
     /// Sealed local-admin auth (password hash + session key). Decrypt via `secrets`.

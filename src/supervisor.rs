@@ -1836,7 +1836,7 @@ async fn finish(
     //
     // The supervisor used to script the publish itself, justified as
     // "deterministic, and it keeps gh out of the agent's hands". The second
-    // half was never true — gh is in the image and GITHUB_TOKEN is in the
+    // half was never true — gh is in the image and GH_TOKEN is in the
     // environment, so the agent always had this capability. And the
     // determinism bought nothing: every one of upload-dest-is-a-directory,
     // non-idempotent `gh pr create`, URL-scraped-from-stdout and
@@ -2047,7 +2047,7 @@ fn agent_env() -> Vec<(String, String)> {
 /// A credential helper that echoes the injected token. The value is OpenShell's
 /// opaque placeholder; the egress proxy substitutes the real one.
 const GIT_CRED: &str =
-    r#"credential.helper=!f(){ echo username=x-access-token; echo password=$GITHUB_TOKEN; };f"#;
+    r#"credential.helper=!f(){ echo username=x-access-token; echo password=$GH_TOKEN; };f"#;
 
 /// Marker lines the supervisor reads back out of the clone step, so the
 /// briefing can tell the agent what it is walking into.
@@ -2353,7 +2353,6 @@ fn pr_lookup_script(cfg: &AgentConfig, branch: &str) -> String {
     };
     format!(
         r#"set -e
-export GH_TOKEN=$GITHUB_TOKEN
 row=$(gh pr list --repo {upstream} --head {head} --state open --json url,mergeable --jq '.[0] // empty')
 if [ -n "$row" ]; then
   url=$(printf '%s' "$row" | jq -r '.url // empty')
@@ -2369,7 +2368,6 @@ fn pr_view_binding_script(pr_url: &str) -> String {
     let url = pr_url.replace('\'', r#"'\''"#);
     format!(
         r#"set -e
-export GH_TOKEN=$GITHUB_TOKEN
 gh pr view '{url}' --json url,baseRefName,headRefName,baseRepository,headRepository \
   --jq '"HONR-PR-BIND="+(.url//"")+"|"+(.baseRepository.nameWithOwner//"")+"|"+(.baseRefName//"")+"|"+(.headRepository.nameWithOwner//"")+"|"+(.headRefName//"")'"#
     )

@@ -1,10 +1,12 @@
-//! GitHub App JWT + installation access tokens for sandbox `GITHUB_TOKEN`.
+//! GitHub App JWT + installation access tokens for sandbox `GH_TOKEN`.
 //!
 //! OpenShell has no App-native refresh strategy, so honr mints short-lived
 //! installation tokens and upserts them into the gateway `github` provider.
+//! Only `GH_TOKEN` is set — never `GITHUB_TOKEN` (gh prefers `GH_TOKEN`, and a
+//! leftover user PAT under that name would shadow the App token).
 
 use crate::model::OpenShellProviderDesired;
-use crate::secrets::{seal_string_map, GitHubAppBundle};
+use crate::secrets::{open_string_map, seal_string_map, GitHubAppBundle};
 use crate::store::SharedBoard;
 
 use chrono::{DateTime, Duration, Utc};
@@ -14,8 +16,8 @@ use std::collections::BTreeMap;
 
 /// Desired OpenShell provider name (also attach name).
 pub const PROVIDER_NAME: &str = "github";
-/// Env / credential key sandboxes and `gh` expect.
-pub const CREDENTIAL_KEY: &str = "GITHUB_TOKEN";
+/// Env / credential key sandboxes and `gh` expect (`gh` prefers this over `GITHUB_TOKEN`).
+pub const CREDENTIAL_KEY: &str = "GH_TOKEN";
 /// Remint when this close to expiry (installation tokens last ~1h).
 pub const REFRESH_SKEW: Duration = Duration::minutes(10);
 
@@ -235,10 +237,24 @@ pub async fn ensure_github_provider(board: &SharedBoard) -> Result<bool, Error> 
 
     let cache = board.github_app_token_cache();
     let now = Utc::now();
+    ensure_desired_row(board, None)?;
+
+    // Sweeper calls this every tick — stay quiet when the cache is fresh and
+    // the gateway already has GH_TOKEN without a leftover GITHUB_TOKEN.
     if !cache.needs_mint(now) {
-        // Still ensure desired attach flag / provider row exists.
-        ensure_desired_row(board, None)?;
-        return Ok(true);
+        if !gateway_github_provider_needs_push(board).await? {
+            return Ok(true);
+        }
+        if let Some(token) = sealed_github_token(board)? {
+            ensure_desired_row(board, Some(&token))?;
+            push_github_provider_on_gateway(board, &token).await?;
+            tracing::info!(
+                installation_id,
+                "repaired OpenShell `{PROVIDER_NAME}` provider"
+            );
+            return Ok(true);
+        }
+        // Cache claimed fresh but nothing sealed — fall through to remint.
     }
 
     let minted = match mint_installation_token(&bundle, installation_id).await {
@@ -251,25 +267,8 @@ pub async fn ensure_github_provider(board: &SharedBoard) -> Result<bool, Error> 
             return Err(e);
         }
     };
-
     ensure_desired_row(board, Some(&minted.token))?;
-    let desired = board
-        .openshell_providers()
-        .into_iter()
-        .find(|p| p.name == PROVIDER_NAME)
-        .ok_or_else(|| Error::Config("github provider missing after upsert".into()))?;
-
-    let credentials = provider_credentials(&minted.token);
-    let os = board.openshell_client();
-    os.apply_provider(
-        PROVIDER_NAME,
-        "github",
-        credentials,
-        desired.config.clone(),
-        None,
-    )
-    .await
-    .map_err(|e| Error::Api(format!("openshell apply github provider: {e}")))?;
+    push_github_provider_on_gateway(board, &minted.token).await?;
 
     board.set_github_app_token_cache(TokenCache {
         expires_at: Some(minted.expires_at),
@@ -283,6 +282,85 @@ pub async fn ensure_github_provider(board: &SharedBoard) -> Result<bool, Error> 
     Ok(true)
 }
 
+/// True when the gateway is missing `github`, lacks `GH_TOKEN`, or still has
+/// a leftover `GITHUB_TOKEN` credential key.
+async fn gateway_github_provider_needs_push(board: &SharedBoard) -> Result<bool, Error> {
+    let os = board.openshell_client();
+    let list = os
+        .list_providers()
+        .await
+        .map_err(|e| Error::Api(format!("openshell list providers: {e}")))?;
+    let Some(p) = list.iter().find(|p| p.name == PROVIDER_NAME) else {
+        return Ok(true);
+    };
+    let has_gh = p.credential_keys.iter().any(|k| k == CREDENTIAL_KEY);
+    let has_legacy = p.credential_keys.iter().any(|k| k == "GITHUB_TOKEN");
+    Ok(!has_gh || has_legacy)
+}
+
+/// Create or update the gateway provider. Never create when it already exists
+/// (that races the sweeper and logs "provider already exists").
+async fn push_github_provider_on_gateway(board: &SharedBoard, token: &str) -> Result<(), Error> {
+    let desired = board
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == PROVIDER_NAME)
+        .ok_or_else(|| Error::Config("github provider missing after upsert".into()))?;
+    let os = board.openshell_client();
+    let exists = os
+        .list_providers()
+        .await
+        .map_err(|e| Error::Api(format!("openshell list providers: {e}")))?
+        .iter()
+        .any(|p| p.name == PROVIDER_NAME);
+
+    if exists {
+        let mut credentials = provider_credentials(token);
+        // Empty value clears a merged leftover from older PAT / App syncs.
+        credentials.insert("GITHUB_TOKEN".into(), String::new());
+        os.update_provider(
+            PROVIDER_NAME,
+            "github",
+            credentials,
+            desired.config.clone(),
+        )
+        .await
+        .map_err(|e| Error::Api(format!("openshell update github provider: {e}")))?;
+    } else {
+        os.create_provider(
+            PROVIDER_NAME,
+            "github",
+            provider_credentials(token),
+            desired.config.clone(),
+        )
+        .await
+        .map_err(|e| Error::Api(format!("openshell create github provider: {e}")))?;
+    }
+    Ok(())
+}
+
+fn sealed_github_token(board: &SharedBoard) -> Result<Option<String>, Error> {
+    let Some(p) = board
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == PROVIDER_NAME)
+    else {
+        return Ok(None);
+    };
+    let Some(sealed) = p.credentials_sealed.as_deref() else {
+        return Ok(None);
+    };
+    let map = open_string_map(sealed).map_err(|e| Error::Config(format!("open GH_TOKEN: {e}")))?;
+    if let Some(t) = map.get(CREDENTIAL_KEY).filter(|t| !t.is_empty()) {
+        return Ok(Some(t.clone()));
+    }
+    // Migrate one-shot from older App syncs that sealed GITHUB_TOKEN.
+    if let Some(t) = map.get("GITHUB_TOKEN").filter(|t| !t.is_empty()) {
+        return Ok(Some(t.clone()));
+    }
+    Ok(None)
+}
+
 fn ensure_desired_row(board: &SharedBoard, fresh_token: Option<&str>) -> Result<(), Error> {
     let existing = board
         .openshell_providers()
@@ -291,10 +369,13 @@ fn ensure_desired_row(board: &SharedBoard, fresh_token: Option<&str>) -> Result<
 
     let (credentials_sealed, credential_keys) = if let Some(token) = fresh_token {
         let sealed = seal_string_map(&provider_credentials(token))
-            .map_err(|e| Error::Config(format!("seal GITHUB_TOKEN: {e}")))?;
+            .map_err(|e| Error::Config(format!("seal GH_TOKEN: {e}")))?;
         (Some(sealed), vec![CREDENTIAL_KEY.to_string()])
     } else if let Some(ref e) = existing {
-        (e.credentials_sealed.clone(), e.credential_keys.clone())
+        // Prefer already-sealed GH_TOKEN; if only legacy GITHUB_TOKEN is sealed,
+        // keep the blob for migration via sealed_github_token — credential_keys
+        // advertise GH_TOKEN only.
+        (e.credentials_sealed.clone(), vec![CREDENTIAL_KEY.to_string()])
     } else {
         (None, vec![CREDENTIAL_KEY.to_string()])
     };
@@ -381,10 +462,27 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let key_path = dir.join("master.key");
         let env = crate::secrets::master_key_env::Guard::with_key_path(&key_path);
-        let board = std::sync::Arc::new(Board::new(
-            crate::schema::Schema::default(),
-            dir.join("board.json"),
+        let mut board_inner = Board::new(crate::schema::Schema::default(), dir.join("board.json"));
+        // ensure_github_provider lists then create/updates the gateway provider.
+        board_inner.openshell = Some(OpenShell::mock(
+            |argv| {
+                if argv.first().map(String::as_str) == Some("provider") {
+                    Output {
+                        code: 0,
+                        stdout: "[]".into(),
+                        stderr: String::new(),
+                    }
+                } else {
+                    Output {
+                        code: 1,
+                        stdout: String::new(),
+                        stderr: format!("unexpected mock argv: {argv:?}"),
+                    }
+                }
+            },
+            StdDuration::from_secs(5),
         ));
+        let board = std::sync::Arc::new(board_inner);
         (dir, board, env)
     }
 
@@ -465,9 +563,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_credentials_sets_github_token() {
+    fn provider_credentials_sets_gh_token_only() {
         let m = provider_credentials("ghs_test");
         assert_eq!(m.get(CREDENTIAL_KEY).map(String::as_str), Some("ghs_test"));
+        assert!(!m.contains_key("GITHUB_TOKEN"));
+        assert_eq!(m.len(), 1);
     }
 
     #[test]
@@ -496,11 +596,12 @@ mod tests {
         let (dir, board, _env) = test_board("fresh");
         seal_test_app(&board);
         board.set_github_app_installation_id(Some(99));
+        ensure_desired_row(&board, Some("ghs_cached_only")).expect("seed sealed");
         board.set_github_app_token_cache(TokenCache {
             expires_at: Some(Utc::now() + Duration::hours(1)),
             last_error: None,
         });
-        // Point at a dead base — mint must not be attempted.
+        // Point at a dead base — mint must not be attempted (sealed token reused).
         let _api = github_api_env::Guard::set("http://127.0.0.1:1");
         let minted = ensure_github_provider(&board).await.expect("ensure");
         assert!(minted);
@@ -510,6 +611,11 @@ mod tests {
             .find(|p| p.name == PROVIDER_NAME)
             .expect("desired github row");
         assert!(p.attach_to_sandboxes);
+        let opened = open_string_map(p.credentials_sealed.as_deref().unwrap()).expect("open");
+        assert_eq!(
+            opened.get(CREDENTIAL_KEY).map(String::as_str),
+            Some("ghs_cached_only")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

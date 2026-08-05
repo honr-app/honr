@@ -8,15 +8,18 @@ needs to show and shape work.
 
 ```bash
 cargo run                 # :8080 (API, SSE, MCP, and the built UI)
+make dev                  # same, but cargo-watch rebuilds/restarts on Rust changes
 ```
 
-Serves `web/dist` if it exists. For hot reload:
+Serves `web/dist` if it exists. For UI hot reload (pair with `cargo run` or `make dev`):
 
 ```bash
-cd web && npm install && npm run dev
+make dev-ui               # or: cd web && npm install && npm run dev
 ```
 
-`:5173` proxies to `:8080`. `HONR_PORT` overrides the listen port.
+`:5173` proxies to `:8080`. `HONR_PORT` overrides the listen port. `make dev`
+needs [`cargo-watch`](https://crates.io/crates/cargo-watch)
+(`cargo install cargo-watch` or `brew install cargo-watch`).
 
 ## Board database
 

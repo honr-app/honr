@@ -47,7 +47,15 @@ export function Login({
   return (
     <div className="login-shell" data-testid="login">
       <section className="login-card" aria-labelledby="login-title">
-        <h1 id="login-title">honr</h1>
+        <h1 id="login-title" className="login-brand">
+          <img
+            src="/honr-logo.png"
+            alt="honr"
+            className="login-brand-mark"
+            width={56}
+            height={56}
+          />
+        </h1>
         <p className="dim">
           {bootstrap
             ? "First run — set a local admin password. The board stays locked until this is done."

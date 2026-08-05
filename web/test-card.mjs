@@ -589,7 +589,7 @@ const openshellProvidersHtml = renderToString(
         name: "gh-clankr",
         type: "github",
         config: {},
-        credential_keys: ["GITHUB_TOKEN"],
+        credential_keys: ["GH_TOKEN"],
         has_credentials: true,
         has_refresh: false,
         attach_to_sandboxes: true,
@@ -603,7 +603,7 @@ const openshellProvidersHtml = renderToString(
         display_name: "GitHub",
         description: "",
         category: "scm",
-        credential_env_vars: ["GITHUB_TOKEN"],
+        credential_env_vars: ["GH_TOKEN"],
         config_keys: [],
       },
     ],
@@ -635,7 +635,7 @@ const openshellManagedGithubHtml = renderToString(
         name: "github",
         type: "github",
         config: {},
-        credential_keys: ["GITHUB_TOKEN"],
+        credential_keys: ["GH_TOKEN"],
         has_credentials: true,
         has_refresh: false,
         attach_to_sandboxes: true,
@@ -665,12 +665,12 @@ assert(
   "Managed github row marks App source",
 );
 assert(
-  openshellManagedGithubHtml.includes("secrets: GITHUB_TOKEN · GitHub App"),
+  openshellManagedGithubHtml.includes("secrets: GH_TOKEN · GitHub App"),
   "Managed github row lists attached env vars like other providers",
 );
 assert(
-  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-cred-GITHUB_TOKEN\""),
-  "Managed github form still shows GITHUB_TOKEN field",
+  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-cred-GH_TOKEN\""),
+  "Managed github form still shows GH_TOKEN field",
 );
 assert(
   openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-app-managed-note\""),
