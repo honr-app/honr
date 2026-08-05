@@ -774,6 +774,69 @@ main > :first-child { flex: 1; min-width: 0; }
   font-size: 0.92em;
 }
 
+/* OperatorGuide — reusable MCP + first-loop onboarding (Board empty / Help). */
+.operator-guide {
+  max-width: 640px;
+}
+.operator-guide-section {
+  margin-top: 0;
+}
+.operator-guide-section + .operator-guide-section {
+  margin-top: 28px;
+}
+.operator-guide-section h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.operator-guide-section > p {
+  margin: 0 0 12px;
+  line-height: 1.55;
+}
+.operator-guide-steps {
+  margin: 0;
+  padding-left: 22px;
+  line-height: 1.65;
+}
+.operator-guide-steps li {
+  margin-bottom: 8px;
+}
+.operator-guide-steps code {
+  font-size: 0.92em;
+}
+.operator-guide-snippet {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  user-select: all;
+}
+.operator-guide-examples {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.operator-guide-examples h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.operator-guide-example-label {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--dim);
+}
+.operator-guide-section > p[data-testid="operator-guide-idle-note"] {
+  margin-top: 12px;
+}
+
 .board-section-head {
   display: flex;
   align-items: baseline;
