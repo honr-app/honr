@@ -2,7 +2,11 @@
   "mcpServers": {
     "honr": {
       "type": "http",
-      "url": "http://127.0.0.1:8080/mcp"
+      "url": "http://127.0.0.1:8080/mcp",
+      "auth": {
+        "CLIENT_ID": "honr-cursor",
+        "scopes": ["mcp"]
+      }
     },
     "playwright": {
       "command": "npx",

@@ -23,8 +23,27 @@ export function Login({
     return null;
   }, []);
 
+  /** Safe same-origin return for MCP OAuth authorize after board login. */
+  const returnNext = useMemo(() => {
+    const raw = new URLSearchParams(window.location.search).get("next");
+    if (!raw || !raw.startsWith("/oauth/authorize")) return null;
+    if (raw.includes("//") || raw.includes("\\")) return null;
+    return raw;
+  }, []);
+
   const bootstrap = status.bootstrap;
   const submitLabel = bootstrap ? "Create admin & continue" : "Sign in";
+
+  const finishAuthed = (next: AuthStatus) => {
+    if (returnNext) {
+      window.location.assign(returnNext);
+      return;
+    }
+    if (window.location.search) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    onAuthed(next);
+  };
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -33,13 +52,7 @@ export function Login({
     const body = { username: username.trim(), password };
     const req = bootstrap ? api.bootstrap(body) : api.login(body);
     req
-      .then((next) => {
-        // Drop auth_error query if present.
-        if (window.location.search) {
-          window.history.replaceState({}, "", window.location.pathname);
-        }
-        onAuthed(next);
-      })
+      .then(finishAuthed)
       .catch((err) => setError(String(err)))
       .finally(() => setBusy(false));
   };
@@ -119,7 +132,11 @@ export function Login({
             </div>
             <a
               className="login-github-btn"
-              href={`/auth/github?return_origin=${encodeURIComponent(window.location.origin)}`}
+              href={`/auth/github?return_origin=${encodeURIComponent(window.location.origin)}${
+                returnNext
+                  ? `&next=${encodeURIComponent(returnNext)}`
+                  : ""
+              }`}
             >
               Sign in with GitHub
             </a>

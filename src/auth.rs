@@ -1,7 +1,8 @@
 //! Operator authentication: local admin + GitHub App OAuth allowlist.
 //!
 //! Session cookies gate `/api` (except webhooks). `/auth/*`, `/healthz`, and
-//! `/mcp` stay reachable without a session.
+//! MCP OAuth discovery/token endpoints stay reachable without a session.
+//! `/mcp` itself uses Bearer tokens (see `mcp_oauth`) once admin exists.
 
 use crate::secrets::{seal_auth, AuthBundle};
 use crate::store::SharedBoard;
@@ -96,6 +97,8 @@ pub struct AuthSettingsWrite {
 pub struct GithubStartQuery {
     /// Browser origin (`http://localhost:5173`). Preferred over proxy Host headers.
     pub return_origin: Option<String>,
+    /// Optional same-origin path to land on after GitHub login (MCP authorize).
+    pub next: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,7 +133,11 @@ pub fn path_exempt(path: &str) -> bool {
         || path.starts_with("/auth/")
         || path == "/auth"
         || path == "/api/webhooks/github"
-        || path.starts_with("/mcp")
+        // MCP OAuth AS + discovery (Bearer gate lives on `/mcp` separately).
+        || path.starts_with("/.well-known/oauth-")
+        || path == "/oauth/register"
+        || path == "/oauth/token"
+        || path.starts_with("/oauth/authorize")
 }
 
 /// Axum middleware: require a valid session for non-exempt paths.
@@ -250,6 +257,22 @@ fn session_from_jar(board: &SharedBoard, jar: &CookieJar) -> Option<SessionUser>
     decode_session(&key, &cookie)
 }
 
+/// Session for MCP authorize consent (and other non-API callers).
+pub fn session_user_from_jar(board: &SharedBoard, jar: &CookieJar) -> Option<SessionUser> {
+    session_from_jar(board, jar)
+}
+
+/// Mint a `honr_session` cookie value for tests / local tooling.
+#[cfg(test)]
+pub fn mint_session_cookie_value(
+    board: &SharedBoard,
+    user: &SessionUser,
+) -> Result<String, String> {
+    let auth = board.auth_bundle().ok_or_else(|| "auth not configured".to_string())?;
+    let key = auth.session_key_bytes().map_err(|e| e.to_string())?;
+    encode_session(&key, user, SESSION_TTL_SECS)
+}
+
 fn session_cookie(value: String) -> Cookie<'static> {
     Cookie::build((SESSION_COOKIE, value))
         .path("/")
@@ -364,16 +387,36 @@ struct OAuthStatePayload {
     exp: u64,
     /// Exact redirect_uri used at authorize time (must match token exchange).
     ru: String,
+    /// Optional post-login path (e.g. `/oauth/authorize?...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next: Option<String>,
+}
+
+/// Only MCP authorize return paths — blocks open redirects via `next`.
+fn sanitize_login_next(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if !raw.starts_with("/oauth/authorize") {
+        return None;
+    }
+    if raw.contains("://") || raw.contains('\\') || raw.contains('\n') || raw.contains('\r') {
+        return None;
+    }
+    Some(raw.to_string())
 }
 
 /// Cookie-less CSRF state — survives Vite↔backend origin splits.
-fn encode_oauth_state(key: &[u8], redirect: &str) -> Result<String, String> {
+fn encode_oauth_state(
+    key: &[u8],
+    redirect: &str,
+    next: Option<&str>,
+) -> Result<String, String> {
     let mut nonce = [0u8; 16];
     rand::rng().fill(&mut nonce);
     let payload = OAuthStatePayload {
         n: hex::encode(nonce),
         exp: now_secs().saturating_add(OAUTH_STATE_TTL_SECS),
         ru: redirect.to_string(),
+        next: next.and_then(sanitize_login_next),
     };
     let json = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
@@ -565,7 +608,7 @@ async fn github_start(
         )
     })?;
     let redirect = redirect_uri_for_start(&headers, q.return_origin.as_deref());
-    let state = encode_oauth_state(&key, &redirect).map_err(|e| {
+    let state = encode_oauth_state(&key, &redirect, q.next.as_deref()).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
@@ -680,9 +723,13 @@ async fn github_callback(
         .ru
         .trim_end_matches("/auth/github/callback")
         .to_string();
+    let dest = match oauth.next.as_deref().and_then(sanitize_login_next) {
+        Some(path) => format!("{home}{path}"),
+        None => format!("{home}/"),
+    };
     Ok((
         jar.add(session_cookie(session)),
-        Redirect::temporary(&format!("{home}/")),
+        Redirect::temporary(&dest),
     ))
 }
 
@@ -986,7 +1033,7 @@ mod tests {
     fn oauth_state_round_trip_embeds_redirect() {
         let key = [3u8; 32];
         let ru = "http://localhost:5173/auth/github/callback";
-        let state = encode_oauth_state(&key, ru).unwrap();
+        let state = encode_oauth_state(&key, ru, None).unwrap();
         let got = decode_oauth_state(&key, &state).unwrap();
         assert_eq!(got.ru, ru);
         assert!(decode_oauth_state(&[0u8; 32], &state).is_none());
@@ -1090,7 +1137,12 @@ mod tests {
     fn path_exempt_rules() {
         assert!(path_exempt("/auth/status"));
         assert!(path_exempt("/api/webhooks/github"));
-        assert!(path_exempt("/mcp"));
+        assert!(!path_exempt("/mcp"));
+        assert!(path_exempt("/.well-known/oauth-protected-resource"));
+        assert!(path_exempt("/.well-known/oauth-authorization-server"));
+        assert!(path_exempt("/oauth/register"));
+        assert!(path_exempt("/oauth/token"));
+        assert!(path_exempt("/oauth/authorize"));
         assert!(path_exempt("/healthz"));
         assert!(!path_exempt("/api/board"));
         assert!(!path_exempt("/api/auth/settings"));
