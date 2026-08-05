@@ -31,8 +31,6 @@ writeFileSync(`${SCRATCH}/honr.yaml`, yaml);
 writeFileSync(`${SCRATCH}/honr.json`, execSync(`node ${ROOT}web/ui-fixture.mjs`).toString());
 mkdirSync(`${SCRATCH}/web`, { recursive: true });
 execSync(`cp -R ${ROOT}web/dist ${SCRATCH}/web/dist`);
-copyFileSync(`${ROOT}sandbox/policy.yaml`, `${SCRATCH}/policy.yaml`);
-
 let honr;
 if (existsSync(`${ROOT}target/debug/honr`)) {
   honr = spawn(`${ROOT}target/debug/honr`, [], {

@@ -296,7 +296,7 @@ mod initial_plan_title_tests {
 /// `pull_request` drives resume remotes. Keep quality gates here.
 pub const DEFAULT_PROJECT_PROMPT: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
-Do not weaken machine.rs invariants, supervisor budget enforcement, or sandbox/policy.yaml; escalate instead.\n\
+Do not weaken machine.rs invariants, supervisor budget enforcement, or the board sandbox-profile policy; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
 Name the repository to clone in each Task's intent and/or definition of done \
 (`owner/name`, and push remote when it differs). Do not invent an owner/name from context; \
@@ -837,16 +837,20 @@ pub fn is_inline_policy_yaml(s: &str) -> bool {
 
 /// Turn `execution.agents.policy` (path or already-inline YAML) into content.
 ///
-/// Resolve policy to YAML text: accept inline content, or read a file path
-/// (used when seeding profiles from honr.yaml).
+/// Live worker policy is the board sandbox profile. This resolves seed /
+/// YAML-fallback text only: inline YAML, the built-in worker default
+/// (`embedded` / legacy `sandbox/policy.yaml` / empty), or an optional path.
 pub fn resolve_policy_yaml(path_or_yaml: &str) -> String {
     if is_inline_policy_yaml(path_or_yaml) {
         return path_or_yaml.to_string();
     }
-    match std::fs::read_to_string(path_or_yaml) {
+    let t = path_or_yaml.trim();
+    if t.is_empty() || t == "embedded" || t == "sandbox/policy.yaml" {
+        return crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY.to_string();
+    }
+    match std::fs::read_to_string(t) {
         Ok(content) if !content.trim().is_empty() => content,
-        Ok(_) => format!("# empty policy file at {path_or_yaml}\nversion: 1\n"),
-        Err(_) => format!("# could not read policy at {path_or_yaml}\nversion: 1\n"),
+        _ => crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY.to_string(),
     }
 }
 
@@ -1203,8 +1207,7 @@ mod tests {
     fn ops_sandbox_policy_file_is_distinct_from_worker() {
         let ops = std::fs::read_to_string(OPS_SANDBOX_POLICY_PATH)
             .unwrap_or_else(|e| panic!("read {OPS_SANDBOX_POLICY_PATH}: {e}"));
-        let worker = std::fs::read_to_string("sandbox/policy.yaml")
-            .unwrap_or_else(|e| panic!("read sandbox/policy.yaml: {e}"));
+        let worker = crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY;
         assert!(
             ops.contains("honr-mcp") && ops.contains("host.docker.internal"),
             "ops policy must allow host honr MCP egress"
@@ -1225,8 +1228,12 @@ mod tests {
             worker.contains("name: github") && worker.contains("api.github.com"),
             "worker keeps GitHub code egress"
         );
+        assert!(
+            worker.contains("/opt/rust/toolchains/**/bin/cargo"),
+            "worker seed allows rustup toolchain cargo for github git deps"
+        );
         openshell_policy::parse_sandbox_policy(&ops).expect("ops-policy.yaml parses");
-        openshell_policy::parse_sandbox_policy(&worker).expect("policy.yaml parses");
+        openshell_policy::parse_sandbox_policy(worker).expect("embedded worker policy parses");
 
         let agents = crate::schema::AgentConfig {
             image: "honr-sandbox:latest".into(),

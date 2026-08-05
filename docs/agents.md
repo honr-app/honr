@@ -80,10 +80,11 @@ order:
    / `engine` in `honr.yaml` (also used to seed the catalog when it is empty at
    load)
 
-Empty-catalog seed inserts two profiles: **`default`** (card worker, from
-`execution.agents` image/policy/cpu/memory) and **`ops`** (control-plane seat,
-from [`sandbox/ops-policy.yaml`](../sandbox/ops-policy.yaml) with lighter
-cpu/memory). Boards that already have a worker catalog still get `ops` via
+Empty-catalog seed inserts two profiles: **`default`** (card worker — image/cpu/memory
+from `execution.agents`, policy from the built-in seed when
+`execution.agents.policy` is `embedded`) and **`ops`** (control-plane seat, from
+[`sandbox/ops-policy.yaml`](../sandbox/ops-policy.yaml) with lighter cpu/memory).
+Boards that already have a worker catalog still get `ops` via
 `ensure_ops_sandbox_profile` at boot when it is missing. The global default
 stays the worker profile; pick `ops` in Settings when starting an ops seat.
 The supervisor materializes that seat from the Board ops-session record
@@ -92,9 +93,9 @@ without the card claim/heartbeat/report path. Start, TTY attach/reconnect, and
 stop: [Ops seat](ops-seat.md).
 
 Profile `policy` is **inline YAML text** stored on the board (edited in Settings
-as a textarea). At create, the supervisor writes a temp file for OpenShell's
-`--policy` flag. The host path in `execution.agents.policy` is seed/fallback
-only: not the catalog source of truth.
+as a textarea). That is the source of truth. At create, the supervisor writes a
+temp file for OpenShell's `--policy` flag. `execution.agents.policy: embedded`
+only seeds an empty catalog — there is no host `sandbox/policy.yaml` to edit.
 
 **Engine** is a field on the sandbox profile (Settings → OpenShell → Profiles).
 When a profile omits it, claim/run falls back to Settings → Agent runtime

@@ -1,6 +1,15 @@
-# honr card-worker sandbox: reach Vertex / Cursor for inference and GitHub for
+//! Built-in sandbox policy text for **empty-catalog seed only**.
+//!
+//! Live worker policy lives on the board sandbox profile (`Settings →
+//! Profiles`, `meta.sandbox_profiles`). Do not reintroduce `sandbox/policy.yaml`
+//! — editing a host file does not change running profiles.
+
+/// Default card-worker OpenShell policy seeded into the `default` profile when
+/// the catalog is empty. After seed, edit the profile on the board.
+pub const DEFAULT_WORKER_SANDBOX_POLICY: &str = r#"# honr card-worker sandbox: reach Vertex / Cursor for inference and GitHub for
 # code. Default-deny includes honr MCP — workers stay air-gapped from the board.
-# The privileged ops seat uses sandbox/ops-policy.yaml instead.
+# The privileged ops seat uses sandbox/ops-policy.yaml (ops profile) instead.
+# Live edits: Settings → OpenShell → Profiles → default (not this string).
 version: 1
 
 filesystem_policy:
@@ -52,12 +61,15 @@ network_policies:
       - { path: /usr/local/bin/agy }
       - { path: /usr/bin/agy }
       - { path: /usr/bin/node }
+      # rustup resolves `cargo` to the toolchain binary; git deps hit github.com
+      # as that path, not the /usr/local/bin or /opt/cargo/bin wrapper.
+      - { path: /usr/local/bin/cargo }
+      - { path: /opt/cargo/bin/cargo }
+      - { path: /opt/rust/toolchains/**/bin/cargo }
 
   # Cargo/npm registries. Use L4 passthrough (`tls: skip`, no `protocol`) —
   # OpenShell MITM injects a CA via SSL_CERT_FILE/CURL_CA_BUNDLE/etc, but
   # cargo's rustls stack uses Mozilla roots and rejects the proxy cert.
-  # Binary allowlist covers /usr/local/bin wrappers (sh → /opt/cargo/bin/cargo)
-  # and the Cursor agent node that shells out to them.
   package_registries:
     name: package-registries
     endpoints:
@@ -68,8 +80,10 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/cargo }
       - { path: /opt/cargo/bin/cargo }
+      - { path: /opt/rust/toolchains/**/bin/cargo }
       - { path: /usr/local/bin/rustc }
       - { path: /opt/cargo/bin/rustc }
+      - { path: /opt/rust/toolchains/**/bin/rustc }
       - { path: /bin/sh }
       - { path: /usr/bin/sh }
       - { path: /bin/bash }
@@ -120,3 +134,4 @@ network_policies:
       - { path: /usr/local/bin/node }
       - { path: /usr/bin/bash }
       - { path: /bin/bash }
+"#;

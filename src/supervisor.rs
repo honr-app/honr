@@ -4043,7 +4043,7 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let containerfile =
             std::fs::read_to_string(root.join("sandbox/Containerfile")).expect("Containerfile");
-        let policy = std::fs::read_to_string(root.join("sandbox/policy.yaml")).expect("policy.yaml");
+        let policy = crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY;
         let ops_policy = std::fs::read_to_string(root.join("sandbox/ops-policy.yaml"))
             .expect("ops-policy.yaml");
         let supervisor_src =
@@ -4062,7 +4062,7 @@ mod tests {
         );
         assert!(
             !policy.contains("/usr/local/bin/bd") && !policy.to_lowercase().contains("beads"),
-            "policy.yaml must not allowlist bd/beads"
+            "embedded worker seed policy must not allowlist bd/beads"
         );
         assert!(
             !ops_policy.contains("/usr/local/bin/bd")

@@ -53,7 +53,7 @@ Task.
 
 An agent that could reach honr's MCP could approve its own review. Worker
 containment is intentional: the card worker is material, not a participant. The
-ops seat is a separate profile and policy (`sandbox/ops-policy.yaml`) so that
+ops seat is a separate sandbox profile (seeded from `sandbox/ops-policy.yaml`) so that
 privileged MCP reach does not share the worker network allow-list.
 
 The durable **ops session** (sandbox environment name, conversation id, running
