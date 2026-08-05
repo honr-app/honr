@@ -455,6 +455,95 @@ pub fn github_api_base() -> String {
     api_base()
 }
 
+/// GitHub PR `mergeable` as returned by the pulls API (`true` / `false` / `null`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrMergeableState {
+    Mergeable,
+    Conflicting,
+    /// `null` / missing — GitHub has not finished computing; retry later.
+    Unknown,
+}
+
+/// Result of a host-side PR conflict check (no sandbox).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrConflictCheck {
+    pub mergeable: PrMergeableState,
+    /// Base branch name (`main`, etc.).
+    pub base_ref: Option<String>,
+}
+
+/// `GET /repos/{owner}/{repo}/pulls/{n}` using the App installation token.
+///
+/// Returns `Ok(None)` when App/installation are not configured. Used by Review
+/// catch-up after MainAdvanced — observe conflicts; do not rebase in a sandbox.
+pub async fn fetch_pr_conflict_check(
+    board: &SharedBoard,
+    pr_url: &str,
+) -> Result<Option<PrConflictCheck>, Error> {
+    let Some(token) = host_installation_token(board).await? else {
+        return Ok(None);
+    };
+    let Some((owner_repo, number)) = crate::store::parse_github_pr_url(pr_url) else {
+        return Err(Error::Config(format!(
+            "not a github.com pull URL: {pr_url}"
+        )));
+    };
+    fetch_pr_conflict_check_with_token(&token, &owner_repo, number).await
+}
+
+pub(crate) async fn fetch_pr_conflict_check_with_token(
+    token: &str,
+    owner_repo: &str,
+    number: u64,
+) -> Result<Option<PrConflictCheck>, Error> {
+    #[derive(Deserialize)]
+    struct Base {
+        #[serde(rename = "ref")]
+        base_ref: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        /// `true` / `false` / omitted or null while GitHub computes.
+        mergeable: Option<bool>,
+        base: Option<Base>,
+    }
+    let url = format!(
+        "{}/repos/{owner_repo}/pulls/{number}",
+        api_base()
+    );
+    let resp = client()?
+        .get(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| Error::Api(format!("GET pull: {e}")))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::Api(format!(
+            "GET pull HTTP {status}: {}",
+            body.chars().take(200).collect::<String>()
+        )));
+    }
+    let body: Resp = resp
+        .json()
+        .await
+        .map_err(|e| Error::Api(format!("GET pull json: {e}")))?;
+    let mergeable = match body.mergeable {
+        Some(true) => PrMergeableState::Mergeable,
+        Some(false) => PrMergeableState::Conflicting,
+        None => PrMergeableState::Unknown,
+    };
+    Ok(Some(PrConflictCheck {
+        mergeable,
+        base_ref: body.base.and_then(|b| b.base_ref),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,6 +838,76 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, 99);
         assert_eq!(list[0].account_login, "clankrshq");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_pr_conflict_check_maps_mergeable_states() {
+        let app = Router::new()
+            .route(
+                "/repos/{owner}/{repo}/pulls/{number}",
+                get(|axum::extract::Path((_, _, number)): axum::extract::Path<(
+                    String,
+                    String,
+                    u64,
+                )>| async move {
+                    if number == 404 {
+                        return (
+                            axum::http::StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({ "message": "Not Found" })),
+                        );
+                    }
+                    let body = match number {
+                        1 => serde_json::json!({
+                            "mergeable": true,
+                            "base": { "ref": "main" }
+                        }),
+                        2 => serde_json::json!({
+                            "mergeable": false,
+                            "base": { "ref": "main" }
+                        }),
+                        3 => serde_json::json!({
+                            "mergeable": null,
+                            "base": { "ref": "main" }
+                        }),
+                        _ => serde_json::json!({ "message": "Not Found" }),
+                    };
+                    (axum::http::StatusCode::OK, Json(body))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let _api = github_api_env::Guard::set(&format!("http://{addr}"));
+
+        let m = fetch_pr_conflict_check_with_token("tok", "o/r", 1)
+            .await
+            .expect("ok")
+            .expect("some");
+        assert_eq!(m.mergeable, PrMergeableState::Mergeable);
+        assert_eq!(m.base_ref.as_deref(), Some("main"));
+
+        let c = fetch_pr_conflict_check_with_token("tok", "o/r", 2)
+            .await
+            .expect("ok")
+            .expect("some");
+        assert_eq!(c.mergeable, PrMergeableState::Conflicting);
+
+        let u = fetch_pr_conflict_check_with_token("tok", "o/r", 3)
+            .await
+            .expect("ok")
+            .expect("some");
+        assert_eq!(u.mergeable, PrMergeableState::Unknown);
+
+        let missing = fetch_pr_conflict_check_with_token("tok", "o/r", 404)
+            .await
+            .expect("ok");
+        assert!(missing.is_none());
+
         handle.abort();
     }
 }

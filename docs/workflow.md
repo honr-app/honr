@@ -85,14 +85,13 @@ Ingress is `POST /api/webhooks/github`. A push to the default branch emits
    `rebase_requested` (merge→Done catch-up). Webhook and github-poll merge
    paths use the same Board completion helper, so sibling Review catch-up
    matches.
-2. **Review rebase catch-up** on tip advance: every Review card with an open
-   PR is queued for supervisor-driven git rebase onto the new default-branch
-   tip (including when a Done sibling already exists, and also when none does).
-   Clean host rebase keeps the card in Review; conflict may bounce to
-   Backlog. If the Review sandbox is not live, the supervisor recreates it
-   and runs the host rebase (or escalates when recreate fails) — delayed
-   catch-up must not leave `rebase_requested` queued forever with the card
-   looking idle.
+2. **Review conflict observation** on tip advance: every Review card with an
+   open PR targeting the advanced base is queued (`rebase_requested`) for a
+   host-side GitHub API `mergeable` check (App installation token — not a
+   sandbox `git rebase`). `MERGEABLE` clears the queue and keeps the card in
+   Review; `CONFLICTING` bounces to Backlog with a BINDING note so a worker
+   can reclaim and rebase; `UNKNOWN` / null stays queued and retries on the
+   next sweep (GitHub computes mergeable asynchronously).
 3. **Live runs**: each Claimed / Running card gets a steer note to fetch /
    rebase onto upstream main. Because steer alone does not inject mid-turn,
    honr then parks and unparks so the agent acts on resume. Sandbox and
