@@ -2110,9 +2110,9 @@ test -d {VERDICT_DIR}"#
     Ok(())
 }
 
-/// Reference clone recipe (unit-tested). Documents the intended remote/branch
-/// layout; the agent performs the clone from the briefing.
-#[allow(dead_code)]
+/// Clone the card branch into a fresh sandbox workdir and attempt rebase onto
+/// base. Used when recovering a dead Review sandbox for host rebase; cold runs
+/// still leave clone to the agent briefing.
 fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
     let clone = cfg.repo.clone_target();
     let upstream = cfg.repo.upstream.trim();
@@ -2255,6 +2255,85 @@ fi"#
     )
 }
 
+/// Ensure a live sandbox for host rebase. When the Review box is gone, recreate
+/// it and report that the workdir needs a fresh clone. Never silent-continue:
+/// recreate failure is surfaced on the card.
+async fn ensure_live_sandbox_for_rebase(
+    board: &SharedBoard,
+    os: &OpenShell,
+    cfg: &AgentConfig,
+    item: &crate::model::WorkItem,
+    sandbox: &str,
+) -> Result<(String, bool), String> {
+    if is_sandbox_live(os, sandbox).await {
+        let has_repo = os
+            .exec(
+                sandbox,
+                &format!("test -d {WORKDIR}/.git"),
+                Duration::from_secs(10),
+            )
+            .await
+            .map(|o| o.ok())
+            .unwrap_or(false);
+        return Ok((sandbox.to_string(), !has_repo));
+    }
+
+    tracing::warn!(
+        "sandbox {sandbox} not live for card #{}; recreating for host rebase",
+        item.id
+    );
+    if let Err(e) = crate::github_app::ensure_github_provider(board).await {
+        tracing::warn!(
+            "GitHub App provider sync before rebase recreate for #{}: {e}",
+            item.id
+        );
+    }
+
+    let _ = os.delete(sandbox).await;
+    let resolved = board.resolve_sandbox_create(item.id);
+    let attach = board.sandbox_attach_provider_names();
+    let name = if sandbox.is_empty() {
+        crate::schema::card_sandbox_name(&cfg.branch_prefix, item.id, item.run_failures + 1)
+    } else {
+        sandbox.to_string()
+    };
+    let spec = sandbox_spec_for_card(item.id, &name, &resolved, &attach);
+    if let Err(e) = os.create(&spec).await {
+        // Race: sandbox may have become reachable while create ran.
+        if is_sandbox_live(os, &name).await {
+            let has_repo = os
+                .exec(
+                    &name,
+                    &format!("test -d {WORKDIR}/.git"),
+                    Duration::from_secs(10),
+                )
+                .await
+                .map(|o| o.ok())
+                .unwrap_or(false);
+            board.set_environment(item.id, Some(name.clone()));
+            return Ok((name, !has_repo));
+        }
+        return Err(format!("recreate sandbox for rebase: {e}"));
+    }
+    board.set_environment(item.id, Some(name.clone()));
+    Ok((name, true))
+}
+
+fn record_rebase_stdout(
+    board: &SharedBoard,
+    id: crate::model::ItemId,
+    stdout: &str,
+) -> Option<Result<crate::model::WorkItem, String>> {
+    if stdout.contains(MARK_REBASED) {
+        Some(board.complete_rebase_clean(id))
+    } else if stdout.contains(MARK_CONFLICT) {
+        let files = parse_conflict_files(stdout);
+        Some(board.complete_rebase_conflict(id, &files, Some("git rebase conflict")))
+    } else {
+        None
+    }
+}
+
 /// Process cards in Review that have pending rebase requests.
 pub async fn process_awaiting_rebases(
     board: &SharedBoard,
@@ -2265,16 +2344,19 @@ pub async fn process_awaiting_rebases(
     let mut results = Vec::new();
     for item in awaiting {
         let branch = crate::schema::card_branch_name(&cfg.branch_prefix, item.id);
-        let sandbox = item
-            .environment
-            .clone()
-            .unwrap_or_else(|| {
-                crate::schema::card_sandbox_name(&cfg.branch_prefix, item.id, item.run_failures + 1)
-            });
+        let wanted = item.environment.clone().unwrap_or_else(|| {
+            crate::schema::card_sandbox_name(&cfg.branch_prefix, item.id, item.run_failures + 1)
+        });
 
-        if !is_sandbox_live(os, &sandbox).await {
-            continue;
-        }
+        let (sandbox, needs_clone) =
+            match ensure_live_sandbox_for_rebase(board, os, cfg, &item, &wanted).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("rebase sandbox recovery failed for card #{}: {e}", item.id);
+                    results.push(board.fail_rebase_sandbox(item.id, &e));
+                    continue;
+                }
+            };
 
         let mut card_cfg = cfg.clone();
         match board.resolve_card_repo(item.id) {
@@ -2295,20 +2377,52 @@ pub async fn process_awaiting_rebases(
             }
         }
 
+        if needs_clone {
+            let clone_res = os
+                .exec(
+                    &sandbox,
+                    &clone_script(&card_cfg, &branch),
+                    Duration::from_secs(120),
+                )
+                .await;
+            match clone_res {
+                Ok(out) => {
+                    if out.stdout.contains(MARK_CONFLICT) {
+                        let files = parse_conflict_files(&out.stdout);
+                        results.push(board.complete_rebase_conflict(
+                            item.id,
+                            &files,
+                            Some("git rebase conflict"),
+                        ));
+                        continue;
+                    }
+                    if !out.ok() && !out.stdout.contains(MARK_REBASED) {
+                        let detail = format!("clone for rebase failed: {}", outerr(&out));
+                        tracing::warn!("card #{}: {detail}", item.id);
+                        results.push(board.fail_rebase_sandbox(item.id, &detail));
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    let detail = format!("clone for rebase failed: {e}");
+                    tracing::warn!("card #{}: {detail}", item.id);
+                    results.push(board.fail_rebase_sandbox(item.id, &detail));
+                    continue;
+                }
+            }
+        }
+
         let script = rebase_script(&card_cfg, &branch);
         let exec_res = os.exec(&sandbox, &script, Duration::from_secs(60)).await;
         match exec_res {
             Ok(out) => {
-                let stdout = out.stdout;
-                if stdout.contains(MARK_REBASED) {
-                    results.push(board.complete_rebase_clean(item.id));
-                } else if stdout.contains(MARK_CONFLICT) {
-                    let files = parse_conflict_files(&stdout);
-                    results.push(board.complete_rebase_conflict(
-                        item.id,
-                        &files,
-                        Some("git rebase conflict"),
-                    ));
+                if let Some(r) = record_rebase_stdout(board, item.id, &out.stdout) {
+                    results.push(r);
+                } else {
+                    tracing::warn!(
+                        "rebase for card #{} produced no outcome marker",
+                        item.id
+                    );
                 }
             }
             Err(e) => {
@@ -5353,6 +5467,248 @@ mod tests {
         assert_eq!(spec.from, "img:1");
         assert_eq!(spec.policy.as_deref(), Some("version: 1\n"));
         assert_eq!(spec.providers, vec!["vertex".to_string()]);
+    }
+
+    fn review_awaiting_rebase_board(env: &str) -> (SharedBoard, crate::model::WorkItem) {
+        let board = Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-awaiting-rebase-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+        let project = board
+            .create(None, "Rebase Proj", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "Review rebase",
+                "catch up",
+                Some("rebased".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        board
+            .transition(task.id, State::Shaping, "test", None)
+            .unwrap();
+        board
+            .transition(task.id, State::Backlog, "test", None)
+            .unwrap();
+        board
+            .transition(task.id, State::Claimed, "agent", None)
+            .unwrap();
+        board
+            .transition(task.id, State::Review, "agent", None)
+            .unwrap();
+        board.set_pull_request(
+            task.id,
+            Some(crate::model::PullRequest {
+                url: format!("https://github.com/shanemcd/honr/pull/{}", task.id),
+                base: Some(crate::model::PullRequestEnd::new("shanemcd/honr", "main")),
+                head: Some(crate::model::PullRequestEnd::new(
+                    "shanemcd/honr",
+                    crate::schema::card_branch_name("honr", task.id),
+                )),
+            }),
+        );
+        board.set_environment(task.id, Some(env.into()));
+        board.dispatch_rebase(task.id).unwrap();
+        let item = board.get(task.id).unwrap();
+        (board, item)
+    }
+
+    fn ok_out(stdout: &str) -> crate::openshell::Output {
+        crate::openshell::Output {
+            code: 0,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
+    }
+
+    fn fail_out(stderr: &str) -> crate::openshell::Output {
+        crate::openshell::Output {
+            code: 1,
+            stdout: String::new(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// Live sandbox + clean host rebase keeps the card in Review.
+    #[tokio::test]
+    async fn process_awaiting_rebases_clean_stays_review() {
+        let env = "honr-card-rebase-clean-a1";
+        let (board, item) = review_awaiting_rebase_board(env);
+        assert!(item.rebase_requested);
+
+        let os = OpenShell::mock(
+            move |args| match (
+                args.first().map(String::as_str),
+                args.get(1).map(String::as_str),
+            ) {
+                (Some("sandbox"), Some("exec")) => {
+                    let script = args.last().map(String::as_str).unwrap_or("");
+                    if script == "true" {
+                        return ok_out("");
+                    }
+                    if script.contains("test -d") {
+                        return ok_out("");
+                    }
+                    if script.contains("git rebase") {
+                        return ok_out(&format!("{MARK_REBASED}\n"));
+                    }
+                    fail_out("unexpected exec")
+                }
+                _ => fail_out("unexpected"),
+            },
+            Duration::from_secs(5),
+        );
+
+        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
+        assert_eq!(results.len(), 1);
+        let updated = results[0].as_ref().unwrap();
+        assert_eq!(updated.state, State::Review);
+        assert!(!updated.rebase_requested);
+        assert!(!updated.awaiting_dispatch);
+    }
+
+    /// Conflicting host rebase bounces to Backlog with BINDING notes as today.
+    #[tokio::test]
+    async fn process_awaiting_rebases_conflict_bounces_backlog() {
+        let env = "honr-card-rebase-conflict-a1";
+        let (board, item) = review_awaiting_rebase_board(env);
+        assert!(item.rebase_requested);
+
+        let os = OpenShell::mock(
+            move |args| match (
+                args.first().map(String::as_str),
+                args.get(1).map(String::as_str),
+            ) {
+                (Some("sandbox"), Some("exec")) => {
+                    let script = args.last().map(String::as_str).unwrap_or("");
+                    if script == "true" {
+                        return ok_out("");
+                    }
+                    if script.contains("test -d") {
+                        return ok_out("");
+                    }
+                    if script.contains("git rebase") {
+                        return ok_out(&format!(
+                            "{MARK_CONFLICT}\n{MARK_CONFLICT_FILES}docs/concepts.md\n"
+                        ));
+                    }
+                    fail_out("unexpected exec")
+                }
+                _ => fail_out("unexpected"),
+            },
+            Duration::from_secs(5),
+        );
+
+        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
+        assert_eq!(results.len(), 1);
+        let updated = results[0].as_ref().unwrap();
+        assert_eq!(updated.state, State::Backlog);
+        assert!(!updated.rebase_requested);
+        assert!(updated
+            .last_bounce_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("docs/concepts.md"));
+        assert!(updated
+            .notes
+            .iter()
+            .any(|n| n.text.contains("BINDING") || n.author == "rebase"));
+    }
+
+    /// Dead sandbox is recreated; clone + rebase clears the queue (no forever skip).
+    #[tokio::test]
+    async fn process_awaiting_rebases_recovers_dead_sandbox() {
+        let env = "honr-card-rebase-recover-a1";
+        let (board, item) = review_awaiting_rebase_board(env);
+        assert!(item.rebase_requested);
+        let created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let created_flag = created.clone();
+
+        let os = OpenShell::mock(
+            move |args| match (
+                args.first().map(String::as_str),
+                args.get(1).map(String::as_str),
+            ) {
+                (Some("sandbox"), Some("delete")) => ok_out(""),
+                (Some("sandbox"), Some("create")) => {
+                    created_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    ok_out("")
+                }
+                (Some("sandbox"), Some("exec")) => {
+                    let script = args.last().map(String::as_str).unwrap_or("");
+                    if script == "true" {
+                        if created_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            return ok_out("");
+                        }
+                        return fail_out("sandbox gone");
+                    }
+                    if script.contains("git clone") {
+                        return ok_out(&format!("{MARK_REBASED}\n"));
+                    }
+                    if script.contains("git rebase") {
+                        return ok_out(&format!("{MARK_REBASED}\n"));
+                    }
+                    fail_out("unexpected exec")
+                }
+                _ => fail_out("unexpected"),
+            },
+            Duration::from_secs(5),
+        );
+
+        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
+        assert!(created.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(results.len(), 1);
+        let updated = results[0].as_ref().unwrap();
+        assert_eq!(updated.state, State::Review);
+        assert!(!updated.rebase_requested);
+        assert!(!updated.awaiting_dispatch);
+    }
+
+    /// Recreate failure must escalate — not leave rebase_requested queued forever.
+    #[tokio::test]
+    async fn process_awaiting_rebases_surfaces_sandbox_recreate_failure() {
+        let env = "honr-card-rebase-dead-a1";
+        let (board, item) = review_awaiting_rebase_board(env);
+        assert!(item.rebase_requested);
+
+        let os = OpenShell::mock(
+            move |args| match (
+                args.first().map(String::as_str),
+                args.get(1).map(String::as_str),
+            ) {
+                (Some("sandbox"), Some("delete")) => ok_out(""),
+                (Some("sandbox"), Some("create")) => fail_out("gateway down"),
+                (Some("sandbox"), Some("exec")) => {
+                    let script = args.last().map(String::as_str).unwrap_or("");
+                    if script == "true" {
+                        return fail_out("sandbox gone");
+                    }
+                    fail_out("unexpected exec")
+                }
+                _ => fail_out("unexpected"),
+            },
+            Duration::from_secs(5),
+        );
+
+        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
+        assert_eq!(results.len(), 1);
+        let updated = results[0].as_ref().unwrap();
+        assert_eq!(updated.state, State::NeedsHuman);
+        assert!(!updated.rebase_requested);
+        assert!(!updated.awaiting_dispatch);
+        assert!(updated.escalation.is_some());
+        let q = &updated.escalation.as_ref().unwrap().question;
+        assert!(q.contains("sandbox unavailable"), "{q}");
     }
 }
 
