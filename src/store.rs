@@ -8543,9 +8543,14 @@ mod tests {
             "cockpit memory must stay distinct from worker default"
         );
         assert!(
-            !cockpit_profile.policy.contains("github.com")
-                && !cockpit_profile.policy.contains("name: github"),
-            "cockpit policy must not copy worker GitHub egress"
+            cockpit_profile.policy.contains("github.com")
+                && cockpit_profile.policy.contains("name: github"),
+            "cockpit seed policy allow-lists GitHub"
+        );
+        assert_eq!(
+            cockpit_profile.provider_names,
+            vec!["github".to_string()],
+            "cockpit seed attaches github for GH_TOKEN"
         );
         // Second seed is a no-op.
         assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
