@@ -46,24 +46,31 @@ export function Login({
 
   return (
     <div className="login-shell" data-testid="login">
-      <section className="login-card" aria-labelledby="login-title">
-        <h1 id="login-title" className="login-brand">
+      <div className="login-atmosphere" aria-hidden="true" />
+      <section className="login-panel" aria-labelledby="login-title">
+        <header className="login-brand">
           <img
             src="/honr-logo.png"
-            alt="honr"
+            alt=""
             className="login-brand-mark"
-            width={56}
-            height={56}
+            width={72}
+            height={72}
           />
-        </h1>
-        <p className="dim">
-          {bootstrap
-            ? "First run — set a local admin password. The board stays locked until this is done."
-            : "Local admin or Sign in with GitHub (allowlisted users / teams)."}
-        </p>
+          <h1 id="login-title" className="login-wordmark">
+            honr
+          </h1>
+          <p className="login-tagline">The board that hones the work.</p>
+        </header>
+
+        {bootstrap && (
+          <p className="login-bootstrap" data-testid="login-bootstrap">
+            First run — set a local admin password. The board stays locked until
+            this is done.
+          </p>
+        )}
 
         {(error || authError) && (
-          <div className="err" data-testid="login-error">
+          <div className="err login-error" data-testid="login-error">
             {error || authError}
           </div>
         )}
@@ -72,7 +79,7 @@ export function Login({
           <label>
             Username
             <input
-              className="search-input"
+              className="login-input"
               autoComplete="username"
               value={username}
               disabled={busy}
@@ -83,7 +90,7 @@ export function Login({
           <label>
             Password
             <input
-              className="search-input"
+              className="login-input"
               type="password"
               autoComplete={bootstrap ? "new-password" : "current-password"}
               value={password}
@@ -92,37 +99,35 @@ export function Login({
               data-testid="login-password"
             />
           </label>
-          <div className="btns">
-            <button
-              type="submit"
-              className="primary"
-              disabled={busy || !username.trim() || password.length < 8}
-              data-testid="login-submit"
-            >
-              {submitLabel}
-            </button>
-          </div>
           {!bootstrap && password.length > 0 && password.length < 8 && (
-            <p className="dim">Password must be at least 8 characters.</p>
+            <p className="login-hint">Password must be at least 8 characters.</p>
           )}
+          <button
+            type="submit"
+            className="primary login-submit"
+            disabled={busy || !username.trim() || password.length < 8}
+            data-testid="login-submit"
+          >
+            {submitLabel}
+          </button>
         </form>
 
         {!bootstrap && status.github_login_enabled && (
-          <div className="login-github" data-testid="login-github">
+          <div className="login-alt" data-testid="login-github">
+            <div className="login-divider" aria-hidden="true">
+              <span>or</span>
+            </div>
             <a
-              className="btn-link"
+              className="login-github-btn"
               href={`/auth/github?return_origin=${encodeURIComponent(window.location.origin)}`}
             >
               Sign in with GitHub
             </a>
-            <p className="dim">
-              Only allowlisted GitHub users or org team members can sign in.
-            </p>
           </div>
         )}
 
         {!bootstrap && !status.github_login_enabled && (
-          <p className="dim" data-testid="login-github-disabled">
+          <p className="login-hint" data-testid="login-github-disabled">
             GitHub login needs Client ID + Client secret on Settings → GitHub App
             (after you sign in as local admin).
           </p>
