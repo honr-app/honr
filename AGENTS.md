@@ -99,6 +99,7 @@ do not treat a stale local `main` as truth.
 | `src/store.rs` | The board — the only write path |
 | `src/supervisor.rs` | Dispatch, per-card lifecycle, briefing, lease sweeping |
 | `src/openshell.rs` | Typed wrapper over the CLI; every call has a deadline |
+| `src/ops_chat.rs` | Host-mediated ops chat bridge (prompt → sandbox seat → SSE) |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs |
 | `sandbox/` | Containerfile, network policy, metadata shim |
 | `web/` | React UI + `npm run shots` screenshot harness |

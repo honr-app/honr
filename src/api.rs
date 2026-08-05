@@ -91,6 +91,8 @@ pub fn routes() -> Router<SharedBoard> {
         )
         .route("/ops-session/park", post(park_ops_session))
         .route("/ops-session/resume", post(resume_ops_session))
+        // Host-mediated ops chat bridge (Board ops_session is authoritative).
+        .merge(crate::ops_chat::routes())
         .route("/openshell/status", get(openshell_status))
         .route("/openshell", get(get_openshell).put(put_openshell))
         .route(

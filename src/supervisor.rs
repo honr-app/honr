@@ -1999,7 +1999,7 @@ pub(crate) fn agy_auth_settings_json() -> String {
     r#"{"enableTelemetry":false}"#.into()
 }
 
-async fn setup_agy_auth(os: &OpenShell, name: &str) -> anyhow::Result<()> {
+pub(crate) async fn setup_agy_auth(os: &OpenShell, name: &str) -> anyhow::Result<()> {
     let settings = agy_auth_settings_json();
     let script = format!(
         r#"set -e
@@ -3384,15 +3384,16 @@ async fn ops_seat_loop(board: SharedBoard, _cfg: ExecutionConfig) {
 
 /// Single-quote for `bash -lc`. A briefing is untrusted text as far as the
 /// shell is concerned — it contains human prose, quotes and newlines.
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Pull a resume handle out of a stream-json line, if present.
 ///
 /// agy uses `conversation_id`; Cursor Agent CLI uses `session_id`. Tolerant:
-/// walk a few known shapes and ignore the rest.
-fn parse_conversation_id(line: &str) -> Option<String> {
+/// walk a few known shapes and ignore the rest. Shared with the ops chat
+/// bridge so resume handles stay one parser.
+pub(crate) fn parse_conversation_id(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     const KEYS: &[&str] = &[
         "/conversation_id",
