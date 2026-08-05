@@ -5,14 +5,15 @@ use super::codec::{
     META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_BIN, META_OPENSHELL_GATEWAY_ENDPOINT,
     META_AUTH_ALLOWED_TEAMS, META_AUTH_ALLOWED_USERS, META_AUTH_SEALED,
     META_GITHUB_APP_INSTALLATION_ID, META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED,
-    META_OPENSHELL_PROVIDERS, META_SANDBOX_PROFILES, META_WORKSPACE_BINDING,
+    META_OPENSHELL_PROVIDERS, META_SANDBOX_PROFILES, META_WEBHOOK_POLL,
+    META_WEBHOOK_POLL_TIPS, META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
 use crate::model::{
-    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, SandboxProfile, WorkItem,
-    WorkspaceBinding,
+    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, SandboxProfile, WebhookPollConfig,
+    WorkItem, WorkspaceBinding,
 };
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
@@ -74,6 +75,8 @@ impl SqliteBoardStore {
         let auth_allowed_teams = self.load_auth_allowed_teams().await?;
         let agent_runtime = self.load_agent_runtime().await?;
         let openshell_providers = self.load_openshell_providers().await?;
+        let webhook_poll = self.load_webhook_poll().await?;
+        let webhook_poll_tips = self.load_webhook_poll_tips().await?;
         let mut state = BoardState {
             next_id,
             items,
@@ -91,6 +94,8 @@ impl SqliteBoardStore {
             auth_allowed_teams,
             agent_runtime,
             openshell_providers,
+            webhook_poll,
+            webhook_poll_tips,
             agent_logs: BTreeMap::new(),
             ..Default::default()
         };
@@ -216,6 +221,15 @@ impl SqliteBoardStore {
         let providers_json = serde_json::to_string(&state.openshell_providers)
             .map_err(|e| StoreError::Query(format!("serialize openshell_providers: {e}")))?;
         set_meta_tx(&mut tx, META_OPENSHELL_PROVIDERS, &providers_json).await?;
+        let webhook_poll_json = match &state.webhook_poll {
+            None => String::new(),
+            Some(cfg) => serde_json::to_string(cfg)
+                .map_err(|e| StoreError::Query(format!("serialize webhook_poll: {e}")))?,
+        };
+        set_meta_tx(&mut tx, META_WEBHOOK_POLL, &webhook_poll_json).await?;
+        let tips_json = serde_json::to_string(&state.webhook_poll_tips)
+            .map_err(|e| StoreError::Query(format!("serialize webhook_poll_tips: {e}")))?;
+        set_meta_tx(&mut tx, META_WEBHOOK_POLL_TIPS, &tips_json).await?;
 
         tx.commit()
             .await
@@ -360,6 +374,24 @@ impl SqliteBoardStore {
             Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(Vec::new()),
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode openshell_providers: {e}"))),
+        }
+    }
+
+    async fn load_webhook_poll(&self) -> Result<Option<WebhookPollConfig>, StoreError> {
+        match self.meta_get(META_WEBHOOK_POLL).await? {
+            None => Ok(None),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(None),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode webhook_poll: {e}"))),
+        }
+    }
+
+    async fn load_webhook_poll_tips(&self) -> Result<BTreeMap<String, String>, StoreError> {
+        match self.meta_get(META_WEBHOOK_POLL_TIPS).await? {
+            None => Ok(BTreeMap::new()),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(BTreeMap::new()),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode webhook_poll_tips: {e}"))),
         }
     }
 }

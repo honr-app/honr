@@ -78,6 +78,13 @@ export interface WorkspaceBinding {
   beads_sync_repo?: string | null;
 }
 
+/** Settings → Forge: poll GitHub in addition to webhooks. */
+export interface WebhookPollConfig {
+  enabled: boolean;
+  /** Seconds between ticks (server clamps to ≥ 15). */
+  interval_secs: number;
+}
+
 /** Presence flags for sealed OpenShell mTLS material (never returns PEMs). */
 export interface OpenShellMtlsStatus {
   ca: boolean;

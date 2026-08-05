@@ -101,6 +101,15 @@ gh webhook forward \
 Only one forwarder per repo at a time. Settings → Forge shows the same
 placeholder template.
 
+### Polling fallback
+
+When `gh webhook forward` (or GitHub delivery) is down, enable **Webhook
+polling fallback** in Settings → Forge. honr then polls on an interval **in
+addition to** webhooks (default 60s, minimum 15s), using the GitHub App
+installation token. Same Board effects: merged Review/NeedsHuman cards → Done
+(`by: github-poll`), default-branch tip change → `MainAdvanced`. Requires a
+configured GitHub App + installation id.
+
 ## Looking at the UI
 
 ```bash

@@ -99,6 +99,12 @@ pub const META_AGENT_RUNTIME: &str = "agent_runtime";
 /// JSON array of [`crate::model::OpenShellProviderDesired`].
 pub const META_OPENSHELL_PROVIDERS: &str = "openshell_providers";
 
+/// JSON blob: [`crate::model::WebhookPollConfig`].
+pub const META_WEBHOOK_POLL: &str = "webhook_poll";
+
+/// JSON object: `owner/name` → last-seen default-branch tip SHA (poll path).
+pub const META_WEBHOOK_POLL_TIPS: &str = "webhook_poll_tips";
+
 /// Fields without dedicated columns — portable JSON blob on `items.extras_json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ItemExtras {

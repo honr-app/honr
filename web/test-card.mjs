@@ -746,7 +746,12 @@ const workspaceHtml = renderToString(
       forge: "github",
       beads_sync_repo: "",
     },
+    poll: {
+      enabled: false,
+      interval_secs: 60,
+    },
     onDraftChange: () => {},
+    onPollChange: () => {},
     onSave: () => {},
   }),
 );
@@ -754,17 +759,17 @@ assert(workspaceHtml.includes("data-testid=\"workspace-panel\""), "Forge panel s
 assert(workspaceHtml.includes("data-testid=\"workspace-form\""), "Forge form should render");
 assert(workspaceHtml.includes("data-testid=\"workspace-field-beads\""), "Beads sync field");
 assert(workspaceHtml.includes("data-testid=\"workspace-field-forge\""), "Provider field");
+assert(workspaceHtml.includes("data-testid=\"workspace-poll\""), "Poll fallback controls");
+assert(workspaceHtml.includes("data-testid=\"workspace-poll-enabled\""), "Poll enabled checkbox");
+assert(workspaceHtml.includes("data-testid=\"workspace-poll-interval\""), "Poll interval field");
 assert(!workspaceHtml.includes("data-testid=\"workspace-first-clone-defaults\""), "no first-clone defaults");
 assert(!workspaceHtml.includes("data-testid=\"workspace-field-upstream\""), "no upstream field");
 assert(!workspaceHtml.includes("data-testid=\"workspace-field-fork\""), "no fork field");
 assert(!workspaceHtml.includes("data-testid=\"workspace-field-base\""), "no base field");
 assert(workspaceHtml.includes("GitLab (future)"), "GitLab listed as future/disabled");
-assert(workspaceHtml.includes("data-testid=\"workspace-webhook-hint\""), "Webhook hint present");
-assert(
-  workspaceHtml.includes("--repo=<owner/name>") || workspaceHtml.includes("--repo=&lt;owner/name&gt;"),
-  "Webhook hint is a repo placeholder template",
-);
-assert(!workspaceHtml.includes("shanemcd/honr"), "Webhook hint must not hardcode Shane repo");
+assert(!workspaceHtml.includes("data-testid=\"workspace-webhook-hint\""), "no gh webhook forward hint");
+assert(!workspaceHtml.includes("gh webhook forward"), "no gh webhook forward copy");
+assert(!workspaceHtml.includes("shanemcd/honr"), "Forge panel must not hardcode Shane repo");
 assert(
   (workspaceHtml.includes("pull_request") || workspaceHtml.includes("pr_url")) && workspaceHtml.includes("not"),
   "Forge copy must say Settings is not the work repo",

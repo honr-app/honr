@@ -3,7 +3,7 @@
 
 use crate::model::{
     AgentRuntimeConfig, ItemId, OpenShellProviderDesired, OpenShellProviderRefreshDesired,
-    SandboxProfile, State, WorkItem, WorkspaceBinding,
+    SandboxProfile, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
 use crate::openshell::{ProviderRefreshSpec, ProviderTypeProfile};
 use crate::secrets::{open_string_map, seal_string_map};
@@ -80,6 +80,7 @@ pub fn routes() -> Router<SharedBoard> {
             post(set_default_sandbox_profile),
         )
         .route("/workspace", get(get_workspace).put(put_workspace))
+        .route("/webhook-poll", get(get_webhook_poll).put(put_webhook_poll))
         .route("/agent-runtime", get(get_agent_runtime).put(put_agent_runtime))
         .route("/openshell/status", get(openshell_status))
         .route("/openshell", get(get_openshell).put(put_openshell))
@@ -527,6 +528,19 @@ async fn put_workspace(
     Json(req): Json<WorkspaceBinding>,
 ) -> ApiResult<WorkspaceBinding> {
     b.set_workspace_binding(req).map(Json).map_err(ApiError)
+}
+
+// ---------------------------------------------------------------- webhook poll
+
+async fn get_webhook_poll(AxState(b): AxState<SharedBoard>) -> Json<WebhookPollConfig> {
+    Json(b.webhook_poll_config())
+}
+
+async fn put_webhook_poll(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<WebhookPollConfig>,
+) -> Json<WebhookPollConfig> {
+    Json(b.set_webhook_poll_config(req))
 }
 
 // ---------------------------------------------------------------- agent runtime
@@ -2483,6 +2497,40 @@ mod tests {
             panic!("create colliding name");
         };
         assert_eq!(second.id, "heavy-ci-2");
+    }
+
+    #[tokio::test]
+    async fn webhook_poll_get_put_clamps_interval() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-whpoll-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let Json(defaults) = get_webhook_poll(AxState(b.clone())).await;
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.interval_secs, 60);
+
+        let Json(saved) = put_webhook_poll(
+            AxState(b.clone()),
+            Json(WebhookPollConfig {
+                enabled: true,
+                interval_secs: 5,
+            }),
+        )
+        .await;
+        assert!(saved.enabled);
+        assert_eq!(
+            saved.interval_secs,
+            crate::model::MIN_WEBHOOK_POLL_INTERVAL_SECS
+        );
+        let Json(got) = get_webhook_poll(AxState(b.clone())).await;
+        assert_eq!(got, saved);
     }
 
     #[tokio::test]

@@ -601,6 +601,25 @@ main > :first-child { flex: 1; min-width: 0; }
 .agent-runtime-check input[type="checkbox"] {
   margin-top: 3px;
 }
+.workspace-poll-fieldset {
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  padding: 0.75rem 1rem 1rem;
+  margin: 0.75rem 0 0;
+}
+
+.workspace-poll-fieldset legend {
+  padding: 0 0.35rem;
+  font-size: 0.9rem;
+}
+
+.workspace-poll-enabled {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
 .workspace-webhook-hint {
   margin-top: 18px;
   padding-top: 14px;

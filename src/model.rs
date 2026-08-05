@@ -588,6 +588,45 @@ impl AgentRuntimeConfig {
     }
 }
 
+/// Settings → Forge: poll GitHub when webhooks are missing or delayed.
+///
+/// When enabled, honr polls on `interval_secs` **in addition to** webhooks.
+/// Both paths call the same Board methods (merge → Done, tip → MainAdvanced).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookPollConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Seconds between ticks. Clamped to ≥ [`MIN_WEBHOOK_POLL_INTERVAL_SECS`].
+    #[serde(default = "default_webhook_poll_interval_secs")]
+    pub interval_secs: u64,
+}
+
+/// Floor for poll interval (Settings + loop). Below this, GitHub rate limits hurt.
+pub const MIN_WEBHOOK_POLL_INTERVAL_SECS: u64 = 15;
+
+fn default_webhook_poll_interval_secs() -> u64 {
+    60
+}
+
+impl Default for WebhookPollConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_webhook_poll_interval_secs(),
+        }
+    }
+}
+
+impl WebhookPollConfig {
+    /// Clamp interval; leave `enabled` as given.
+    pub fn normalized(mut self) -> Self {
+        if self.interval_secs < MIN_WEBHOOK_POLL_INTERVAL_SECS {
+            self.interval_secs = MIN_WEBHOOK_POLL_INTERVAL_SECS;
+        }
+        self
+    }
+}
+
 /// Per-install forge identity + beads Issue sync (Settings → Forge).
 /// Work remotes are **not** stored here — they live on each card's
 /// [`PullRequest`] after the agent reports. See `docs/architecture.md`.

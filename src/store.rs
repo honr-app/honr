@@ -70,6 +70,12 @@ pub struct BoardState {
     /// Desired OpenShell providers (Settings → OpenShell → Providers). Board SoT.
     #[serde(default)]
     pub openshell_providers: Vec<OpenShellProviderDesired>,
+    /// Settings → Forge: webhook polling fallback.
+    #[serde(default)]
+    pub webhook_poll: Option<WebhookPollConfig>,
+    /// Last-seen default-branch tip SHAs keyed by `owner/name` (poll path).
+    #[serde(default)]
+    pub webhook_poll_tips: BTreeMap<String, String>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
     /// Parent → child ids. Rebuilt after load; maintained on create/delete.
@@ -102,6 +108,8 @@ impl BoardState {
             auth_allowed_teams: self.auth_allowed_teams.clone(),
             agent_runtime: self.agent_runtime.clone(),
             openshell_providers: self.openshell_providers.clone(),
+            webhook_poll: self.webhook_poll.clone(),
+            webhook_poll_tips: self.webhook_poll_tips.clone(),
             agent_logs: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
             ids_by_state: HashMap::new(),
@@ -2311,6 +2319,48 @@ impl Board {
         self.dirty.store(true, Ordering::Relaxed);
         self.sync_beads_github_repository();
         Ok(stored)
+    }
+
+    // ------------------------------------------------ webhook poll (board state)
+
+    /// Settings → Forge polling fallback. Default is disabled / 60s.
+    pub fn webhook_poll_config(&self) -> WebhookPollConfig {
+        self.state
+            .read()
+            .webhook_poll
+            .clone()
+            .unwrap_or_default()
+            .normalized()
+    }
+
+    /// Persist poll Settings. Board is SoT after save.
+    pub fn set_webhook_poll_config(&self, cfg: WebhookPollConfig) -> WebhookPollConfig {
+        let stored = cfg.normalized();
+        {
+            let mut s = self.state.write();
+            s.webhook_poll = Some(stored.clone());
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    /// Last-seen default-branch tip SHA for `owner/name` (poll path).
+    pub fn webhook_poll_tip(&self, repo: &str) -> Option<String> {
+        self.state.read().webhook_poll_tips.get(repo).cloned()
+    }
+
+    /// Record a tip SHA after a successful poll (persisted on next flush).
+    pub fn set_webhook_poll_tip(&self, repo: &str, sha: &str) {
+        let repo = repo.trim().to_string();
+        let sha = sha.trim().to_string();
+        if repo.is_empty() || sha.is_empty() {
+            return;
+        }
+        {
+            let mut s = self.state.write();
+            s.webhook_poll_tips.insert(repo, sha);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     // ------------------------------------------------ OpenShell connectivity (board state)
@@ -4701,10 +4751,23 @@ facts are pasted, then unpark";
     /// When a PR merges on GitHub, complete the matching Review/NeedsHuman card.
     /// Done triggers the usual beads close + github_push (linked Issue close).
     /// Returns the completed item id, or `None` if no eligible card matched.
+    ///
+    /// History `by` is `github-webhook` (webhook ingress). Polling uses
+    /// [`Self::complete_for_merged_pr_by`] with `github-poll`.
     pub fn complete_for_merged_pr(
         &self,
         pr_url: &str,
         pr_number: Option<u64>,
+    ) -> Option<ItemId> {
+        self.complete_for_merged_pr_by(pr_url, pr_number, "github-webhook")
+    }
+
+    /// Same as [`Self::complete_for_merged_pr`] with an explicit history actor.
+    pub fn complete_for_merged_pr_by(
+        &self,
+        pr_url: &str,
+        pr_number: Option<u64>,
+        by: &str,
     ) -> Option<ItemId> {
         let needle = Self::normalize_pr_url(pr_url);
         if needle.is_empty() {
@@ -4727,7 +4790,12 @@ facts are pasted, then unpark";
             Some(n) => format!("PR merged (#{n})"),
             None => "PR merged".into(),
         };
-        match self.transition(id, State::Done, "github-webhook", Some(reason)) {
+        let by = if by.trim().is_empty() {
+            "github-webhook"
+        } else {
+            by.trim()
+        };
+        match self.transition(id, State::Done, by, Some(reason)) {
             Ok(item) => {
                 self.story(id, format!("{} — PR merged; card Done.", item.title));
                 self.trigger_rebase_for_behind_siblings(id);

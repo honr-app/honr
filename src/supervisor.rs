@@ -54,6 +54,10 @@ type Active = Arc<parking_lot::Mutex<std::collections::HashSet<ItemId>>>;
 type Cooldown = Arc<parking_lot::Mutex<Option<std::time::Instant>>>;
 
 pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
+    // Webhook poll is independent of agent execution — always run so Forge
+    // Settings can complete merges when `gh webhook forward` is down.
+    tokio::spawn(crate::github_poll::poll_loop(board.clone()));
+
     // Durable Settings overlay (seeded from yaml at board load).
     let agents = board.effective_agents();
     if !agents.enabled {

@@ -13,6 +13,7 @@ import type {
   SandboxProfilesOut,
   Snapshot,
   SyncProvidersOut,
+  WebhookPollConfig,
   WorkItem,
   WorkspaceBinding,
 } from "./types";
@@ -177,6 +178,11 @@ export const api = {
     fetch("/api/workspace", fetchOpts).then(jsonOrThrow),
   putWorkspace: (binding: WorkspaceBinding): Promise<WorkspaceBinding> =>
     put("/workspace", binding),
+
+  getWebhookPoll: (): Promise<WebhookPollConfig> =>
+    fetch("/api/webhook-poll", fetchOpts).then(jsonOrThrow),
+  putWebhookPoll: (cfg: WebhookPollConfig): Promise<WebhookPollConfig> =>
+    put("/webhook-poll", cfg),
 
   getAgentRuntime: (): Promise<AgentRuntimeConfig> =>
     fetch("/api/agent-runtime", fetchOpts).then(jsonOrThrow),
