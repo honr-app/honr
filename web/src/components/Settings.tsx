@@ -10,6 +10,7 @@ import type {
   OpenShellStatus,
   ProviderTypeProfile,
   SandboxProfile,
+  WebhookPollConfig,
   WorkspaceBinding,
 } from "../types.js";
 
@@ -64,6 +65,11 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
 const emptyWorkspace = (): WorkspaceBinding => ({
   forge: "github",
   beads_sync_repo: "",
+});
+
+const emptyWebhookPoll = (): WebhookPollConfig => ({
+  enabled: false,
+  interval_secs: 60,
 });
 
 const emptyAgentRuntime = (): AgentRuntimeConfig => ({
@@ -878,8 +884,8 @@ export function GitHubAppPanelView({
             ))}
           </select>
           <span className="dim sandbox-field-hint">
-            Prefer the fork account install (e.g. clankrshq). Honr mints tokens
-            into OpenShell provider <code>github</code> automatically.
+            Installation used to mint sandbox <code>GH_TOKEN</code> into the
+            OpenShell <code>github</code> provider.
           </span>
         </label>
         <label>
@@ -1099,17 +1105,21 @@ function GitHubAppPanel() {
 /** Presentational Forge form — exported for UI tests without fetch. */
 export function WorkspacePanelView({
   draft,
+  poll,
   busy,
   error,
   savedHint,
   onDraftChange,
+  onPollChange,
   onSave,
 }: {
   draft: WorkspaceBinding;
+  poll: WebhookPollConfig;
   busy?: boolean;
   error?: string | null;
   savedHint?: string | null;
   onDraftChange: (next: WorkspaceBinding) => void;
+  onPollChange: (next: WebhookPollConfig) => void;
   onSave: () => void;
 }) {
   return (
@@ -1170,30 +1180,58 @@ export function WorkspacePanelView({
           </span>
         </label>
 
+        <fieldset className="workspace-poll-fieldset" data-testid="workspace-poll">
+          <legend>Webhook polling fallback</legend>
+          <label className="workspace-poll-enabled">
+            <input
+              type="checkbox"
+              checked={poll.enabled}
+              disabled={busy}
+              onChange={(e) =>
+                onPollChange({ ...poll, enabled: e.target.checked })
+              }
+              data-testid="workspace-poll-enabled"
+            />
+            Poll GitHub on an interval (in addition to webhooks)
+          </label>
+          <label>
+            Interval (seconds)
+            <input
+              className="search-input"
+              type="number"
+              min={15}
+              step={1}
+              value={poll.interval_secs}
+              disabled={busy || !poll.enabled}
+              onChange={(e) =>
+                onPollChange({
+                  ...poll,
+                  interval_secs: Number(e.target.value) || 60,
+                })
+              }
+              data-testid="workspace-poll-interval"
+            />
+            <span className="dim sandbox-field-hint">
+              Minimum 15s. Uses the GitHub App installation token. Completes
+              merged Review cards and advances main when the tip moves — same
+              effects as the webhook path when delivery is delayed or missing.
+            </span>
+          </label>
+        </fieldset>
+
         <div className="btns">
           <button type="submit" className="primary" disabled={busy} data-testid="workspace-save">
             Save
           </button>
         </div>
       </form>
-
-      <aside className="workspace-webhook-hint" data-testid="workspace-webhook-hint">
-        <h3>Local webhook forward</h3>
-        <p className="dim">
-          Run one forwarder per product upstream you care about. Cards complete
-          on <code>pull_request.url</code> match, not on these Settings fields:
-        </p>
-        <pre data-testid="workspace-webhook-example">{`gh webhook forward \\
-  --repo=<owner/name> \\
-  --events=pull_request,push \\
-  --url=http://127.0.0.1:8080/api/webhooks/github`}</pre>
-      </aside>
     </section>
   );
 }
 
 function WorkspacePanel() {
   const [draft, setDraft] = useState<WorkspaceBinding>(emptyWorkspace);
+  const [poll, setPoll] = useState<WebhookPollConfig>(emptyWebhookPoll);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1201,12 +1239,15 @@ function WorkspacePanel() {
 
   const refresh = useCallback(() => {
     setLoading(true);
-    return api
-      .getWorkspace()
-      .then((ws) => {
+    return Promise.all([api.getWorkspace(), api.getWebhookPoll()])
+      .then(([ws, wp]) => {
         setDraft({
           forge: ws.forge || "github",
           beads_sync_repo: ws.beads_sync_repo ?? "",
+        });
+        setPoll({
+          enabled: !!wp.enabled,
+          interval_secs: wp.interval_secs || 60,
         });
         setError(null);
       })
@@ -1230,12 +1271,17 @@ function WorkspacePanel() {
   return (
     <WorkspacePanelView
       draft={draft}
+      poll={poll}
       busy={busy}
       error={error}
       savedHint={savedHint}
       onDraftChange={(next) => {
         setSavedHint(null);
         setDraft(next);
+      }}
+      onPollChange={(next) => {
+        setSavedHint(null);
+        setPoll(next);
       }}
       onSave={() => {
         setBusy(true);
@@ -1245,14 +1291,21 @@ function WorkspacePanel() {
           forge: draft.forge.trim() || "github",
           beads_sync_repo: (draft.beads_sync_repo ?? "").trim() || null,
         };
-        api
-          .putWorkspace(body)
-          .then((saved) => {
+        const pollBody: WebhookPollConfig = {
+          enabled: poll.enabled,
+          interval_secs: Math.max(15, Number(poll.interval_secs) || 60),
+        };
+        Promise.all([api.putWorkspace(body), api.putWebhookPoll(pollBody)])
+          .then(([saved, savedPoll]) => {
             setDraft({
               forge: saved.forge,
               beads_sync_repo: saved.beads_sync_repo ?? "",
             });
-            setSavedHint("Saved. Forge + beads sync update board state.");
+            setPoll({
+              enabled: !!savedPoll.enabled,
+              interval_secs: savedPoll.interval_secs || 60,
+            });
+            setSavedHint("Saved. Forge, beads sync, and poll settings update board state.");
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));

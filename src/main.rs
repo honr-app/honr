@@ -6,6 +6,7 @@ mod beads;
 mod db;
 mod events;
 mod github_app;
+mod github_poll;
 mod machine;
 mod mcp;
 mod model;

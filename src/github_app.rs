@@ -405,6 +405,56 @@ pub fn configured_for_tokens(board: &SharedBoard) -> bool {
     board.github_app_status().complete && board.github_app_installation_id().is_some()
 }
 
+/// Host-side installation token for REST (webhook poll). Reuses the sealed
+/// cache when fresh; mints without requiring an OpenShell gateway push.
+///
+/// Returns `Ok(None)` when App/installation are not configured.
+pub async fn host_installation_token(board: &SharedBoard) -> Result<Option<String>, Error> {
+    if !configured_for_tokens(board) {
+        return Ok(None);
+    }
+    let Some(bundle) = board.github_app_bundle() else {
+        return Ok(None);
+    };
+    if bundle.app_id.trim().is_empty() || bundle.private_key_pem.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(installation_id) = board.github_app_installation_id() else {
+        return Ok(None);
+    };
+
+    let cache = board.github_app_token_cache();
+    let now = Utc::now();
+    if !cache.needs_mint(now) {
+        if let Some(token) = sealed_github_token(board)? {
+            return Ok(Some(token));
+        }
+    }
+
+    let minted = match mint_installation_token(&bundle, installation_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            board.set_github_app_token_cache(TokenCache {
+                expires_at: cache.expires_at,
+                last_error: Some(e.to_string()),
+            });
+            return Err(e);
+        }
+    };
+    // Seal for reuse by poll + provider sync; do not push OpenShell here.
+    ensure_desired_row(board, Some(&minted.token))?;
+    board.set_github_app_token_cache(TokenCache {
+        expires_at: Some(minted.expires_at),
+        last_error: None,
+    });
+    Ok(Some(minted.token))
+}
+
+/// GitHub API base (override with `HONR_GITHUB_API` in tests).
+pub fn github_api_base() -> String {
+    api_base()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
