@@ -43,9 +43,6 @@ pub struct BoardState {
     /// Per-install forge/repo binding. Seeded from yaml; Board is SoT after.
     #[serde(default)]
     pub workspace: Option<WorkspaceBinding>,
-    /// Optional OpenShell CLI path override (Settings → OpenShell). Empty/None → `openshell` on PATH.
-    #[serde(default)]
-    pub openshell_bin: Option<String>,
     /// Gateway URL for direct mTLS clients (Settings → OpenShell). Not secret.
     #[serde(default)]
     pub openshell_gateway_endpoint: Option<String>,
@@ -106,7 +103,6 @@ impl BoardState {
             default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
             cockpit_sandbox_profile_id: self.cockpit_sandbox_profile_id.clone(),
             workspace: self.workspace.clone(),
-            openshell_bin: self.openshell_bin.clone(),
             openshell_gateway_endpoint: self.openshell_gateway_endpoint.clone(),
             openshell_mtls_sealed: self.openshell_mtls_sealed.clone(),
             github_app_sealed: self.github_app_sealed.clone(),
@@ -1879,17 +1875,6 @@ impl Board {
     }
 
     // ------------------------------------------------ OpenShell connectivity (board state)
-
-    /// Optional legacy CLI binary override (unused; kept so older board rows load).
-    #[allow(dead_code)]
-    pub fn openshell_bin_override(&self) -> Option<String> {
-        self.state
-            .read()
-            .openshell_bin
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
 
     pub fn openshell_gateway_endpoint(&self) -> Option<String> {
         self.state

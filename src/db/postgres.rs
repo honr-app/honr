@@ -3,7 +3,7 @@
 use super::codec::{
     item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME,
     META_COCKPIT_SANDBOX_PROFILE_ID, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
-    META_NEXT_ID, META_OPENSHELL_BIN, META_OPENSHELL_GATEWAY_ENDPOINT, META_AUTH_ALLOWED_TEAMS,
+    META_NEXT_ID, META_OPENSHELL_GATEWAY_ENDPOINT, META_AUTH_ALLOWED_TEAMS,
     META_AUTH_ALLOWED_USERS, META_AUTH_SEALED, META_GITHUB_APP_INSTALLATION_ID,
     META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS,
     META_COCKPIT_SESSION, META_SANDBOX_PROFILES, META_WEBHOOK_POLL, META_WEBHOOK_POLL_TIPS,
@@ -62,7 +62,6 @@ impl PostgresBoardStore {
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
         let cockpit_sandbox_profile_id = self.load_cockpit_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
-        let openshell_bin = self.load_openshell_bin().await?;
         let openshell_gateway_endpoint = self.load_openshell_gateway_endpoint().await?;
         let openshell_mtls_sealed = self.load_openshell_mtls_sealed().await?;
         let github_app_sealed = self.load_github_app_sealed().await?;
@@ -83,7 +82,6 @@ impl PostgresBoardStore {
             default_sandbox_profile_id,
             cockpit_sandbox_profile_id,
             workspace,
-            openshell_bin,
             openshell_gateway_endpoint,
             openshell_mtls_sealed,
             github_app_sealed,
@@ -173,12 +171,6 @@ impl PostgresBoardStore {
                 .map_err(|e| StoreError::Query(format!("serialize workspace_binding: {e}")))?,
         };
         set_meta_tx(&mut tx, META_WORKSPACE_BINDING, &workspace_json).await?;
-        set_meta_tx(
-            &mut tx,
-            META_OPENSHELL_BIN,
-            state.openshell_bin.as_deref().unwrap_or(""),
-        )
-        .await?;
         set_meta_tx(
             &mut tx,
             META_OPENSHELL_GATEWAY_ENDPOINT,
@@ -306,14 +298,6 @@ impl PostgresBoardStore {
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode workspace_binding: {e}"))),
         }
-    }
-
-    async fn load_openshell_bin(&self) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .meta_get(META_OPENSHELL_BIN)
-            .await?
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()))
     }
 
     async fn load_openshell_gateway_endpoint(&self) -> Result<Option<String>, StoreError> {
