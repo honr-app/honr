@@ -1,0 +1,571 @@
+//! Host-mediated ops chat bridge.
+//!
+//! Authenticated browser prompts are forwarded into the Board-named ops sandbox
+//! conversation and streamed back. Board `ops_session` stays authoritative for
+//! environment / conversation_id / status — this module is a thin face: it
+//! reads those fields, refuses when the seat is not ready, and never parks,
+//! resumes, or stops the session.
+
+use crate::model::OpsSessionStatus;
+use crate::store::SharedBoard;
+use crate::supervisor::{parse_conversation_id, setup_agy_auth, shell_quote};
+
+use axum::extract::State as AxState;
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use axum::{Json, Router};
+use futures::stream::{self, StreamExt};
+use serde::Deserialize;
+use std::convert::Infallible;
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt as TokioStreamExt;
+
+/// Serialize chat turns so two browsers cannot fight over the same seat.
+static TURN_LOCK: Mutex<()> = Mutex::const_new(());
+
+const AGENT_PID: &str = "/tmp/agent.pid";
+const WORKDIR: &str = "/sandbox/repo";
+
+pub fn routes() -> Router<SharedBoard> {
+    Router::new().route("/ops-chat", post(ops_chat))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpsChatReq {
+    pub prompt: String,
+}
+
+#[derive(Debug)]
+struct BridgeError {
+    status: StatusCode,
+    message: String,
+}
+
+impl BridgeError {
+    fn bad(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: msg.into(),
+        }
+    }
+
+    fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: msg.into(),
+        }
+    }
+}
+
+impl IntoResponse for BridgeError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(serde_json::json!({ "error": self.message })),
+        )
+            .into_response()
+    }
+}
+
+/// Preconditions for a chat turn. Read-only over Board — no lifecycle writes.
+fn ready_target(board: &SharedBoard) -> Result<(String, Option<String>, String), BridgeError> {
+    let session = board
+        .ops_session()
+        .ok_or_else(|| BridgeError::conflict("no ops session"))?;
+    match session.status {
+        OpsSessionStatus::Parked => {
+            return Err(BridgeError::conflict("ops session is parked"));
+        }
+        OpsSessionStatus::Running => {}
+    }
+    let environment = session
+        .environment
+        .filter(|e| !e.trim().is_empty())
+        .ok_or_else(|| BridgeError::conflict("ops session has no environment yet"))?;
+    let conversation_id = session.conversation_id.filter(|c| !c.trim().is_empty());
+    let engine = resolve_ops_engine(board);
+    Ok((environment, conversation_id, engine))
+}
+
+fn resolve_ops_engine(board: &SharedBoard) -> String {
+    let resolved = board.resolve_ops_sandbox_create();
+    if let Some(e) = resolved
+        .engine
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return e.to_string();
+    }
+    let fallback = board.effective_agents().engine;
+    let t = fallback.trim();
+    if t.is_empty() {
+        "cursor".into()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Foreground (not detached) agent turn — stdout is what we stream to the browser.
+fn turn_script(engine: &str, prompt: &str, conversation_id: Option<&str>) -> String {
+    let secs = 3600u64;
+    let cmd = match (engine, conversation_id) {
+        ("agy", Some(_)) => {
+            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json --conversation \"$HONR_CONVERSATION\" -p \"$HONR_PROMPT\""
+                .to_string()
+        }
+        ("agy", None) => {
+            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json -p \"$HONR_PROMPT\""
+                .to_string()
+        }
+        ("cursor", Some(_)) => {
+            "agent -p --force --trust --sandbox disabled --output-format stream-json --resume \"$HONR_CONVERSATION\" \"$HONR_PROMPT\""
+                .to_string()
+        }
+        ("cursor", None) => {
+            "agent -p --force --trust --sandbox disabled --output-format stream-json \"$HONR_PROMPT\""
+                .to_string()
+        }
+        _ => {
+            "claude -p \"$HONR_PROMPT\" --output-format stream-json --verbose --permission-mode bypassPermissions"
+                .to_string()
+        }
+    };
+    let conv_export = conversation_id
+        .map(|c| format!("export HONR_CONVERSATION={}\n", shell_quote(c)))
+        .unwrap_or_default();
+    format!(
+        r#"set -e
+export HONR_PROMPT={prompt}
+{conv_export}cd {WORKDIR} 2>/dev/null || cd /
+timeout --foreground {secs} {cmd}"#,
+        prompt = shell_quote(prompt),
+    )
+}
+
+fn stop_live_agent_script() -> String {
+    format!(
+        r#"if [ -s {AGENT_PID} ]; then kill -TERM -"$(cat {AGENT_PID})" 2>/dev/null || true; sleep 0.5; fi"#
+    )
+}
+
+async fn ops_chat(
+    AxState(board): AxState<SharedBoard>,
+    Json(req): Json<OpsChatReq>,
+) -> Response {
+    let prompt = req.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return BridgeError::bad("prompt required").into_response();
+    }
+
+    let (environment, conversation_id, engine) = match ready_target(&board) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
+    let board2 = board.clone();
+    let env = environment.clone();
+    let cid = conversation_id.clone();
+    let eng = engine.clone();
+
+    tokio::spawn(async move {
+        let _guard = TURN_LOCK.lock().await;
+        if let Err(e) = run_turn(board2, &env, cid.as_deref(), &eng, &prompt, &tx).await {
+            let _ = tx
+                .send(Ok(Event::default().event("error").data(e)))
+                .await;
+        }
+        let _ = tx
+            .send(Ok(Event::default().event("done").data("{}")))
+            .await;
+    });
+
+    let ready_data = serde_json::json!({
+        "environment": environment,
+        "conversation_id": conversation_id,
+        "engine": engine,
+    })
+    .to_string();
+
+    let hello = stream::once(async move {
+        Ok::<_, Infallible>(Event::default().event("ready").data(ready_data))
+    });
+
+    let body = TokioStreamExt::map(ReceiverStream::new(rx), |msg| msg);
+    let sse = Sse::new(StreamExt::chain(hello, body)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    );
+
+    let mut res = sse.into_response();
+    res.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    res.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    res
+}
+
+async fn run_turn(
+    board: SharedBoard,
+    environment: &str,
+    conversation_id: Option<&str>,
+    engine: &str,
+    prompt: &str,
+    tx: &mpsc::Sender<Result<Event, Infallible>>,
+) -> Result<(), String> {
+    // Re-check Board after acquiring the turn lock — session may have parked.
+    let (env_now, cid_now, engine_now) = match ready_target(&board) {
+        Ok(t) => t,
+        Err(e) => return Err(e.message),
+    };
+    if env_now != environment {
+        return Err(format!(
+            "ops session environment changed ({environment} → {env_now})"
+        ));
+    }
+    let conversation_id = cid_now.as_deref().or(conversation_id);
+    let engine = if engine_now.is_empty() {
+        engine
+    } else {
+        engine_now.as_str()
+    };
+
+    let os = board.openshell_client();
+    let timeout = Duration::from_secs(board.effective_agents().agent_timeout_secs.max(60))
+        + Duration::from_secs(120);
+
+    // Free the seat's detached print process so this turn injects into the
+    // same conversation rather than racing a parallel agent. Does not touch
+    // Board status — park/stop stay on /api/ops-session*.
+    let _ = os
+        .exec(
+            environment,
+            &stop_live_agent_script(),
+            Duration::from_secs(30),
+        )
+        .await;
+
+    if engine == "agy" {
+        let _ = setup_agy_auth(&os, environment).await;
+    }
+
+    let script = turn_script(engine, prompt, conversation_id);
+    let board_lines = board.clone();
+    let tx_lines = tx.clone();
+    let result = os
+        .exec_streaming(environment, &script, timeout, move |line| {
+            if let Some(cid) = parse_conversation_id(line) {
+                let _ = board_lines.update_ops_session(None, Some(cid));
+            }
+            let ev = Event::default().event("agent").data(line);
+            // Non-blocking: drop if the client is slow rather than stalling the
+            // sandbox read loop (same constraint as supervisor on_line).
+            let _ = tx_lines.try_send(Ok(ev));
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !result.ok() {
+        let detail = {
+            let mut s = result.stderr.trim().to_string();
+            if !result.stdout.trim().is_empty() {
+                if !s.is_empty() {
+                    s.push('\n');
+                }
+                s.push_str(result.stdout.trim());
+            }
+            if s.len() > 800 {
+                s = s[s.len() - 800..].to_string();
+            }
+            s
+        };
+        return Err(format!("ops chat turn exited {}: {detail}", result.code));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::openshell::OpenShell;
+    use crate::schema::Schema;
+    use crate::store::Board;
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::sync::Arc;
+    use tower_service::Service;
+
+    fn board() -> SharedBoard {
+        Arc::new(Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-ops-chat-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ))
+    }
+
+    #[test]
+    fn turn_script_resumes_cursor_conversation() {
+        let s = turn_script("cursor", "triage Needs You", Some("conv-abc"));
+        assert!(s.contains("--resume \"$HONR_CONVERSATION\""), "{s}");
+        assert!(s.contains("HONR_CONVERSATION='conv-abc'"), "{s}");
+        assert!(s.contains("HONR_PROMPT='triage Needs You'"), "{s}");
+        assert!(s.contains("timeout --foreground"), "{s}");
+        assert!(!s.contains("setsid nohup"), "chat turns are foreground: {s}");
+    }
+
+    #[test]
+    fn turn_script_resumes_agy_conversation() {
+        let s = turn_script("agy", "hello", Some("cid-1"));
+        assert!(s.contains("--conversation \"$HONR_CONVERSATION\""), "{s}");
+        assert!(s.contains("-p \"$HONR_PROMPT\""), "{s}");
+    }
+
+    #[test]
+    fn turn_script_without_conversation_starts_fresh_in_seat() {
+        let s = turn_script("cursor", "first prompt", None);
+        assert!(!s.contains("--resume"), "{s}");
+        assert!(!s.contains("HONR_CONVERSATION="), "{s}");
+        assert!(s.contains("HONR_PROMPT='first prompt'"), "{s}");
+    }
+
+    #[test]
+    fn turn_script_shell_quotes_prompt_apostrophes() {
+        let s = turn_script("cursor", "it's a test", None);
+        assert!(s.contains(r"it'\''s a test"), "{s}");
+    }
+
+    #[test]
+    fn ready_target_refuses_absent_parked_and_missing_environment() {
+        let b = board();
+        let err = ready_target(&b).expect_err("no session");
+        assert!(err.message.contains("no ops session"), "{}", err.message);
+
+        b.create_ops_session(None, None).expect("create");
+        let err = ready_target(&b).expect_err("no environment");
+        assert!(
+            err.message.contains("no environment"),
+            "{}",
+            err.message
+        );
+
+        b.update_ops_session(Some("honr-ops".into()), None)
+            .expect("env");
+        b.park_ops_session().expect("park");
+        let err = ready_target(&b).expect_err("parked");
+        assert!(err.message.contains("parked"), "{}", err.message);
+
+        b.resume_ops_session().expect("resume");
+        let (env, cid, engine) = ready_target(&b).expect("running");
+        assert_eq!(env, "honr-ops");
+        assert!(cid.is_none());
+        assert!(!engine.is_empty());
+    }
+
+    #[test]
+    fn ready_target_passes_conversation_id_through() {
+        let b = board();
+        b.create_ops_session(Some("honr-ops".into()), Some("conv-9".into()))
+            .expect("create");
+        let (env, cid, _) = ready_target(&b).expect("ready");
+        assert_eq!(env, "honr-ops");
+        assert_eq!(cid.as_deref(), Some("conv-9"));
+    }
+
+    #[tokio::test]
+    async fn ops_chat_route_refuses_without_session() {
+        let b = board();
+        let mut app = Router::new().nest("/api", routes()).with_state(b);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/ops-chat")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"hello"}"#))
+            .unwrap();
+        let res = app.call(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            v["error"].as_str().unwrap_or("").contains("no ops session"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ops_chat_route_refuses_empty_prompt() {
+        let b = board();
+        b.create_ops_session(Some("honr-ops".into()), None)
+            .expect("create");
+        let mut app = Router::new().nest("/api", routes()).with_state(b);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/ops-chat")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"  "}"#))
+            .unwrap();
+        let res = app.call(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            v["error"].as_str().unwrap_or("").contains("prompt"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ops_chat_route_refuses_parked_session() {
+        let b = board();
+        b.create_ops_session(Some("honr-ops".into()), Some("c1".into()))
+            .expect("create");
+        b.park_ops_session().expect("park");
+        let mut app = Router::new().nest("/api", routes()).with_state(b);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/ops-chat")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"hello"}"#))
+            .unwrap();
+        let res = app.call(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            v["error"].as_str().unwrap_or("").contains("parked"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ops_chat_route_streams_agent_lines_when_running() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-ops-chat-stream-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut board = Board::new(Schema::default(), path);
+        board.openshell = Some(OpenShell::mock(
+            |args| {
+                let joined = args.join(" ");
+                if joined.contains("kill -TERM") {
+                    return crate::openshell::Output {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    };
+                }
+                crate::openshell::Output {
+                    code: 0,
+                    stdout: concat!(
+                        r#"{"type":"assistant","session_id":"conv-from-stream","text":"pong"}"#,
+                        "\n",
+                        r#"{"type":"result","session_id":"conv-from-stream"}"#,
+                        "\n",
+                    )
+                    .into(),
+                    stderr: String::new(),
+                }
+            },
+            Duration::from_secs(5),
+        ));
+        let b: SharedBoard = Arc::new(board);
+        b.create_ops_session(Some("honr-ops".into()), Some("conv-old".into()))
+            .expect("create");
+
+        let mut app = Router::new().nest("/api", routes()).with_state(b.clone());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/ops-chat")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"ping"}"#))
+            .unwrap();
+        let res = app.call(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("text/event-stream"), "content-type={ct}");
+
+        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(
+            body.contains("event:ready") || body.contains("event: ready"),
+            "{body}"
+        );
+        assert!(body.contains("honr-ops"), "{body}");
+        assert!(
+            body.contains("event:agent")
+                || body.contains("event: agent")
+                || body.contains("pong"),
+            "{body}"
+        );
+        assert!(
+            body.contains("event:done") || body.contains("event: done"),
+            "{body}"
+        );
+
+        let cid = b.ops_session().and_then(|s| s.conversation_id);
+        assert_eq!(cid.as_deref(), Some("conv-from-stream"));
+    }
+
+    #[tokio::test]
+    async fn ops_chat_does_not_create_or_stop_session() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-ops-chat-lifecycle-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut board = Board::new(Schema::default(), path);
+        board.openshell = Some(OpenShell::mock(
+            |_| crate::openshell::Output {
+                code: 0,
+                stdout: "{\"type\":\"assistant\"}\n".into(),
+                stderr: String::new(),
+            },
+            Duration::from_secs(5),
+        ));
+        let b: SharedBoard = Arc::new(board);
+        b.create_ops_session(Some("honr-ops".into()), None)
+            .expect("create");
+
+        let mut app = Router::new().nest("/api", routes()).with_state(b.clone());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/ops-chat")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"stay running"}"#))
+            .unwrap();
+        let res = app.call(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+
+        let session = b.ops_session().expect("session must remain");
+        assert_eq!(session.status, OpsSessionStatus::Running);
+        assert_eq!(session.environment.as_deref(), Some("honr-ops"));
+    }
+}

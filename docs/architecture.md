@@ -25,7 +25,7 @@ UI / MCP / supervisor
 | `src/model.rs` | One node type. Project (container) + Task (claimable leaf). Ops session singleton. |
 | `src/machine.rs` | Legal transitions + lifecycle invariants (cards and ops session). |
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
-| `src/api.rs` `src/sse.rs` | The human face (REST + SSE). |
+| `src/api.rs` `src/sse.rs` `src/ops_chat.rs` | The human face (REST + board SSE + ops chat bridge). |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs. |
 | `src/openshell.rs` | Typed async wrapper over the `openshell` CLI; every call has a deadline. |
 | `src/supervisor.rs` | Card dispatch + durable ops seat start/reconcile/stop; briefing; lease sweeping. |
@@ -65,7 +65,8 @@ MCP with operator tools only.
 |---|---|---|
 | Ops seat (operator tools only) | MCP streamable HTTP at `/mcp` | Chat / ops agents on the host (OAuth) |
 | Host seat (operator + worker verbs) | `Operator::host` (in-process) | Supervisor/host tooling and tests |
-| Human UI | REST + SSE | React app; one-tap answers and approvals |
+| Human UI | REST + board SSE | React app; one-tap answers and approvals |
+| Ops chat bridge | `POST /api/ops-chat` (SSE) | Cockpit / browser; prompts into Board ops seat |
 
 `/mcp` does not expose worker verbs (`claim`, `heartbeat`, `report`, `split`,
 `escalate`, `release`, `list_ready`). Ops clients triage and dispatch; they do
