@@ -3,7 +3,7 @@
 
 use crate::model::{
     AgentRuntimeConfig, ItemId, OpenShellProviderDesired, OpenShellProviderRefreshDesired,
-    SandboxProfile, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
+    OpsSession, SandboxProfile, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
 use crate::openshell::{ProviderRefreshSpec, ProviderTypeProfile};
 use crate::secrets::{open_string_map, seal_string_map};
@@ -82,6 +82,15 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/workspace", get(get_workspace).put(put_workspace))
         .route("/webhook-poll", get(get_webhook_poll).put(put_webhook_poll))
         .route("/agent-runtime", get(get_agent_runtime).put(put_agent_runtime))
+        .route(
+            "/ops-session",
+            get(get_ops_session)
+                .post(create_ops_session)
+                .put(update_ops_session)
+                .delete(stop_ops_session),
+        )
+        .route("/ops-session/park", post(park_ops_session))
+        .route("/ops-session/resume", post(resume_ops_session))
         .route("/openshell/status", get(openshell_status))
         .route("/openshell", get(get_openshell).put(put_openshell))
         .route(
@@ -1344,6 +1353,70 @@ async fn set_item_sandbox_profile(
         b.set_project_sandbox_profile(id, req.sandbox_profile_id)
             .map_err(ApiError)?,
     ))
+}
+
+// ---------------------------------------------------------------- ops session
+// Thin face: every rule lives on Board / machine.rs.
+
+#[derive(Serialize)]
+pub struct OpsSessionOut {
+    pub session: Option<OpsSession>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateOpsSessionReq {
+    #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateOpsSessionReq {
+    /// When present, sets (blank clears). Omitted leaves unchanged.
+    #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+}
+
+async fn get_ops_session(AxState(b): AxState<SharedBoard>) -> Json<OpsSessionOut> {
+    Json(OpsSessionOut {
+        session: b.ops_session(),
+    })
+}
+
+async fn create_ops_session(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<CreateOpsSessionReq>,
+) -> ApiResult<OpsSession> {
+    Ok(Json(
+        b.create_ops_session(req.environment, req.conversation_id)
+            .map_err(ApiError)?,
+    ))
+}
+
+async fn update_ops_session(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<UpdateOpsSessionReq>,
+) -> ApiResult<OpsSession> {
+    Ok(Json(
+        b.update_ops_session(req.environment, req.conversation_id)
+            .map_err(ApiError)?,
+    ))
+}
+
+async fn park_ops_session(AxState(b): AxState<SharedBoard>) -> ApiResult<OpsSession> {
+    Ok(Json(b.park_ops_session().map_err(ApiError)?))
+}
+
+async fn resume_ops_session(AxState(b): AxState<SharedBoard>) -> ApiResult<OpsSession> {
+    Ok(Json(b.resume_ops_session().map_err(ApiError)?))
+}
+
+async fn stop_ops_session(AxState(b): AxState<SharedBoard>) -> Result<StatusCode, ApiError> {
+    b.stop_ops_session().map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]

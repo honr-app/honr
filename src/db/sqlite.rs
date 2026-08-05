@@ -5,14 +5,15 @@ use super::codec::{
     META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_BIN, META_OPENSHELL_GATEWAY_ENDPOINT,
     META_AUTH_ALLOWED_TEAMS, META_AUTH_ALLOWED_USERS, META_AUTH_SEALED,
     META_GITHUB_APP_INSTALLATION_ID, META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED,
-    META_OPENSHELL_PROVIDERS, META_SANDBOX_PROFILES, META_WEBHOOK_POLL,
+    META_OPENSHELL_PROVIDERS, META_OPS_SESSION, META_SANDBOX_PROFILES, META_WEBHOOK_POLL,
     META_WEBHOOK_POLL_TIPS, META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
 use crate::model::{
-    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, SandboxProfile, WebhookPollConfig,
+    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, OpsSession, SandboxProfile,
+    WebhookPollConfig,
     WorkItem, WorkspaceBinding,
 };
 use crate::store::{BoardState, StoryLine};
@@ -77,6 +78,7 @@ impl SqliteBoardStore {
         let openshell_providers = self.load_openshell_providers().await?;
         let webhook_poll = self.load_webhook_poll().await?;
         let webhook_poll_tips = self.load_webhook_poll_tips().await?;
+        let ops_session = self.load_ops_session().await?;
         let mut state = BoardState {
             next_id,
             items,
@@ -96,6 +98,7 @@ impl SqliteBoardStore {
             openshell_providers,
             webhook_poll,
             webhook_poll_tips,
+            ops_session,
             agent_logs: BTreeMap::new(),
             ..Default::default()
         };
@@ -230,6 +233,12 @@ impl SqliteBoardStore {
         let tips_json = serde_json::to_string(&state.webhook_poll_tips)
             .map_err(|e| StoreError::Query(format!("serialize webhook_poll_tips: {e}")))?;
         set_meta_tx(&mut tx, META_WEBHOOK_POLL_TIPS, &tips_json).await?;
+        let ops_session_json = match &state.ops_session {
+            None => String::new(),
+            Some(session) => serde_json::to_string(session)
+                .map_err(|e| StoreError::Query(format!("serialize ops_session: {e}")))?,
+        };
+        set_meta_tx(&mut tx, META_OPS_SESSION, &ops_session_json).await?;
 
         tx.commit()
             .await
@@ -392,6 +401,15 @@ impl SqliteBoardStore {
             Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(BTreeMap::new()),
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode webhook_poll_tips: {e}"))),
+        }
+    }
+
+    async fn load_ops_session(&self) -> Result<Option<OpsSession>, StoreError> {
+        match self.meta_get(META_OPS_SESSION).await? {
+            None => Ok(None),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(None),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode ops_session: {e}"))),
         }
     }
 }
@@ -1053,10 +1071,31 @@ mod tests {
         });
         store.save_board_state(&with_rt).await.expect("save runtime");
         let rt_again = store.load_board_state().await.expect("reload runtime");
-        let rt = rt_again.agent_runtime.expect("agent_runtime round-trip");
+        let rt = rt_again
+            .agent_runtime
+            .as_ref()
+            .expect("agent_runtime round-trip");
         assert!(rt.enabled);
         assert_eq!(rt.engine, "agy");
         assert_eq!(rt.max_concurrent, 1);
+
+        // Ops session meta round-trip.
+        let mut with_ops = rt_again;
+        with_ops.ops_session = Some(crate::model::OpsSession::new(
+            Some("honr-ops".into()),
+            Some("conv-db".into()),
+        ));
+        with_ops.ops_session.as_mut().unwrap().status =
+            crate::model::OpsSessionStatus::Parked;
+        store
+            .save_board_state(&with_ops)
+            .await
+            .expect("save ops session");
+        let ops_again = store.load_board_state().await.expect("reload ops");
+        let ops = ops_again.ops_session.expect("ops_session round-trip");
+        assert_eq!(ops.environment.as_deref(), Some("honr-ops"));
+        assert_eq!(ops.conversation_id.as_deref(), Some("conv-db"));
+        assert_eq!(ops.status, crate::model::OpsSessionStatus::Parked);
     }
 
     #[tokio::test]
