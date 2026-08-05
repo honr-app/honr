@@ -47,7 +47,7 @@ Task.
 
 | Role | Who | Reach |
 |---|---|---|
-| **Operator** | Human + chat agent on the host | MCP into honr: shape Projects, triage Needs You / Review, dispatch, park / steer / halt |
+| **Operator / ops seat** | Human + chat agent on the host | MCP `/mcp`: shape Projects, triage Needs You / Review, dispatch, park / steer / halt. No worker verbs. |
 | **Worker** | Agent inside an OpenShell sandbox | No network path to honr. Supervisor calls `claim` / `heartbeat` / `report` on its behalf |
 
 An agent that could reach honr's MCP could approve its own review. Containment

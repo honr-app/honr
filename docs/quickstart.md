@@ -49,7 +49,11 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 ## Connect the operator MCP
 
 honr must already be listening. After local admin bootstrap, `/mcp` requires
-MCP OAuth 2.1 (Bearer). Clients discover the authorization server from
+MCP OAuth 2.1 (Bearer). That endpoint is the **ops seat**: operator tools only
+(board snapshot, dispatch, park, steer, approve_*, answer_escalation, …). Worker
+verbs (`claim`, `heartbeat`, `report`, `split`, `escalate`, `release`,
+`list_ready`) are not listed there — the supervisor calls `Board` for card
+lifecycle. Clients discover the authorization server from
 `/.well-known/oauth-protected-resource` and open a browser login/consent that
 reuses the same admin / GitHub allowlist as the board UI.
 

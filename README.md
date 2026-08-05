@@ -85,7 +85,8 @@ make dev-ui               # Vite on :5173 (proxies to :8080)
 
 Connect an operator MCP client (honr must already be listening). After admin
 bootstrap, `/mcp` uses MCP OAuth 2.1 — Authenticate / Connect in the client and
-sign in with the same board credentials.
+sign in with the same board credentials. That endpoint is the ops seat:
+operator tools only (no `claim` / `heartbeat` / `report` / worker verbs).
 
 **Cursor** ([`.cursor/mcp.json`](.cursor/mcp.json)):
 
@@ -141,7 +142,7 @@ Operator orientation for agents working *on* this repo:
 | `src/store.rs` | The board: the only write path |
 | `src/machine.rs` | Legal transitions and lifecycle invariants |
 | `src/supervisor.rs` | Dispatch, sandbox lifecycle, lease sweeping |
-| `src/mcp.rs` | Operator tools and worker verbs |
+| `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs |
 | `src/openshell.rs` | Typed wrapper over the OpenShell CLI |
 | `sandbox/` | Container image, network policy, metadata shim |
 | `web/` | React UI |
