@@ -73,9 +73,6 @@ pub const META_COCKPIT_SANDBOX_PROFILE_ID: &str = "cockpit_sandbox_profile_id";
 /// JSON blob: optional [`crate::model::WorkspaceBinding`].
 pub const META_WORKSPACE_BINDING: &str = "workspace_binding";
 
-/// Optional OpenShell CLI path override (empty string means use PATH default).
-pub const META_OPENSHELL_BIN: &str = "openshell_bin";
-
 /// OpenShell gateway URL (e.g. `https://127.0.0.1:17670`). Not secret.
 pub const META_OPENSHELL_GATEWAY_ENDPOINT: &str = "openshell_gateway_endpoint";
 
