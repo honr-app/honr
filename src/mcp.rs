@@ -2,13 +2,15 @@
 //! same care — the operator has to be able to do the right thing without the
 //! human reading the board, and an agent has to without any human at all.
 //!
-//! Two families share one state machine:
-//!   * operator tools — what a liaison agent needs to triage and decide
+//! Two families share one state machine; seats gate which family is visible:
+//!   * operator tools — what a liaison / ops seat needs to triage and decide
 //!   * worker verbs  — `list_ready` `claim` `heartbeat` `split` `escalate`
 //!     `report` `release`, and nothing else
 //!
-//! If the worker surface grows past roughly that size, the orchestrator has
-//! started leaking its own complexity into the workers.
+//! `/mcp` (OAuth) is the **ops seat**: operator tools only. Worker verbs stay
+//! on the host seat for supervisor/host tooling; the live supervisor path
+//! calls `Board` directly. If the worker surface grows past roughly that size,
+//! the orchestrator has started leaking its own complexity into the workers.
 
 use crate::model::{Column, EscalationOption, ItemId, State};
 use crate::store::SharedBoard;
@@ -32,6 +34,32 @@ fn bad(msg: impl Into<std::borrow::Cow<'static, str>>) -> ErrorData {
 }
 
 type Out<T> = Result<ToolJson<T>, ErrorData>;
+
+/// Which MCP tool family a session may use.
+///
+/// Ops (default `/mcp`) is the privileged chatbot / OAuth operator client.
+/// Host keeps worker verbs for supervisor-facing tooling and tests; production
+/// card lifecycle still goes through `Board` in `store.rs`, not this seat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum McpSeat {
+    /// Operator tools only — no claim/heartbeat/report/split/escalate/release/list_ready.
+    #[default]
+    Ops,
+    /// Operator tools plus worker verbs (host / supervisor tooling).
+    #[allow(dead_code)] // constructed via `Operator::host` (tests + host tooling)
+    Host,
+}
+
+/// Worker-verb tool names. Ops seat hides these from `tools/list` and rejects calls.
+pub const WORKER_VERB_TOOLS: &[&str] = &[
+    "list_ready",
+    "claim",
+    "heartbeat",
+    "split",
+    "escalate",
+    "report",
+    "release",
+];
 
 // ------------------------------------------------------------------ payloads
 
@@ -331,15 +359,51 @@ pub struct HealEpicsOut {
 #[derive(Clone)]
 pub struct Operator {
     board: SharedBoard,
-    /// Read by the `#[tool_handler]` macro, not by us.
+    seat: McpSeat,
+    /// Used by `#[tool_handler(router = self.tool_router)]` for list/call.
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Operator>,
 }
 
 #[tool_router]
 impl Operator {
+    /// Ops seat — operator tools only. This is what `/mcp` mounts.
     pub fn new(board: SharedBoard) -> Self {
-        Self { board, tool_router: Self::tool_router() }
+        Self::with_seat(board, McpSeat::Ops)
+    }
+
+    /// Host seat — operator tools plus worker verbs (supervisor/host tooling).
+    #[allow(dead_code)] // used by unit tests; live supervisor calls Board directly
+    pub fn host(board: SharedBoard) -> Self {
+        Self::with_seat(board, McpSeat::Host)
+    }
+
+    pub fn with_seat(board: SharedBoard, seat: McpSeat) -> Self {
+        let mut tool_router = Self::tool_router();
+        if seat == McpSeat::Ops {
+            for name in WORKER_VERB_TOOLS {
+                tool_router.disable_route(*name);
+            }
+        }
+        Self {
+            board,
+            seat,
+            tool_router,
+        }
+    }
+
+    #[allow(dead_code)] // used by unit tests asserting seat identity
+    pub fn seat(&self) -> McpSeat {
+        self.seat
+    }
+
+    fn deny_worker(&self, verb: &str) -> Result<(), ErrorData> {
+        if self.seat == McpSeat::Ops {
+            return Err(bad(format!(
+                "{verb} is a worker verb; ops seat is operator tools only"
+            )));
+        }
+        Ok(())
     }
 
     fn ack(&self, id: ItemId, note: impl Into<String>) -> Out<Ack> {
@@ -850,6 +914,7 @@ impl Operator {
                        Not a start queue — operator must dispatch before the supervisor claims."
     )]
     fn list_ready(&self, Parameters(a): Parameters<ListReadyArg>) -> Out<ListReadyOut> {
+        self.deny_worker("list_ready")?;
         let rows = self
             .board
             .list_ready(&a.capabilities)
@@ -871,6 +936,7 @@ impl Operator {
                        ends at agent_timeout_secs; heartbeats do not extend that deadline."
     )]
     fn claim(&self, Parameters(a): Parameters<ClaimArg>) -> Out<crate::store::ClaimGrant> {
+        self.deny_worker("claim")?;
         let timeout = self.board.effective_agents().agent_timeout_secs as i64;
         let grant = self
             .board
@@ -885,6 +951,7 @@ impl Operator {
                        that was fixed at claim."
     )]
     fn heartbeat(&self, Parameters(a): Parameters<HeartbeatArg>) -> Out<Ack> {
+        self.deny_worker("heartbeat")?;
         let _ = a.cost_cents; // legacy clients may still send it
         self.board
             .heartbeat(a.item_id, &a.agent_id, a.progress, a.lease_secs)
@@ -900,6 +967,7 @@ impl Operator {
                        just report. Mutually exclusive with opening a PR."
     )]
     fn split(&self, Parameters(a): Parameters<SplitArg>) -> Out<SplitOut> {
+        self.deny_worker("split")?;
         let children = a
             .children
             .into_iter()
@@ -932,6 +1000,7 @@ impl Operator {
                        quality signal, not just a workflow event."
     )]
     fn escalate(&self, Parameters(a): Parameters<EscalateArg>) -> Out<Ack> {
+        self.deny_worker("escalate")?;
         let options = a
             .options
             .into_iter()
@@ -949,6 +1018,7 @@ impl Operator {
                        Review — CI on the PR is the mechanical gate."
     )]
     fn report(&self, Parameters(a): Parameters<ReportArg>) -> Out<Ack> {
+        self.deny_worker("report")?;
         self.board
             .report(
                 a.item_id,
@@ -967,6 +1037,7 @@ impl Operator {
                        waiting for your lease to expire. Operator must dispatch again to restart."
     )]
     fn release(&self, Parameters(a): Parameters<AgentItemArg>) -> Out<Ack> {
+        self.deny_worker("release")?;
         self.board
             .release(a.item_id, &a.agent_id)
             .map_err(|e| bad(e.to_string()))?;
@@ -974,7 +1045,7 @@ impl Operator {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for Operator {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(
@@ -987,9 +1058,11 @@ impl ServerHandler for Operator {
             me.version = env!("CARGO_PKG_VERSION").into();
             me
         })
-        .with_instructions(
-                "honr — an agent orchestration board. You are the operator: the human's liaison, \
-                 not a dashboard reader.\n\n\
+        .with_instructions(match self.seat {
+            McpSeat::Ops => {
+                "honr — an agent orchestration board. You are the ops seat: the human's \
+                 liaison over operator tools only (no claim/heartbeat/report/split/escalate/\
+                 release/list_ready — those are worker verbs on the host/supervisor path).\n\n\
                  Start with board_snapshot. Triage in this order, because urgency differs:\n\
                  1. Needs You — an agent is stopped and burning nothing while it waits. Every \
                     minute costs throughput. Resolve these first.\n\
@@ -998,7 +1071,8 @@ impl ServerHandler for Operator {
                  3. Everything else waits for a digest.\n\n\
                  Interrupt the human for three things only: irreversible actions, \
                  an ambiguity blocking several items, and repeated failure on the same card. \
-                 Otherwise summarise and let them walk away.\n\n\
+                 Prefer escalating ambiguous irreversibles; do not widen merge semantics — \
+                 approving merges stays human. Otherwise summarise and let them walk away.\n\n\
                  Backlog cards do not auto-start unless the Project's auto mode is on \
                  (swimlane play/pause or set_auto_dispatch). Otherwise use dispatch (or Start). \
                  Park/halt/lease expiry/request_changes return to Backlog without reclaim — \
@@ -1011,16 +1085,24 @@ impl ServerHandler for Operator {
                  impl splits write a proposal on the card → Review; Approve creates sibling \
                  Tasks. Read item_detail's proposal/Plan before approving; a card that passes \
                  its gates can still be building the wrong thing, because coherence is not a \
-                 property of any single card.",
-        )
+                 property of any single card."
+            }
+            McpSeat::Host => {
+                "honr — host MCP seat: operator tools plus worker verbs \
+                 (list_ready/claim/heartbeat/split/escalate/report/release). \
+                 Card lifecycle mutations still go through Board; this seat is for \
+                 supervisor/host tooling, not the ops chatbot."
+            }
+        })
     }
 }
 
 /// Mounted on the same axum router, same port, same state as the human face.
 ///
-/// Stateless on purpose. Operator tools are request/response over `SharedBoard`;
-/// an in-memory `Mcp-Session-Id` only made Cursor brittle across `cargo run`
-/// restarts ("Session not found") without buying us server→client streams.
+/// `/mcp` is the **ops seat** (operator tools only). Stateless on purpose:
+/// tools are request/response over `SharedBoard`; an in-memory `Mcp-Session-Id`
+/// only made Cursor brittle across `cargo run` restarts ("Session not found")
+/// without buying us server→client streams.
 pub fn service(board: SharedBoard) -> StreamableHttpService<Operator, NeverSessionManager> {
     // rmcp defaults to localhost/127.0.0.1/::1 only (DNS-rebinding guard).
     // Docker clients reach us as host.docker.internal — allow that Host.
@@ -1299,7 +1381,8 @@ mod tests {
     #[test]
     fn cut_scope_list_ready_and_split_return_record_with_items() {
         let (board, goal_id) = test_board();
-        let operator = Operator::new(board.clone());
+        // Worker-verb shape checks use the host seat (ops hides list_ready).
+        let operator = Operator::host(board.clone());
 
         // list_ready
         let ready_res = operator
@@ -1483,5 +1566,245 @@ mod tests {
         let ack = operator.approve_review(Parameters(IdArg { id: t1.id })).expect("approve_review");
         assert_eq!(ack.0.note, format!("approved — dispatch #{} next", t2.id));
     }
+
+    #[test]
+    fn ops_seat_lists_operator_tools_and_hides_worker_verbs() {
+        let (board, _) = test_board();
+        let ops = Operator::new(board);
+        assert_eq!(ops.seat(), McpSeat::Ops);
+
+        let names: Vec<_> = ops
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+
+        for tool in [
+            "board_snapshot",
+            "dispatch",
+            "park",
+            "steer",
+            "approve_review",
+            "approve_plan",
+            "answer_escalation",
+        ] {
+            assert!(
+                names.iter().any(|n| n == tool),
+                "ops seat must list operator tool {tool}; got {names:?}"
+            );
+            assert!(
+                ops.tool_router.has_route(tool),
+                "ops seat must expose {tool}"
+            );
+        }
+
+        for verb in WORKER_VERB_TOOLS {
+            assert!(
+                !names.iter().any(|n| n == *verb),
+                "ops seat must not list worker verb {verb}; got {names:?}"
+            );
+            assert!(
+                !ops.tool_router.has_route(verb),
+                "ops seat must disable {verb}"
+            );
+        }
+    }
+
+    #[test]
+    fn ops_seat_invokes_operator_tools_and_denies_worker_verbs() {
+        let (board, goal_id) = test_board();
+        let ops = Operator::new(board.clone());
+
+        let snap = ops.board_snapshot().expect("ops board_snapshot");
+        assert!(!snap.0.goals.is_empty(), "ops can read the board");
+
+        let park = ops.park(Parameters(ReasonArg {
+            id: goal_id,
+            reason: Some("ops seat smoke".into()),
+        }));
+        if let Err(e) = &park {
+            assert!(
+                !e.message.contains("worker verb"),
+                "ops park must not be seat-denied: {}",
+                e.message
+            );
+        }
+
+        let claim = ops.claim(Parameters(ClaimArg {
+            item_id: goal_id,
+            agent_id: "ops-agent".into(),
+            model: None,
+            lease_secs: 60,
+        }));
+        let err = match claim {
+            Ok(_) => panic!("ops must deny claim"),
+            Err(e) => e,
+        };
+        assert!(
+            err.message.contains("worker verb") && err.message.contains("ops seat"),
+            "unexpected deny message: {}",
+            err.message
+        );
+
+        for (label, result) in [
+            (
+                "list_ready",
+                ops.list_ready(Parameters(ListReadyArg {
+                    capabilities: vec!["any".into()],
+                }))
+                .map(|_| ()),
+            ),
+            (
+                "heartbeat",
+                ops.heartbeat(Parameters(HeartbeatArg {
+                    item_id: goal_id,
+                    agent_id: "ops-agent".into(),
+                    progress: 0.1,
+                    lease_secs: 30,
+                    cost_cents: 0,
+                }))
+                .map(|_| ()),
+            ),
+            (
+                "report",
+                ops.report(Parameters(ReportArg {
+                    item_id: goal_id,
+                    agent_id: "ops-agent".into(),
+                    lines_added: 1,
+                    lines_removed: 0,
+                }))
+                .map(|_| ()),
+            ),
+            (
+                "release",
+                ops.release(Parameters(AgentItemArg {
+                    item_id: goal_id,
+                    agent_id: "ops-agent".into(),
+                }))
+                .map(|_| ()),
+            ),
+            (
+                "escalate",
+                ops.escalate(Parameters(EscalateArg {
+                    item_id: goal_id,
+                    agent_id: "ops-agent".into(),
+                    question: "pick?".into(),
+                    options: vec![
+                        OptionSpec {
+                            label: "A".into(),
+                            detail: "one".into(),
+                        },
+                        OptionSpec {
+                            label: "B".into(),
+                            detail: "two".into(),
+                        },
+                    ],
+                    recommended: 0,
+                }))
+                .map(|_| ()),
+            ),
+            (
+                "split",
+                ops.split(Parameters(SplitArg {
+                    item_id: goal_id,
+                    agent_id: "ops-agent".into(),
+                    children: vec![
+                        ChildSpec {
+                            title: "a".into(),
+                            intent: "a".into(),
+                            definition_of_done: "a".into(),
+                            capability: None,
+                            key: None,
+                            blocked_by_keys: vec![],
+                            blocked_by: vec![],
+                            repo: None,
+                        },
+                        ChildSpec {
+                            title: "b".into(),
+                            intent: "b".into(),
+                            definition_of_done: "b".into(),
+                            capability: None,
+                            key: None,
+                            blocked_by_keys: vec![],
+                            blocked_by: vec![],
+                            repo: None,
+                        },
+                    ],
+                }))
+                .map(|_| ()),
+            ),
+        ] {
+            match result {
+                Ok(_) => panic!("ops must deny {label}"),
+                Err(e) => assert!(
+                    e.message.contains("worker verb"),
+                    "{label} deny message: {}",
+                    e.message
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn host_seat_lists_and_invokes_worker_verbs() {
+        let (board, goal_id) = test_board();
+        let host = Operator::host(board.clone());
+        assert_eq!(host.seat(), McpSeat::Host);
+
+        let names: Vec<_> = host
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for verb in WORKER_VERB_TOOLS {
+            assert!(
+                names.iter().any(|n| n == *verb),
+                "host seat must list {verb}; got {names:?}"
+            );
+        }
+
+        let leaf = board
+            .create(
+                Some(goal_id),
+                "Host leaf",
+                "claimable",
+                Some("DoD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("leaf");
+        let _ = board.transition(leaf.id, State::Shaping, "test", None);
+        let _ = board.transition(leaf.id, State::Backlog, "test", None);
+
+        let grant = match host.claim(Parameters(ClaimArg {
+            item_id: leaf.id,
+            agent_id: "host-agent".into(),
+            model: None,
+            lease_secs: 60,
+        })) {
+            Ok(g) => g,
+            Err(e) => panic!("host claim: {}", e.message),
+        };
+        assert_eq!(grant.0.item_id, leaf.id);
+
+        if let Err(e) = host.heartbeat(Parameters(HeartbeatArg {
+            item_id: leaf.id,
+            agent_id: "host-agent".into(),
+            progress: 0.5,
+            lease_secs: 30,
+            cost_cents: 0,
+        })) {
+            panic!("host heartbeat: {}", e.message);
+        }
+
+        // Board-direct supervisor path remains authoritative.
+        board
+            .heartbeat(leaf.id, "host-agent", 0.6, 30)
+            .expect("board heartbeat still works");
+    }
+
 
 }

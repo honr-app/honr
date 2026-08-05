@@ -4,9 +4,10 @@ Orientation for the **operator** agent sitting with the human. If you are an
 agent honr dispatched to work on a card, you already have a briefing — ignore
 this file.
 
-**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`). Do not
-implement product work by editing this tree; shape Projects/Plans, triage
-Needs You / Review, let sandboxed workers open PRs. See
+**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`) — the ops
+seat (operator tools only; no worker verbs). Do not implement product work by
+editing this tree; shape Projects/Plans, triage Needs You / Review, let
+sandboxed workers open PRs. See
 [`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc).
 
 Start with [`docs/index.md`](docs/index.md) and
@@ -98,7 +99,7 @@ do not treat a stale local `main` as truth.
 | `src/store.rs` | The board — the only write path |
 | `src/supervisor.rs` | Dispatch, per-card lifecycle, briefing, lease sweeping |
 | `src/openshell.rs` | Typed wrapper over the CLI; every call has a deadline |
-| `src/mcp.rs` | Operator tools and worker verbs |
+| `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs |
 | `sandbox/` | Containerfile, network policy, metadata shim |
 | `web/` | React UI + `npm run shots` screenshot harness |
 | `docs/sandbox.md` | How a sandboxed run works and the gotchas that matter. Read before touching `sandbox/`. |

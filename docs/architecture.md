@@ -26,7 +26,7 @@ UI / MCP / supervisor
 | `src/machine.rs` | Legal transitions + lifecycle invariants (cards and ops session). |
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
 | `src/api.rs` `src/sse.rs` | The human face (REST + SSE). |
-| `src/mcp.rs` | Operator tools and worker verbs. |
+| `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs. |
 | `src/openshell.rs` | Typed async wrapper over the `openshell` CLI; every call has a deadline. |
 | `src/supervisor.rs` | Dispatch, per-card sandbox lifecycle, briefing, lease sweeping. |
 | `honr.yaml` | Level schema (Project + Task) and execution config. |
@@ -49,14 +49,19 @@ When agents are enabled, the supervisor:
    restart does not orphan a running agent.
 
 The agent has no network path to honr. The supervisor is the only caller of
-worker verbs on the live path.
+worker verbs on the live path (`Board` in `store.rs`).
 
 ## MCP and REST
 
 | Face | Transport | Audience |
 |---|---|---|
-| Operator + worker tools | MCP streamable HTTP at `/mcp` | Chat agents on the host; supervisor for worker verbs |
+| Ops seat (operator tools only) | MCP streamable HTTP at `/mcp` | Chat / ops agents on the host (OAuth) |
+| Host seat (operator + worker verbs) | `Operator::host` (in-process) | Supervisor/host tooling and tests |
 | Human UI | REST + SSE | React app; one-tap answers and approvals |
+
+`/mcp` does not expose worker verbs (`claim`, `heartbeat`, `report`, `split`,
+`escalate`, `release`, `list_ready`). Ops clients triage and dispatch; they do
+not run the card-lifecycle path.
 
 Steer, pin, park, halt, and cut scope want a reason. They live in MCP. What
 stays one-tap in the UI is answering an escalation and approving a review.

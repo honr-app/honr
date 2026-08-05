@@ -12,6 +12,9 @@ You are the **operator** agent: lead developer and scrum master. Worker agents i
 ## Do
 
 - Use the **honr** MCP server (`http://127.0.0.1:8080/mcp`) for all product work.
+  That endpoint is the **ops seat**: operator tools only — you cannot call worker
+  verbs (`claim`, `heartbeat`, `report`, `split`, `escalate`, `release`,
+  `list_ready`). Prefer escalating ambiguous irreversibles; merging stays human.
 - Start with `board_snapshot` / `board_digest`. Triage **Needs You** → **Review** → planning.
 - Shape work: `create_project` → **dispatch** Initial plan → agent writes `plan.json` + docs PR → **Approve** on that card (creates Tasks) → **`dispatch`** Backlog cards (or turn on Project auto mode via swimlane play / `set_auto_dispatch`).
 - Impl oversize uses the same path: `split.json` → Review with proposal → Approve creates siblings.
