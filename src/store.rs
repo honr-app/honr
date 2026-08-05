@@ -12,10 +12,10 @@ use crate::model::*;
 use crate::schema::{AgentConfig, Level, RepoConfig, Schema};
 
 use chrono::{DateTime, Duration, Utc};
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -140,9 +140,15 @@ impl BoardState {
 
     fn index_link_item(&mut self, item: &WorkItem) {
         if let Some(p) = item.parent {
-            self.children_by_parent.entry(p).or_default().insert(item.id);
+            self.children_by_parent
+                .entry(p)
+                .or_default()
+                .insert(item.id);
         }
-        self.ids_by_state.entry(item.state).or_default().insert(item.id);
+        self.ids_by_state
+            .entry(item.state)
+            .or_default()
+            .insert(item.id);
     }
 
     fn index_unlink_item(&mut self, item: &WorkItem) {
@@ -441,7 +447,10 @@ impl Board {
     pub fn new(schema: Schema, path: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(1024);
         Self {
-            state: RwLock::new(BoardState { next_id: 1, ..Default::default() }),
+            state: RwLock::new(BoardState {
+                next_id: 1,
+                ..Default::default()
+            }),
             tx,
             seq: AtomicU64::new(0),
             event_buffer: RwLock::new(std::collections::VecDeque::new()),
@@ -573,10 +582,7 @@ impl Board {
         if renamed > 0 {
             tracing::info!("renamed {renamed} Initial plan Task(s) to include Project name");
         }
-        tracing::info!(
-            items = state.items.len(),
-            "restored board from database"
-        );
+        tracing::info!(items = state.items.len(), "restored board from database");
         let mut board = Self::new(schema, json_path);
         board.store = Some(store);
         *board.state.write() = state;
@@ -852,7 +858,10 @@ impl Board {
 
     pub fn get_agent_logs(&self, id: ItemId) -> Vec<String> {
         let s = self.state.read();
-        s.agent_logs.get(&id).map(|l| l.iter().cloned().collect()).unwrap_or_default()
+        s.agent_logs
+            .get(&id)
+            .map(|l| l.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn clear_agent_logs(&self, id: ItemId) {
@@ -864,7 +873,12 @@ impl Board {
         item.blocked_by
             .iter()
             .copied()
-            .filter(|b| s.items.get(b).map(|i| !i.state.is_terminal()).unwrap_or(false))
+            .filter(|b| {
+                s.items
+                    .get(b)
+                    .map(|i| !i.state.is_terminal())
+                    .unwrap_or(false)
+            })
             .collect()
     }
 
@@ -888,14 +902,23 @@ impl Board {
         let from = {
             let item = s.items.get_mut(&id).unwrap();
             let from = item.state;
-            item.history.push(Transition { at: now, from, to, by: by.to_string(), reason });
+            item.history.push(Transition {
+                at: now,
+                from,
+                to,
+                by: by.to_string(),
+                reason,
+            });
             item.state = to;
             if from != to {
                 item.entered_state_at = now;
             }
 
             // States that imply no agent is holding the card.
-            if matches!(to, State::Backlog | State::NeedsHuman | State::Done | State::Retired | State::Shaping) {
+            if matches!(
+                to,
+                State::Backlog | State::NeedsHuman | State::Done | State::Retired | State::Shaping
+            ) {
                 item.lease = None;
                 item.run_deadline_at = None;
             }
@@ -1094,15 +1117,7 @@ impl Board {
                 format!("{}\nDefault clone repository: {clone}.\n", base.trim_end())
             }
         };
-        let item = self.create(
-            None,
-            title,
-            intent,
-            None,
-            Origin::Human,
-            above_line,
-            None,
-        )?;
+        let item = self.create(None, title, intent, None, Origin::Human, above_line, None)?;
         let _ = self.update_item(item.id, None, None, None, None, Some(prompt));
         // Re-stamp Initial plan if create's auto-seed ran before prompt update —
         // seed reads clone from Project intent (already stamped).
@@ -1174,14 +1189,21 @@ impl Board {
             false,
             None,
         )?;
-        let _ = self.transition(seed.id, State::Shaping, "operator", Some("init plan".into()));
-        let seed = self
-            .transition(seed.id, State::Backlog, "operator", Some("init plan".into()))
-            .map_err(|e| e.to_string())?;
-        self.story(
-            project_id,
-            format!("Seeded {title} Task #{}.", seed.id),
+        let _ = self.transition(
+            seed.id,
+            State::Shaping,
+            "operator",
+            Some("init plan".into()),
         );
+        let seed = self
+            .transition(
+                seed.id,
+                State::Backlog,
+                "operator",
+                Some("init plan".into()),
+            )
+            .map_err(|e| e.to_string())?;
+        self.story(project_id, format!("Seeded {title} Task #{}.", seed.id));
         Ok(seed)
     }
 
@@ -1192,9 +1214,7 @@ impl Board {
 
     /// Resolve a Project id or Initial plan id to the Initial plan Task id.
     pub fn resolve_initial_plan_id(&self, id: ItemId) -> Result<ItemId, String> {
-        let item = self
-            .get(id)
-            .ok_or_else(|| format!("no work item #{id}"))?;
+        let item = self.get(id).ok_or_else(|| format!("no work item #{id}"))?;
         if item.is_initial_plan_task() {
             return Ok(id);
         }
@@ -1229,10 +1249,7 @@ impl Board {
         let Some(seed) = Self::initial_plan_of_locked(s, project_id) else {
             return "no_plan".into();
         };
-        let has_proposal = seed
-            .proposal
-            .as_ref()
-            .is_some_and(|p| !p.tasks.is_empty());
+        let has_proposal = seed.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty());
         if seed.state == State::Done {
             return if has_proposal {
                 "approved".into()
@@ -1316,18 +1333,10 @@ impl Board {
         }
 
         // Legacy boards: proposal empty but Project still holds an awaiting Plan.
-        if !seed
-            .proposal
-            .as_ref()
-            .is_some_and(|p| !p.tasks.is_empty())
-        {
+        if !seed.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty()) {
             if let Some(project_id) = seed.parent {
                 if let Some(project) = self.get(project_id) {
-                    if let Some(plan) = project
-                        .plan
-                        .as_ref()
-                        .filter(|p| !p.tasks.is_empty())
-                    {
+                    if let Some(plan) = project.plan.as_ref().filter(|p| !p.tasks.is_empty()) {
                         self.set_proposal(
                             seed_id,
                             TaskProposal {
@@ -1352,14 +1361,9 @@ impl Board {
         let seed = self
             .get(seed_id)
             .ok_or_else(|| format!("no work item #{seed_id}"))?;
-        if !seed
-            .proposal
-            .as_ref()
-            .is_some_and(|p| !p.tasks.is_empty())
-        {
+        if !seed.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty()) {
             return Err(
-                "no proposal on Initial plan — run propose_breakdown or wait for plan.json"
-                    .into(),
+                "no proposal on Initial plan — run propose_breakdown or wait for plan.json".into(),
             );
         }
 
@@ -1383,7 +1387,9 @@ impl Board {
             let s = self.state.read();
             s.items
                 .values()
-                .filter(|i| i.parent.is_none() && i.state != State::Done && i.state != State::Retired)
+                .filter(|i| {
+                    i.parent.is_none() && i.state != State::Done && i.state != State::Retired
+                })
                 .map(|i| (i.id, i.state))
                 .collect()
         };
@@ -1440,7 +1446,12 @@ impl Board {
 
         if failures < max_attempts {
             let item = self
-                .transition(id, State::Backlog, "supervisor", Some(format!("run failed: {reason}")))
+                .transition(
+                    id,
+                    State::Backlog,
+                    "supervisor",
+                    Some(format!("run failed: {reason}")),
+                )
                 .map_err(|e| e.to_string())?;
             self.story(
                 id,
@@ -1480,7 +1491,9 @@ impl Board {
     pub fn clear_run_failures(&self, id: ItemId) {
         let item = {
             let mut s = self.state.write();
-            let Some(it) = s.items.get_mut(&id) else { return };
+            let Some(it) = s.items.get_mut(&id) else {
+                return;
+            };
             if it.run_failures == 0 {
                 return;
             }
@@ -1542,7 +1555,9 @@ impl Board {
     pub fn set_environment(&self, id: ItemId, sandbox: Option<String>) {
         let item = {
             let mut s = self.state.write();
-            let Some(it) = s.items.get_mut(&id) else { return };
+            let Some(it) = s.items.get_mut(&id) else {
+                return;
+            };
             it.environment = sandbox;
             it.clone()
         };
@@ -1553,7 +1568,9 @@ impl Board {
     pub fn set_conversation_id(&self, id: ItemId, conversation_id: Option<String>) {
         let item = {
             let mut s = self.state.write();
-            let Some(it) = s.items.get_mut(&id) else { return };
+            let Some(it) = s.items.get_mut(&id) else {
+                return;
+            };
             if it.conversation_id == conversation_id {
                 return;
             }
@@ -1580,11 +1597,7 @@ impl Board {
     /// Test helper: write the unused `WorkItem.repo` field for DB round-trips.
     /// [`Self::resolve_card_repo`] reads `pull_request` only.
     #[cfg(test)]
-    pub fn set_task_repo(
-        &self,
-        id: ItemId,
-        repo: Option<RepoConfig>,
-    ) -> Result<WorkItem, String> {
+    pub fn set_task_repo(&self, id: ItemId, repo: Option<RepoConfig>) -> Result<WorkItem, String> {
         let normalized = match repo {
             None => None,
             Some(r) => {
@@ -1635,7 +1648,9 @@ impl Board {
     pub fn set_blocked_by(&self, id: ItemId, blockers: Vec<ItemId>) {
         let item = {
             let mut s = self.state.write();
-            let Some(it) = s.items.get_mut(&id) else { return };
+            let Some(it) = s.items.get_mut(&id) else {
+                return;
+            };
             it.blocked_by = blockers;
             it.clone()
         };
@@ -1656,7 +1671,10 @@ impl Board {
     ) -> Result<WorkItem, String> {
         let item = {
             let mut s = self.state.write();
-            let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
+            let it = s
+                .items
+                .get_mut(&id)
+                .ok_or_else(|| format!("no such item #{id}"))?;
             if let Some(t) = title {
                 if !t.trim().is_empty() {
                     it.title = t;
@@ -1681,11 +1699,7 @@ impl Board {
             }
             if let Some(p) = project_prompt {
                 if it.is_project() {
-                    it.project_prompt = if p.trim().is_empty() {
-                        None
-                    } else {
-                        Some(p)
-                    };
+                    it.project_prompt = if p.trim().is_empty() { None } else { Some(p) };
                 }
             }
             it.clone()
@@ -1735,11 +1749,13 @@ impl Board {
                 cpu: agents.cpu.clone(),
                 memory: agents.memory.clone(),
                 engine,
+                provider_names: Vec::new(),
             },
         );
         let cockpit_profile = crate::model::cockpit_sandbox_profile_from_agents(agents);
         let cockpit_id = cockpit_profile.id.clone();
-        s.sandbox_profiles.insert(cockpit_id.clone(), cockpit_profile);
+        s.sandbox_profiles
+            .insert(cockpit_id.clone(), cockpit_profile);
         s.default_sandbox_profile_id = Some(id);
         s.cockpit_sandbox_profile_id = Some(cockpit_id);
         drop(s);
@@ -1811,7 +1827,10 @@ impl Board {
     }
 
     /// Replace the durable Forge binding. REST: `GET`/`PUT /api/workspace` (Settings → Forge).
-    pub fn set_workspace_binding(&self, binding: WorkspaceBinding) -> Result<WorkspaceBinding, String> {
+    pub fn set_workspace_binding(
+        &self,
+        binding: WorkspaceBinding,
+    ) -> Result<WorkspaceBinding, String> {
         let forge = binding.forge.trim();
         if forge.is_empty() {
             return Err("forge provider must not be empty".into());
@@ -2045,7 +2064,10 @@ impl Board {
     }
 
     /// Upsert one desired provider by name.
-    pub fn upsert_openshell_provider(&self, provider: OpenShellProviderDesired) -> OpenShellProviderDesired {
+    pub fn upsert_openshell_provider(
+        &self,
+        provider: OpenShellProviderDesired,
+    ) -> OpenShellProviderDesired {
         let stored = provider.normalized();
         {
             let mut s = self.state.write();
@@ -2078,14 +2100,22 @@ impl Board {
         removed
     }
 
-    /// Provider names with `attach_to_sandboxes` for sandbox create.
-    pub fn sandbox_attach_provider_names(&self) -> Vec<String> {
-        self.state
-            .read()
+    /// Providers to attach for a resolved create-spec.
+    ///
+    /// Uses the profile's `provider_names` (empty = attach none). Unknown names
+    /// are dropped; order follows the profile list.
+    pub fn attach_providers_for_resolved(&self, resolved: &ResolvedSandboxCreate) -> Vec<String> {
+        let s = self.state.read();
+        let known: std::collections::BTreeSet<&str> = s
             .openshell_providers
             .iter()
-            .filter(|p| p.attach_to_sandboxes)
-            .map(|p| p.name.clone())
+            .map(|p| p.name.as_str())
+            .collect();
+        resolved
+            .providers
+            .iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty() && known.contains(n.as_str()))
             .collect()
     }
 
@@ -2295,6 +2325,12 @@ impl Board {
             .engine
             .map(|e| e.trim().to_string())
             .filter(|e| !e.is_empty());
+        let provider_names: Vec<String> = profile
+            .provider_names
+            .into_iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect();
         let mut s = self.state.write();
         let id = {
             let trimmed = profile.id.trim();
@@ -2313,6 +2349,7 @@ impl Board {
             cpu,
             memory,
             engine,
+            provider_names,
         };
         s.sandbox_profiles.insert(stored.id.clone(), stored.clone());
         drop(s);
@@ -2595,7 +2632,10 @@ impl Board {
             .values()
             .find(|i| {
                 matches!(i.state, State::Claimed | State::Running)
-                    && i.lease.as_ref().map(|l| l.agent_id == agent_id).unwrap_or(false)
+                    && i.lease
+                        .as_ref()
+                        .map(|l| l.agent_id == agent_id)
+                        .unwrap_or(false)
             })
             .map(|i| i.id)
     }
@@ -2695,7 +2735,10 @@ impl Board {
         self.emit(&item);
         self.story(
             id,
-            format!("{}: queued for dispatch — supervisor will claim when a slot opens.", item.title),
+            format!(
+                "{}: queued for dispatch — supervisor will claim when a slot opens.",
+                item.title
+            ),
         );
         Ok(item)
     }
@@ -2907,8 +2950,7 @@ impl Board {
             .iter()
             .map(|t| {
                 let current = t.item_id == Some(id)
-                    || (t.item_id.is_none()
-                        && Self::normalize_title(&t.title) == title_key);
+                    || (t.item_id.is_none() && Self::normalize_title(&t.title) == title_key);
                 if current {
                     plan_task_key = Some(t.key.clone());
                 }
@@ -2947,7 +2989,10 @@ impl Board {
                 Self::transition_locked(&mut s, id, State::Running, agent_id, None)?;
             }
             let now = Utc::now();
-            let it = s.items.get_mut(&id).ok_or(TransitionError::NoSuchItem(id))?;
+            let it = s
+                .items
+                .get_mut(&id)
+                .ok_or(TransitionError::NoSuchItem(id))?;
             it.progress = progress.clamp(0.0, 1.0);
             if let Some(l) = it.lease.as_mut() {
                 l.last_heartbeat = now;
@@ -2959,129 +3004,133 @@ impl Board {
         Ok(item)
     }
 
-fn normalize_title(title: &str) -> String {
-    title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
-}
-
-/// Pick `base`, or `base-2`, `base-3`, … until unused in the catalog.
-fn allocate_unique_sandbox_profile_id(
-    existing: &BTreeMap<String, SandboxProfile>,
-    base: &str,
-) -> String {
-    if !existing.contains_key(base) {
-        return base.to_string();
+    fn normalize_title(title: &str) -> String {
+        title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
     }
-    let mut n = 2u32;
-    loop {
-        let candidate = format!("{base}-{n}");
-        if !existing.contains_key(&candidate) {
-            return candidate;
+
+    /// Pick `base`, or `base-2`, `base-3`, … until unused in the catalog.
+    fn allocate_unique_sandbox_profile_id(
+        existing: &BTreeMap<String, SandboxProfile>,
+        base: &str,
+    ) -> String {
+        if !existing.contains_key(base) {
+            return base.to_string();
         }
-        n = n.saturating_add(1);
-        if n == u32::MAX {
-            // Pathological; still must terminate.
-            return format!("{base}-{n}");
-        }
-    }
-}
-
-fn tokenize_text(text: &str) -> HashSet<String> {
-    let stop_words: HashSet<&'static str> = [
-        "a", "an", "the", "and", "or", "but", "if", "because", "as", "until", "while", "of", "at",
-        "by", "for", "with", "about", "against", "between", "into", "through", "during", "before",
-        "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over",
-        "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how",
-        "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor",
-        "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will", "just",
-        "don", "should", "now", "is", "are", "was", "were", "be", "been", "being", "have", "has",
-        "had", "do", "does", "did", "doing", "would", "could", "this", "that", "these", "those",
-        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them", "my", "your",
-        "his", "their", "our", "its",
-    ]
-    .into_iter()
-    .collect();
-
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| s.len() >= 2 && !stop_words.contains(s))
-        .map(|s| s.to_string())
-        .collect()
-}
-
-fn is_token_related(child_token: &str, theme_token: &str) -> bool {
-    if child_token == theme_token {
-        return true;
-    }
-    let min_len = child_token.len().min(theme_token.len());
-    if min_len >= 3 {
-        if child_token.starts_with(theme_token) || theme_token.starts_with(child_token) {
-            return true;
-        }
-        if min_len >= 4
-            && child_token.is_char_boundary(4)
-            && theme_token.is_char_boundary(4)
-            && child_token[..4] == theme_token[..4]
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn child_is_related(child_tokens: &HashSet<String>, theme_tokens: &HashSet<String>) -> bool {
-    if theme_tokens.is_empty() {
-        return true;
-    }
-    for c_tok in child_tokens {
-        for t_tok in theme_tokens {
-            if Self::is_token_related(c_tok, t_tok) {
-                return true;
+        let mut n = 2u32;
+        loop {
+            let candidate = format!("{base}-{n}");
+            if !existing.contains_key(&candidate) {
+                return candidate;
+            }
+            n = n.saturating_add(1);
+            if n == u32::MAX {
+                // Pathological; still must terminate.
+                return format!("{base}-{n}");
             }
         }
     }
-    false
-}
 
-fn check_split_relatedness(
-    card: &WorkItem,
-    project: &WorkItem,
-    children: &[crate::model::SplitChildSpec],
-) -> Result<(), String> {
-    let mut theme_text = String::new();
-    theme_text.push_str(&project.title);
-    theme_text.push(' ');
-    theme_text.push_str(&project.intent);
-    theme_text.push(' ');
-    theme_text.push_str(&card.title);
-    theme_text.push(' ');
-    theme_text.push_str(&card.intent);
-    if let Some(ref dod) = card.definition_of_done {
-        theme_text.push(' ');
-        theme_text.push_str(dod);
+    fn tokenize_text(text: &str) -> HashSet<String> {
+        let stop_words: HashSet<&'static str> = [
+            "a", "an", "the", "and", "or", "but", "if", "because", "as", "until", "while", "of",
+            "at", "by", "for", "with", "about", "against", "between", "into", "through", "during",
+            "before", "after", "above", "below", "to", "from", "up", "down", "in", "out", "on",
+            "off", "over", "under", "again", "further", "then", "once", "here", "there", "when",
+            "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other",
+            "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+            "s", "t", "can", "will", "just", "don", "should", "now", "is", "are", "was", "were",
+            "be", "been", "being", "have", "has", "had", "do", "does", "did", "doing", "would",
+            "could", "this", "that", "these", "those", "i", "you", "he", "she", "it", "we", "they",
+            "me", "him", "her", "us", "them", "my", "your", "his", "their", "our", "its",
+        ]
+        .into_iter()
+        .collect();
+
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| s.len() >= 2 && !stop_words.contains(s))
+            .map(|s| s.to_string())
+            .collect()
     }
 
-    let theme_tokens = Self::tokenize_text(&theme_text);
-
-    for child in children {
-        let mut child_text = String::new();
-        child_text.push_str(&child.title);
-        child_text.push(' ');
-        child_text.push_str(&child.intent);
-        child_text.push(' ');
-        child_text.push_str(&child.definition_of_done);
-
-        let child_tokens = Self::tokenize_text(&child_text);
-
-        if !Self::child_is_related(&child_tokens, &theme_tokens) {
-            return Err(format!(
-                "split child '{}' does not relate to parent card or project theme",
-                child.title
-            ));
+    fn is_token_related(child_token: &str, theme_token: &str) -> bool {
+        if child_token == theme_token {
+            return true;
         }
+        let min_len = child_token.len().min(theme_token.len());
+        if min_len >= 3 {
+            if child_token.starts_with(theme_token) || theme_token.starts_with(child_token) {
+                return true;
+            }
+            if min_len >= 4
+                && child_token.is_char_boundary(4)
+                && theme_token.is_char_boundary(4)
+                && child_token[..4] == theme_token[..4]
+            {
+                return true;
+            }
+        }
+        false
     }
 
-    Ok(())
-}
+    fn child_is_related(child_tokens: &HashSet<String>, theme_tokens: &HashSet<String>) -> bool {
+        if theme_tokens.is_empty() {
+            return true;
+        }
+        for c_tok in child_tokens {
+            for t_tok in theme_tokens {
+                if Self::is_token_related(c_tok, t_tok) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn check_split_relatedness(
+        card: &WorkItem,
+        project: &WorkItem,
+        children: &[crate::model::SplitChildSpec],
+    ) -> Result<(), String> {
+        let mut theme_text = String::new();
+        theme_text.push_str(&project.title);
+        theme_text.push(' ');
+        theme_text.push_str(&project.intent);
+        theme_text.push(' ');
+        theme_text.push_str(&card.title);
+        theme_text.push(' ');
+        theme_text.push_str(&card.intent);
+        if let Some(ref dod) = card.definition_of_done {
+            theme_text.push(' ');
+            theme_text.push_str(dod);
+        }
+
+        let theme_tokens = Self::tokenize_text(&theme_text);
+
+        for child in children {
+            let mut child_text = String::new();
+            child_text.push_str(&child.title);
+            child_text.push(' ');
+            child_text.push_str(&child.intent);
+            child_text.push(' ');
+            child_text.push_str(&child.definition_of_done);
+
+            let child_tokens = Self::tokenize_text(&child_text);
+
+            if !Self::child_is_related(&child_tokens, &theme_tokens) {
+                return Err(format!(
+                    "split child '{}' does not relate to parent card or project theme",
+                    child.title
+                ));
+            }
+        }
+
+        Ok(())
+    }
 
     /// Validate children and park them on the card as a proposal in Review.
     /// Does **not** create sibling Tasks — Approve materializes them.
@@ -3121,7 +3170,8 @@ fn check_split_relatedness(
                     },
                     EscalationOption {
                         label: "Close PR and retry split".into(),
-                        detail: "Close or abandon the existing PR before splitting the card.".into(),
+                        detail: "Close or abandon the existing PR before splitting the card."
+                            .into(),
                     },
                 ],
                 0,
@@ -3130,7 +3180,9 @@ fn check_split_relatedness(
         }
 
         if children.len() < 2 {
-            return Err("a split needs at least two siblings; use report if the work is one card".into());
+            return Err(
+                "a split needs at least two siblings; use report if the work is one card".into(),
+            );
         }
         if children.len() > max_children {
             return Err(format!(
@@ -3143,7 +3195,9 @@ fn check_split_relatedness(
         let project_id = card.parent.ok_or_else(|| {
             "cannot split a Project; only Tasks under a Project can split into siblings".to_string()
         })?;
-        let project = self.get(project_id).ok_or_else(|| "project not found".to_string())?;
+        let project = self
+            .get(project_id)
+            .ok_or_else(|| "project not found".to_string())?;
 
         {
             let s = self.state.read();
@@ -3208,7 +3262,11 @@ fn check_split_relatedness(
                 "{} proposed {} sibling Tasks — Approve to create them: {}.",
                 card.title,
                 specs.len(),
-                specs.iter().map(|t| t.title.as_str()).collect::<Vec<_>>().join(", ")
+                specs
+                    .iter()
+                    .map(|t| t.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         );
         Ok(item)
@@ -3225,7 +3283,10 @@ fn check_split_relatedness(
                 return Err(format!("proposal task '{}' needs a key", t.title));
             }
             if t.definition_of_done.trim().is_empty() {
-                return Err(format!("proposal task '{}' needs a definition of done", t.title));
+                return Err(format!(
+                    "proposal task '{}' needs a definition of done",
+                    t.title
+                ));
             }
         }
         let item = {
@@ -3262,9 +3323,9 @@ fn check_split_relatedness(
             .clone()
             .filter(|p| !p.tasks.is_empty())
             .ok_or_else(|| format!("card #{id} has no proposal to materialize"))?;
-        let project_id = card.parent.ok_or_else(|| {
-            "cannot materialize proposal on a Project root".to_string()
-        })?;
+        let project_id = card
+            .parent
+            .ok_or_else(|| "cannot materialize proposal on a Project root".to_string())?;
 
         let existing_by_title: HashMap<String, WorkItem> = {
             let s = self.state.read();
@@ -3306,7 +3367,9 @@ fn check_split_relatedness(
         }
 
         for spec in &proposal.tasks {
-            let Some(&sid) = key_to_id.get(&spec.key) else { continue };
+            let Some(&sid) = key_to_id.get(&spec.key) else {
+                continue;
+            };
             let blockers: Vec<ItemId> = spec
                 .blocked_by_keys
                 .iter()
@@ -3347,10 +3410,7 @@ fn check_split_relatedness(
             Some(c) => c,
             None => return Ok(0),
         };
-        let has_proposal = card
-            .proposal
-            .as_ref()
-            .is_some_and(|p| !p.tasks.is_empty());
+        let has_proposal = card.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty());
         if !has_proposal {
             return Ok(0);
         }
@@ -3398,9 +3458,7 @@ fn check_split_relatedness(
     /// Heal: materialize a Done card's proposal if siblings were never created
     /// (e.g. merge-to-Done before materialize-on-Done shipped).
     pub fn materialize_pending_proposal(&self, id: ItemId) -> Result<Vec<WorkItem>, String> {
-        let card = self
-            .get(id)
-            .ok_or_else(|| format!("no work item #{id}"))?;
+        let card = self.get(id).ok_or_else(|| format!("no work item #{id}"))?;
         if card.state != State::Done {
             return Err(format!("card #{id} is {:?}; expected Done", card.state));
         }
@@ -3585,7 +3643,11 @@ fn check_split_relatedness(
         let item = {
             let mut s = self.state.write();
             let it = s.items.get_mut(&id).ok_or("no such item")?;
-            it.notes.push(Note { at: Utc::now(), author: "human".into(), text });
+            it.notes.push(Note {
+                at: Utc::now(),
+                author: "human".into(),
+                text,
+            });
             it.run_failures = 0;
             it.escalation = None;
             it.clone()
@@ -3638,7 +3700,12 @@ fn check_split_relatedness(
             it.title.clone()
         };
         let item = self
-            .transition(id, State::Backlog, "human", Some(format!("answered: {choice}")))
+            .transition(
+                id,
+                State::Backlog,
+                "human",
+                Some(format!("answered: {choice}")),
+            )
             .map_err(|e| e.to_string())?;
         self.story(id, format!("{title}: unblocked — {choice}"));
         // "Host runs X; re-claim to document" without Proof facts is a promise,
@@ -3763,7 +3830,12 @@ facts are pasted, then unpark";
             }
         };
         let item = self
-            .transition(id, State::Backlog, "human", reason.or(Some("halted".into())))
+            .transition(
+                id,
+                State::Backlog,
+                "human",
+                reason.or(Some("halted".into())),
+            )
             .map_err(|e| e.to_string())?;
         if let Some(env) = env_to_delete {
             let os = self.openshell_client();
@@ -3799,7 +3871,10 @@ facts are pasted, then unpark";
             }
         }
         if let Some(t) = self.get(id) {
-            self.story(id, format!("Scope cut: {} retired ({} items).", t.title, touched.len()));
+            self.story(
+                id,
+                format!("Scope cut: {} retired ({} items).", t.title, touched.len()),
+            );
         }
         Ok(touched)
     }
@@ -3857,25 +3932,16 @@ facts are pasted, then unpark";
     }
 
     pub fn approve_review(&self, id: ItemId) -> Result<WorkItem, String> {
-        let item = self
-            .get(id)
-            .ok_or_else(|| format!("no work item #{id}"))?;
+        let item = self.get(id).ok_or_else(|| format!("no work item #{id}"))?;
 
-        let has_proposal = item
-            .proposal
-            .as_ref()
-            .is_some_and(|p| !p.tasks.is_empty());
+        let has_proposal = item.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty());
 
         if has_proposal {
             // UI: "Approve — create Tasks". Materialize now from the proposal.
             let done = self
                 .transition(id, State::Done, "human", Some("proposal approved".into()))
                 .map_err(|e| e.to_string())?;
-            let n = done
-                .proposal
-                .as_ref()
-                .map(|p| p.tasks.len())
-                .unwrap_or(0);
+            let n = done.proposal.as_ref().map(|p| p.tasks.len()).unwrap_or(0);
             self.story(
                 id,
                 format!("{} approved — {} Tasks created.", done.title, n),
@@ -3890,9 +3956,7 @@ facts are pasted, then unpark";
                     let awaiting = project.plan.as_ref().is_some_and(|p| !p.tasks.is_empty());
                     if awaiting {
                         let published = self.approve_plan(parent)?;
-                        let done = self
-                            .get(id)
-                            .ok_or_else(|| format!("no work item #{id}"))?;
+                        let done = self.get(id).ok_or_else(|| format!("no work item #{id}"))?;
                         self.story(
                             id,
                             format!(
@@ -3930,7 +3994,12 @@ facts are pasted, then unpark";
             }
         }
         let item = self
-            .transition(id, State::Backlog, "human", Some(format!("changes requested: {note}")))
+            .transition(
+                id,
+                State::Backlog,
+                "human",
+                Some(format!("changes requested: {note}")),
+            )
             .map_err(|e| e.to_string())?;
         self.emit(&item);
         self.story(id, format!("{}: changes requested — {note}", item.title));
@@ -3943,7 +4012,10 @@ facts are pasted, then unpark";
         let (goal, line) = {
             let mut s = self.state.write();
             let goal = Self::goal_of(&s, near);
-            let line = StoryLine { at: Utc::now(), text };
+            let line = StoryLine {
+                at: Utc::now(),
+                text,
+            };
             let entries = s.stories.entry(goal).or_default();
             entries.push(line.clone());
             // A story, not an event log.
@@ -3995,7 +4067,11 @@ facts are pasted, then unpark";
             Some(sha) if !sha.is_empty() => format!("{ref_name} @ {sha}"),
             _ => ref_name.to_string(),
         };
-        let base = if base.trim().is_empty() { "main" } else { base.trim() };
+        let base = if base.trim().is_empty() {
+            "main"
+        } else {
+            base.trim()
+        };
         format!(
             "Main advanced ({where_main}). First action: fetch upstream {base} and rebase \
              this card's branch onto upstream/{base} (not origin/{base} alone — the fork's \
@@ -4053,7 +4129,12 @@ facts are pasted, then unpark";
         let mut results = Vec::new();
         if let Some(item) = s.items.get(&near_id) {
             let parent_id = item.parent.unwrap_or(item.id);
-            for child_id in s.items.values().filter(|i| i.parent == Some(parent_id)).map(|i| i.id) {
+            for child_id in s
+                .items
+                .values()
+                .filter(|i| i.parent == Some(parent_id))
+                .map(|i| i.id)
+            {
                 if child_id == near_id {
                     continue;
                 }
@@ -4091,7 +4172,10 @@ facts are pasted, then unpark";
     pub fn dispatch_rebase(&self, id: ItemId) -> Result<WorkItem, String> {
         let item = {
             let mut s = self.state.write();
-            let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item {id}"))?;
+            let it = s
+                .items
+                .get_mut(&id)
+                .ok_or_else(|| format!("no such item {id}"))?;
             if it.state != State::Review {
                 return Err(format!(
                     "only Review cards can be rebased, #{id} is in {:?}",
@@ -4110,7 +4194,10 @@ facts are pasted, then unpark";
         self.emit(&item);
         self.story(
             id,
-            format!("{}: queued rebase request — branch is behind main.", item.title),
+            format!(
+                "{}: queued rebase request — branch is behind main.",
+                item.title
+            ),
         );
         Ok(item)
     }
@@ -4147,9 +4234,7 @@ facts are pasted, then unpark";
             .items
             .values()
             .filter(|i| {
-                i.state == State::Review
-                    && (i.rebase_requested || i.awaiting_dispatch)
-                    && !i.parked
+                i.state == State::Review && (i.rebase_requested || i.awaiting_dispatch) && !i.parked
             })
             .cloned()
             .collect();
@@ -4162,12 +4247,22 @@ facts are pasted, then unpark";
     /// If Clean (GitHub MERGEABLE): stay in Review; clear queue flags.
     /// If Conflict (GitHub CONFLICTING): bounce to Backlog (or escalate on
     /// repeated overlapping conflict files); clear queue flags.
-    pub fn record_rebase_outcome(&self, id: ItemId, outcome: RebaseOutcome) -> Result<WorkItem, String> {
+    pub fn record_rebase_outcome(
+        &self,
+        id: ItemId,
+        outcome: RebaseOutcome,
+    ) -> Result<WorkItem, String> {
         let (title, previous_files) = {
             let s = self.state.read();
-            let it = s.items.get(&id).ok_or_else(|| format!("no such item #{id}"))?;
+            let it = s
+                .items
+                .get(&id)
+                .ok_or_else(|| format!("no such item #{id}"))?;
             if it.state != State::Review {
-                return Err(format!("only Review cards can record rebase outcome, #{id} is in {:?}", it.state));
+                return Err(format!(
+                    "only Review cards can record rebase outcome, #{id} is in {:?}",
+                    it.state
+                ));
             }
             (it.title.clone(), it.last_conflict_files.clone())
         };
@@ -4176,7 +4271,10 @@ facts are pasted, then unpark";
             RebaseOutcome::Clean => {
                 let item = {
                     let mut s = self.state.write();
-                    let it = s.items.get_mut(&id).ok_or_else(|| format!("no such item #{id}"))?;
+                    let it = s
+                        .items
+                        .get_mut(&id)
+                        .ok_or_else(|| format!("no such item #{id}"))?;
                     it.rebase_requested = false;
                     it.awaiting_dispatch = false;
                     it.last_bounce_reason = None;
@@ -4192,8 +4290,14 @@ facts are pasted, then unpark";
                 );
                 Ok(item)
             }
-            RebaseOutcome::Conflict { conflicting_files, reason } => {
-                let curr_files: Vec<String> = conflicting_files.iter().map(|f| f.trim().to_string()).collect();
+            RebaseOutcome::Conflict {
+                conflicting_files,
+                reason,
+            } => {
+                let curr_files: Vec<String> = conflicting_files
+                    .iter()
+                    .map(|f| f.trim().to_string())
+                    .collect();
                 let has_overlap = !curr_files.is_empty()
                     && !previous_files.is_empty()
                     && curr_files.iter().any(|f| previous_files.contains(f));
@@ -4206,8 +4310,8 @@ facts are pasted, then unpark";
                         .cloned()
                         .collect();
 
-                    let base_reason = reason
-                        .unwrap_or_else(|| "GitHub PR mergeable is CONFLICTING".to_string());
+                    let base_reason =
+                        reason.unwrap_or_else(|| "GitHub PR mergeable is CONFLICTING".to_string());
                     let bounce_reason = format!(
                         "{base_reason}: decomposition failure: repeated conflict on overlapping files: {}",
                         overlapping.join(", ")
@@ -4248,12 +4352,15 @@ facts are pasted, then unpark";
 
                     self.escalate(id, "rebase", question, options, 0)
                 } else {
-                    let base_reason = reason
-                        .unwrap_or_else(|| "GitHub PR mergeable is CONFLICTING".to_string());
+                    let base_reason =
+                        reason.unwrap_or_else(|| "GitHub PR mergeable is CONFLICTING".to_string());
                     let bounce_reason = if curr_files.is_empty() {
                         base_reason
                     } else {
-                        format!("{base_reason}: conflicting files: {}", curr_files.join(", "))
+                        format!(
+                            "{base_reason}: conflicting files: {}",
+                            curr_files.join(", ")
+                        )
                     };
 
                     let item = {
@@ -4267,8 +4374,16 @@ facts are pasted, then unpark";
                                 text: binding_note,
                             });
                         }
-                        Self::transition_locked(&mut s, id, State::Backlog, "rebase", Some(bounce_reason.clone()))
-                            .map_err(|e| format!("failed transition to Backlog on rebase conflict: {e}"))?;
+                        Self::transition_locked(
+                            &mut s,
+                            id,
+                            State::Backlog,
+                            "rebase",
+                            Some(bounce_reason.clone()),
+                        )
+                        .map_err(|e| {
+                            format!("failed transition to Backlog on rebase conflict: {e}")
+                        })?;
                         let it_mut = s.items.get_mut(&id).unwrap();
                         it_mut.rebase_requested = false;
                         it_mut.awaiting_dispatch = false;
@@ -4321,11 +4436,7 @@ facts are pasted, then unpark";
     ///
     /// History `by` is `github-webhook` (webhook ingress). Polling uses
     /// [`Self::complete_for_merged_pr_by`] with `github-poll`.
-    pub fn complete_for_merged_pr(
-        &self,
-        pr_url: &str,
-        pr_number: Option<u64>,
-    ) -> Option<ItemId> {
+    pub fn complete_for_merged_pr(&self, pr_url: &str, pr_number: Option<u64>) -> Option<ItemId> {
         self.complete_for_merged_pr_by(pr_url, pr_number, "github-webhook")
     }
 
@@ -4458,10 +4569,7 @@ facts are pasted, then unpark";
 
         // Tasks under this Project — via children_by_parent (not a full scan).
         let member_ids = Self::children_of_indexed(s, gid);
-        let members: Vec<&WorkItem> = member_ids
-            .iter()
-            .filter_map(|id| s.items.get(id))
-            .collect();
+        let members: Vec<&WorkItem> = member_ids.iter().filter_map(|id| s.items.get(id)).collect();
 
         // Active projects: retired leaves are out of scope (cut duplicates must
         // not inflate the bar). Archived projects: cut_scope retires the whole
@@ -4482,7 +4590,10 @@ facts are pasted, then unpark";
             .iter()
             .filter(|i| matches!(i.state, State::Claimed | State::Running | State::Splitting))
             .count();
-        let needs_you = members.iter().filter(|i| i.state == State::NeedsHuman).count();
+        let needs_you = members
+            .iter()
+            .filter(|i| i.state == State::NeedsHuman)
+            .count();
 
         let mut columns = Vec::new();
         for column in [
@@ -4492,8 +4603,10 @@ facts are pasted, then unpark";
             Column::Review,
             Column::Done,
         ] {
-            let in_col: Vec<&&WorkItem> =
-                members.iter().filter(|i| i.state.column() == column).collect();
+            let in_col: Vec<&&WorkItem> = members
+                .iter()
+                .filter(|i| i.state.column() == column)
+                .collect();
             columns.push(ColumnView {
                 column,
                 summary: Self::chunk(
@@ -4512,7 +4625,11 @@ facts are pasted, then unpark";
             id: gid,
             title: goal.title.clone(),
             intent: goal.intent.clone(),
-            progress: if leaves_total == 0 { 0.0 } else { leaves_done as f32 / leaves_total as f32 },
+            progress: if leaves_total == 0 {
+                0.0
+            } else {
+                leaves_done as f32 / leaves_total as f32
+            },
             leaves_done,
             leaves_total,
             agents_live,
@@ -4536,7 +4653,10 @@ facts are pasted, then unpark";
     ) -> ChunkSummary {
         let count = items.len();
         if count == 0 {
-            return ChunkSummary { count, text: "empty".into() };
+            return ChunkSummary {
+                count,
+                text: "empty".into(),
+            };
         }
         let oldest = items
             .iter()
@@ -4607,13 +4727,19 @@ facts are pasted, then unpark";
                     .map(|e| e.blocked_secs(now))
                     .max()
                     .unwrap_or(0);
-                format!("{count} blocked on you · longest {}", humanize(Duration::seconds(longest)))
+                format!(
+                    "{count} blocked on you · longest {}",
+                    humanize(Duration::seconds(longest))
+                )
             }
             Column::Review => {
                 // Can I approve this in 30 seconds? CI is on the PR, not here.
                 let added: u32 = items.iter().map(|i| i.diff_added).sum();
                 let removed: u32 = items.iter().map(|i| i.diff_removed).sum();
-                format!("{count} awaiting review · +{added} −{removed} · oldest {}", humanize(oldest))
+                format!(
+                    "{count} awaiting review · +{added} −{removed} · oldest {}",
+                    humanize(oldest)
+                )
             }
             Column::Done => format!("{count} merged"),
             _ => format!("{count} items"),
@@ -4648,10 +4774,8 @@ facts are pasted, then unpark";
                 }
                 // Flat Tasks under Project + the Project itself (legacy goal_of set).
                 let child_ids = Self::children_of_indexed(&s, gid);
-                let mut members: Vec<&WorkItem> = child_ids
-                    .iter()
-                    .filter_map(|id| s.items.get(id))
-                    .collect();
+                let mut members: Vec<&WorkItem> =
+                    child_ids.iter().filter_map(|id| s.items.get(id)).collect();
                 members.push(goal);
 
                 let needs_you = members
@@ -4671,7 +4795,9 @@ facts are pasted, then unpark";
 
                 let running: Vec<&&WorkItem> = members
                     .iter()
-                    .filter(|i| matches!(i.state, State::Claimed | State::Running | State::Splitting))
+                    .filter(|i| {
+                        matches!(i.state, State::Claimed | State::Running | State::Splitting)
+                    })
                     .collect();
                 let warn_secs =
                     (self.schema.execution.agents.agent_timeout_secs as i64).max(1) / 10;
@@ -4712,12 +4838,19 @@ facts are pasted, then unpark";
                     backlog: members.iter().filter(|i| i.state == State::Backlog).count(),
                     in_review: members.iter().filter(|i| i.state == State::Review).count(),
                     ready_to_dispatch,
-                    latest_story: s.stories.get(&gid).and_then(|v| v.last()).map(|l| l.text.clone()),
+                    latest_story: s
+                        .stories
+                        .get(&gid)
+                        .and_then(|v| v.last())
+                        .map(|l| l.text.clone()),
                 })
             })
             .collect();
 
-        Digest { since: self.started_at, goals }
+        Digest {
+            since: self.started_at,
+            goals,
+        }
     }
 }
 
@@ -4737,8 +4870,6 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
     }
-
-
 
     /// Complete Task repo used by tests that need an Initial plan after create.
     fn test_task_repo() -> RepoConfig {
@@ -4762,7 +4893,10 @@ mod tests {
 
     /// A board with one leaf sitting in Backlog, claimed by `agent`.
     fn claimed_leaf() -> (Board, ItemId) {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nowrite.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-nowrite.json"),
+        );
         let parent = b
             .create(None, "goal", "why", None, Origin::Human, true, None)
             .expect("project");
@@ -4788,7 +4922,10 @@ mod tests {
 
     #[test]
     fn claim_sets_run_deadline_from_timeout() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-deadline.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-deadline.json"),
+        );
         let parent = b
             .create(None, "goal", "why", None, Origin::Human, true, None)
             .expect("project");
@@ -4862,7 +4999,9 @@ mod tests {
         assert!(it.parked, "park must hold the card from reclaim");
         assert!(!b.may_claim(id), "parked card must not be claimable");
         assert!(
-            it.notes.iter().any(|n| n.text.contains("Parked: wedged on cargo")),
+            it.notes
+                .iter()
+                .any(|n| n.text.contains("Parked: wedged on cargo")),
             "park reason must become a resume note: {:?}",
             it.notes
         );
@@ -4907,7 +5046,10 @@ mod tests {
             .update_cockpit_session(Some("  ".into()), None)
             .expect("clear env");
         assert!(cleared_env.environment.is_none());
-        assert_eq!(cleared_env.conversation_id.as_deref(), Some("conv-cockpit-1"));
+        assert_eq!(
+            cleared_env.conversation_id.as_deref(),
+            Some("conv-cockpit-1")
+        );
 
         b.update_cockpit_session(Some("honr-cockpit".into()), None)
             .expect("restore env");
@@ -4942,10 +5084,7 @@ mod tests {
     fn resolve_cockpit_sandbox_create_uses_cockpit_profile_preference() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-resolve-cockpit-{}",
-                std::process::id()
-            )),
+            std::env::temp_dir().join(format!("honr-test-resolve-cockpit-{}", std::process::id())),
         );
         assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
         assert_eq!(
@@ -4998,7 +5137,10 @@ mod tests {
         let raw = std::fs::read_to_string(&path).expect("read board json");
         let state: BoardState = serde_json::from_str(&raw).expect("parse");
         assert_eq!(
-            state.cockpit_session.as_ref().map(|s| s.environment.as_deref()),
+            state
+                .cockpit_session
+                .as_ref()
+                .map(|s| s.environment.as_deref()),
             Some(Some("honr-cockpit"))
         );
         assert_eq!(
@@ -5017,7 +5159,10 @@ mod tests {
 
     #[test]
     fn enqueue_dispatch_marks_card_for_supervisor() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-dispatch.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-dispatch.json"),
+        );
         let parent = b
             .create(None, "goal", "why", None, Origin::Human, true, None)
             .expect("project");
@@ -5117,10 +5262,7 @@ mod tests {
             !ready_ids.contains(&blocked.id),
             "blocked leaf must be excluded"
         );
-        assert!(
-            !ready_ids.contains(&project.id),
-            "Project must be excluded"
-        );
+        assert!(!ready_ids.contains(&project.id), "Project must be excluded");
 
         let ready_python = b.list_ready(&["python".into()]);
         assert!(
@@ -5129,14 +5271,8 @@ mod tests {
         );
 
         // Parent/child helpers use children_by_parent.
-        assert!(Board::has_children(
-            &b.state.read(),
-            project.id
-        ));
-        assert!(!Board::has_children(
-            &b.state.read(),
-            leaf.id
-        ));
+        assert!(Board::has_children(&b.state.read(), project.id));
+        assert!(!Board::has_children(&b.state.read(), leaf.id));
         let kids = b.children_of(project.id);
         assert!(kids.contains(&leaf.id));
         assert!(kids.contains(&blocked.id));
@@ -5196,7 +5332,11 @@ mod tests {
         b.delete_item(container_child.id).expect("delete");
         assert_eq!(b.children_of(project.id).len(), before - 1);
         assert_eq!(
-            b.state.read().ids_by_state.get(&State::Backlog).map(|s| s.len()),
+            b.state
+                .read()
+                .ids_by_state
+                .get(&State::Backlog)
+                .map(|s| s.len()),
             Some(
                 b.state
                     .read()
@@ -5317,7 +5457,11 @@ mod tests {
         assert_eq!(b.list_awaiting_dispatch().len(), 1);
 
         let snap = b.snapshot();
-        let goal = snap.goals.iter().find(|g| g.id == project.id).expect("goal");
+        let goal = snap
+            .goals
+            .iter()
+            .find(|g| g.id == project.id)
+            .expect("goal");
         assert!(goal.auto_dispatch);
 
         let proj = b.set_auto_dispatch(project.id, false).expect("auto off");
@@ -5340,7 +5484,10 @@ mod tests {
         let it = b.halt(id, Some("start over".into())).expect("halt");
         assert_eq!(it.state, State::Backlog);
         assert!(it.environment.is_none(), "halt deletes the sandbox binding");
-        assert!(it.conversation_id.is_none(), "halt discards the LLM session");
+        assert!(
+            it.conversation_id.is_none(),
+            "halt discards the LLM session"
+        );
         assert!(!it.parked);
     }
 
@@ -5348,7 +5495,9 @@ mod tests {
     #[test]
     fn early_failures_requeue_while_budget_remains() {
         let (b, id) = claimed_leaf();
-        let it = b.record_run_failure(id, "sandbox would not start", 3).expect("recorded");
+        let it = b
+            .record_run_failure(id, "sandbox would not start", 3)
+            .expect("recorded");
         assert_eq!(it.state, State::Backlog);
         assert_eq!(it.run_failures, 1);
     }
@@ -5379,17 +5528,26 @@ mod tests {
     fn repeated_failures_become_a_humans_problem() {
         let (b, id) = claimed_leaf();
         for _ in 0..2 {
-            b.record_run_failure(id, "clone refused", 3).expect("requeued");
+            b.record_run_failure(id, "clone refused", 3)
+                .expect("requeued");
             b.claim(id, "agent", None, 45).expect("reclaim");
         }
-        let it = b.record_run_failure(id, "clone refused", 3).expect("escalated");
+        let it = b
+            .record_run_failure(id, "clone refused", 3)
+            .expect("escalated");
         assert_eq!(it.state, State::NeedsHuman);
         assert_eq!(it.run_failures, 3);
 
         // An escalation a human cannot act on in one tap is not a decision.
         let esc = it.escalation.expect("escalation present");
-        assert!(esc.options.len() >= 2, "needs at least two concrete options");
-        assert!(esc.question.contains("clone refused"), "must say what went wrong");
+        assert!(
+            esc.options.len() >= 2,
+            "needs at least two concrete options"
+        );
+        assert!(
+            esc.question.contains("clone refused"),
+            "must say what went wrong"
+        );
     }
 
     /// A run that dies before its first heartbeat is still Claimed, and
@@ -5398,7 +5556,9 @@ mod tests {
     fn escalation_works_from_claimed_without_a_heartbeat() {
         let (b, id) = claimed_leaf();
         assert_eq!(b.get(id).unwrap().state, State::Claimed, "no heartbeat yet");
-        let it = b.record_run_failure(id, "died instantly", 1).expect("escalated");
+        let it = b
+            .record_run_failure(id, "died instantly", 1)
+            .expect("escalated");
         assert_eq!(it.state, State::NeedsHuman);
     }
 
@@ -5417,7 +5577,8 @@ mod tests {
         let (b, id) = claimed_leaf();
         b.record_run_failure(id, "boom", 1).expect("escalated");
         assert_eq!(b.get(id).unwrap().run_failures, 1);
-        b.answer_escalation(id, "Investigate the environment".into()).expect("answered");
+        b.answer_escalation(id, "Investigate the environment".into())
+            .expect("answered");
         let it = b.get(id).unwrap();
         assert_eq!(it.state, State::Backlog);
         assert_eq!(it.run_failures, 0);
@@ -5433,14 +5594,20 @@ mod tests {
         b.record_run_failure(id, "boom", 1).expect("escalated");
         assert!(b.get(id).unwrap().escalation.is_some());
 
-        b.answer_escalation(id, "Investigate the environment".into()).expect("answered");
+        b.answer_escalation(id, "Investigate the environment".into())
+            .expect("answered");
         let it = b.get(id).unwrap();
-        assert!(it.escalation.is_none(), "resolved escalation must not linger");
+        assert!(
+            it.escalation.is_none(),
+            "resolved escalation must not linger"
+        );
         assert!(!it.parked, "ordinary answers must not auto-park");
 
         // The decision survives as standing context for whoever picks it up.
         assert!(
-            it.notes.iter().any(|n| n.text.contains("Investigate the environment")),
+            it.notes
+                .iter()
+                .any(|n| n.text.contains("Investigate the environment")),
             "the decision must be preserved as a note: {:?}",
             it.notes
         );
@@ -5472,7 +5639,10 @@ mod tests {
         )
         .expect("answered");
         let it2 = b2.get(id2).unwrap();
-        assert!(!it2.parked, "answers that already embed pr_url= must not park");
+        assert!(
+            !it2.parked,
+            "answers that already embed pr_url= must not park"
+        );
     }
 
     #[test]
@@ -5491,7 +5661,15 @@ mod tests {
             .create(None, "Parent", "intent", None, Origin::Human, false, None)
             .expect("project");
         let c = b
-            .create(Some(p.id), "Child", "intent", None, Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Child",
+                "intent",
+                None,
+                Origin::Human,
+                false,
+                None,
+            )
             .expect("task");
         assert!(b.get(p.id).is_some());
         assert!(b.get(c.id).is_some());
@@ -5540,9 +5718,20 @@ mod tests {
 
     #[test]
     fn propose_split_accepts_on_theme_children() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-theme-accept.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-split-theme-accept.json"),
+        );
         let project = b
-            .create(None, "User Authentication System", "Manage user logins and tokens", None, Origin::Human, true, None)
+            .create(
+                None,
+                "User Authentication System",
+                "Manage user logins and tokens",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .expect("project");
         let _ = b.transition(project.id, State::Shaping, "t", None);
         let task = b
@@ -5562,8 +5751,16 @@ mod tests {
         let _ = b.transition(task.id, State::Running, "agent", None);
 
         let children = vec![
-            SplitChildSpec::new("Google OAuth login endpoint", "Add endpoint for google auth callback", "Google auth done"),
-            SplitChildSpec::new("GitHub OAuth token exchange", "Exchange code for github access token", "GitHub auth done"),
+            SplitChildSpec::new(
+                "Google OAuth login endpoint",
+                "Add endpoint for google auth callback",
+                "Google auth done",
+            ),
+            SplitChildSpec::new(
+                "GitHub OAuth token exchange",
+                "Exchange code for github access token",
+                "GitHub auth done",
+            ),
         ];
 
         let card = b
@@ -5575,9 +5772,20 @@ mod tests {
 
     #[test]
     fn propose_split_rejects_off_theme_children() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-theme-reject.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-split-theme-reject.json"),
+        );
         let project = b
-            .create(None, "User Authentication System", "Manage user logins and tokens", None, Origin::Human, true, None)
+            .create(
+                None,
+                "User Authentication System",
+                "Manage user logins and tokens",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .expect("project");
         let _ = b.transition(project.id, State::Shaping, "t", None);
         let task = b
@@ -5597,12 +5805,23 @@ mod tests {
         let _ = b.transition(task.id, State::Running, "agent", None);
 
         let children = vec![
-            SplitChildSpec::new("Google OAuth login endpoint", "Add endpoint for google auth callback", "Google auth done"),
-            SplitChildSpec::new("Database connection pool", "Optimize postgres max connection limit", "DB config done"),
+            SplitChildSpec::new(
+                "Google OAuth login endpoint",
+                "Add endpoint for google auth callback",
+                "Google auth done",
+            ),
+            SplitChildSpec::new(
+                "Database connection pool",
+                "Optimize postgres max connection limit",
+                "DB config done",
+            ),
         ];
 
         let err = b.propose_split(task.id, "agent", children, 5).unwrap_err();
-        assert!(err.contains("does not relate to parent card or project theme"), "got error: {err}");
+        assert!(
+            err.contains("does not relate to parent card or project theme"),
+            "got error: {err}"
+        );
         assert_eq!(b.get(task.id).unwrap().state, State::Running);
     }
 
@@ -5620,15 +5839,27 @@ mod tests {
         let (b, id) = claimed_leaf();
         let _ = b.transition(id, State::Running, "agent", None);
         let children: Vec<_> = (1..=6)
-            .map(|i| SplitChildSpec::new(format!("Child {i}"), format!("Intent {i}"), format!("DoD {i}")))
+            .map(|i| {
+                SplitChildSpec::new(
+                    format!("Child {i}"),
+                    format!("Intent {i}"),
+                    format!("DoD {i}"),
+                )
+            })
             .collect();
         let err = b.propose_split(id, "agent", children, 5).unwrap_err();
-        assert!(err.contains("exceeds max_children_per_split=5"), "got error: {err}");
+        assert!(
+            err.contains("exceeds max_children_per_split=5"),
+            "got error: {err}"
+        );
     }
 
     #[test]
     fn propose_split_refused_on_project_root() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-split-root.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-split-root.json"),
+        );
         let project = b
             .create(None, "proj", "why", None, Origin::Human, true, None)
             .expect("project");
@@ -5650,7 +5881,10 @@ mod tests {
     #[test]
     fn propose_split_refused_when_pr_exists() {
         let (b, id) = claimed_leaf();
-        b.set_pr_url(id, Some("https://github.com/shanemcd/honr/pull/42".to_string()));
+        b.set_pr_url(
+            id,
+            Some("https://github.com/shanemcd/honr/pull/42".to_string()),
+        );
         let children = vec![
             SplitChildSpec::new("Part 1", "Do part 1", "Part 1 done"),
             SplitChildSpec::new("Part 2", "Do part 2", "Part 2 done"),
@@ -5675,7 +5909,9 @@ mod tests {
         let (project, seed) = project_with_initial_plan(&b, "Archive UI");
         let seed_id = seed.id;
         let _ = project;
-        let _ = b.claim(seed_id, "agent", None, 60).expect("claim initial plan");
+        let _ = b
+            .claim(seed_id, "agent", None, 60)
+            .expect("claim initial plan");
         let _ = b.transition(seed_id, State::Running, "agent", None);
 
         let err = b
@@ -5885,33 +6121,61 @@ mod tests {
 
     #[test]
     fn nest_under_task_is_refused() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-nest.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-nest.json"),
+        );
         let project = b
             .create(None, "proj", "why", None, Origin::Human, true, None)
             .expect("project");
         let task = b
-            .create(Some(project.id), "task", "do", Some("done".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "task",
+                "do",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .expect("task");
         let err = b
-            .create(Some(task.id), "nested", "no", None, Origin::Human, false, None)
+            .create(
+                Some(task.id),
+                "nested",
+                "no",
+                None,
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap_err();
         assert!(err.contains("flat under a Project"), "got error: {err}");
     }
 
     #[test]
     fn project_create_auto_seeds_initial_plan() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-auto-seed.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-auto-seed.json"),
+        );
         let project = b
             .create(None, "Phase X", "why", None, Origin::Human, true, None)
             .expect("project");
-        assert!(project.plan.is_none(), "Plan lives on Initial plan, not Project");
+        assert!(
+            project.plan.is_none(),
+            "Plan lives on Initial plan, not Project"
+        );
         let seed = b
             .initial_plan_of(project.id)
             .expect("create_project auto-seeds Initial plan");
         assert_eq!(seed.title, initial_plan_title("Phase X"));
         assert_eq!(seed.state, State::Backlog);
         assert!(seed.is_initial_plan_task());
-        assert!(seed.repo.is_none(), "Initial plan remotes come from prose until PR");
+        assert!(
+            seed.repo.is_none(),
+            "Initial plan remotes come from prose until PR"
+        );
         assert!(b.resolve_card_repo(seed.id).unwrap().is_none());
         assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
     }
@@ -5953,8 +6217,7 @@ mod tests {
             seed.intent
         );
         assert!(
-            seed
-                .definition_of_done
+            seed.definition_of_done
                 .as_deref()
                 .unwrap_or("")
                 .contains("shanemcd/honr"),
@@ -5965,16 +6228,19 @@ mod tests {
 
     #[test]
     fn init_plan_is_idempotent_after_auto_seed() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-init-plan.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-init-plan.json"),
+        );
         let project = b
             .create(None, "Phase X", "why", None, Origin::Human, true, None)
             .expect("project");
-        let seed = b
-            .initial_plan_of(project.id)
-            .expect("auto-seed");
+        let seed = b.initial_plan_of(project.id).expect("auto-seed");
         assert!(b.may_claim(seed.id));
         assert!(
-            b.list_ready(&["any".into()]).iter().any(|i| i.id == seed.id),
+            b.list_ready(&["any".into()])
+                .iter()
+                .any(|i| i.id == seed.id),
             "Initial plan must appear in list_ready"
         );
 
@@ -6064,7 +6330,10 @@ mod tests {
 
     #[test]
     fn approve_plan_materializes_from_initial_plan_proposal() {
-        let b = Board::new(Schema::default(), std::env::temp_dir().join("honr-test-approve-plan.json"));
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-approve-plan.json"),
+        );
         let (project, _seed) = project_with_initial_plan(&b, "Phase Y");
         let _ = b.transition(project.id, State::Shaping, "t", None);
 
@@ -6123,8 +6392,6 @@ mod tests {
         assert_eq!(prop.tasks.len(), 2);
         assert!(prop.tasks.iter().all(|t| t.item_id.is_some()));
     }
-
-
 
     #[test]
     fn approve_plan_closes_initial_plan_in_review() {
@@ -6244,7 +6511,13 @@ mod tests {
             .collect();
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|t| t.state == State::Backlog));
-        assert!(done.proposal.as_ref().unwrap().tasks.iter().all(|t| t.item_id.is_some()));
+        assert!(done
+            .proposal
+            .as_ref()
+            .unwrap()
+            .tasks
+            .iter()
+            .all(|t| t.item_id.is_some()));
     }
 
     #[test]
@@ -6405,7 +6678,9 @@ mod tests {
 
         // Verify Backlog column summary lists plain language blockers
         let s = b.state.read();
-        let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
+        let goal_view = b
+            .goal_view(&s, project.id, chrono::Utc::now())
+            .expect("goal view");
         let ready_col = goal_view
             .columns
             .iter()
@@ -6458,30 +6733,18 @@ mod tests {
             .expect("release with reason");
 
         assert_eq!(released.state, State::Backlog);
-        assert_eq!(
-            released.last_bounce_reason.as_deref(),
-            Some(bounce_msg)
-        );
+        assert_eq!(released.last_bounce_reason.as_deref(), Some(bounce_msg));
 
         // Verify transition history
-        let last_transition = released
-            .history
-            .last()
-            .expect("has transition history");
+        let last_transition = released.history.last().expect("has transition history");
         assert_eq!(last_transition.from, State::Claimed);
         assert_eq!(last_transition.to, State::Backlog);
         assert_eq!(last_transition.by, agent_id);
-        assert_eq!(
-            last_transition.reason.as_deref(),
-            Some(bounce_msg)
-        );
+        assert_eq!(last_transition.reason.as_deref(), Some(bounce_msg));
 
         // Verify state store persistence/get
         let fetched = b.get(task_id).expect("fetched item");
-        assert_eq!(
-            fetched.last_bounce_reason.as_deref(),
-            Some(bounce_msg)
-        );
+        assert_eq!(fetched.last_bounce_reason.as_deref(), Some(bounce_msg));
     }
 
     #[test]
@@ -6529,7 +6792,11 @@ mod tests {
             )
             .expect("impl");
         let snap = b.snapshot();
-        let g = snap.goals.iter().find(|g| g.id == project.id).expect("goal");
+        let g = snap
+            .goals
+            .iter()
+            .find(|g| g.id == project.id)
+            .expect("goal");
         assert_eq!(g.plan_status, "approved");
     }
 
@@ -6569,7 +6836,10 @@ mod tests {
             "retired Project must not appear in digest"
         );
         assert!(
-            b.snapshot().goals.iter().any(|g| g.id == keep.id && !g.archived),
+            b.snapshot()
+                .goals
+                .iter()
+                .any(|g| g.id == keep.id && !g.archived),
             "active Project still listed"
         );
     }
@@ -6598,7 +6868,6 @@ mod tests {
             goal_before.ready_to_dispatch[0].title,
             "Initial Plan for Test Project"
         );
-
 
         b.enqueue_dispatch(initial_id).expect("dispatch");
         let digest_dispatched = b.digest();
@@ -6673,25 +6942,6 @@ mod tests {
         assert!((goal.progress - 1.0).abs() < f32::EPSILON);
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     #[test]
     fn ready_column_summary_mentions_blockers_in_plain_language() {
         let b = Board::new(
@@ -6699,19 +6949,37 @@ mod tests {
             std::env::temp_dir().join("honr-test-summary-blockers.json"),
         );
         let project = b
-            .create(None, "Test Project", "Goal", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Test Project",
+                "Goal",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
 
         // create_project auto-seeds Initial plan in Backlog — counts include it.
         let t1 = b
-            .create(Some(project.id), "Task One", "Unblocked", Some("DOD".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Task One",
+                "Unblocked",
+                Some("DOD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let _ = b.transition(t1.id, State::Shaping, "human", None);
         let _ = b.transition(t1.id, State::Backlog, "human", None);
 
         {
             let s = b.state.read();
-            let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
+            let goal_view = b
+                .goal_view(&s, project.id, chrono::Utc::now())
+                .expect("goal view");
             let ready_col = goal_view
                 .columns
                 .iter()
@@ -6726,7 +6994,15 @@ mod tests {
         }
 
         let t2 = b
-            .create(Some(project.id), "Task Two", "Blocked", Some("DOD".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Task Two",
+                "Blocked",
+                Some("DOD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let _ = b.transition(t2.id, State::Shaping, "human", None);
         let _ = b.transition(t2.id, State::Backlog, "human", None);
@@ -6734,7 +7010,9 @@ mod tests {
 
         {
             let s = b.state.read();
-            let goal_view = b.goal_view(&s, project.id, chrono::Utc::now()).expect("goal view");
+            let goal_view = b
+                .goal_view(&s, project.id, chrono::Utc::now())
+                .expect("goal view");
             let ready_col = goal_view
                 .columns
                 .iter()
@@ -6746,7 +7024,10 @@ mod tests {
                 ready_col.summary.text
             );
             assert!(
-                ready_col.summary.text.contains(&format!("1 blocked on #{}: Task One", t1.id)),
+                ready_col
+                    .summary
+                    .text
+                    .contains(&format!("1 blocked on #{}: Task One", t1.id)),
                 "Summary was: {}",
                 ready_col.summary.text
             );
@@ -6755,7 +7036,10 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_deleted_on_done_retired_and_item_deletion() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!("honr-sb-del-test-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let log_file = dir.join("openshell_calls.log");
@@ -6780,10 +7064,7 @@ mod tests {
             std::time::Duration::from_secs(5),
         );
 
-        let mut board_raw = Board::new(
-            crate::schema::Schema::default(),
-            dir.join("board.json"),
-        );
+        let mut board_raw = Board::new(crate::schema::Schema::default(), dir.join("board.json"));
         board_raw.openshell = Some(os);
         let b = Arc::new(board_raw);
 
@@ -6792,7 +7073,15 @@ mod tests {
             .create(None, "Project", "intent", None, Origin::Human, true, None)
             .unwrap();
         let t1 = b
-            .create(Some(p.id), "Task 1", "intent", Some("DOD".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Task 1",
+                "intent",
+                Some("DOD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         b.set_environment(t1.id, Some("honr-card-1-a1".into()));
         let _ = b.transition(t1.id, State::Shaping, "human", None);
@@ -6801,7 +7090,10 @@ mod tests {
         let _ = b.transition(t1.id, State::Running, "agent", None);
         let _ = b.transition(t1.id, State::Review, "agent", None);
 
-        assert_eq!(b.get(t1.id).unwrap().environment.as_deref(), Some("honr-card-1-a1"));
+        assert_eq!(
+            b.get(t1.id).unwrap().environment.as_deref(),
+            Some("honr-card-1-a1")
+        );
 
         // 2. Transition to Done clears environment and triggers sandbox deletion
         let _ = b.transition(t1.id, State::Done, "human", None);
@@ -6821,7 +7113,15 @@ mod tests {
 
         // 3. Transition to Retired clears environment and triggers sandbox deletion
         let t2 = b
-            .create(Some(p.id), "Task 2", "intent", Some("DOD".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Task 2",
+                "intent",
+                Some("DOD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         b.set_environment(t2.id, Some("honr-card-2-a1".into()));
         let _ = b.transition(t2.id, State::Retired, "human", None);
@@ -6841,7 +7141,15 @@ mod tests {
 
         // 4. Item deletion triggers sandbox deletion
         let t3 = b
-            .create(Some(p.id), "Task 3", "intent", Some("DOD".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Task 3",
+                "intent",
+                Some("DOD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         b.set_environment(t3.id, Some("honr-card-3-a1".into()));
         b.delete_item(t3.id).expect("delete_item succeeds");
@@ -6861,7 +7169,15 @@ mod tests {
 
         // 5. Halt clears environment and deletes the sandbox
         let t4 = b
-            .create(Some(p.id), "Task 4", "intent", Some("DOD".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Task 4",
+                "intent",
+                Some("DOD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let _ = b.transition(t4.id, State::Shaping, "human", None);
         let _ = b.transition(t4.id, State::Backlog, "human", None);
@@ -6885,10 +7201,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
-
-
-
     #[test]
     fn approve_review_with_pr_moves_to_done() {
         let b = Arc::new(Board::new(
@@ -6899,7 +7211,15 @@ mod tests {
             )),
         ));
         let p = b
-            .create(None, "Approve PR", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Approve PR",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t = b
             .create(
@@ -6917,15 +7237,21 @@ mod tests {
         let _ = b.transition(t.id, State::Claimed, "agent", None);
         let _ = b.transition(t.id, State::Running, "agent", None);
         let _ = b.transition(t.id, State::Review, "agent", None);
-        b.set_pr_url(t.id, Some("https://github.com/shanemcd/honr/pull/99".into()));
+        b.set_pr_url(
+            t.id,
+            Some("https://github.com/shanemcd/honr/pull/99".into()),
+        );
 
         let item = b.approve_review(t.id).expect("approve");
-        assert_eq!(item.state, State::Done, "Approve & Move to Done must complete PR cards");
-        // Webhook after Approve is a no-op (idempotent).
-        assert!(
-            b.complete_for_merged_pr("https://github.com/shanemcd/honr/pull/99", Some(99))
-                .is_none()
+        assert_eq!(
+            item.state,
+            State::Done,
+            "Approve & Move to Done must complete PR cards"
         );
+        // Webhook after Approve is a no-op (idempotent).
+        assert!(b
+            .complete_for_merged_pr("https://github.com/shanemcd/honr/pull/99", Some(99))
+            .is_none());
         assert_eq!(b.get(t.id).unwrap().state, State::Done);
     }
 
@@ -6939,7 +7265,15 @@ mod tests {
             )),
         ));
         let p = b
-            .create(None, "Merge Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Merge Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t = b
             .create(
@@ -6989,10 +7323,7 @@ mod tests {
     fn test_event_sequence_ordering_and_buffer_catchup() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-seq-catchup-{}.json",
-                std::process::id()
-            )),
+            std::env::temp_dir().join(format!("honr-test-seq-catchup-{}.json", std::process::id())),
         )
         .with_buffer_capacity(10);
 
@@ -7079,16 +7410,48 @@ mod tests {
             )),
         ));
         let p = b
-            .create(None, "Linear Chain Project", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Linear Chain Project",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t1 = b
-            .create(Some(p.id), "Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Task 1",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let t2 = b
-            .create(Some(p.id), "Task 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Task 2",
+                "intent 2",
+                Some("dod 2".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let t3 = b
-            .create(Some(p.id), "Task 3", "intent 3", Some("dod 3".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Task 3",
+                "intent 3",
+                Some("dod 3".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         b.set_blocked_by(t2.id, vec![t1.id]);
@@ -7109,7 +7472,9 @@ mod tests {
 
         let stories = b.stories_for(p.id);
         assert!(
-            stories.iter().any(|s| s.text.contains(&format!("Unblocked next sibling #{}", t2.id))),
+            stories.iter().any(|s| s
+                .text
+                .contains(&format!("Unblocked next sibling #{}", t2.id))),
             "Expected story line referencing unblocked sibling #{}",
             t2.id
         );
@@ -7129,7 +7494,9 @@ mod tests {
 
         let stories2 = b.stories_for(p.id);
         assert!(
-            stories2.iter().any(|s| s.text.contains(&format!("Unblocked next sibling #{}", t3.id))),
+            stories2.iter().any(|s| s
+                .text
+                .contains(&format!("Unblocked next sibling #{}", t3.id))),
             "Expected story line referencing unblocked sibling #{}",
             t3.id
         );
@@ -7143,13 +7510,37 @@ mod tests {
         ));
         let b = Arc::new(Board::new(Schema::default(), path));
         let p = b
-            .create(None, "Epic Hygiene Project", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Epic Hygiene Project",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let _t1 = b
-            .create(Some(p.id), "Child Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Child Task 1",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let _t2 = b
-            .create(Some(p.id), "Child Task 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Child Task 2",
+                "intent 2",
+                Some("dod 2".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         // Project should be open
@@ -7184,27 +7575,57 @@ mod tests {
             std::env::temp_dir().join(format!("honr-test-rebase-{}.json", std::process::id())),
         );
         let project = b
-            .create(None, "Rebase Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Rebase Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
 
         let t1 = b
-            .create(Some(project.id), "Task 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Task 1",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let t2 = b
-            .create(Some(project.id), "Task 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Task 2",
+                "intent 2",
+                Some("dod 2".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         b.transition(t1.id, State::Shaping, "test", None).unwrap();
         b.transition(t1.id, State::Backlog, "test", None).unwrap();
         b.transition(t1.id, State::Claimed, "agent", None).unwrap();
         b.transition(t1.id, State::Review, "agent", None).unwrap();
-        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/101".into()));
+        b.set_pr_url(
+            t1.id,
+            Some("https://github.com/shanemcd/honr/pull/101".into()),
+        );
 
         b.transition(t2.id, State::Shaping, "test", None).unwrap();
         b.transition(t2.id, State::Backlog, "test", None).unwrap();
         b.transition(t2.id, State::Claimed, "agent", None).unwrap();
         b.transition(t2.id, State::Review, "agent", None).unwrap();
-        b.set_pr_url(t2.id, Some("https://github.com/shanemcd/honr/pull/102".into()));
+        b.set_pr_url(
+            t2.id,
+            Some("https://github.com/shanemcd/honr/pull/102".into()),
+        );
 
         let behind = b.identify_behind_sibling_prs(t1.id);
         assert_eq!(behind.len(), 1);
@@ -7216,8 +7637,14 @@ mod tests {
         assert_eq!(completed_id, t1.id);
 
         let t2_updated = b.get(t2.id).unwrap();
-        assert!(t2_updated.rebase_requested, "t2 should have rebase_requested set");
-        assert!(t2_updated.awaiting_dispatch, "t2 should have awaiting_dispatch set");
+        assert!(
+            t2_updated.rebase_requested,
+            "t2 should have rebase_requested set"
+        );
+        assert!(
+            t2_updated.awaiting_dispatch,
+            "t2 should have awaiting_dispatch set"
+        );
 
         let awaiting_rebase = b.list_awaiting_rebase();
         assert_eq!(awaiting_rebase.len(), 1);
@@ -7233,14 +7660,38 @@ mod tests {
             std::env::temp_dir().join(format!("honr-test-rebase-main-{}.json", std::process::id())),
         );
         let project = b
-            .create(None, "Rebase Main Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Rebase Main Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
 
         let t1 = b
-            .create(Some(project.id), "Merged Task", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Merged Task",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let t2 = b
-            .create(Some(project.id), "Behind Task", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Behind Task",
+                "intent 2",
+                Some("dod 2".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         b.transition(t1.id, State::Shaping, "test", None).unwrap();
@@ -7250,13 +7701,22 @@ mod tests {
         b.transition(t2.id, State::Backlog, "test", None).unwrap();
         b.transition(t2.id, State::Claimed, "agent", None).unwrap();
         b.transition(t2.id, State::Review, "agent", None).unwrap();
-        b.set_pr_url(t2.id, Some("https://github.com/shanemcd/honr/pull/202".into()));
+        b.set_pr_url(
+            t2.id,
+            Some("https://github.com/shanemcd/honr/pull/202".into()),
+        );
 
         b.notify_main_advanced("refs/heads/main", Some("sha123".into()));
 
         let t2_updated = b.get(t2.id).unwrap();
-        assert!(t2_updated.rebase_requested, "t2 rebase_requested should be true");
-        assert!(t2_updated.awaiting_dispatch, "t2 awaiting_dispatch should be true");
+        assert!(
+            t2_updated.rebase_requested,
+            "t2 rebase_requested should be true"
+        );
+        assert!(
+            t2_updated.awaiting_dispatch,
+            "t2 awaiting_dispatch should be true"
+        );
         assert_eq!(
             t2_updated.state,
             State::Review,
@@ -7298,10 +7758,14 @@ mod tests {
             )
             .unwrap();
 
-        b.transition(review.id, State::Shaping, "test", None).unwrap();
-        b.transition(review.id, State::Backlog, "test", None).unwrap();
-        b.transition(review.id, State::Claimed, "agent", None).unwrap();
-        b.transition(review.id, State::Review, "agent", None).unwrap();
+        b.transition(review.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(review.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(review.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(review.id, State::Review, "agent", None)
+            .unwrap();
         b.set_pr_url(
             review.id,
             Some("https://github.com/shanemcd/honr/pull/404".into()),
@@ -7386,19 +7850,27 @@ mod tests {
         b.transition(done.id, State::Shaping, "test", None).unwrap();
         b.transition(done.id, State::Done, "test", None).unwrap();
 
-        b.transition(review.id, State::Shaping, "test", None).unwrap();
-        b.transition(review.id, State::Backlog, "test", None).unwrap();
-        b.transition(review.id, State::Claimed, "agent", None).unwrap();
-        b.transition(review.id, State::Review, "agent", None).unwrap();
+        b.transition(review.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(review.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(review.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(review.id, State::Review, "agent", None)
+            .unwrap();
         b.set_pr_url(
             review.id,
             Some("https://github.com/shanemcd/honr/pull/505".into()),
         );
 
-        b.transition(running.id, State::Shaping, "test", None).unwrap();
-        b.transition(running.id, State::Backlog, "test", None).unwrap();
-        b.transition(running.id, State::Claimed, "agent", None).unwrap();
-        b.transition(running.id, State::Running, "agent", None).unwrap();
+        b.transition(running.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(running.id, State::Running, "agent", None)
+            .unwrap();
 
         b.notify_main_advanced("refs/heads/main", Some("bothpaths".into()));
 
@@ -7409,7 +7881,10 @@ mod tests {
             "Review must get rebase_requested even when a Running card is steered"
         );
         assert!(
-            !review_after.notes.iter().any(|n| n.text.contains("Main advanced")),
+            !review_after
+                .notes
+                .iter()
+                .any(|n| n.text.contains("Main advanced")),
             "Review must not be steered/parked via the Running path: {:?}",
             review_after.notes
         );
@@ -7516,13 +7991,18 @@ mod tests {
     fn notify_main_advanced_steers_running_cards_with_fetch_rebase_note() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-main-steer-{}.json",
-                std::process::id()
-            )),
+            std::env::temp_dir().join(format!("honr-test-main-steer-{}.json", std::process::id())),
         );
         let project = b
-            .create(None, "Steer Main Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Steer Main Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let running = b
             .create(
@@ -7562,9 +8042,12 @@ mod tests {
             b.transition(id, State::Shaping, "test", None).unwrap();
             b.transition(id, State::Backlog, "test", None).unwrap();
         }
-        b.transition(running.id, State::Claimed, "agent", None).unwrap();
-        b.transition(running.id, State::Running, "agent", None).unwrap();
-        b.transition(claimed.id, State::Claimed, "agent", None).unwrap();
+        b.transition(running.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(running.id, State::Running, "agent", None)
+            .unwrap();
+        b.transition(claimed.id, State::Claimed, "agent", None)
+            .unwrap();
 
         b.notify_main_advanced("refs/heads/main", Some("abcdeadbeef".into()));
 
@@ -7641,10 +8124,14 @@ mod tests {
                 None,
             )
             .unwrap();
-        b.transition(running.id, State::Shaping, "test", None).unwrap();
-        b.transition(running.id, State::Backlog, "test", None).unwrap();
-        b.transition(running.id, State::Claimed, "agent", None).unwrap();
-        b.transition(running.id, State::Running, "agent", None).unwrap();
+        b.transition(running.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(running.id, State::Running, "agent", None)
+            .unwrap();
         b.set_environment(running.id, Some("honr-card-150-sandbox".into()));
         b.set_conversation_id(running.id, Some("conv-main-adv".into()));
 
@@ -7684,20 +8171,42 @@ mod tests {
     fn rebase_clean_keeps_card_in_review() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!("honr-test-rebase-clean-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!(
+                "honr-test-rebase-clean-{}.json",
+                std::process::id()
+            )),
         );
         let project = b
-            .create(None, "Rebase Clean Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Rebase Clean Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t1 = b
-            .create(Some(project.id), "Task Clean", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Task Clean",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         b.transition(t1.id, State::Shaping, "test", None).unwrap();
         b.transition(t1.id, State::Backlog, "test", None).unwrap();
         b.transition(t1.id, State::Claimed, "agent", None).unwrap();
         b.transition(t1.id, State::Review, "agent", None).unwrap();
-        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/301".into()));
+        b.set_pr_url(
+            t1.id,
+            Some("https://github.com/shanemcd/honr/pull/301".into()),
+        );
 
         b.dispatch_rebase(t1.id).unwrap();
         let item = b.get(t1.id).unwrap();
@@ -7722,20 +8231,42 @@ mod tests {
     fn rebase_conflict_moves_card_to_backlog_with_bounce_reason_and_conflict_details() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!("honr-test-rebase-conflict-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!(
+                "honr-test-rebase-conflict-{}.json",
+                std::process::id()
+            )),
         );
         let project = b
-            .create(None, "Rebase Conflict Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Rebase Conflict Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t1 = b
-            .create(Some(project.id), "Task Conflict", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Task Conflict",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         b.transition(t1.id, State::Shaping, "test", None).unwrap();
         b.transition(t1.id, State::Backlog, "test", None).unwrap();
         b.transition(t1.id, State::Claimed, "agent", None).unwrap();
         b.transition(t1.id, State::Review, "agent", None).unwrap();
-        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/302".into()));
+        b.set_pr_url(
+            t1.id,
+            Some("https://github.com/shanemcd/honr/pull/302".into()),
+        );
 
         b.dispatch_rebase(t1.id).unwrap();
 
@@ -7767,10 +8298,21 @@ mod tests {
     fn report_clears_stale_bounce_fields() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!("honr-test-report-clear-bounce-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!(
+                "honr-test-report-clear-bounce-{}.json",
+                std::process::id()
+            )),
         );
         let project = b
-            .create(None, "Clear Bounce Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Clear Bounce Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t1 = b
             .create(
@@ -7817,20 +8359,42 @@ mod tests {
     fn repeated_rebase_conflict_on_overlapping_files_escalates_to_needs_human() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!("honr-test-rebase-conflict-repeat-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!(
+                "honr-test-rebase-conflict-repeat-{}.json",
+                std::process::id()
+            )),
         );
         let project = b
-            .create(None, "Repeated Conflict Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Repeated Conflict Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t1 = b
-            .create(Some(project.id), "Task Repeated Conflict", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Task Repeated Conflict",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         b.transition(t1.id, State::Shaping, "test", None).unwrap();
         b.transition(t1.id, State::Backlog, "test", None).unwrap();
         b.transition(t1.id, State::Claimed, "agent", None).unwrap();
         b.transition(t1.id, State::Review, "agent", None).unwrap();
-        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/303".into()));
+        b.set_pr_url(
+            t1.id,
+            Some("https://github.com/shanemcd/honr/pull/303".into()),
+        );
 
         // First conflict -> Backlog
         b.dispatch_rebase(t1.id).unwrap();
@@ -7839,7 +8403,10 @@ mod tests {
             .complete_rebase_conflict(t1.id, &first_conflict_files, Some("git rebase conflict"))
             .unwrap();
         assert_eq!(updated1.state, State::Backlog);
-        assert_eq!(updated1.last_conflict_files, vec!["src/main.rs", "src/store.rs"]);
+        assert_eq!(
+            updated1.last_conflict_files,
+            vec!["src/main.rs", "src/store.rs"]
+        );
 
         // Card is claimed again and moves back to Review
         b.transition(t1.id, State::Claimed, "agent", None).unwrap();
@@ -7866,20 +8433,42 @@ mod tests {
     fn second_rebase_conflict_on_disjoint_files_returns_to_backlog() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!("honr-test-rebase-conflict-disjoint-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!(
+                "honr-test-rebase-conflict-disjoint-{}.json",
+                std::process::id()
+            )),
         );
         let project = b
-            .create(None, "Disjoint Conflict Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Disjoint Conflict Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t1 = b
-            .create(Some(project.id), "Task Disjoint Conflict", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(project.id),
+                "Task Disjoint Conflict",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         b.transition(t1.id, State::Shaping, "test", None).unwrap();
         b.transition(t1.id, State::Backlog, "test", None).unwrap();
         b.transition(t1.id, State::Claimed, "agent", None).unwrap();
         b.transition(t1.id, State::Review, "agent", None).unwrap();
-        b.set_pr_url(t1.id, Some("https://github.com/shanemcd/honr/pull/304".into()));
+        b.set_pr_url(
+            t1.id,
+            Some("https://github.com/shanemcd/honr/pull/304".into()),
+        );
 
         // First conflict -> Backlog
         b.dispatch_rebase(t1.id).unwrap();
@@ -7905,7 +8494,8 @@ mod tests {
         assert_eq!(updated2.last_conflict_files, vec!["src/store.rs"]);
     }
 
-    const SEED_POLICY_YAML: &str = "version: 1\n# seed-policy\nfilesystem_policy:\n  include_workdir: true\n";
+    const SEED_POLICY_YAML: &str =
+        "version: 1\n# seed-policy\nfilesystem_policy:\n  include_workdir: true\n";
 
     fn agents_for_seed() -> AgentConfig {
         AgentConfig {
@@ -7936,8 +8526,14 @@ mod tests {
         let cockpit_profile = b.get_sandbox_profile("cockpit").expect("cockpit");
         assert_eq!(cockpit_profile.name, "Cockpit");
         assert_eq!(cockpit_profile.image, "seed-image:test");
-        assert_eq!(cockpit_profile.cpu.as_deref(), Some(crate::model::COCKPIT_SANDBOX_CPU));
-        assert_eq!(cockpit_profile.memory.as_deref(), Some(crate::model::COCKPIT_SANDBOX_MEMORY));
+        assert_eq!(
+            cockpit_profile.cpu.as_deref(),
+            Some(crate::model::COCKPIT_SANDBOX_CPU)
+        );
+        assert_eq!(
+            cockpit_profile.memory.as_deref(),
+            Some(crate::model::COCKPIT_SANDBOX_MEMORY)
+        );
         assert_ne!(
             cockpit_profile.cpu, p.cpu,
             "cockpit cpu must stay distinct from worker default"
@@ -7947,7 +8543,8 @@ mod tests {
             "cockpit memory must stay distinct from worker default"
         );
         assert!(
-            !cockpit_profile.policy.contains("github.com") && !cockpit_profile.policy.contains("name: github"),
+            !cockpit_profile.policy.contains("github.com")
+                && !cockpit_profile.policy.contains("name: github"),
             "cockpit policy must not copy worker GitHub egress"
         );
         // Second seed is a no-op.
@@ -7972,14 +8569,21 @@ mod tests {
             cpu: Some("2".into()),
             memory: Some("4Gi".into()),
             engine: Some("cursor".into()),
+            provider_names: Vec::new(),
         })
         .expect("default");
         b.set_default_sandbox_profile("default").unwrap();
         assert!(b.get_sandbox_profile("cockpit").is_none());
         assert!(b.ensure_cockpit_sandbox_profile_from(&agents_for_seed()));
         let cockpit_profile = b.get_sandbox_profile("cockpit").expect("cockpit");
-        assert_eq!(cockpit_profile.cpu.as_deref(), Some(crate::model::COCKPIT_SANDBOX_CPU));
-        assert_eq!(cockpit_profile.memory.as_deref(), Some(crate::model::COCKPIT_SANDBOX_MEMORY));
+        assert_eq!(
+            cockpit_profile.cpu.as_deref(),
+            Some(crate::model::COCKPIT_SANDBOX_CPU)
+        );
+        assert_eq!(
+            cockpit_profile.memory.as_deref(),
+            Some(crate::model::COCKPIT_SANDBOX_MEMORY)
+        );
         assert_eq!(
             b.cockpit_sandbox_profile_id().as_deref(),
             Some("cockpit"),
@@ -8007,10 +8611,7 @@ mod tests {
     fn workspace_binding_seeds_forge_from_yaml_when_unbound() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-ws-seed-{}.json",
-                std::process::id()
-            )),
+            std::env::temp_dir().join(format!("honr-test-ws-seed-{}.json", std::process::id())),
         );
         assert!(b.workspace_binding().is_none());
         assert!(b.seed_workspace_binding_from(&agents_with_repo()));
@@ -8037,12 +8638,12 @@ mod tests {
     fn agents_overlay_is_yaml_passthrough_without_workspace_remotes() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-ws-fail-{}.json",
-                std::process::id()
-            )),
+            std::env::temp_dir().join(format!("honr-test-ws-fail-{}.json", std::process::id())),
         );
-        assert!(b.yaml_work_repo().is_none(), "empty yaml has no work remotes");
+        assert!(
+            b.yaml_work_repo().is_none(),
+            "empty yaml has no work remotes"
+        );
 
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
@@ -8109,10 +8710,7 @@ mod tests {
         schema.execution.agents.repo.base = "develop".into();
         let b = Board::new(
             schema,
-            std::env::temp_dir().join(format!(
-                "honr-test-resolve-pr-{}.json",
-                std::process::id()
-            )),
+            std::env::temp_dir().join(format!("honr-test-resolve-pr-{}.json", std::process::id())),
         );
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
@@ -8120,7 +8718,15 @@ mod tests {
         .unwrap();
 
         let p = b
-            .create(None, "Other Repo Proj", "why", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Other Repo Proj",
+                "why",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t = b
             .create(
@@ -8173,8 +8779,14 @@ mod tests {
             t.id,
             Some(crate::model::PullRequest {
                 url: "https://github.com/other/widgets/pull/3".into(),
-                base: Some(crate::model::PullRequestEnd::new("other/widgets", "develop")),
-                head: Some(crate::model::PullRequestEnd::new("bot/widgets", "honr/card-1")),
+                base: Some(crate::model::PullRequestEnd::new(
+                    "other/widgets",
+                    "develop",
+                )),
+                head: Some(crate::model::PullRequestEnd::new(
+                    "bot/widgets",
+                    "honr/card-1",
+                )),
             }),
         );
         let repo = b.resolve_card_repo(t.id).unwrap().unwrap();
@@ -8284,8 +8896,14 @@ mod tests {
             t.id,
             Some(crate::model::PullRequest {
                 url: "https://github.com/other/widgets/pull/3".into(),
-                base: Some(crate::model::PullRequestEnd::new("other/widgets", "develop")),
-                head: Some(crate::model::PullRequestEnd::new("bot/widgets", "honr/card-1")),
+                base: Some(crate::model::PullRequestEnd::new(
+                    "other/widgets",
+                    "develop",
+                )),
+                head: Some(crate::model::PullRequestEnd::new(
+                    "bot/widgets",
+                    "honr/card-1",
+                )),
             }),
         );
 
@@ -8306,7 +8924,15 @@ mod tests {
             )),
         );
         let p = b
-            .create(None, "Multi-repo Proj", "why", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Multi-repo Proj",
+                "why",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let a = b
             .create(
@@ -8490,15 +9116,9 @@ mod tests {
         assert_eq!(b.workspace_binding().unwrap().forge, "github");
     }
 
-    
-
-
     #[test]
     fn workspace_binding_persists_in_json_roundtrip() {
-        let dir = std::env::temp_dir().join(format!(
-            "honr-test-ws-persist-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("honr-test-ws-persist-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("honr.json");
@@ -8546,7 +9166,10 @@ mod tests {
             let project = b
                 .create(None, "Bound Proj", "why", None, Origin::Human, true, None)
                 .expect("project");
-            assert!(project.repo.is_none(), "Projects are containers; remotes live on Tasks");
+            assert!(
+                project.repo.is_none(),
+                "Projects are containers; remotes live on Tasks"
+            );
             let task = b
                 .create(
                     Some(project.id),
@@ -8573,7 +9196,11 @@ mod tests {
             assert_eq!(bound.repo.as_ref().unwrap().base, "develop");
 
             let snap = b.snapshot();
-            let snap_task = snap.items.iter().find(|i| i.id == task.id).expect("in snap");
+            let snap_task = snap
+                .items
+                .iter()
+                .find(|i| i.id == task.id)
+                .expect("in snap");
             assert_eq!(
                 snap_task.repo.as_ref().map(|r| r.upstream.as_str()),
                 Some("acme/widgets")
@@ -8738,6 +9365,7 @@ mod tests {
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
                 engine: None,
+                provider_names: Vec::new(),
             })
             .expect("upsert heavy");
         b.set_default_sandbox_profile(&heavy.id)
@@ -8771,6 +9399,56 @@ mod tests {
     }
 
     #[test]
+    fn attach_providers_come_from_profile_list_only() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!("honr-test-attach-profile-{}", std::process::id())),
+        );
+        b.seed_sandbox_profiles_from(&agents_for_seed());
+        b.upsert_openshell_provider(OpenShellProviderDesired {
+            name: "vertex".into(),
+            provider_type: "google-vertex-ai".into(),
+            config: Default::default(),
+            credentials_sealed: None,
+            credential_keys: Vec::new(),
+            refresh: None,
+        });
+        b.upsert_openshell_provider(OpenShellProviderDesired {
+            name: "github".into(),
+            provider_type: "github".into(),
+            config: Default::default(),
+            credentials_sealed: None,
+            credential_keys: Vec::new(),
+            refresh: None,
+        });
+
+        let project = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        // Seeded default has empty provider_names → attach none.
+        assert!(b
+            .attach_providers_for_resolved(&b.resolve_sandbox_create(project.id))
+            .is_empty());
+
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "img:1".into(),
+            policy: SEED_POLICY_YAML.into(),
+            cpu: None,
+            memory: None,
+            engine: Some("cursor".into()),
+            provider_names: vec!["vertex".into(), "missing".into()],
+        })
+        .unwrap();
+        assert_eq!(
+            b.attach_providers_for_resolved(&b.resolve_sandbox_create(project.id)),
+            vec!["vertex".to_string()],
+            "unknown names dropped; only profile list attaches"
+        );
+    }
+
+    #[test]
     fn sandbox_profiles_refuse_delete_of_default_or_in_use() {
         let b = Board::new(
             Schema::default(),
@@ -8785,6 +9463,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: None,
+            provider_names: Vec::new(),
         })
         .unwrap();
 
@@ -8802,10 +9481,7 @@ mod tests {
             .unwrap();
 
         let err = b.delete_sandbox_profile("default").unwrap_err();
-        assert!(
-            err.contains("in use"),
-            "expected in-use refusal, got {err}"
-        );
+        assert!(err.contains("in use"), "expected in-use refusal, got {err}");
 
         b.set_project_sandbox_profile(project.id, None).unwrap();
         b.delete_sandbox_profile("default")
@@ -8834,6 +9510,7 @@ mod tests {
             cpu: Some("1".into()),
             memory: None,
             engine: None,
+            provider_names: Vec::new(),
         })
         .unwrap();
         b.set_default_sandbox_profile("ci").unwrap();
@@ -8845,10 +9522,7 @@ mod tests {
         b.flush();
 
         let restored = Board::load_or_new(Schema::default(), path.clone());
-        assert_eq!(
-            restored.default_sandbox_profile_id().as_deref(),
-            Some("ci")
-        );
+        assert_eq!(restored.default_sandbox_profile_id().as_deref(), Some("ci"));
         assert_eq!(restored.list_sandbox_profiles().len(), 3);
         let p = restored.get(project.id).expect("project");
         assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
@@ -8912,6 +9586,7 @@ mod tests {
             cpu: Some("2".into()),
             memory: None,
             engine: None,
+            provider_names: Vec::new(),
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -8928,6 +9603,7 @@ mod tests {
             cpu: None,
             memory: Some("8Gi".into()),
             engine: None,
+            provider_names: Vec::new(),
         })
         .unwrap();
         b.set_project_sandbox_profile(project.id, Some("alt".into()))
@@ -8963,6 +9639,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: Some("agy".into()),
+            provider_names: Vec::new(),
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -9016,6 +9693,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: None,
+            provider_names: Vec::new(),
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -9053,6 +9731,7 @@ mod tests {
                 cpu: None,
                 memory: None,
                 engine: None,
+                provider_names: Vec::new(),
             })
             .expect("create from name");
         assert_eq!(created.id, "heavy-ci");
@@ -9068,6 +9747,7 @@ mod tests {
                 cpu: None,
                 memory: None,
                 engine: None,
+                provider_names: Vec::new(),
             })
             .expect("create colliding slug");
         assert_eq!(again.id, "default-2");
@@ -9082,6 +9762,7 @@ mod tests {
                 cpu: None,
                 memory: None,
                 engine: None,
+                provider_names: Vec::new(),
             })
             .expect("create punctuation name");
         assert_eq!(punct.id, "profile");
@@ -9114,6 +9795,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: None,
+            provider_names: Vec::new(),
         })
         .unwrap();
         assert_eq!(b.migrate_sandbox_policies_to_inline(), 1);

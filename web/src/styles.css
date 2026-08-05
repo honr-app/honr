@@ -692,15 +692,54 @@ main.with-side-panes {
   white-space: pre-wrap;
 }
 
-.openshell-band {
-  margin: 20px 0 8px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
+.openshell-hero {
+  margin-bottom: 14px;
 }
-.openshell-connectivity {
-  margin-top: 12px;
+.openshell-hero h2 {
+  margin: 0 0 6px;
+}
+.openshell-hero-lead {
+  margin: 0 0 12px;
+  max-width: 52rem;
+}
+.openshell-status-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.openshell-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 14px 0 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.openshell-subnav-btn {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-weight: 500;
+}
+.openshell-subnav-btn.active {
+  border-color: var(--accent);
+  background: var(--panel-2);
+  font-weight: 600;
+}
+.openshell-pane {
+  min-width: 0;
+}
+.openshell-band {
+  margin: 0;
   padding-top: 0;
   border-top: none;
+}
+.openshell-connectivity {
+  margin-top: 0;
 }
 .openshell-band-head {
   margin-bottom: 10px;
@@ -708,6 +747,95 @@ main.with-side-panes {
 .openshell-band-head h3 {
   margin: 0 0 4px;
   font-size: 15px;
+}
+.openshell-profiles-layout {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.openshell-profile-rail-ul {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.openshell-profile-rail-btn {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+}
+.openshell-profile-rail-btn.active {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+.openshell-profile-rail-name {
+  font-weight: 600;
+}
+.openshell-profile-rail-id {
+  font-size: 12px;
+}
+.openshell-profile-rail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+.openshell-profile-detail {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+  padding: 14px 16px;
+}
+.openshell-profile-attach-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  margin: 10px 0;
+}
+.openshell-profile-providers {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.openshell-profile-providers legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+.openshell-profile-provider-ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.openshell-profile-policy-preview {
+  margin: 12px 0 0;
+  padding: 10px;
+  font-size: 12px;
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  white-space: pre-wrap;
+}
+@media (max-width: 720px) {
+  .openshell-profiles-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .openshell-health {

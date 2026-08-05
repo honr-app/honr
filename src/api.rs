@@ -2,8 +2,9 @@
 //! the pixels and the agent API can't drift apart.
 
 use crate::model::{
-    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, OpenShellProviderRefreshDesired,
-    CockpitSession, SandboxProfile, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
+    AgentRuntimeConfig, CockpitSession, ItemId, OpenShellProviderDesired,
+    OpenShellProviderRefreshDesired, SandboxProfile, State, WebhookPollConfig, WorkItem,
+    WorkspaceBinding,
 };
 use crate::openshell::{ProviderRefreshSpec, ProviderTypeProfile};
 use crate::secrets::{open_string_map, seal_string_map};
@@ -23,7 +24,11 @@ pub struct ApiError(String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": self.0 }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": self.0 })),
+        )
+            .into_response()
     }
 }
 
@@ -86,7 +91,10 @@ pub fn routes() -> Router<SharedBoard> {
         )
         .route("/workspace", get(get_workspace).put(put_workspace))
         .route("/webhook-poll", get(get_webhook_poll).put(put_webhook_poll))
-        .route("/agent-runtime", get(get_agent_runtime).put(put_agent_runtime))
+        .route(
+            "/agent-runtime",
+            get(get_agent_runtime).put(put_agent_runtime),
+        )
         .route(
             "/cockpit-session",
             get(get_cockpit_session)
@@ -96,7 +104,10 @@ pub fn routes() -> Router<SharedBoard> {
         )
         .route("/cockpit-session/park", post(park_cockpit_session))
         .route("/cockpit-session/resume", post(resume_cockpit_session))
-        .route("/cockpit-session/mcp-cred", post(provision_cockpit_mcp_cred))
+        .route(
+            "/cockpit-session/mcp-cred",
+            post(provision_cockpit_mcp_cred),
+        )
         // Host-mediated cockpit attach (interactive TTY) + legacy cockpit-chat bridge.
         // Board cockpit_session stays authoritative for both.
         .merge(crate::cockpit_attach::routes())
@@ -127,7 +138,9 @@ pub struct Version {
 }
 
 async fn version() -> Json<Version> {
-    Json(Version { version: env!("CARGO_PKG_VERSION") })
+    Json(Version {
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 async fn board(AxState(b): AxState<SharedBoard>) -> Json<crate::store::Snapshot> {
@@ -154,7 +167,9 @@ async fn item_detail(
     AxState(b): AxState<SharedBoard>,
     Path(id): Path<ItemId>,
 ) -> ApiResult<ItemDetail> {
-    let mut item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
+    let mut item = b
+        .get(id)
+        .ok_or_else(|| ApiError(format!("no work item #{id}")))?;
     let agents = b.effective_agents();
     let default_engine = agents.engine.clone();
     // Display the resolved profile engine (not stale WorkItem.engine).
@@ -179,7 +194,9 @@ async fn item_logs(
     AxState(b): AxState<SharedBoard>,
     Path(id): Path<ItemId>,
 ) -> ApiResult<LogResponse> {
-    let item = b.get(id).ok_or_else(|| ApiError(format!("no work item #{id}")))?;
+    let item = b
+        .get(id)
+        .ok_or_else(|| ApiError(format!("no work item #{id}")))?;
     let agent = b.get_agent_logs(id);
 
     let env_name = item.environment.clone().unwrap_or_else(|| {
@@ -245,7 +262,9 @@ async fn create_item(
         .map_err(ApiError)?
     };
     // A project dropped in plain language starts shaping immediately.
-    let item = b.transition(item.id, State::Shaping, "human", None).unwrap_or(item);
+    let item = b
+        .transition(item.id, State::Shaping, "human", None)
+        .unwrap_or(item);
 
     Ok(Json(item))
 }
@@ -343,11 +362,9 @@ async fn save_plan(
     Path(id): Path<ItemId>,
     Json(req): Json<SavePlanReq>,
 ) -> ApiResult<crate::model::TaskProposal> {
-    let summary = req.summary.unwrap_or_else(|| {
-        b.get(id)
-            .map(|i| i.intent.clone())
-            .unwrap_or_default()
-    });
+    let summary = req
+        .summary
+        .unwrap_or_else(|| b.get(id).map(|i| i.intent.clone()).unwrap_or_default());
     let tasks = req
         .tasks
         .into_iter()
@@ -420,10 +437,7 @@ async fn park(
     Ok(Json(b.park(id, req.reason).map_err(ApiError)?))
 }
 
-async fn unpark(
-    AxState(b): AxState<SharedBoard>,
-    Path(id): Path<ItemId>,
-) -> ApiResult<WorkItem> {
+async fn unpark(AxState(b): AxState<SharedBoard>, Path(id): Path<ItemId>) -> ApiResult<WorkItem> {
     Ok(Json(b.unpark(id).map_err(ApiError)?))
 }
 
@@ -490,10 +504,7 @@ async fn answer(
     Ok(Json(b.answer_escalation(id, req.choice).map_err(ApiError)?))
 }
 
-async fn approve(
-    AxState(b): AxState<SharedBoard>,
-    Path(id): Path<ItemId>,
-) -> ApiResult<WorkItem> {
+async fn approve(AxState(b): AxState<SharedBoard>, Path(id): Path<ItemId>) -> ApiResult<WorkItem> {
     let before: std::collections::HashSet<_> = b
         .get(id)
         .and_then(|i| i.parent)
@@ -691,11 +702,13 @@ async fn put_openshell(
         if any_pem {
             // Merge with existing decrypted bundle when only some fields are sent.
             let mut bundle = match b.openshell_mtls_sealed() {
-                Some(s) => crate::secrets::open_mtls(&s).unwrap_or(crate::secrets::OpenShellMtlsBundle {
-                    ca_pem: String::new(),
-                    client_cert_pem: String::new(),
-                    client_key_pem: String::new(),
-                }),
+                Some(s) => {
+                    crate::secrets::open_mtls(&s).unwrap_or(crate::secrets::OpenShellMtlsBundle {
+                        ca_pem: String::new(),
+                        client_cert_pem: String::new(),
+                        client_key_pem: String::new(),
+                    })
+                }
                 None => crate::secrets::OpenShellMtlsBundle {
                     ca_pem: String::new(),
                     client_cert_pem: String::new(),
@@ -789,7 +802,7 @@ async fn github_app_settings_view(b: &SharedBoard) -> GitHubAppSettings {
     let provider_attached = b
         .openshell_providers()
         .iter()
-        .any(|p| p.name == crate::github_app::PROVIDER_NAME && p.attach_to_sandboxes);
+        .any(|p| p.name == crate::github_app::PROVIDER_NAME);
     let mut installations = Vec::new();
     if let Some(ref bundle) = bundle {
         if !bundle.app_id.trim().is_empty() && !bundle.private_key_pem.trim().is_empty() {
@@ -932,7 +945,6 @@ pub struct OpenShellProviderView {
     pub credential_keys: Vec<String>,
     pub has_credentials: bool,
     pub has_refresh: bool,
-    pub attach_to_sandboxes: bool,
     /// Present when the gateway was reachable for this request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_synced: Option<bool>,
@@ -955,15 +967,9 @@ pub struct OpenShellProviderWrite {
     /// Write-only. Omit / empty on PUT to keep existing sealed credentials.
     #[serde(default)]
     pub credentials: Option<BTreeMap<String, String>>,
-    #[serde(default = "default_attach_true")]
-    pub attach_to_sandboxes: bool,
     /// Optional refresh bootstrap for providers that need gateway-owned refresh.
     #[serde(default)]
     pub refresh: Option<OpenShellProviderRefreshWrite>,
-}
-
-fn default_attach_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -998,7 +1004,6 @@ fn provider_view(
         credential_keys: p.credential_keys.clone(),
         has_credentials: p.has_credentials(),
         has_refresh: p.refresh.is_some(),
-        attach_to_sandboxes: p.attach_to_sandboxes,
         gateway_synced: gateway_names.map(|g| g.contains(&p.name)),
     }
 }
@@ -1016,7 +1021,9 @@ fn seal_credentials_from_write(
         if cleaned.is_empty() {
             return Ok((
                 existing.and_then(|e| e.credentials_sealed.clone()),
-                existing.map(|e| e.credential_keys.clone()).unwrap_or_default(),
+                existing
+                    .map(|e| e.credential_keys.clone())
+                    .unwrap_or_default(),
             ));
         }
         let keys: Vec<_> = cleaned.keys().cloned().collect();
@@ -1030,7 +1037,9 @@ fn seal_credentials_from_write(
     }
     Ok((
         existing.and_then(|e| e.credentials_sealed.clone()),
-        existing.map(|e| e.credential_keys.clone()).unwrap_or_default(),
+        existing
+            .map(|e| e.credential_keys.clone())
+            .unwrap_or_default(),
     ))
 }
 
@@ -1067,9 +1076,7 @@ fn seal_refresh_from_write(
     }))
 }
 
-fn credentials_for_apply(
-    p: &OpenShellProviderDesired,
-) -> Result<BTreeMap<String, String>, String> {
+fn credentials_for_apply(p: &OpenShellProviderDesired) -> Result<BTreeMap<String, String>, String> {
     match p.credentials_sealed.as_deref() {
         None | Some("") => Ok(BTreeMap::new()),
         Some(s) => open_string_map(s).map_err(|e| format!("open credentials: {e}")),
@@ -1080,8 +1087,8 @@ fn refresh_for_apply(p: &OpenShellProviderDesired) -> Result<Option<ProviderRefr
     let Some(r) = &p.refresh else {
         return Ok(None);
     };
-    let material = open_string_map(&r.material_sealed)
-        .map_err(|e| format!("open refresh material: {e}"))?;
+    let material =
+        open_string_map(&r.material_sealed).map_err(|e| format!("open refresh material: {e}"))?;
     Ok(Some(ProviderRefreshSpec {
         credential_key: r.credential_key.clone(),
         strategy: r.strategy.clone(),
@@ -1144,10 +1151,7 @@ async fn create_openshell_provider(
     if req.provider_type.trim().is_empty() {
         return Err(ApiError("type is required".into()));
     }
-    let existing = b
-        .openshell_providers()
-        .into_iter()
-        .find(|p| p.name == name);
+    let existing = b.openshell_providers().into_iter().find(|p| p.name == name);
     let (credentials_sealed, credential_keys) =
         seal_credentials_from_write(req.credentials.as_ref(), existing.as_ref())
             .map_err(|(_, m)| ApiError(m))?;
@@ -1160,7 +1164,6 @@ async fn create_openshell_provider(
         credentials_sealed,
         credential_keys,
         refresh,
-        attach_to_sandboxes: req.attach_to_sandboxes,
     }
     .normalized();
     let stored = b.upsert_openshell_provider(desired);
@@ -1226,7 +1229,6 @@ async fn update_openshell_provider(
         credentials_sealed,
         credential_keys,
         refresh,
-        attach_to_sandboxes: req.attach_to_sandboxes,
     }
     .normalized();
     let stored = b.upsert_openshell_provider(desired);
@@ -1295,9 +1297,7 @@ fn sandbox_profiles_out(b: &crate::store::SharedBoard) -> SandboxProfilesOut {
     }
 }
 
-async fn list_sandbox_profiles(
-    AxState(b): AxState<SharedBoard>,
-) -> Json<SandboxProfilesOut> {
+async fn list_sandbox_profiles(AxState(b): AxState<SharedBoard>) -> Json<SandboxProfilesOut> {
     Json(sandbox_profiles_out(&b))
 }
 
@@ -1310,7 +1310,7 @@ async fn get_sandbox_profile(
         .ok_or_else(|| ApiError(format!("no sandbox profile `{id}`")))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct UpsertSandboxProfileReq {
     /// Omit or leave empty on create — board derives a slug from `name`.
     /// Pass the existing id when editing.
@@ -1325,6 +1325,8 @@ pub struct UpsertSandboxProfileReq {
     pub memory: Option<String>,
     #[serde(default)]
     pub engine: Option<String>,
+    #[serde(default)]
+    pub provider_names: Vec<String>,
 }
 
 async fn upsert_sandbox_profile(
@@ -1340,6 +1342,7 @@ async fn upsert_sandbox_profile(
             cpu: req.cpu,
             memory: req.memory,
             engine: req.engine,
+            provider_names: req.provider_names,
         })
         .map_err(ApiError)?,
     ))
@@ -1463,10 +1466,11 @@ async fn provision_cockpit_mcp_cred(
     AxState(b): AxState<SharedBoard>,
     jar: CookieJar,
 ) -> Result<Json<OpsMcpCredOut>, ApiError> {
-    let user = crate::auth::session_user_from_jar(&b, &jar).ok_or_else(|| {
-        ApiError("authentication required".into())
-    })?;
-    let session = b.cockpit_session().ok_or_else(|| ApiError("no cockpit session".into()))?;
+    let user = crate::auth::session_user_from_jar(&b, &jar)
+        .ok_or_else(|| ApiError("authentication required".into()))?;
+    let session = b
+        .cockpit_session()
+        .ok_or_else(|| ApiError("no cockpit session".into()))?;
     if session.status != crate::model::CockpitSessionStatus::Running {
         return Err(ApiError(
             "cockpit session is not Running — Start first".into(),
@@ -1584,7 +1588,12 @@ pub struct WebhookResponse {
 
 fn resolve_merged_pr_url(payload: &GithubWebhookPayload) -> Option<String> {
     let pr = payload.pull_request.as_ref()?;
-    if let Some(url) = pr.html_url.as_ref().map(|u| u.trim()).filter(|u| !u.is_empty()) {
+    if let Some(url) = pr
+        .html_url
+        .as_ref()
+        .map(|u| u.trim())
+        .filter(|u| !u.is_empty())
+    {
         return Some(url.to_string());
     }
     let number = pr.number?;
@@ -1654,10 +1663,7 @@ async fn github_webhook(
     let mut completed_item_ids = Vec::new();
     if is_pr_main_merge {
         if let Some(pr_url) = resolve_merged_pr_url(&payload) {
-            let number = payload
-                .pull_request
-                .as_ref()
-                .and_then(|pr| pr.number);
+            let number = payload.pull_request.as_ref().and_then(|pr| pr.number);
             if let Some(id) = b.complete_for_merged_pr(&pr_url, number) {
                 completed_item_ids.push(id);
             }
@@ -1864,7 +1870,10 @@ mod tests {
             panic!("init_plan");
         };
         assert!(seed.is_initial_plan_task());
-        assert!(seed.repo.is_none(), "Initial plan carries clone targets in prose");
+        assert!(
+            seed.repo.is_none(),
+            "Initial plan carries clone targets in prose"
+        );
         assert!(b.children_of(created.id).contains(&seed.id));
     }
 
@@ -1882,7 +1891,15 @@ mod tests {
             )),
         ));
         let project = b
-            .create(None, "P", "why", None, crate::model::Origin::Human, true, None)
+            .create(
+                None,
+                "P",
+                "why",
+                None,
+                crate::model::Origin::Human,
+                true,
+                None,
+            )
             .expect("project");
 
         let Ok(Json(created)) = create_item(
@@ -1943,7 +1960,15 @@ mod tests {
             std::env::temp_dir().join("honr-test-nowrite.json"),
         ));
         let id = b
-            .create(None, "t", "i", None, crate::model::Origin::Human, false, None)
+            .create(
+                None,
+                "t",
+                "i",
+                None,
+                crate::model::Origin::Human,
+                false,
+                None,
+            )
             .expect("create")
             .id;
         b.set_environment(id, Some("honr-card-8-a1".into()));
@@ -1951,14 +1976,20 @@ mod tests {
 
         let Json(snap) = board(AxState(b.clone())).await;
         let on_the_card = serde_json::to_value(&snap).unwrap();
-        assert_eq!(on_the_card["items"][0]["pull_request"]["url"], "https://github.com/shanemcd/honr/pull/1");
+        assert_eq!(
+            on_the_card["items"][0]["pull_request"]["url"],
+            "https://github.com/shanemcd/honr/pull/1"
+        );
         assert_eq!(on_the_card["items"][0]["environment"], "honr-card-8-a1");
 
         let Ok(Json(detail)) = item_detail(AxState(b), Path(id)).await else {
             panic!("no detail for the card we just created");
         };
         let in_the_drawer = serde_json::to_value(&detail).unwrap();
-        assert_eq!(in_the_drawer["pull_request"]["url"], "https://github.com/shanemcd/honr/pull/1");
+        assert_eq!(
+            in_the_drawer["pull_request"]["url"],
+            "https://github.com/shanemcd/honr/pull/1"
+        );
         assert_eq!(in_the_drawer["environment"], "honr-card-8-a1");
     }
 
@@ -1979,7 +2010,15 @@ mod tests {
             std::env::temp_dir().join("honr-test-blockers.json"),
         ));
         let project = b
-            .create(None, "Proj", "why", None, crate::model::Origin::Human, true, None)
+            .create(
+                None,
+                "Proj",
+                "why",
+                None,
+                crate::model::Origin::Human,
+                true,
+                None,
+            )
             .expect("project");
         let blocker = b
             .create(
@@ -2076,13 +2115,23 @@ mod tests {
 
         assert_eq!(resp.status, "ok");
         assert!(resp.main_advanced);
-        assert_eq!(resp.commit_sha.as_deref(), Some("1234567890abcdef1234567890abcdef12345678"));
+        assert_eq!(
+            resp.commit_sha.as_deref(),
+            Some("1234567890abcdef1234567890abcdef12345678")
+        );
 
         let event = rx.try_recv().expect("event emitted");
         match event {
-            BoardEvent::MainAdvanced { seq: _, ref_name, commit_sha } => {
+            BoardEvent::MainAdvanced {
+                seq: _,
+                ref_name,
+                commit_sha,
+            } => {
                 assert_eq!(ref_name, "refs/heads/main");
-                assert_eq!(commit_sha.as_deref(), Some("1234567890abcdef1234567890abcdef12345678"));
+                assert_eq!(
+                    commit_sha.as_deref(),
+                    Some("1234567890abcdef1234567890abcdef12345678")
+                );
             }
             other => panic!("expected MainAdvanced, got {other:?}"),
         }
@@ -2118,9 +2167,16 @@ mod tests {
 
         let event = rx.try_recv().expect("event emitted");
         match event {
-            BoardEvent::MainAdvanced { seq: _, ref_name, commit_sha } => {
+            BoardEvent::MainAdvanced {
+                seq: _,
+                ref_name,
+                commit_sha,
+            } => {
                 assert_eq!(ref_name, "main");
-                assert_eq!(commit_sha.as_deref(), Some("fedcba0987654321fedcba0987654321fedcba09"));
+                assert_eq!(
+                    commit_sha.as_deref(),
+                    Some("fedcba0987654321fedcba0987654321fedcba09")
+                );
             }
             other => panic!("expected MainAdvanced, got {other:?}"),
         }
@@ -2147,7 +2203,10 @@ mod tests {
 
         assert_eq!(resp.status, "ignored");
         assert!(!resp.main_advanced);
-        assert!(rx.try_recv().is_err(), "no event should be emitted for feature branch push");
+        assert!(
+            rx.try_recv().is_err(),
+            "no event should be emitted for feature branch push"
+        );
 
         // 4. Ping event (no event emitted)
         let ping_payload = serde_json::json!({
@@ -2167,7 +2226,10 @@ mod tests {
 
         assert_eq!(resp.status, "pong");
         assert!(!resp.main_advanced);
-        assert!(rx.try_recv().is_err(), "no event should be emitted for ping");
+        assert!(
+            rx.try_recv().is_err(),
+            "no event should be emitted for ping"
+        );
     }
 
     #[tokio::test]
@@ -2202,7 +2264,10 @@ mod tests {
         let event = rx.try_recv().expect("event emitted over route");
         match event {
             crate::events::BoardEvent::MainAdvanced { commit_sha, .. } => {
-                assert_eq!(commit_sha.as_deref(), Some("11223344556677889900aabbccddeeff11223344"));
+                assert_eq!(
+                    commit_sha.as_deref(),
+                    Some("11223344556677889900aabbccddeeff11223344")
+                );
             }
             other => panic!("expected MainAdvanced event, got {other:?}"),
         }
@@ -2211,7 +2276,15 @@ mod tests {
     fn review_card_with_pr(b: &SharedBoard, pr_url: &str) -> u64 {
         use crate::model::{Origin, State};
         let p = b
-            .create(None, "Webhook Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Webhook Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let t = b
             .create(
@@ -2451,14 +2524,38 @@ mod tests {
         ));
 
         let p = b
-            .create(None, "Webhook Rebase Proj", "intent", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Webhook Rebase Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
 
         let t1 = b
-            .create(Some(p.id), "Impl 1", "intent 1", Some("dod 1".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Impl 1",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
         let t2 = b
-            .create(Some(p.id), "Impl 2", "intent 2", Some("dod 2".into()), Origin::Human, false, None)
+            .create(
+                Some(p.id),
+                "Impl 2",
+                "intent 2",
+                Some("dod 2".into()),
+                Origin::Human,
+                false,
+                None,
+            )
             .unwrap();
 
         let pr1_url = "https://github.com/shanemcd/honr/pull/5001";
@@ -2541,6 +2638,7 @@ mod tests {
                 cpu: Some("2".into()),
                 memory: Some("4Gi".into()),
                 engine: None,
+                ..Default::default()
             }),
         )
         .await
@@ -2565,6 +2663,7 @@ mod tests {
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
                 engine: None,
+                ..Default::default()
             }),
         )
         .await
@@ -2584,6 +2683,7 @@ mod tests {
                 cpu: Some("8".into()),
                 memory: Some("32Gi".into()),
                 engine: None,
+                ..Default::default()
             }),
         )
         .await
@@ -2609,18 +2709,14 @@ mod tests {
         else {
             panic!("set cockpit");
         };
-        assert_eq!(
-            cockpit.cockpit_sandbox_profile_id.as_deref(),
-            Some("heavy")
-        );
+        assert_eq!(cockpit.cockpit_sandbox_profile_id.as_deref(), Some("heavy"));
         assert_eq!(
             cockpit.default_sandbox_profile_id.as_deref(),
             Some("default"),
             "setting Cockpit must not clear the worker default"
         );
 
-        let Ok(Json(got)) =
-            get_sandbox_profile(AxState(b.clone()), Path("heavy".into())).await
+        let Ok(Json(got)) = get_sandbox_profile(AxState(b.clone()), Path("heavy".into())).await
         else {
             panic!("get heavy");
         };
@@ -2667,17 +2763,15 @@ mod tests {
                 None,
             )
             .expect("task");
-        assert!(
-            set_item_sandbox_profile(
-                AxState(b.clone()),
-                Path(task.id),
-                Json(SetProjectSandboxProfileReq {
-                    sandbox_profile_id: Some("default".into()),
-                }),
-            )
-            .await
-            .is_err()
-        );
+        assert!(set_item_sandbox_profile(
+            AxState(b.clone()),
+            Path(task.id),
+            Json(SetProjectSandboxProfileReq {
+                sandbox_profile_id: Some("default".into()),
+            }),
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
@@ -2694,6 +2788,7 @@ mod tests {
                 cpu: None,
                 memory: None,
                 engine: None,
+                ..Default::default()
             }),
         )
         .await
@@ -2714,6 +2809,7 @@ mod tests {
                 cpu: None,
                 memory: None,
                 engine: None,
+                ..Default::default()
             }),
         )
         .await
@@ -2789,16 +2885,14 @@ mod tests {
         // Work remotes are yaml-only; Settings forge does not supply them.
         assert!(b.yaml_work_repo().is_none());
         // Unsupported forge is refused.
-        assert!(
-            put_workspace(
-                AxState(b.clone()),
-                Json(WorkspaceBinding {
-                    forge: "gitlab".into(),
-                }),
-            )
-            .await
-            .is_err()
-        );
+        assert!(put_workspace(
+            AxState(b.clone()),
+            Json(WorkspaceBinding {
+                forge: "gitlab".into(),
+            }),
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
@@ -2895,9 +2989,7 @@ mod tests {
             AxState(b.clone()),
             Json(OpenShellSettings {
                 gateway_endpoint: Some("https://127.0.0.1:17670".into()),
-                ca_pem: Some(
-                    "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n".into(),
-                ),
+                ca_pem: Some("-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n".into()),
                 client_cert_pem: Some(
                     "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----\n".into(),
                 ),
@@ -2951,8 +3043,7 @@ mod tests {
                 app_id: Some("424242".into()),
                 client_id: Some("Iv1.test".into()),
                 private_key_pem: Some(
-                    "-----BEGIN RSA PRIVATE KEY-----\nKEY\n-----END RSA PRIVATE KEY-----\n"
-                        .into(),
+                    "-----BEGIN RSA PRIVATE KEY-----\nKEY\n-----END RSA PRIVATE KEY-----\n".into(),
                 ),
                 webhook_secret: Some("whsec_never_echo".into()),
                 client_secret: Some("cs_never_echo".into()),
@@ -3035,7 +3126,6 @@ mod tests {
                 provider_type: "github".into(),
                 config: BTreeMap::new(),
                 credentials: Some(creds),
-                attach_to_sandboxes: true,
                 refresh: None,
             }),
         )
@@ -3165,11 +3255,7 @@ mod tests {
         let err = provision_cockpit_mcp_cred(AxState(b), CookieJar::new())
             .await
             .expect_err("auth required");
-        assert!(
-            err.0.contains("authentication"),
-            "error={}",
-            err.0
-        );
+        assert!(err.0.contains("authentication"), "error={}", err.0);
     }
 
     #[tokio::test]
@@ -3188,11 +3274,7 @@ mod tests {
         let err = provision_cockpit_mcp_cred(AxState(b.clone()), admin_jar(&b))
             .await
             .expect_err("no environment");
-        assert!(
-            err.0.contains("no environment"),
-            "error={}",
-            err.0
-        );
+        assert!(err.0.contains("no environment"), "error={}", err.0);
     }
 
     #[tokio::test]
@@ -3204,11 +3286,7 @@ mod tests {
         let err = provision_cockpit_mcp_cred(AxState(b.clone()), admin_jar(&b))
             .await
             .expect_err("not Running");
-        assert!(
-            err.0.contains("not Running"),
-            "error={}",
-            err.0
-        );
+        assert!(err.0.contains("not Running"), "error={}", err.0);
     }
 
     #[tokio::test]

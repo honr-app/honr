@@ -166,7 +166,11 @@ export const api = {
     policy: string;
     cpu?: string | null;
     memory?: string | null;
+    engine?: string | null;
+    provider_names?: string[];
   }): Promise<SandboxProfile> => post("/sandbox-profiles", profile),
+  deleteSandboxProfile: (id: string): Promise<{ ok: boolean }> =>
+    del(`/sandbox-profiles/${encodeURIComponent(id)}`),
   setDefaultSandboxProfile: (id: string): Promise<SandboxProfilesOut> =>
     post(`/sandbox-profiles/${encodeURIComponent(id)}/default`),
   setCockpitSandboxProfile: (id: string): Promise<SandboxProfilesOut> =>

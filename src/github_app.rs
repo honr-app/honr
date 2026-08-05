@@ -393,7 +393,6 @@ fn ensure_desired_row(board: &SharedBoard, fresh_token: Option<&str>) -> Result<
             credentials_sealed,
             credential_keys,
             refresh: None,
-            attach_to_sandboxes: true,
         }
         .normalized(),
     );
@@ -718,7 +717,6 @@ mod tests {
         let p = &providers[0];
         assert_eq!(p.name, PROVIDER_NAME);
         assert_eq!(p.provider_type, "github");
-        assert!(p.attach_to_sandboxes);
         assert_eq!(p.credential_keys, vec![CREDENTIAL_KEY.to_string()]);
         let sealed = p.credentials_sealed.as_deref().expect("sealed");
         assert!(!sealed.contains("ghs_secret_value"));
@@ -749,7 +747,7 @@ mod tests {
             .into_iter()
             .find(|p| p.name == PROVIDER_NAME)
             .expect("desired github row");
-        assert!(p.attach_to_sandboxes);
+        assert_eq!(p.name, PROVIDER_NAME);
         let opened = open_string_map(p.credentials_sealed.as_deref().unwrap()).expect("open");
         assert_eq!(
             opened.get(CREDENTIAL_KEY).map(String::as_str),
@@ -806,7 +804,7 @@ mod tests {
             .into_iter()
             .find(|p| p.name == PROVIDER_NAME)
             .expect("provider");
-        assert!(p.attach_to_sandboxes);
+        assert_eq!(p.name, PROVIDER_NAME);
         let sealed = p.credentials_sealed.as_deref().expect("sealed");
         assert!(!sealed.contains("ghs_mock_installation_token"));
         let opened = open_string_map(sealed).expect("open");
