@@ -143,7 +143,7 @@ Operator orientation for agents working *on* this repo:
 | `src/machine.rs` | Legal transitions and lifecycle invariants |
 | `src/supervisor.rs` | Dispatch, sandbox lifecycle, lease sweeping |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs |
-| `src/openshell.rs` | Typed wrapper over the OpenShell CLI |
+| `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board mTLS) |
 | `sandbox/` | Container image, network policy, metadata shim |
 | `web/` | React UI |
 | `docs/` | Operator docs |
