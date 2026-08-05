@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { Card } from "./Card.js";
 import { DependencyGraph } from "./DependencyGraph.js";
+import { OperatorGuide } from "./OperatorGuide.js";
 import { humanizeEscalation } from "../humanize.js";
 import { BOARD_COLUMNS, COLUMN_OF, normState } from "../types.js";
 import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types.js";
@@ -131,25 +132,20 @@ export function Board(props: BoardProps) {
             then dispatch Tasks. Agents stay idle until you dispatch.
           </p>
         </header>
-        <div className="board-empty-card" data-testid="board-empty">
-          <h2>No projects yet</h2>
-          <p className="dim">
-            Via the honr MCP:{" "}
-            <code>create_project</code> → <code>dispatch</code> Initial plan →
-            Approve (creates Tasks). Then dispatch Backlog tasks. Or open Help
-            for the same loop.
-          </p>
+        <div className="board-empty" data-testid="board-empty">
           {archivedGoals.length > 0 && (
-            <p style={{ marginTop: 12 }}>
+            <p className="board-empty-archived">
               <button
                 type="button"
                 className="filter-btn active"
                 onClick={() => setShowArchived(true)}
+                data-testid="board-empty-show-archived"
               >
                 Show {archivedGoals.length} archived
               </button>
             </p>
           )}
+          <OperatorGuide />
         </div>
       </div>
     );
