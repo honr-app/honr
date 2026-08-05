@@ -5,7 +5,7 @@ import { Card } from "./dist-test/components/Card.js";
 import { Board, isBlocked, sortFor } from "./dist-test/components/Board.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
-import { Cockpit } from "./dist-test/components/Cockpit.js";
+import { Cockpit, CockpitSessionView } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
@@ -498,6 +498,89 @@ assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should exp
 const cockpitHtml = renderToString(React.createElement(Cockpit));
 assert(cockpitHtml.includes("data-testid=\"cockpit-page\""), "Cockpit view should render");
 assert(cockpitHtml.includes("Cockpit"), "Cockpit page should title the surface");
+assert(cockpitHtml.includes("data-testid=\"cockpit-session\""), "Cockpit should show ops-session face");
+assert(cockpitHtml.includes("data-testid=\"cockpit-session-start\""), "Cockpit should expose Start");
+assert(cockpitHtml.includes("data-testid=\"cockpit-session-park\""), "Cockpit should expose Park");
+assert(cockpitHtml.includes("data-testid=\"cockpit-session-resume\""), "Cockpit should expose Resume");
+assert(cockpitHtml.includes("data-testid=\"cockpit-session-stop\""), "Cockpit should expose Stop");
+
+// CockpitSessionView — thin face enablement mirrors Board presence/status only
+const noop = () => {};
+const buttonTag = (html, testId) => {
+  // React SSR may place attrs in any order — match the whole opening tag.
+  const all = html.match(/<button\b[^>]*>/g) || [];
+  const tag = all.find((t) => t.includes(`data-testid="${testId}"`));
+  assert(tag, `missing button ${testId}`);
+  return tag;
+};
+const isDisabled = (html, testId) => /\bdisabled\b/.test(buttonTag(html, testId));
+
+const absentHtml = renderToString(
+  React.createElement(CockpitSessionView, {
+    session: null,
+    onStart: noop,
+    onPark: noop,
+    onResume: noop,
+    onStop: noop,
+  }),
+);
+assert(absentHtml.includes("data-testid=\"cockpit-session-status-value\""), "Absent status value");
+assert(absentHtml.includes(">None<"), "Absent session shows None");
+assert(!isDisabled(absentHtml, "cockpit-session-start"), "Start enabled when no session");
+assert(isDisabled(absentHtml, "cockpit-session-park"), "Park disabled when no session");
+assert(isDisabled(absentHtml, "cockpit-session-resume"), "Resume disabled when no session");
+assert(isDisabled(absentHtml, "cockpit-session-stop"), "Stop disabled when no session");
+assert(!absentHtml.includes("data-testid=\"cockpit-attach-fallback\""), "No attach hint without environment");
+
+const runningSession = {
+  environment: "honr-ops",
+  conversation_id: "conv-ops-1",
+  status: "running",
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+};
+const runningHtml = renderToString(
+  React.createElement(CockpitSessionView, {
+    session: runningSession,
+    onStart: noop,
+    onPark: noop,
+    onResume: noop,
+    onStop: noop,
+  }),
+);
+assert(runningHtml.includes(">Running<"), "Running status label");
+assert(runningHtml.includes("honr-ops"), "Shows environment");
+assert(runningHtml.includes("conv-ops-1"), "Shows conversation_id when present");
+assert(isDisabled(runningHtml, "cockpit-session-start"), "Start disabled when Running");
+assert(!isDisabled(runningHtml, "cockpit-session-park"), "Park enabled when Running");
+assert(isDisabled(runningHtml, "cockpit-session-resume"), "Resume disabled when Running");
+assert(!isDisabled(runningHtml, "cockpit-session-stop"), "Stop enabled when Running");
+assert(
+  runningHtml.includes("data-testid=\"cockpit-attach-fallback\"") &&
+    runningHtml.includes("openshell sandbox connect") &&
+    runningHtml.includes("honr-ops"),
+  "Optional openshell connect fallback when environment present",
+);
+
+const parkedSession = {
+  ...runningSession,
+  status: "parked",
+  conversation_id: null,
+};
+const parkedHtml = renderToString(
+  React.createElement(CockpitSessionView, {
+    session: parkedSession,
+    onStart: noop,
+    onPark: noop,
+    onResume: noop,
+    onStop: noop,
+  }),
+);
+assert(parkedHtml.includes(">Parked<"), "Parked status label");
+assert(!parkedHtml.includes("data-testid=\"cockpit-session-conversation\""), "Hide empty conversation");
+assert(isDisabled(parkedHtml, "cockpit-session-park"), "Park disabled when Parked");
+assert(!isDisabled(parkedHtml, "cockpit-session-resume"), "Resume enabled when Parked");
+assert(!isDisabled(parkedHtml, "cockpit-session-stop"), "Stop enabled when Parked");
 
 const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
