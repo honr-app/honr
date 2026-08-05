@@ -67,6 +67,9 @@ pub const META_SANDBOX_PROFILES: &str = "sandbox_profiles";
 /// Global default sandbox profile id (empty string means unset).
 pub const META_DEFAULT_SANDBOX_PROFILE_ID: &str = "default_sandbox_profile_id";
 
+/// Cockpit sandbox profile id (empty string means unset → fall through at resolve).
+pub const META_COCKPIT_SANDBOX_PROFILE_ID: &str = "cockpit_sandbox_profile_id";
+
 /// JSON blob: optional [`crate::model::WorkspaceBinding`].
 pub const META_WORKSPACE_BINDING: &str = "workspace_binding";
 
@@ -105,8 +108,8 @@ pub const META_WEBHOOK_POLL: &str = "webhook_poll";
 /// JSON object: `owner/name` → last-seen default-branch tip SHA (poll path).
 pub const META_WEBHOOK_POLL_TIPS: &str = "webhook_poll_tips";
 
-/// JSON blob: optional [`crate::model::OpsSession`] (control-plane ops seat).
-pub const META_OPS_SESSION: &str = "ops_session";
+/// JSON blob: optional [`crate::model::CockpitSession`] (control-plane cockpit).
+pub const META_COCKPIT_SESSION: &str = "cockpit_session";
 
 /// Fields without dedicated columns — portable JSON blob on `items.extras_json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

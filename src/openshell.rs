@@ -12,17 +12,22 @@
 
 use crate::secrets::OpenShellMtlsBundle;
 use futures::StreamExt;
+use openshell_core::forward::validate_ssh_session_response;
 use openshell_core::metadata::{ObjectId, ObjectLabels, ObjectName};
 use openshell_core::proto::open_shell_client::OpenShellClient;
 use openshell_core::proto::datamodel::v1::{ObjectMeta, Provider};
 use openshell_core::proto::{
     ConfigureProviderRefreshRequest, CreateProviderRequest, CreateSandboxRequest,
-    DeleteProviderRequest, DeleteSandboxRequest, ExecSandboxEvent, ExecSandboxRequest,
-    GetSandboxLogsRequest, GetSandboxRequest, HealthRequest, ListProviderProfilesRequest,
-    ListProvidersRequest, ListSandboxesRequest, ProviderCredentialRefreshStrategy,
-    ProviderProfile as ProtoProviderProfile, SandboxPhase, SandboxSpec as ProtoSandboxSpec,
-    SandboxTemplate, ServiceStatus, UpdateProviderRequest, exec_sandbox_event,
+    CreateSshSessionRequest, DeleteProviderRequest, DeleteSandboxRequest, ExecSandboxEvent,
+    ExecSandboxInput, ExecSandboxRequest, ExecSandboxWindowResize, GetSandboxLogsRequest,
+    GetSandboxRequest, HealthRequest, ListProviderProfilesRequest, ListProvidersRequest,
+    ListSandboxesRequest, ProviderCredentialRefreshStrategy,
+    ProviderProfile as ProtoProviderProfile, RevokeSshSessionRequest, SandboxPhase,
+    SandboxSpec as ProtoSandboxSpec, SandboxTemplate, ServiceStatus, UpdateProviderRequest,
+    exec_sandbox_event, exec_sandbox_input,
 };
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use prost_types::{Struct, Value, value::Kind};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -48,7 +53,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Outcome of a gateway health probe for Settings → OpenShell and ops surfaces.
+/// Outcome of a gateway health probe for Settings → OpenShell and cockpit surfaces.
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct GatewayStatus {
     pub healthy: bool,
@@ -82,10 +87,10 @@ impl Sandbox {
         self.labels.get(LABEL_ITEM)?.parse().ok()
     }
 
-    /// Control-plane ops seat sandbox (`honr.ops=1`), not a card worker.
-    pub fn is_ops(&self) -> bool {
+    /// Control-plane cockpit sandbox (`honr.cockpit=1`), not a card worker.
+    pub fn is_cockpit(&self) -> bool {
         self.labels
-            .get(LABEL_OPS)
+            .get(LABEL_COCKPIT)
             .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     }
 }
@@ -114,6 +119,82 @@ pub struct GatewayProvider {
     pub provider_type: String,
     pub credential_keys: Vec<String>,
     pub config_keys: Vec<String>,
+}
+
+/// Short-lived SSH session from `CreateSshSession` — what `sandbox connect` uses
+/// before spawning local `ssh` with an `openshell ssh-proxy` ProxyCommand.
+/// Token is secret; do not echo to untrusted clients.
+///
+/// Typed gRPC surface for the host CLI connect path; Cockpit attach uses
+/// `exec_interactive` and honr does not shell out to launch editors.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // exercised in unit tests; not on the Cockpit hot path
+pub struct SshSession {
+    pub sandbox_id: String,
+    pub token: String,
+    pub gateway_host: String,
+    pub gateway_port: u32,
+    pub gateway_scheme: String,
+    pub host_key_fingerprint: String,
+    pub expires_at_ms: i64,
+}
+
+/// One event from an interactive (`ExecSandboxInteractive`) attach stream.
+#[derive(Debug, Clone)]
+pub enum InteractiveEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit(i32),
+}
+
+/// Live interactive exec — stdin/resize in, stdout/stderr/exit out.
+/// Dropping this closes the input side; the gateway stream ends on Exit or error.
+pub struct InteractiveExec {
+    input_tx: mpsc::Sender<ExecSandboxInput>,
+    events: mpsc::Receiver<InteractiveEvent>,
+    join: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl InteractiveExec {
+    pub async fn write_stdin(&self, data: Vec<u8>) -> Result<()> {
+        self.input_tx
+            .send(ExecSandboxInput {
+                payload: Some(exec_sandbox_input::Payload::Stdin(data)),
+            })
+            .await
+            .map_err(|_| Error::Failed {
+                op: "exec interactive".into(),
+                message: "stdin channel closed".into(),
+            })
+    }
+
+    pub async fn resize(&self, cols: u32, rows: u32) -> Result<()> {
+        self.input_tx
+            .send(ExecSandboxInput {
+                payload: Some(exec_sandbox_input::Payload::Resize(ExecSandboxWindowResize {
+                    cols,
+                    rows,
+                })),
+            })
+            .await
+            .map_err(|_| Error::Failed {
+                op: "exec interactive".into(),
+                message: "resize channel closed".into(),
+            })
+    }
+
+    pub async fn next_event(&mut self) -> Option<InteractiveEvent> {
+        self.events.recv().await
+    }
+}
+
+impl Drop for InteractiveExec {
+    fn drop(&mut self) {
+        // Dropping input_tx closes the gRPC client stream.
+        if let Some(join) = self.join.take() {
+            join.abort();
+        }
+    }
 }
 
 /// Provider type profile for Settings form scaffolding.
@@ -151,8 +232,8 @@ impl Output {
 }
 
 pub const LABEL_ITEM: &str = "honr.item";
-/// Marks the durable control-plane ops seat sandbox (not a card worker).
-pub const LABEL_OPS: &str = "honr.ops";
+/// Marks the durable control-plane cockpit sandbox (not a card worker).
+pub const LABEL_COCKPIT: &str = "honr.cockpit";
 
 #[cfg(test)]
 type MockHandler = std::sync::Arc<dyn Fn(&[String]) -> Output + Send + Sync>;
@@ -295,7 +376,7 @@ impl OpenShell {
         self.gateway_status().await.healthy
     }
 
-    /// Probe gateway Health over mTLS for Settings / ops.
+    /// Probe gateway Health over mTLS for Settings / cockpit.
     pub async fn gateway_status(&self) -> GatewayStatus {
         #[cfg(test)]
         if let Some(mock) = &self.mock {
@@ -437,9 +518,9 @@ impl OpenShell {
         Ok(self.list().await?.into_iter().filter(|s| s.item_id().is_some()).collect())
     }
 
-    /// Ops-seat sandboxes (`honr.ops`), distinct from card `list_ours`.
-    pub async fn list_ops(&self) -> Result<Vec<Sandbox>> {
-        Ok(self.list().await?.into_iter().filter(|s| s.is_ops()).collect())
+    /// Cockpit sandboxes (`honr.cockpit`), distinct from card `list_ours`.
+    pub async fn list_cockpit(&self) -> Result<Vec<Sandbox>> {
+        Ok(self.list().await?.into_iter().filter(|s| s.is_cockpit()).collect())
     }
 
     /// Create and wait until Ready. We exec into it afterwards.
@@ -1081,6 +1162,265 @@ impl OpenShell {
         })
         .await
     }
+
+    /// Issue a short-lived SSH session for `sandbox connect` / ssh-proxy.
+    ///
+    /// Same gRPC path the CLI uses: `GetSandbox` by name → `CreateSshSession`.
+    /// The token is for host-side ProxyCommand only — do not ship it to browsers.
+    #[allow(dead_code)] // unit-tested; host CLI owns connect, not honr
+    pub async fn create_ssh_session(&self, name: &str) -> Result<SshSession> {
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let args = [
+                "sandbox".into(),
+                "create-ssh-session".into(),
+                "-n".into(),
+                name.into(),
+            ];
+            let out = mock(&args);
+            if !out.ok() {
+                return Err(Error::Failed {
+                    op: "create ssh session".into(),
+                    message: out.stderr.trim().to_string(),
+                });
+            }
+            // Mock returns JSON on stdout for tests that need fields.
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(out.stdout.trim()) {
+                return Ok(SshSession {
+                    sandbox_id: v["sandbox_id"].as_str().unwrap_or("mock-sb").into(),
+                    token: v["token"].as_str().unwrap_or("mock-token").into(),
+                    gateway_host: v["gateway_host"].as_str().unwrap_or("127.0.0.1").into(),
+                    gateway_port: v["gateway_port"].as_u64().unwrap_or(443) as u32,
+                    gateway_scheme: v["gateway_scheme"].as_str().unwrap_or("https").into(),
+                    host_key_fingerprint: v["host_key_fingerprint"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .into(),
+                    expires_at_ms: v["expires_at_ms"].as_i64().unwrap_or(0),
+                });
+            }
+            return Ok(SshSession {
+                sandbox_id: "mock-sb".into(),
+                token: "mock-token".into(),
+                gateway_host: "127.0.0.1".into(),
+                gateway_port: 443,
+                gateway_scheme: "https".into(),
+                host_key_fingerprint: String::new(),
+                expires_at_ms: 0,
+            });
+        }
+
+        self.with_timeout(
+            &format!("create ssh session {name}"),
+            self.default_timeout,
+            || async {
+                let mut client = self.connect().await?;
+                let sb = get_sandbox(&mut client, name).await?;
+                let resp = client
+                    .create_ssh_session(CreateSshSessionRequest {
+                        sandbox_id: sb.object_id().to_string(),
+                    })
+                    .await
+                    .map_err(|e| Error::Failed {
+                        op: "create ssh session".into(),
+                        message: e.to_string(),
+                    })?
+                    .into_inner();
+                validate_ssh_session_response(&resp).map_err(|e| Error::Failed {
+                    op: "create ssh session".into(),
+                    message: format!("gateway returned invalid SSH session: {e}"),
+                })?;
+                Ok(SshSession {
+                    sandbox_id: resp.sandbox_id,
+                    token: resp.token,
+                    gateway_host: resp.gateway_host,
+                    gateway_port: resp.gateway_port,
+                    gateway_scheme: resp.gateway_scheme,
+                    host_key_fingerprint: resp.host_key_fingerprint,
+                    expires_at_ms: resp.expires_at_ms,
+                })
+            },
+        )
+        .await
+    }
+
+    /// Revoke a previously issued SSH session token.
+    #[allow(dead_code)] // unit-tested; host CLI owns connect, not honr
+    pub async fn revoke_ssh_session(&self, token: &str) -> Result<bool> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(Error::Failed {
+                op: "revoke ssh session".into(),
+                message: "token required".into(),
+            });
+        }
+
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let args = [
+                "sandbox".into(),
+                "revoke-ssh-session".into(),
+                "--token".into(),
+                token.into(),
+            ];
+            let out = mock(&args);
+            if !out.ok() {
+                return Err(Error::Failed {
+                    op: "revoke ssh session".into(),
+                    message: out.stderr.trim().to_string(),
+                });
+            }
+            return Ok(true);
+        }
+
+        self.with_timeout("revoke ssh session", self.default_timeout, || async {
+            let mut client = self.connect().await?;
+            let resp = client
+                .revoke_ssh_session(RevokeSshSessionRequest {
+                    token: token.to_string(),
+                })
+                .await
+                .map_err(|e| Error::Failed {
+                    op: "revoke ssh session".into(),
+                    message: e.to_string(),
+                })?
+                .into_inner();
+            Ok(resp.revoked)
+        })
+        .await
+    }
+
+    /// Interactive TTY attach via `ExecSandboxInteractive` (no local OpenSSH).
+    ///
+    /// This is the in-process path Cockpit uses — same interactive shell shape
+    /// as `sandbox connect`, but over gRPC so a browser WebSocket can relay it.
+    pub async fn exec_interactive(
+        &self,
+        name: &str,
+        command: Vec<String>,
+        cols: u32,
+        rows: u32,
+    ) -> Result<InteractiveExec> {
+        if command.is_empty() {
+            return Err(Error::Failed {
+                op: "exec interactive".into(),
+                message: "command required".into(),
+            });
+        }
+
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let mut args = vec![
+                "sandbox".into(),
+                "exec-interactive".into(),
+                "-n".into(),
+                name.into(),
+                "--".into(),
+            ];
+            args.extend(command.clone());
+            let out = mock(&args);
+            if !out.ok() {
+                return Err(Error::Failed {
+                    op: "exec interactive".into(),
+                    message: out.stderr.trim().to_string(),
+                });
+            }
+            let (input_tx, _input_rx) = mpsc::channel::<ExecSandboxInput>(4);
+            let (event_tx, event_rx) = mpsc::channel(16);
+            let stdout = out.stdout.into_bytes();
+            let code = out.code;
+            let join = tokio::spawn(async move {
+                if !stdout.is_empty() {
+                    let _ = event_tx.send(InteractiveEvent::Stdout(stdout)).await;
+                }
+                let _ = event_tx.send(InteractiveEvent::Exit(code)).await;
+            });
+            return Ok(InteractiveExec {
+                input_tx,
+                events: event_rx,
+                join: Some(join),
+            });
+        }
+
+        // Setup (resolve sandbox + open stream) is deadline-bound; the session
+        // itself lives until Exit / drop — same hang-vs-deadline rule as exec.
+        self.with_timeout(
+            &format!("exec interactive {name}"),
+            self.default_timeout,
+            || async {
+                let mut client = self.connect().await?;
+                let sb = get_sandbox(&mut client, name).await?;
+                let (input_tx, input_rx) = mpsc::channel::<ExecSandboxInput>(4096);
+                input_tx
+                    .send(ExecSandboxInput {
+                        payload: Some(exec_sandbox_input::Payload::Start(ExecSandboxRequest {
+                            sandbox_id: sb.object_id().to_string(),
+                            command,
+                            workdir: String::new(),
+                            environment: Default::default(),
+                            timeout_seconds: 0,
+                            stdin: Vec::new(),
+                            tty: true,
+                            cols,
+                            rows,
+                        })),
+                    })
+                    .await
+                    .map_err(|_| Error::Failed {
+                        op: "exec interactive".into(),
+                        message: "failed to queue start frame".into(),
+                    })?;
+
+                let mut stream = client
+                    .exec_sandbox_interactive(ReceiverStream::new(input_rx))
+                    .await
+                    .map_err(|e| Error::Failed {
+                        op: "exec interactive".into(),
+                        message: e.to_string(),
+                    })?
+                    .into_inner();
+
+                let (event_tx, event_rx) = mpsc::channel(256);
+                let join = tokio::spawn(async move {
+                    while let Some(ev) = stream.next().await {
+                        let ev = match ev {
+                            Ok(e) => e,
+                            Err(e) => {
+                                tracing::warn!("exec interactive stream error: {e}");
+                                break;
+                            }
+                        };
+                        let mapped = match ev.payload {
+                            Some(exec_sandbox_event::Payload::Stdout(chunk)) => {
+                                InteractiveEvent::Stdout(chunk.data)
+                            }
+                            Some(exec_sandbox_event::Payload::Stderr(chunk)) => {
+                                InteractiveEvent::Stderr(chunk.data)
+                            }
+                            Some(exec_sandbox_event::Payload::Exit(exit)) => {
+                                InteractiveEvent::Exit(exit.exit_code)
+                            }
+                            None => continue,
+                        };
+                        let is_exit = matches!(mapped, InteractiveEvent::Exit(_));
+                        if event_tx.send(mapped).await.is_err() {
+                            break;
+                        }
+                        if is_exit {
+                            break;
+                        }
+                    }
+                });
+
+                Ok(InteractiveExec {
+                    input_tx,
+                    events: event_rx,
+                    join: Some(join),
+                })
+            },
+        )
+        .await
+    }
 }
 
 fn mtls_bundle_complete(b: &OpenShellMtlsBundle) -> bool {
@@ -1567,6 +1907,109 @@ mod tests {
         assert_eq!(name2, "metadata-shim.py");
     }
 
+    /// Connect's first gRPC step is CreateSshSession after GetSandbox — mock
+    /// argv surface must stay named so we do not silently shell out again.
+    #[tokio::test]
+    async fn create_ssh_session_uses_mock_argv_surface() {
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let seen_c = seen.clone();
+        let os = OpenShell::mock(
+            move |args| {
+                *seen_c.lock() = args.to_vec();
+                Output {
+                    code: 0,
+                    stdout: r#"{"sandbox_id":"sb-1","token":"tok.abc","gateway_host":"127.0.0.1","gateway_port":17670,"gateway_scheme":"https"}"#.into(),
+                    stderr: String::new(),
+                }
+            },
+            Duration::from_secs(5),
+        );
+        let session = os.create_ssh_session("honr-cockpit").await.expect("session");
+        assert_eq!(session.sandbox_id, "sb-1");
+        assert_eq!(session.token, "tok.abc");
+        assert_eq!(session.gateway_port, 17670);
+        let args = seen.lock().clone();
+        assert_eq!(
+            args,
+            vec![
+                "sandbox",
+                "create-ssh-session",
+                "-n",
+                "honr-cockpit",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_ssh_session_uses_mock_argv_surface() {
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let seen_c = seen.clone();
+        let os = OpenShell::mock(
+            move |args| {
+                *seen_c.lock() = args.to_vec();
+                Output {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }
+            },
+            Duration::from_secs(5),
+        );
+        assert!(os.revoke_ssh_session("tok.abc").await.expect("revoke"));
+        assert_eq!(
+            seen.lock().as_slice(),
+            ["sandbox", "revoke-ssh-session", "--token", "tok.abc"]
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_interactive_mock_streams_stdout_then_exit() {
+        let os = OpenShell::mock(
+            |args| {
+                assert_eq!(args[0], "sandbox");
+                assert_eq!(args[1], "exec-interactive");
+                assert!(args.windows(2).any(|w| w[0] == "-n" && w[1] == "honr-cockpit"));
+                Output {
+                    code: 0,
+                    stdout: "ready\n".into(),
+                    stderr: String::new(),
+                }
+            },
+            Duration::from_secs(5),
+        );
+        let mut session = os
+            .exec_interactive(
+                "honr-cockpit",
+                vec!["bash".into(), "-l".into()],
+                80,
+                24,
+            )
+            .await
+            .expect("interactive");
+        match session.next_event().await {
+            Some(InteractiveEvent::Stdout(b)) => assert_eq!(b, b"ready\n"),
+            other => panic!("expected stdout, got {other:?}"),
+        }
+        match session.next_event().await {
+            Some(InteractiveEvent::Exit(0)) => {}
+            other => panic!("expected exit 0, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_ssh_session_rejects_shell_metacharacters_in_token() {
+        let bad = openshell_core::proto::CreateSshSessionResponse {
+            sandbox_id: "sb-1".into(),
+            token: "tok`id`".into(),
+            gateway_host: "127.0.0.1".into(),
+            gateway_port: 443,
+            gateway_scheme: "https".into(),
+            host_key_fingerprint: String::new(),
+            expires_at_ms: 0,
+        };
+        assert!(validate_ssh_session_response(&bad).is_err());
+    }
+
     // ---- gateway-backed. `cargo test -- --ignored` with gateway + Settings mTLS.
     #[tokio::test]
     #[ignore = "needs a running OpenShell gateway with Settings mTLS configured"]
@@ -1578,5 +2021,40 @@ mod tests {
         let os = OpenShell::new(Some(endpoint), Some(bundle), Duration::from_secs(30));
         assert!(os.healthy().await);
         os.list().await.expect("sandbox list");
+    }
+}
+
+#[cfg(test)]
+mod cockpit_policy_create_tests {
+    use super::*;
+
+    #[test]
+    fn build_create_request_accepts_cockpit_mcp_protocol_policy() {
+        let yaml = std::fs::read_to_string("sandbox/cockpit-policy.yaml").expect("file");
+        assert!(yaml.contains("protocol: mcp"), "seed must use protocol mcp");
+        let spec = SandboxSpec {
+            name: "honr-cockpit-policy-test".into(),
+            from: "honr-sandbox:latest".into(),
+            providers: vec![],
+            policy: Some(yaml),
+            env: vec![],
+            labels: vec![("honr.cockpit".into(), "1".into())],
+            cpu: Some("1".into()),
+            memory: Some("2Gi".into()),
+        };
+        let req = build_create_request(&spec).expect("parse+build");
+        let policy = req
+            .spec
+            .as_ref()
+            .expect("spec")
+            .policy
+            .as_ref()
+            .expect("policy must be present on create request");
+        let yaml_out =
+            openshell_policy::serialize_sandbox_policy(policy).expect("serialize");
+        assert!(
+            yaml_out.contains("8080") && yaml_out.contains("mcp"),
+            "create request policy lost host MCP allow-list:\n{yaml_out}"
+        );
     }
 }

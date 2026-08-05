@@ -49,7 +49,7 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 ## Connect the operator MCP
 
 honr must already be listening. After local admin bootstrap, `/mcp` requires
-MCP OAuth 2.1 (Bearer). That endpoint is the **ops seat**: operator tools only
+MCP OAuth 2.1 (Bearer). That endpoint is the **cockpit**: operator tools only
 (board snapshot, dispatch, park, steer, approve_*, answer_escalation, …). Worker
 verbs (`claim`, `heartbeat`, `report`, `split`, `escalate`, `release`,
 `list_ready`) are not listed there — the supervisor calls `Board` for card
@@ -86,6 +86,11 @@ the operator rule in
 [`.cursor/rules/honr-operator.mdc`](../.cursor/rules/honr-operator.mdc), the
 chat agent drives Projects / Plans via MCP; sandboxed workers claim Ready Tasks
 and open PRs.
+
+**Cockpit / cockpit sandbox** does not use that browser OAuth path. When you Start
+a cockpit session, honr mints `honr-cockpit` tokens and writes them under
+`/sandbox/.honr/mcp/` inside the seat (see [Cockpit](cockpit.md#mcp-auth-inside-the-seat-special-for-cockpit)).
+Host Cursor on `/mcp` stays the OAuth client above.
 
 **Claude Code:**
 

@@ -1,7 +1,7 @@
 //! The state machine is the contract. Neither transport owns any of this —
 //! REST handlers and MCP tools both route every mutation through here.
 
-use crate::model::{OpsSession, OpsSessionStatus, State, WorkItem};
+use crate::model::{CockpitSession, CockpitSessionStatus, State, WorkItem};
 
 /// Legal edges, straight off the lifecycle diagram.
 pub fn allowed(from: State, to: State) -> bool {
@@ -123,53 +123,53 @@ pub fn check(
     Ok(())
 }
 
-// --------------------------------------------------------------- ops session
+// --------------------------------------------------------------- cockpit session
 //
-// Singleton Board record for the control-plane ops seat. Not a WorkItem and
+// Singleton Board record for the control-plane cockpit. Not a WorkItem and
 // not card claim/heartbeat/report. Transports must call Board; these helpers
 // are the only place the create/park/resume/stop rules live.
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum OpsSessionError {
-    #[error("ops session already exists")]
+pub enum CockpitSessionError {
+    #[error("cockpit session already exists")]
     AlreadyExists,
-    #[error("no ops session")]
+    #[error("no cockpit session")]
     NotFound,
-    #[error("ops session is already parked")]
+    #[error("cockpit session is already parked")]
     AlreadyParked,
-    #[error("ops session is not parked")]
+    #[error("cockpit session is not parked")]
     NotParked,
 }
 
-/// Create only when the Board has no ops session.
-pub fn check_ops_create(existing: &Option<OpsSession>) -> Result<(), OpsSessionError> {
+/// Create only when the Board has no cockpit session.
+pub fn check_cockpit_create(existing: &Option<CockpitSession>) -> Result<(), CockpitSessionError> {
     if existing.is_some() {
-        Err(OpsSessionError::AlreadyExists)
+        Err(CockpitSessionError::AlreadyExists)
     } else {
         Ok(())
     }
 }
 
 /// Mutate (update / park / resume) only when a session exists.
-pub fn check_ops_present(
-    existing: &Option<OpsSession>,
-) -> Result<&OpsSession, OpsSessionError> {
-    existing.as_ref().ok_or(OpsSessionError::NotFound)
+pub fn check_cockpit_present(
+    existing: &Option<CockpitSession>,
+) -> Result<&CockpitSession, CockpitSessionError> {
+    existing.as_ref().ok_or(CockpitSessionError::NotFound)
 }
 
 /// Park-hold only from Running.
-pub fn check_ops_park(session: &OpsSession) -> Result<(), OpsSessionError> {
+pub fn check_cockpit_park(session: &CockpitSession) -> Result<(), CockpitSessionError> {
     match session.status {
-        OpsSessionStatus::Running => Ok(()),
-        OpsSessionStatus::Parked => Err(OpsSessionError::AlreadyParked),
+        CockpitSessionStatus::Running => Ok(()),
+        CockpitSessionStatus::Parked => Err(CockpitSessionError::AlreadyParked),
     }
 }
 
 /// Resume only from Parked (Running → Running is not a resume).
-pub fn check_ops_resume(session: &OpsSession) -> Result<(), OpsSessionError> {
+pub fn check_cockpit_resume(session: &CockpitSession) -> Result<(), CockpitSessionError> {
     match session.status {
-        OpsSessionStatus::Parked => Ok(()),
-        OpsSessionStatus::Running => Err(OpsSessionError::NotParked),
+        CockpitSessionStatus::Parked => Ok(()),
+        CockpitSessionStatus::Running => Err(CockpitSessionError::NotParked),
     }
 }
 
@@ -273,26 +273,26 @@ mod tests {
     }
 
     #[test]
-    fn ops_session_create_requires_absence() {
-        assert!(check_ops_create(&None).is_ok());
-        let existing = Some(OpsSession::new(None, None));
+    fn cockpit_session_create_requires_absence() {
+        assert!(check_cockpit_create(&None).is_ok());
+        let existing = Some(CockpitSession::new(None, None));
         assert_eq!(
-            check_ops_create(&existing),
-            Err(OpsSessionError::AlreadyExists)
+            check_cockpit_create(&existing),
+            Err(CockpitSessionError::AlreadyExists)
         );
     }
 
     #[test]
-    fn ops_session_park_resume_are_strict() {
-        let mut s = OpsSession::new(Some("honr-ops".into()), Some("conv-1".into()));
-        assert!(check_ops_park(&s).is_ok());
-        assert_eq!(check_ops_resume(&s), Err(OpsSessionError::NotParked));
+    fn cockpit_session_park_resume_are_strict() {
+        let mut s = CockpitSession::new(Some("honr-cockpit".into()), Some("conv-1".into()));
+        assert!(check_cockpit_park(&s).is_ok());
+        assert_eq!(check_cockpit_resume(&s), Err(CockpitSessionError::NotParked));
 
-        s.status = OpsSessionStatus::Parked;
-        assert_eq!(check_ops_park(&s), Err(OpsSessionError::AlreadyParked));
-        assert!(check_ops_resume(&s).is_ok());
+        s.status = CockpitSessionStatus::Parked;
+        assert_eq!(check_cockpit_park(&s), Err(CockpitSessionError::AlreadyParked));
+        assert!(check_cockpit_resume(&s).is_ok());
 
-        assert_eq!(check_ops_present(&None), Err(OpsSessionError::NotFound));
-        assert!(check_ops_present(&Some(s)).is_ok());
+        assert_eq!(check_cockpit_present(&None), Err(CockpitSessionError::NotFound));
+        assert!(check_cockpit_present(&Some(s)).is_ok());
     }
 }

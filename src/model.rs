@@ -650,42 +650,42 @@ impl Default for WorkspaceBinding {
     }
 }
 
-/// Hold for the durable control-plane ops seat. Distinct from card `parked`:
+/// Hold for the durable control-plane cockpit. Distinct from card `parked`:
 /// this is not claim/heartbeat/report lifecycle — it is the Board record that
 /// lets chat/TTY reconnect keep the same sandbox + conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum OpsSessionStatus {
-    /// Ops agent may be live in the sandbox.
+pub enum CockpitSessionStatus {
+    /// Cockpit agent may be live in the sandbox.
     #[default]
     Running,
     /// Park-like hold: sandbox + conversation kept; agent stopped until resume.
     Parked,
 }
 
-/// Durable ops-session singleton on the Board. Chat and TTY are faces over this
+/// Durable cockpit-session singleton on the Board. Chat and TTY are faces over this
 /// record — they must not grow a second lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OpsSession {
-    /// OpenShell sandbox environment name (e.g. `honr-ops`).
+pub struct CockpitSession {
+    /// OpenShell sandbox environment name (e.g. `honr-cockpit`).
     #[serde(default)]
     pub environment: Option<String>,
     /// agy conversation id for reconnect (`--conversation`).
     #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(default)]
-    pub status: OpsSessionStatus,
+    pub status: CockpitSessionStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-impl OpsSession {
+impl CockpitSession {
     pub fn new(environment: Option<String>, conversation_id: Option<String>) -> Self {
         let now = Utc::now();
         Self {
-            environment: normalize_ops_field(environment),
-            conversation_id: normalize_ops_field(conversation_id),
-            status: OpsSessionStatus::Running,
+            environment: normalize_cockpit_field(environment),
+            conversation_id: normalize_cockpit_field(conversation_id),
+            status: CockpitSessionStatus::Running,
             created_at: now,
             updated_at: now,
         }
@@ -693,7 +693,7 @@ impl OpsSession {
 }
 
 /// Trim; empty → `None`.
-pub fn normalize_ops_field(value: Option<String>) -> Option<String> {
+pub fn normalize_cockpit_field(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -720,19 +720,19 @@ pub struct SandboxProfile {
     pub engine: Option<String>,
 }
 
-/// Catalog id for the privileged ops control-plane seat (not the card worker).
-pub const OPS_SANDBOX_PROFILE_ID: &str = "ops";
+/// Catalog id for the privileged cockpit control-plane seat (not the card worker).
+pub const COCKPIT_SANDBOX_PROFILE_ID: &str = "cockpit";
 
-/// Host-path seed source for the ops profile policy (inline after seed).
-pub const OPS_SANDBOX_POLICY_PATH: &str = "sandbox/ops-policy.yaml";
+/// Host-path seed source for the cockpit profile policy (inline after seed).
+pub const COCKPIT_SANDBOX_POLICY_PATH: &str = "sandbox/cockpit-policy.yaml";
 
 /// Lighter create knobs than the worker default — chat seat, not a build box.
-pub const OPS_SANDBOX_CPU: &str = "1";
-pub const OPS_SANDBOX_MEMORY: &str = "2Gi";
+pub const COCKPIT_SANDBOX_CPU: &str = "1";
+pub const COCKPIT_SANDBOX_MEMORY: &str = "2Gi";
 
-/// Build the seedable `ops` catalog entry from AgentConfig image/engine and
-/// [`OPS_SANDBOX_POLICY_PATH`]. Cpu/memory stay distinct from the worker default.
-pub fn ops_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) -> SandboxProfile {
+/// Build the seedable `cockpit` catalog entry from AgentConfig image/engine and
+/// [`COCKPIT_SANDBOX_POLICY_PATH`]. Cpu/memory stay distinct from the worker default.
+pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) -> SandboxProfile {
     let engine = {
         let e = agents.engine.trim();
         if e.is_empty() {
@@ -742,12 +742,12 @@ pub fn ops_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) -> S
         }
     };
     SandboxProfile {
-        id: OPS_SANDBOX_PROFILE_ID.into(),
-        name: "Ops".into(),
+        id: COCKPIT_SANDBOX_PROFILE_ID.into(),
+        name: "Cockpit".into(),
         image: agents.image.clone(),
-        policy: resolve_policy_yaml(OPS_SANDBOX_POLICY_PATH),
-        cpu: Some(OPS_SANDBOX_CPU.into()),
-        memory: Some(OPS_SANDBOX_MEMORY.into()),
+        policy: resolve_policy_yaml(COCKPIT_SANDBOX_POLICY_PATH),
+        cpu: Some(COCKPIT_SANDBOX_CPU.into()),
+        memory: Some(COCKPIT_SANDBOX_MEMORY.into()),
         engine,
     }
 }
@@ -1204,21 +1204,26 @@ mod tests {
     }
 
     #[test]
-    fn ops_sandbox_policy_file_is_distinct_from_worker() {
-        let ops = std::fs::read_to_string(OPS_SANDBOX_POLICY_PATH)
-            .unwrap_or_else(|e| panic!("read {OPS_SANDBOX_POLICY_PATH}: {e}"));
+    fn cockpit_sandbox_policy_file_is_distinct_from_worker() {
+        let cockpit_pol = std::fs::read_to_string(COCKPIT_SANDBOX_POLICY_PATH)
+            .unwrap_or_else(|e| panic!("read {COCKPIT_SANDBOX_POLICY_PATH}: {e}"));
         let worker = crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY;
         assert!(
-            ops.contains("honr-mcp") && ops.contains("host.docker.internal"),
-            "ops policy must allow host honr MCP egress"
+            cockpit_pol.contains("honr-mcp") && cockpit_pol.contains("host.docker.internal"),
+            "cockpit policy must allow host honr MCP egress"
         );
         assert!(
-            !ops.contains("name: github") && !ops.contains("api.github.com"),
-            "ops must not copy worker GitHub egress"
+            cockpit_pol.contains("protocol: mcp")
+                && cockpit_pol.contains("allow_all_known_mcp_methods: true"),
+            "cockpit host MCP must use OpenShell protocol: mcp (rest+access:full 403s /mcp)"
         );
         assert!(
-            !ops.contains("package-registries") && !ops.contains("index.crates.io"),
-            "ops must not copy worker package-registry egress"
+            !cockpit_pol.contains("name: github") && !cockpit_pol.contains("api.github.com"),
+            "cockpit must not copy worker GitHub egress"
+        );
+        assert!(
+            !cockpit_pol.contains("package-registries") && !cockpit_pol.contains("index.crates.io"),
+            "cockpit must not copy worker package-registry egress"
         );
         assert!(
             !worker.contains("honr-mcp") && !worker.contains("host.docker.internal"),
@@ -1232,7 +1237,7 @@ mod tests {
             worker.contains("/opt/rust/toolchains/**/bin/cargo"),
             "worker seed allows rustup toolchain cargo for github git deps"
         );
-        openshell_policy::parse_sandbox_policy(&ops).expect("ops-policy.yaml parses");
+        openshell_policy::parse_sandbox_policy(&cockpit_pol).expect("cockpit-policy.yaml parses");
         openshell_policy::parse_sandbox_policy(worker).expect("embedded worker policy parses");
 
         let agents = crate::schema::AgentConfig {
@@ -1242,12 +1247,12 @@ mod tests {
             memory: Some("4Gi".into()),
             ..Default::default()
         };
-        let profile = ops_sandbox_profile_from_agents(&agents);
-        assert_eq!(profile.id, OPS_SANDBOX_PROFILE_ID);
-        assert_eq!(profile.cpu.as_deref(), Some(OPS_SANDBOX_CPU));
-        assert_eq!(profile.memory.as_deref(), Some(OPS_SANDBOX_MEMORY));
+        let profile = cockpit_sandbox_profile_from_agents(&agents);
+        assert_eq!(profile.id, COCKPIT_SANDBOX_PROFILE_ID);
+        assert_eq!(profile.cpu.as_deref(), Some(COCKPIT_SANDBOX_CPU));
+        assert_eq!(profile.memory.as_deref(), Some(COCKPIT_SANDBOX_MEMORY));
         assert_ne!(profile.cpu, agents.cpu);
         assert_ne!(profile.memory, agents.memory);
-        assert_eq!(profile.policy, ops);
+        assert_eq!(profile.policy, cockpit_pol);
     }
 }

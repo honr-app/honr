@@ -22,13 +22,13 @@ UI / MCP / supervisor
 
 | Path | What |
 |---|---|
-| `src/model.rs` | One node type. Project (container) + Task (claimable leaf). Ops session singleton. |
-| `src/machine.rs` | Legal transitions + lifecycle invariants (cards and ops session). |
+| `src/model.rs` | One node type. Project (container) + Task (claimable leaf). Cockpit session singleton. |
+| `src/machine.rs` | Legal transitions + lifecycle invariants (cards and cockpit session). |
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
-| `src/api.rs` `src/sse.rs` `src/ops_chat.rs` | The human face (REST + board SSE + ops chat bridge). |
+| `src/api.rs` `src/sse.rs` `src/cockpit_chat.rs` | The human face (REST + board SSE + cockpit chat bridge). |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs. |
 | `src/openshell.rs` | Typed async wrapper over the `openshell` CLI; every call has a deadline. |
-| `src/supervisor.rs` | Card dispatch + durable ops seat start/reconcile/stop; briefing; lease sweeping. |
+| `src/supervisor.rs` | Card dispatch + durable cockpit start/reconcile/stop; briefing; lease sweeping. |
 | `honr.yaml` | Level schema (Project + Task) and execution config. |
 | `sandbox/` | Container image, network policy, metadata shim. |
 | `web/` | React UI + Playwright screenshot harness. |
@@ -48,25 +48,26 @@ When agents are enabled, the supervisor:
 6. Sweeps expired leases; on startup, reconciles live sandboxes so a honr
    restart does not orphan a running agent.
 
-Separately, when a Board **ops session** exists, the supervisor materializes the
-durable ops seat: create or reuse the `ops` profile sandbox (`honr.ops` label),
-start the ops agent detached, reconcile across honr restart (keep sandbox +
+Separately, when a Board **cockpit session** exists, the supervisor materializes the
+durable cockpit: create or reuse the `cockpit` profile sandbox (`honr.cockpit` label),
+start the cockpit agent detached, reconcile across honr restart (keep sandbox +
 conversation like park), and stop cleanly when the session is cleared. That
 path never uses claim / heartbeat / report / split or the card-dispatch queue —
-Board `ops_session` fields stay authoritative.
+Board `cockpit_session` fields stay authoritative.
 
 The card worker has no network path to honr. The supervisor is the only caller of
-worker verbs on the live path (`Board` in `store.rs`). The ops seat reaches host
+worker verbs on the live path (`Board` in `store.rs`). The cockpit reaches host
 MCP with operator tools only.
 
 ## MCP and REST
 
 | Face | Transport | Audience |
 |---|---|---|
-| Ops seat (operator tools only) | MCP streamable HTTP at `/mcp` | Chat / ops agents on the host (OAuth) |
+| Cockpit (operator tools only) | MCP streamable HTTP at `/mcp` | Chat / cockpit agents on the host (OAuth) |
 | Host seat (operator + worker verbs) | `Operator::host` (in-process) | Supervisor/host tooling and tests |
 | Human UI | REST + board SSE | React app; one-tap answers and approvals |
-| Ops chat bridge | `POST /api/ops-chat` (SSE) | Cockpit primary attach; prompts into Board ops seat |
+| Cockpit attach | `GET/WS /api/cockpit-attach` | Cockpit xterm → `ExecSandboxInteractive` in Board cockpit |
+| Cockpit chat bridge (legacy) | `POST /api/cockpit-chat` (SSE) | Detached-agent stream-json bridge (not Cockpit primary) |
 
 `/mcp` does not expose worker verbs (`claim`, `heartbeat`, `report`, `split`,
 `escalate`, `release`, `list_ready`). Ops clients triage and dispatch; they do
@@ -86,5 +87,5 @@ Optional one-shot import from legacy `honr.json` when the DB is empty. See
 
 - [Concepts](concepts.md): product model and invariants
 - [Agents](agents.md): enabling the execution path
-- [Ops seat](ops-seat.md): Cockpit chat (primary) over Board ops session; TTY optional
+- [Cockpit](cockpit.md): start / TTY attach / stop over Board cockpit session
 - [Sandbox](sandbox.md): sandbox stack and gotchas

@@ -7,10 +7,12 @@ import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-te
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
 import {
   Cockpit,
-  CockpitChatView,
+  CockpitAttachView,
+  CockpitDrop,
   CockpitSessionView,
+  CockpitToggle,
+  cockpitAttachGate,
   cockpitChatGate,
-  opsChatLineText,
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
@@ -484,7 +486,7 @@ const pingPayload = JSON.stringify({ type: "ping" });
 const parsedPing = JSON.parse(pingPayload);
 assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
-// Test 17: App chrome — Board | Cockpit | Help | Settings sidebar + Settings OpenShell (profiles)
+// Test 17: App chrome — Board | Help | Settings; Cockpit is a board edge rail
 const sidebarHtml = renderToString(
   React.createElement(PrimarySidebar, {
     view: "board",
@@ -493,36 +495,76 @@ const sidebarHtml = renderToString(
 );
 assert(sidebarHtml.includes("data-testid=\"app-sidebar\""), "App should render primary sidebar");
 assert(sidebarHtml.includes("Board"), "Sidebar should include Board nav");
-assert(sidebarHtml.includes("Cockpit"), "Sidebar should include Cockpit nav");
 assert(sidebarHtml.includes("Help"), "Sidebar should include Help nav");
 assert(sidebarHtml.includes("Settings"), "Sidebar should include Settings nav");
 assert(sidebarHtml.includes("data-testid=\"nav-board\""), "Sidebar should expose Board control");
-assert(sidebarHtml.includes("data-testid=\"nav-cockpit\""), "Sidebar should expose Cockpit control");
 assert(sidebarHtml.includes("data-testid=\"nav-help\""), "Sidebar should expose Help control");
 assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should expose Settings control");
+assert(
+  !sidebarHtml.includes("data-testid=\"nav-cockpit\""),
+  "Cockpit must not live in primary nav",
+);
+assert(!sidebarHtml.includes("Cockpit"), "Sidebar must not list Cockpit");
+
+const toggleClosedHtml = renderToString(
+  React.createElement(CockpitToggle, { open: false, onToggle: () => {} }),
+);
+assert(toggleClosedHtml.includes("data-testid=\"cockpit-toggle\""), "Top bar exposes Cockpit toggle");
+assert(toggleClosedHtml.includes("cockpit-bar-btn"), "Toggle uses top-bar grip chrome");
+assert(toggleClosedHtml.includes("cockpit-bar-icon"), "Grip uses chevron SVG icon");
+assert(toggleClosedHtml.includes("<svg"), "Grip renders an SVG chevron");
+assert(
+  toggleClosedHtml.includes('aria-expanded="false"') ||
+    !toggleClosedHtml.includes('aria-expanded="true"'),
+  "Closed toggle is not expanded",
+);
+
+const toggleOpenHtml = renderToString(
+  React.createElement(CockpitToggle, { open: true, onToggle: () => {} }),
+);
+assert(toggleOpenHtml.includes("cockpit-bar-btn open"), "Open toggle marks open class");
+assert(toggleOpenHtml.includes("cockpit-bar-icon"), "Open grip keeps chevron icon");
+assert(
+  toggleOpenHtml.includes('aria-expanded="true"') ||
+    toggleOpenHtml.includes('aria-expanded=""'),
+  "Open toggle is expanded",
+);
+
+const dropClosedHtml = renderToString(React.createElement(CockpitDrop, { open: false }));
+assert.equal(
+  dropClosedHtml,
+  "",
+  "Drop stays unmounted until first open (collapse later keeps it mounted client-side)",
+);
+
+const dropOpenHtml = renderToString(React.createElement(CockpitDrop, { open: true }));
+assert(dropOpenHtml.includes("data-testid=\"cockpit-drop\""), "Open drop mounts under the top bar");
+assert(dropOpenHtml.includes("data-testid=\"cockpit-pane\""), "Open drop mounts Cockpit pane");
+// `open` class is applied after rAF so the slide can run — not present in SSR.
 
 const cockpitHtml = renderToString(React.createElement(Cockpit));
-assert(cockpitHtml.includes("data-testid=\"cockpit-page\""), "Cockpit view should render");
-assert(cockpitHtml.includes("Cockpit"), "Cockpit page should title the surface");
-assert(cockpitHtml.includes("data-testid=\"cockpit-chat\""), "Cockpit should show ops chat surface");
-assert(cockpitHtml.includes("data-testid=\"cockpit-chat-composer\""), "Cockpit should show chat composer");
-assert(cockpitHtml.includes("data-testid=\"cockpit-session\""), "Cockpit should show ops-session face");
+assert(cockpitHtml.includes("data-testid=\"cockpit-pane\""), "Cockpit renders as drop pane");
+assert(!cockpitHtml.includes("data-testid=\"cockpit-page\""), "Cockpit is not a separate page");
+assert(cockpitHtml.includes("data-testid=\"cockpit-attach\""), "Cockpit should show cockpit attach surface");
+assert(cockpitHtml.includes("data-testid=\"cockpit-term-window\""), "Cockpit should show terminal chrome");
+assert(cockpitHtml.includes("data-testid=\"cockpit-xterm\""), "Cockpit should mount xterm host");
+assert(cockpitHtml.includes("data-testid=\"cockpit-session\""), "Cockpit should show Start/Stop strip");
 assert(cockpitHtml.includes("data-testid=\"cockpit-session-start\""), "Cockpit should expose Start");
-assert(cockpitHtml.includes("data-testid=\"cockpit-session-park\""), "Cockpit should expose Park");
-assert(cockpitHtml.includes("data-testid=\"cockpit-session-resume\""), "Cockpit should expose Resume");
 assert(cockpitHtml.includes("data-testid=\"cockpit-session-stop\""), "Cockpit should expose Stop");
+assert(!cockpitHtml.includes("data-testid=\"cockpit-open-cursor\""), "Cockpit should not shell out Open in Cursor");
+assert(!cockpitHtml.includes("data-testid=\"cockpit-mcp-provision\""), "Cockpit should not expose Refresh MCP");
+assert(!cockpitHtml.includes("data-testid=\"cockpit-mcp-status\""), "Cockpit should not dump MCP status");
+assert(!cockpitHtml.includes("data-testid=\"cockpit-session-status\""), "Cockpit should not dump session status");
+assert(!cockpitHtml.includes("data-testid=\"cockpit-session-park\""), "Cockpit should not expose Park");
+assert(!cockpitHtml.includes("data-testid=\"cockpit-session-resume\""), "Cockpit should not expose Resume");
+assert(!cockpitHtml.includes("/api/cockpit-attach"), "Cockpit should not show attach API lede");
 assert(
-  (cockpitHtml.match(/data-testid="nav-cockpit"/g) || []).length === 0,
-  "Cockpit page itself must not add a second Cockpit nav entry",
-);
-assert(cockpitHtml.includes("/api/ops-chat"), "Cockpit lede names the chat bridge");
-assert(
-  cockpitHtml.indexOf("data-testid=\"cockpit-chat\"") <
-    cockpitHtml.indexOf("data-testid=\"cockpit-session\""),
-  "Chat is the primary Cockpit composition above session controls",
+  cockpitHtml.indexOf("data-testid=\"cockpit-session\"") <
+    cockpitHtml.indexOf("data-testid=\"cockpit-attach\""),
+  "Start/Stop precede the attach window in the drop",
 );
 
-// CockpitSessionView — thin face enablement mirrors Board presence/status only
+// CockpitSessionView — Start/Stop only; no status dump
 const noop = () => {};
 const buttonTag = (html, testId) => {
   // React SSR may place attrs in any order — match the whole opening tag.
@@ -537,22 +579,16 @@ const absentHtml = renderToString(
   React.createElement(CockpitSessionView, {
     session: null,
     onStart: noop,
-    onPark: noop,
-    onResume: noop,
     onStop: noop,
   }),
 );
-assert(absentHtml.includes("data-testid=\"cockpit-session-status-value\""), "Absent status value");
-assert(absentHtml.includes(">None<"), "Absent session shows None");
+assert(!absentHtml.includes("data-testid=\"cockpit-session-status\""), "No status dump when absent");
 assert(!isDisabled(absentHtml, "cockpit-session-start"), "Start enabled when no session");
-assert(isDisabled(absentHtml, "cockpit-session-park"), "Park disabled when no session");
-assert(isDisabled(absentHtml, "cockpit-session-resume"), "Resume disabled when no session");
 assert(isDisabled(absentHtml, "cockpit-session-stop"), "Stop disabled when no session");
-assert(!absentHtml.includes("data-testid=\"cockpit-attach-fallback\""), "No attach hint without environment");
 
 const runningSession = {
-  environment: "honr-ops",
-  conversation_id: "conv-ops-1",
+  environment: "honr-cockpit",
+  conversation_id: "conv-cockpit-1",
   status: "running",
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
@@ -561,24 +597,15 @@ const runningHtml = renderToString(
   React.createElement(CockpitSessionView, {
     session: runningSession,
     onStart: noop,
-    onPark: noop,
-    onResume: noop,
     onStop: noop,
   }),
 );
-assert(runningHtml.includes(">Running<"), "Running status label");
-assert(runningHtml.includes("honr-ops"), "Shows environment");
-assert(runningHtml.includes("conv-ops-1"), "Shows conversation_id when present");
+assert(!runningHtml.includes("honr-cockpit"), "Session strip does not dump environment");
+assert(!runningHtml.includes("conv-cockpit-1"), "Session strip does not dump conversation_id");
 assert(isDisabled(runningHtml, "cockpit-session-start"), "Start disabled when Running");
-assert(!isDisabled(runningHtml, "cockpit-session-park"), "Park enabled when Running");
-assert(isDisabled(runningHtml, "cockpit-session-resume"), "Resume disabled when Running");
 assert(!isDisabled(runningHtml, "cockpit-session-stop"), "Stop enabled when Running");
-assert(
-  runningHtml.includes("data-testid=\"cockpit-attach-fallback\"") &&
-    runningHtml.includes("openshell sandbox connect") &&
-    runningHtml.includes("honr-ops"),
-  "Optional openshell connect fallback when environment present",
-);
+assert(!runningHtml.includes("data-testid=\"cockpit-open-cursor\""), "No Open in Cursor button");
+assert(!runningHtml.includes("openshell sandbox connect"), "No host TTY hint in Cockpit");
 
 const parkedSession = {
   ...runningSession,
@@ -589,118 +616,61 @@ const parkedHtml = renderToString(
   React.createElement(CockpitSessionView, {
     session: parkedSession,
     onStart: noop,
-    onPark: noop,
-    onResume: noop,
     onStop: noop,
   }),
 );
-assert(parkedHtml.includes(">Parked<"), "Parked status label");
-assert(!parkedHtml.includes("data-testid=\"cockpit-session-conversation\""), "Hide empty conversation");
-assert(isDisabled(parkedHtml, "cockpit-session-park"), "Park disabled when Parked");
-assert(!isDisabled(parkedHtml, "cockpit-session-resume"), "Resume enabled when Parked");
+assert(isDisabled(parkedHtml, "cockpit-session-start"), "Start disabled while a session exists");
 assert(!isDisabled(parkedHtml, "cockpit-session-stop"), "Stop enabled when Parked");
+assert(!parkedHtml.includes("data-testid=\"cockpit-session-park\""), "No Park control");
+assert(!parkedHtml.includes("data-testid=\"cockpit-session-resume\""), "No Resume control");
 
-// Cockpit chat — gated by Board session; composer disabled when absent/Parked
-const chatNoop = {
-  draft: "",
-  onDraftChange: noop,
-  onSend: noop,
-};
-const chatAbsent = renderToString(
-  React.createElement(CockpitChatView, {
-    ...chatNoop,
-    messages: [],
-    canSend: false,
-    disabledReason: "Start an ops session to chat with the seat.",
+// Cockpit attach — gated by Board session; xterm host present when attachable
+const attachAbsent = renderToString(
+  React.createElement(CockpitAttachView, {
+    canAttach: false,
+    disabledReason: "Start a cockpit session to open the seat.",
   }),
 );
-assert(chatAbsent.includes("data-testid=\"cockpit-chat\""), "Chat root");
-assert(chatAbsent.includes("data-testid=\"cockpit-chat-empty\""), "Empty state when no messages");
-assert(chatAbsent.includes("data-testid=\"cockpit-chat-gate\""), "Gate copy when disabled");
-assert(chatAbsent.includes("Start an ops session"), "Absent gate explains Start");
-assert(isDisabled(chatAbsent, "cockpit-chat-send"), "Send disabled when session absent");
-assert(
-  /\bdisabled\b/.test(
-    (chatAbsent.match(/<textarea\b[^>]*>/g) || []).find((t) =>
-      t.includes('data-testid="cockpit-chat-input"'),
-    ) || "",
-  ),
-  "Composer input disabled when session absent",
-);
+assert(attachAbsent.includes("data-testid=\"cockpit-attach\""), "Attach root");
+assert(attachAbsent.includes("data-testid=\"cockpit-term-window\""), "Terminal chrome");
+assert(attachAbsent.includes("data-testid=\"cockpit-attach-gate\""), "Gate copy when disabled");
+assert(attachAbsent.includes("Start a cockpit session"), "Absent gate explains Start");
 
-const chatParked = renderToString(
-  React.createElement(CockpitChatView, {
-    ...chatNoop,
-    messages: [],
-    canSend: false,
-    disabledReason: "Resume the ops session to continue chatting.",
+const attachParked = renderToString(
+  React.createElement(CockpitAttachView, {
+    canAttach: false,
+    disabledReason: "Cockpit session is parked. Stop it, then Start again.",
   }),
 );
-assert(chatParked.includes("Resume the ops session"), "Parked gate explains Resume");
-assert(isDisabled(chatParked, "cockpit-chat-send"), "Send disabled when Parked");
+assert(attachParked.includes("Stop it, then Start again"), "Parked gate explains Stop+Start");
 
-const chatRunning = renderToString(
-  React.createElement(CockpitChatView, {
-    ...chatNoop,
-    draft: "triage Needs You",
-    messages: [
-      { id: "1", role: "user", text: "hello" },
-      { id: "2", role: "assistant", text: "board is quiet", streaming: false },
-    ],
-    canSend: true,
+const attachRunning = renderToString(
+  React.createElement(CockpitAttachView, {
+    canAttach: true,
     disabledReason: null,
+    environment: "honr-cockpit",
+    sessionStatus: "running",
   }),
 );
-assert(chatRunning.includes("data-testid=\"cockpit-chat-messages\""), "Message list present");
-assert(chatRunning.includes("data-testid=\"cockpit-chat-msg-user\""), "User bubble");
-assert(chatRunning.includes("data-testid=\"cockpit-chat-msg-assistant\""), "Assistant bubble");
-assert(chatRunning.includes("board is quiet"), "Renders streamed assistant reply text");
-assert(chatRunning.includes("triage Needs You"), "Draft shown in composer");
-assert(!isDisabled(chatRunning, "cockpit-chat-send"), "Send enabled when Running + draft");
-assert(!chatRunning.includes("data-testid=\"cockpit-chat-gate\""), "No gate banner when canSend");
+assert(attachRunning.includes("data-testid=\"cockpit-xterm\""), "xterm host present");
+assert(attachRunning.includes("honr-cockpit"), "Title bar shows environment");
+assert(!attachRunning.includes("data-testid=\"cockpit-attach-gate\""), "No gate when attachable");
 
-const chatStreaming = renderToString(
-  React.createElement(CockpitChatView, {
-    ...chatNoop,
-    draft: "next",
-    messages: [{ id: "3", role: "assistant", text: "partial", streaming: true }],
-    canSend: true,
-    streaming: true,
-  }),
-);
-assert(isDisabled(chatStreaming, "cockpit-chat-send"), "Send disabled while streaming");
-assert(chatStreaming.includes("Streaming"), "Streaming label on send button");
-
-// Gate helper + stream-json line extractor (no Board lifecycle invented)
-assert.deepEqual(cockpitChatGate(null), {
-  canSend: false,
-  reason: "Start an ops session to chat with the seat.",
+// Gate helpers
+assert.deepEqual(cockpitAttachGate(null), {
+  canAttach: false,
+  reason: "Start a cockpit session to open the seat.",
 });
-assert.equal(cockpitChatGate(parkedSession).canSend, false);
-assert.match(cockpitChatGate(parkedSession).reason, /Resume/);
-assert.equal(cockpitChatGate(runningSession).canSend, true);
-assert.equal(cockpitChatGate(runningSession).reason, null);
+assert.equal(cockpitAttachGate(parkedSession).canAttach, false);
+assert.match(cockpitAttachGate(parkedSession).reason, /Stop it, then Start again/);
+assert.equal(cockpitAttachGate(runningSession).canAttach, true);
+assert.equal(cockpitAttachGate(runningSession).reason, null);
 assert.equal(
-  cockpitChatGate({ ...runningSession, environment: null }).canSend,
+  cockpitAttachGate({ ...runningSession, environment: null }).canAttach,
   false,
 );
-assert.equal(
-  opsChatLineText('{"type":"assistant","message":{"content":[{"type":"text","text":"hi ops"}]}}'),
-  "hi ops",
-);
-assert.equal(
-  opsChatLineText('{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}'),
-  "world",
-);
-assert.equal(opsChatLineText('{"type":"thinking","subtype":"delta","text":"hmm"}'), null);
-assert.equal(opsChatLineText("plain reply line"), "plain reply line");
-
-// Exactly one Cockpit nav entry in the primary sidebar (reuse, do not invent a second)
-assert.equal(
-  (sidebarHtml.match(/data-testid="nav-cockpit"/g) || []).length,
-  1,
-  "Primary sidebar has a single Cockpit nav entry",
-);
+// Legacy alias
+assert.equal(cockpitChatGate(runningSession).canSend, true);
 
 const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
@@ -806,7 +776,7 @@ assert(openshellHtml.includes("data-testid=\"openshell-health-summary\""), "Open
 assert(openshellHtml.includes("data-testid=\"openshell-field-endpoint\""), "OpenShell gateway endpoint field");
 assert(openshellHtml.includes("data-testid=\"openshell-field-ca\""), "OpenShell CA PEM field");
 assert(!openshellHtml.includes("data-testid=\"openshell-field-binary\""), "OpenShell must not expose CLI binary path");
-assert(openshellHtml.includes("data-testid=\"openshell-ops-hint\""), "OpenShell host setup hint");
+assert(openshellHtml.includes("data-testid=\"openshell-cockpit-hint\""), "OpenShell host setup hint");
 
 const openshellUnhealthyHtml = renderToString(
   React.createElement(OpenShellPanelView, {
@@ -951,7 +921,7 @@ const openshellWithBandsHtml = renderToString(
 );
 assert(openshellWithBandsHtml.includes("data-testid=\"openshell-providers-slot\""), "OpenShell panel hosts providers band");
 assert(openshellWithBandsHtml.includes("data-testid=\"openshell-profiles-slot\""), "OpenShell panel hosts profiles band");
-assert(openshellWithBandsHtml.includes("providers → profiles"), "Ops hint mentions providers then profiles");
+assert(openshellWithBandsHtml.includes("providers → profiles"), "OpenShell hint mentions providers then profiles");
 
 const workspaceHtml = renderToString(
   React.createElement(WorkspacePanelView, {
@@ -1012,6 +982,7 @@ const sandboxesHtml = renderToString(
   React.createElement(SandboxesPanelView, {
     profiles: fixtureProfiles,
     defaultId: "default",
+    cockpitId: "default",
     editingId: null,
     draft: { id: "", name: "", image: "", policy: "", cpu: "", memory: "", engine: "cursor" },
     onDraftChange: () => {},
@@ -1020,6 +991,7 @@ const sandboxesHtml = renderToString(
     onCancelEdit: () => {},
     onSave: () => {},
     onSetDefault: () => {},
+    onSetCockpit: () => {},
   }),
 );
 assert(sandboxesHtml.includes("data-testid=\"openshell-profiles\""), "Profiles band wrapper");
@@ -1029,7 +1001,12 @@ assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-list\""), "Profiles
 assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-default\""), "Should list default profile");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-heavy\""), "Should list heavy profile");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-default-badge\""), "Default profile should be badged");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-cockpit-badge\""), "Cockpit profile should be badged");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-set-default-heavy\""), "Non-default should offer Set default");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-set-cockpit-heavy\""),
+  "Non-Cockpit should offer Use for Cockpit");
+assert(!sandboxesHtml.includes("data-testid=\"sandbox-set-cockpit-default\""),
+  "Current Cockpit profile should not offer Use for Cockpit");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Profiles panel should support create");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Profiles panel should support edit");
 assert(sandboxesHtml.includes("cursor"), "Profile list shows engine");
@@ -1044,6 +1021,7 @@ const createFormHtml = renderToString(
   React.createElement(SandboxesPanelView, {
     profiles: fixtureProfiles,
     defaultId: "default",
+    cockpitId: "cockpit",
     editingId: "",
     draft: {
       id: "",
@@ -1060,6 +1038,7 @@ const createFormHtml = renderToString(
     onCancelEdit: () => {},
     onSave: () => {},
     onSetDefault: () => {},
+    onSetCockpit: () => {},
   }),
 );
 assert(createFormHtml.includes("data-testid=\"sandbox-profile-form\""), "Create/edit form should render");
@@ -1081,6 +1060,7 @@ const editFormHtml = renderToString(
   React.createElement(SandboxesPanelView, {
     profiles: fixtureProfiles,
     defaultId: "default",
+    cockpitId: null,
     editingId: "default",
     draft: {
       id: "default",
@@ -1097,6 +1077,7 @@ const editFormHtml = renderToString(
     onCancelEdit: () => {},
     onSave: () => {},
     onSetDefault: () => {},
+    onSetCockpit: () => {},
   }),
 );
 assert(editFormHtml.includes("data-testid=\"sandbox-field-id\""),

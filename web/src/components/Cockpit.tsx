@@ -1,191 +1,73 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { api } from "../api.js";
-import type { OpsSession } from "../types.js";
+import { xtermThemeFromDocument } from "../theme.js";
+import type { CockpitSession } from "../types.js";
 
 const POLL_MS = 4000;
 
-function statusLabel(status: OpsSession["status"]): string {
-  return status === "parked" ? "Parked" : "Running";
-}
-
-export type CockpitChatRole = "user" | "assistant" | "system";
-
-export type CockpitChatMessage = {
-  id: string;
-  role: CockpitChatRole;
-  text: string;
-  streaming?: boolean;
-};
-
-/**
- * Extract displayable assistant text from one ops-chat `agent` SSE line
- * (Cursor/Claude stream-json or plain stdout). Returns null to skip.
- */
-export function opsChatLineText(line: string): string | null {
-  const trimmed = line.trim();
-  if (!trimmed) return null;
-  if (!trimmed.startsWith("{")) return trimmed;
-
-  try {
-    const obj = JSON.parse(trimmed) as Record<string, unknown>;
-
-    if (obj.type === "thinking") return null;
-    if (obj.type === "tool_call" || obj.event === "step_update") return null;
-    if (
-      typeof obj.type === "string" &&
-      [
-        "message_start",
-        "message_delta",
-        "message_stop",
-        "content_block_stop",
-        "ping",
-        "system",
-        "result",
-      ].includes(obj.type)
-    ) {
-      return null;
-    }
-
-    if (obj.type === "content_block_start") {
-      const cb = obj.content_block as { type?: string; text?: string } | undefined;
-      if (cb?.type === "text" && cb.text) return cb.text;
-      return null;
-    }
-
-    if (obj.type === "content_block_delta") {
-      const delta = obj.delta as { type?: string; text?: string } | undefined;
-      if (delta?.text) return delta.text;
-      return null;
-    }
-
-    if (obj.type === "error" || obj.error) {
-      const err = obj.error;
-      const msg =
-        typeof err === "string"
-          ? err
-          : err && typeof err === "object" && "message" in err
-            ? String((err as { message: unknown }).message)
-            : JSON.stringify(err ?? obj);
-      return `Error: ${msg}`;
-    }
-
-    const content =
-      (obj.message as { content?: unknown } | undefined)?.content ?? obj.content;
-    if (Array.isArray(content)) {
-      const parts: string[] = [];
-      for (const item of content) {
-        if (
-          item &&
-          typeof item === "object" &&
-          (item as { type?: string }).type === "text" &&
-          typeof (item as { text?: unknown }).text === "string"
-        ) {
-          parts.push((item as { text: string }).text);
-        }
-      }
-      return parts.length > 0 ? parts.join("") : null;
-    }
-    if (typeof content === "string" && content.trim()) return content;
-
-    return null;
-  } catch {
-    return trimmed;
-  }
-}
-
-/** Why the composer is locked — mirrors Board session readiness only. */
-export function cockpitChatGate(
-  session: OpsSession | null,
-): { canSend: boolean; reason: string | null } {
+/** Why attach is locked — mirrors Board session readiness only. */
+export function cockpitAttachGate(
+  session: CockpitSession | null,
+): { canAttach: boolean; reason: string | null } {
   if (session == null) {
-    return { canSend: false, reason: "Start an ops session to chat with the seat." };
+    return { canAttach: false, reason: "Start a cockpit session to open the seat." };
   }
   if (session.status === "parked") {
-    return { canSend: false, reason: "Resume the ops session to continue chatting." };
+    return {
+      canAttach: false,
+      reason: "Cockpit session is parked. Stop it, then Start again.",
+    };
   }
   const environment = session.environment?.trim();
   if (!environment) {
     return {
-      canSend: false,
-      reason: "Waiting for the supervisor to provision the ops environment…",
+      canAttach: false,
+      reason: "Waiting for the supervisor to provision the cockpit environment…",
     };
   }
-  return { canSend: true, reason: null };
+  return { canAttach: true, reason: null };
+}
+
+/** @deprecated alias — prefer cockpitAttachGate */
+export function cockpitChatGate(session: CockpitSession | null): {
+  canSend: boolean;
+  reason: string | null;
+} {
+  const g = cockpitAttachGate(session);
+  return { canSend: g.canAttach, reason: g.reason };
+}
+
+function cockpitAttachWsUrl(): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}/api/cockpit-attach`;
 }
 
 /**
- * Presentational ops-session face — exported so tests render without fetch.
- * Action enablement mirrors Board rules; mutations stay on the parent.
+ * Start / Stop only — exported so tests render without fetch.
+ * Session metadata stays on the Board; Cockpit does not dump it.
  */
 export function CockpitSessionView({
   session,
-  loading,
   busy,
   error,
   onStart,
-  onPark,
-  onResume,
   onStop,
 }: {
-  session: OpsSession | null;
-  loading?: boolean;
+  session: CockpitSession | null;
   busy?: boolean;
   error?: string | null;
   onStart: () => void;
-  onPark: () => void;
-  onResume: () => void;
   onStop: () => void;
 }) {
   const absent = session == null;
-  const running = session?.status === "running";
-  const parked = session?.status === "parked";
-  const environment = session?.environment?.trim() || null;
-  const conversationId = session?.conversation_id?.trim() || null;
 
   return (
-    <section
-      className="cockpit-session"
-      aria-labelledby="cockpit-session-title"
-      data-testid="cockpit-session"
-    >
-      <h2 id="cockpit-session-title">Ops session</h2>
-      <p className="dim cockpit-session-lede">
-        Board owns lifecycle. These controls call{" "}
-        <code>/api/ops-session*</code> only — status below is polled from the
-        Board, not a second state machine.
-      </p>
-
+    <div className="cockpit-session" data-testid="cockpit-session">
       {error && (
         <div className="err" data-testid="cockpit-session-error">
           {error}
         </div>
       )}
-
-      <dl className="cockpit-session-status" data-testid="cockpit-session-status">
-        <div>
-          <dt>Status</dt>
-          <dd data-testid="cockpit-session-status-value">
-            {loading && absent
-              ? "Loading…"
-              : absent
-                ? "None"
-                : statusLabel(session.status)}
-          </dd>
-        </div>
-        <div>
-          <dt>Environment</dt>
-          <dd data-testid="cockpit-session-environment">
-            {environment ?? "—"}
-          </dd>
-        </div>
-        {conversationId && (
-          <div>
-            <dt>Conversation</dt>
-            <dd data-testid="cockpit-session-conversation">{conversationId}</dd>
-          </div>
-        )}
-      </dl>
-
       <div className="cockpit-session-actions" data-testid="cockpit-session-actions">
         <button
           type="button"
@@ -198,22 +80,6 @@ export function CockpitSessionView({
         </button>
         <button
           type="button"
-          disabled={busy || !running}
-          onClick={onPark}
-          data-testid="cockpit-session-park"
-        >
-          Park
-        </button>
-        <button
-          type="button"
-          disabled={busy || !parked}
-          onClick={onResume}
-          data-testid="cockpit-session-resume"
-        >
-          Resume
-        </button>
-        <button
-          type="button"
           className="danger"
           disabled={busy || absent}
           onClick={onStop}
@@ -222,184 +88,391 @@ export function CockpitSessionView({
           Stop
         </button>
       </div>
-
-      {environment && (
-        <p className="dim cockpit-attach-fallback" data-testid="cockpit-attach-fallback">
-          Optional TTY fallback:{" "}
-          <code>openshell sandbox connect {environment}</code>
-        </p>
-      )}
-    </section>
+    </div>
   );
 }
 
 /**
- * Presentational ops chat — message list + composer over /api/ops-chat.
- * Enablement comes from Board session status only; no local lifecycle.
+ * Real attach face — xterm.js over `/api/cockpit-attach` (ExecSandboxInteractive).
+ * SSR-safe: terminal + WebSocket only mount in the browser when attachable.
  */
-export function CockpitChatView({
-  messages,
-  canSend,
+export function CockpitAttachView({
+  canAttach,
   disabledReason,
-  streaming,
-  error,
-  draft,
-  onDraftChange,
-  onSend,
+  environment,
+  sessionStatus,
+  reconnectKey = 0,
+  /** When the drop re-opens, refit xterm (attach stays mounted while collapsed). */
+  panelOpen = true,
 }: {
-  messages: CockpitChatMessage[];
-  canSend: boolean;
+  canAttach: boolean;
   disabledReason?: string | null;
-  streaming?: boolean;
-  error?: string | null;
-  draft: string;
-  onDraftChange: (value: string) => void;
-  onSend: () => void;
+  environment?: string | null;
+  sessionStatus?: CockpitSession["status"] | null;
+  /** Bump to force a fresh WebSocket (e.g. after Stop/Start). */
+  reconnectKey?: number;
+  panelOpen?: boolean;
 }) {
-  const listRef = useRef<HTMLDivElement>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  const composerDisabled = !canSend || !!streaming;
-  const sendDisabled = composerDisabled || !draft.trim();
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
+  const titleEnv = environment?.trim() || "cockpit";
+  const titleStatus =
+    sessionStatus === "parked"
+      ? "parked"
+      : sessionStatus === "running"
+        ? connected
+          ? "attached"
+          : "connecting…"
+        : "offline";
 
   useEffect(() => {
-    const el = listRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages]);
+    if (!canAttach || !hostRef.current) {
+      setConnected(false);
+      return;
+    }
+
+    // Dynamic import keeps SSR / node tests free of xterm's CJS surface.
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    setAttachError(null);
+    setConnected(false);
+
+    void (async () => {
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import("@xterm/xterm"),
+        import("@xterm/addon-fit"),
+      ]);
+      if (disposed || !hostRef.current) return;
+
+      const host = hostRef.current;
+      host.replaceChildren();
+
+      const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+        theme: xtermThemeFromDocument(),
+        allowProposedApi: true,
+      });
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+      term.open(host);
+      fit.fit();
+      if (disposed) {
+        term.dispose();
+        return;
+      }
+
+      // Follow the site theme switcher (data-theme on <html>).
+      const syncTheme = () => {
+        term.options.theme = xtermThemeFromDocument();
+      };
+      const themeObs = new MutationObserver(syncTheme);
+      themeObs.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme"],
+      });
+
+      let ws: WebSocket | null = null;
+      try {
+        ws = new WebSocket(cockpitAttachWsUrl());
+        ws.binaryType = "arraybuffer";
+      } catch (e) {
+        setAttachError(e instanceof Error ? e.message : String(e));
+        term.dispose();
+        return;
+      }
+
+      // After `ready`, agent stdout can lag a few seconds — animate in-terminal
+      // so "attached" doesn't look like a dead TTY. Cleared on first PTY bytes.
+      let awaitingAgent = false;
+      let spinnerTimer: ReturnType<typeof setInterval> | null = null;
+      let spinnerTick = 0;
+      const stopAgentSpinner = (clearLine: boolean) => {
+        if (spinnerTimer != null) {
+          clearInterval(spinnerTimer);
+          spinnerTimer = null;
+        }
+        if (awaitingAgent && clearLine) {
+          term.write("\r\x1b[2K");
+        }
+        awaitingAgent = false;
+      };
+      const startAgentSpinner = () => {
+        stopAgentSpinner(false);
+        awaitingAgent = true;
+        spinnerTick = 0;
+        const paint = () => {
+          if (!awaitingAgent || disposed) return;
+          const dots = ".".repeat((spinnerTick % 3) + 1);
+          term.write(`\r\x1b[2K\x1b[90mstarting agent${dots}\x1b[0m`);
+          spinnerTick += 1;
+        };
+        paint();
+        spinnerTimer = setInterval(paint, 400);
+      };
+
+      const sendResize = () => {
+        fit.fit();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "resize",
+              cols: term.cols,
+              rows: term.rows,
+            }),
+          );
+        }
+      };
+
+      ws.onopen = () => {
+        if (disposed) return;
+        // WS open ≠ agent ready — create-chat + exec_interactive still run.
+        sendResize();
+      };
+      ws.onmessage = (ev) => {
+        if (disposed) return;
+        if (typeof ev.data === "string") {
+          try {
+            const msg = JSON.parse(ev.data) as {
+              type?: string;
+              message?: string;
+              code?: number;
+            };
+            if (msg.type === "ready") {
+              setConnected(true);
+              sendResize();
+              startAgentSpinner();
+            } else if (msg.type === "error" && msg.message) {
+              stopAgentSpinner(true);
+              setAttachError(msg.message);
+              term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);
+            } else if (msg.type === "exit") {
+              stopAgentSpinner(true);
+              term.writeln(
+                `\r\n\x1b[90m[shell exited${msg.code != null ? ` ${msg.code}` : ""}]\x1b[0m`,
+              );
+              setConnected(false);
+            }
+          } catch {
+            /* ignore non-JSON control */
+          }
+          return;
+        }
+        stopAgentSpinner(true);
+        const bytes =
+          ev.data instanceof ArrayBuffer
+            ? new Uint8Array(ev.data)
+            : new Uint8Array(ev.data as ArrayBuffer);
+        term.write(bytes);
+      };
+      ws.onerror = () => {
+        if (!disposed) setAttachError("attach WebSocket error");
+      };
+      ws.onclose = () => {
+        stopAgentSpinner(true);
+        if (!disposed) setConnected(false);
+      };
+
+      const dataSub = term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(new TextEncoder().encode(data));
+        }
+      });
+
+      const onWinResize = () => sendResize();
+      window.addEventListener("resize", onWinResize);
+      const ro =
+        typeof ResizeObserver !== "undefined"
+          ? new ResizeObserver(() => sendResize())
+          : null;
+      ro?.observe(host);
+
+      cleanup = () => {
+        stopAgentSpinner(false);
+        themeObs.disconnect();
+        window.removeEventListener("resize", onWinResize);
+        ro?.disconnect();
+        dataSub.dispose();
+        ws?.close();
+        term.dispose();
+        setConnected(false);
+      };
+    })();
+
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [canAttach, environment, reconnectKey]);
+
+  // Collapse only hides the drop — keep the WebSocket. Refit when shown again.
+  useEffect(() => {
+    if (!panelOpen || !canAttach) return;
+    window.dispatchEvent(new Event("resize"));
+  }, [panelOpen, canAttach]);
 
   return (
     <section
-      className="cockpit-chat"
+      className="cockpit-term"
       aria-labelledby={titleId}
-      data-testid="cockpit-chat"
+      data-testid="cockpit-attach"
     >
-      <h2 id={titleId}>Ops chat</h2>
-      <p className="dim cockpit-chat-lede">
-        Primary attach: prompts go through the host{" "}
-        <code>/api/ops-chat</code> bridge into the Board-named seat. Transcript
-        below is browser-local — conversation id stays on the Board session.
-      </p>
-
-      {error && (
-        <div className="err" data-testid="cockpit-chat-error">
-          {error}
+      <div className="cockpit-term-window" data-testid="cockpit-term-window">
+        <div className="cockpit-term-titlebar">
+          <span className="cockpit-term-traffic" aria-hidden="true">
+            <i /><i /><i />
+          </span>
+          <h2 id={titleId} className="cockpit-term-title">
+            {titleEnv}
+            <span className="cockpit-term-title-status"> — {titleStatus}</span>
+          </h2>
         </div>
-      )}
 
-      <div
-        className="cockpit-chat-messages"
-        ref={listRef}
-        data-testid="cockpit-chat-messages"
-        role="log"
-        aria-live="polite"
-      >
-        {messages.length === 0 && (
-          <p className="dim cockpit-chat-empty" data-testid="cockpit-chat-empty">
-            {disabledReason ??
-              "Send a prompt to steer the board via the ops seat."}
+        {attachError && (
+          <div className="err cockpit-term-error" data-testid="cockpit-attach-error">
+            {attachError}
+          </div>
+        )}
+
+        {!canAttach && (
+          <p className="dim cockpit-term-gate" data-testid="cockpit-attach-gate">
+            {disabledReason ?? "Start a cockpit session to attach."}
           </p>
         )}
-        {messages.map((m) => (
-          <div
-            key={m.id}
-            className={`cockpit-chat-bubble cockpit-chat-bubble-${m.role}${
-              m.streaming ? " cockpit-chat-bubble-streaming" : ""
-            }`}
-            data-testid={`cockpit-chat-msg-${m.role}`}
-            data-role={m.role}
-          >
-            <span className="cockpit-chat-role">
-              {m.role === "user"
-                ? "You"
-                : m.role === "assistant"
-                  ? "Ops"
-                  : "System"}
-            </span>
-            <pre className="cockpit-chat-text">
-              {m.text || (m.streaming ? "…" : "")}
-            </pre>
-          </div>
-        ))}
-      </div>
 
-      {disabledReason && !streaming && (
-        <p className="dim cockpit-chat-gate" data-testid="cockpit-chat-gate">
-          {disabledReason}
-        </p>
-      )}
-
-      <form
-        className="cockpit-chat-composer"
-        data-testid="cockpit-chat-composer"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!sendDisabled) onSend();
-        }}
-      >
-        <textarea
-          value={draft}
-          onChange={(e) => onDraftChange(e.target.value)}
-          disabled={composerDisabled}
-          rows={3}
-          placeholder={
-            canSend
-              ? "Message the ops seat…"
-              : "Chat unavailable until the session is Running"
-          }
-          data-testid="cockpit-chat-input"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              if (!sendDisabled) onSend();
-            }
-          }}
+        <div
+          className="cockpit-xterm"
+          ref={hostRef}
+          data-testid="cockpit-xterm"
+          // Keep a mount point even when gated so layout stays stable; effect
+          // only opens the WebSocket when canAttach.
+          style={{ display: canAttach ? undefined : "none" }}
         />
-        <button
-          type="submit"
-          className="primary"
-          disabled={sendDisabled}
-          data-testid="cockpit-chat-send"
-        >
-          {streaming ? "Streaming…" : "Send"}
-        </button>
-      </form>
+      </div>
+    </section>
+  );
+}
+
+/** Lucide-style chevrons-down — flips when the drop is open. */
+function CockpitChevrons() {
+  return (
+    <svg
+      className="cockpit-bar-icon"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <path
+        d="m7 6 5 5 5-5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="m7 13 5 5 5-5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/** Centered top-bar control — opens the Cockpit drop below the header. */
+export function CockpitToggle({
+  open,
+  onToggle,
+}: {
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`cockpit-bar-btn${open ? " open" : ""}`}
+      aria-expanded={open}
+      aria-controls="cockpit-drop"
+      aria-label={open ? "Collapse Cockpit" : "Open Cockpit"}
+      title={open ? "Collapse Cockpit" : "Open Cockpit"}
+      data-testid="cockpit-toggle"
+      onClick={onToggle}
+    >
+      <CockpitChevrons />
+    </button>
+  );
+}
+
+/**
+ * Panel under the top bar. Stays mounted after the first open so collapse does
+ * not tear down the attach WebSocket / interactive agent. `shown` lags one
+ * frame behind `open` so open/close both slide via CSS.
+ */
+export function CockpitDrop({ open }: { open: boolean }) {
+  const [kept, setKept] = useState(false);
+  const [shown, setShown] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setKept(true);
+      const id = requestAnimationFrame(() => setShown(true));
+      return () => cancelAnimationFrame(id);
+    }
+    setShown(false);
+  }, [open]);
+
+  if (!open && !kept) return null;
+
+  return (
+    <section
+      id="cockpit-drop"
+      className={`cockpit-drop${shown ? " open" : ""}`}
+      data-testid="cockpit-drop"
+      aria-label="Cockpit cockpit"
+      aria-hidden={!open}
+      inert={!open || undefined}
+    >
+      <div className="cockpit-drop-inner">
+        <Cockpit panelOpen={open} />
+      </div>
     </section>
   );
 }
 
 /**
- * Cockpit — primary-nav surface for steering the board via the ops seat.
- * Chat is the primary attach UX; session controls are a thin face over
- * /api/ops-session*. No local session files or shadow lifecycle.
+ * Cockpit — Start/Stop the Board cockpit session; terminal attaches when ready.
+ * MCP inject stays silent in the background.
  */
-export function Cockpit() {
-  const [session, setSession] = useState<OpsSession | null>(null);
-  const [loading, setLoading] = useState(true);
+export function Cockpit({ panelOpen = true }: { panelOpen?: boolean } = {}) {
+  const [session, setSession] = useState<CockpitSession | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const [messages, setMessages] = useState<CockpitChatMessage[]>([]);
-  const [draft, setDraft] = useState("");
-  const [streaming, setStreaming] = useState(false);
-  const [chatError, setChatError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const msgSeq = useRef(0);
-
-  const nextId = () => {
-    msgSeq.current += 1;
-    return `m-${msgSeq.current}`;
-  };
+  const [reconnectKey, setReconnectKey] = useState(0);
+  const provisionedEnv = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const out = await api.getOpsSession();
+      const out = await api.getCockpitSession();
       setSession(out.session ?? null);
       setError(null);
+      if (!out.session) {
+        provisionedEnv.current = null;
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
     }
+  }, []);
+
+  const provisionMcp = useCallback(async () => {
+    const out = await api.provisionCockpitMcp();
+    provisionedEnv.current = out.environment;
   }, []);
 
   useEffect(() => {
@@ -413,29 +486,33 @@ export function Cockpit() {
     return () => {
       alive = false;
       clearInterval(poll);
-      abortRef.current?.abort();
     };
   }, [refresh]);
 
-  // Drop the browser transcript when the Board session is gone — not a
-  // lifecycle store, just avoid showing stale turns after Stop.
+  // When the supervisor fills environment, inject MCP once for this env.
   useEffect(() => {
-    if (session == null && messages.length > 0 && !streaming) {
-      setMessages([]);
-      setChatError(null);
+    const env = session?.environment?.trim();
+    if (
+      session?.status === "running" &&
+      env &&
+      provisionedEnv.current !== env
+    ) {
+      void provisionMcp().catch(() => {
+        /* attach still works; next Start retries inject */
+      });
     }
-  }, [session, messages.length, streaming]);
+  }, [session?.status, session?.environment, provisionMcp]);
 
   const runAction = useCallback(
-    async (action: () => Promise<unknown>) => {
+    async (action: () => Promise<unknown>, opts?: { reconnect?: boolean }) => {
       setBusy(true);
       setError(null);
       try {
         await action();
         await refresh();
+        if (opts?.reconnect) setReconnectKey((k) => k + 1);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
-        // Board may still have moved — refetch so the face stays honest.
         await refresh();
       } finally {
         setBusy(false);
@@ -444,110 +521,32 @@ export function Cockpit() {
     [refresh],
   );
 
-  const gate = cockpitChatGate(session);
-
-  const sendChat = useCallback(async () => {
-    const prompt = draft.trim();
-    if (!prompt || streaming || !gate.canSend) return;
-
-    const userId = nextId();
-    const assistantId = nextId();
-    setDraft("");
-    setChatError(null);
-    setMessages((prev) => [
-      ...prev,
-      { id: userId, role: "user", text: prompt },
-      { id: assistantId, role: "assistant", text: "", streaming: true },
-    ]);
-    setStreaming(true);
-
-    const ac = new AbortController();
-    abortRef.current = ac;
-
-    const appendAssistant = (chunk: string) => {
-      if (!chunk) return;
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId ? { ...m, text: m.text + chunk } : m,
-        ),
-      );
-    };
-
-    try {
-      await api.streamOpsChat(prompt, {
-        signal: ac.signal,
-        onAgentLine: (line) => {
-          const text = opsChatLineText(line);
-          if (text) appendAssistant(text);
-        },
-        onError: (message) => {
-          setChatError(message);
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId && !m.text
-                ? { ...m, text: message, streaming: false }
-                : m,
-            ),
-          );
-        },
-      });
-    } catch (e) {
-      if (ac.signal.aborted) return;
-      const msg = e instanceof Error ? e.message : String(e);
-      setChatError(msg);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId && !m.text
-            ? { ...m, role: "system", text: msg, streaming: false }
-            : m,
-        ),
-      );
-    } finally {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId ? { ...m, streaming: false } : m,
-        ),
-      );
-      setStreaming(false);
-      if (abortRef.current === ac) abortRef.current = null;
-      // conversation_id may have landed on the Board mid-turn
-      await refresh();
-    }
-  }, [draft, streaming, gate.canSend, refresh]);
+  const gate = cockpitAttachGate(session);
 
   return (
-    <div className="cockpit-page" data-testid="cockpit-page">
-      <header className="board-hero">
-        <h1>Cockpit</h1>
-        <p className="board-lede">
-          Steer the board by chatting with the ops seat in the browser. Session
-          Start / Park / Resume / Stop call Board{" "}
-          <code>/api/ops-session*</code>; chat uses the host{" "}
-          <code>/api/ops-chat</code> bridge. Optional{" "}
-          <code>openshell sandbox connect</code> remains a TTY fallback.
-        </p>
-      </header>
-
-      <CockpitChatView
-        messages={messages}
-        canSend={gate.canSend}
-        disabledReason={gate.reason}
-        streaming={streaming}
-        error={chatError}
-        draft={draft}
-        onDraftChange={setDraft}
-        onSend={() => void sendChat()}
-      />
-
+    <div className="cockpit-pane" data-testid="cockpit-pane">
       <CockpitSessionView
         session={session}
-        loading={loading}
         busy={busy}
         error={error}
-        onStart={() => void runAction(() => api.startOpsSession())}
-        onPark={() => void runAction(() => api.parkOpsSession())}
-        onResume={() => void runAction(() => api.resumeOpsSession())}
-        onStop={() => void runAction(() => api.stopOpsSession())}
+        onStart={() =>
+          void runAction(() => api.startCockpitSession(), { reconnect: true })
+        }
+        onStop={() =>
+          void runAction(async () => {
+            provisionedEnv.current = null;
+            await api.stopCockpitSession();
+          })
+        }
+      />
+
+      <CockpitAttachView
+        canAttach={gate.canAttach}
+        disabledReason={gate.reason}
+        environment={session?.environment}
+        sessionStatus={session?.status ?? null}
+        reconnectKey={reconnectKey}
+        panelOpen={panelOpen}
       />
     </div>
   );

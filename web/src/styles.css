@@ -36,6 +36,22 @@
   --shadow-soft:
     0 0.15em 0.9em -0.4em color-mix(in srgb, #000 6%, transparent);
 
+  /* Cockpit xterm — tracks the site theme switcher */
+  --term-bg: var(--panel-inset);
+  --term-fg: var(--ink);
+  --term-cursor: var(--accent);
+  --term-selection: color-mix(in srgb, var(--accent) 28%, transparent);
+  --term-black: #29353c;
+  --term-red: var(--needs-human);
+  --term-green: var(--ok);
+  --term-yellow: var(--review);
+  --term-blue: var(--accent);
+  --term-magenta: var(--section);
+  --term-cyan: var(--ready);
+  --term-white: #eef3ef;
+  --term-bright-black: var(--muted);
+  --term-bright-white: #ffffff;
+
   color-scheme: light;
 }
 
@@ -68,6 +84,21 @@
     0 0.3em 1.4em -0.4em color-mix(in srgb, #000 45%, transparent);
   --shadow-soft:
     0 0.2em 1em -0.3em color-mix(in srgb, #000 40%, transparent);
+
+  --term-bg: var(--panel-inset);
+  --term-fg: var(--ink);
+  --term-cursor: var(--accent);
+  --term-selection: color-mix(in srgb, var(--accent) 32%, transparent);
+  --term-black: #0b151b;
+  --term-red: var(--needs-human);
+  --term-green: var(--ok);
+  --term-yellow: var(--review);
+  --term-blue: var(--accent);
+  --term-magenta: var(--section);
+  --term-cyan: var(--ready);
+  --term-white: #e1e5e8;
+  --term-bright-black: var(--muted);
+  --term-bright-white: #ffffff;
 
   color-scheme: dark;
 }
@@ -272,10 +303,11 @@ textarea {
 .app { display: flex; flex-direction: column; min-height: 100vh; }
 
 .top {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 18px;
-  padding: 12px 18px;
+  column-gap: 18px;
+  padding: 10px 18px;
   background: var(--chrome);
   border-bottom: 1px solid var(--line);
   box-shadow: var(--shadow-soft);
@@ -285,6 +317,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
+  justify-self: start;
   font-weight: 700;
   font-size: 17px;
   letter-spacing: -0.03em;
@@ -326,7 +359,7 @@ textarea {
   text-align: center;
 }
 .stats {
-  margin-left: auto;
+  justify-self: end;
   display: flex;
   gap: 14px;
   align-items: center;
@@ -400,6 +433,10 @@ textarea {
 
 main { flex: 1; display: flex; align-items: flex-start; gap: 0; min-width: 0; }
 main > :first-child { flex: 1; min-width: 0; }
+main.with-side-panes {
+  align-items: stretch;
+  min-height: 0;
+}
 
 .bottom { padding: 10px 14px; border-top: 1px solid var(--line); font-size: 12px; }
 
@@ -774,137 +811,210 @@ main > :first-child { flex: 1; min-width: 0; }
   margin-top: 28px;
 }
 
-.cockpit-page {
-  padding: 24px 28px 48px;
-  max-width: 720px;
+/* Centered Cockpit control — lives in the top bar, doesn’t break the edge. */
+.cockpit-bar-slot {
+  justify-self: center;
+  align-self: center;
+  z-index: 1;
+}
+.cockpit-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.cockpit-bar-btn:hover {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+.cockpit-bar-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.cockpit-bar-btn.open {
+  background: var(--accent-fill);
+  color: var(--accent);
+}
+.cockpit-bar-btn.open:hover {
+  color: var(--ink);
+}
+.cockpit-bar-icon {
+  display: block;
+  transition: transform 0.18s ease;
+}
+.cockpit-bar-btn.open .cockpit-bar-icon {
+  transform: rotate(180deg);
+}
+
+/* Grid 0fr→1fr slides height both ways; tree stays mounted while collapsed. */
+.cockpit-drop {
+  flex: 0 0 auto;
+  z-index: 3;
+  display: grid;
+  grid-template-rows: 0fr;
+  background: var(--panel);
+  border-bottom: 1px solid transparent;
+  box-shadow: none;
+  overflow: hidden;
+  transition:
+    grid-template-rows 0.28s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.cockpit-drop.open {
+  grid-template-rows: 1fr;
+  border-bottom-color: var(--line);
+  box-shadow: var(--shadow-soft);
+}
+.cockpit-drop-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cockpit-pane {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  min-height: 0;
+  max-height: min(52vh, 560px);
+  overflow: hidden;
+  padding: 0;
+  background: var(--panel);
+  transform: translateY(-12px);
+  opacity: 0.85;
+  transition:
+    transform 0.28s ease,
+    opacity 0.22s ease;
+}
+.cockpit-drop.open .cockpit-pane {
+  transform: translateY(0);
+  opacity: 1;
+}
+.cockpit-drop .cockpit-term {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 12px 12px;
 }
 .cockpit-session {
-  margin-top: 28px;
-}
-.cockpit-session h2,
-.cockpit-chat h2 {
-  margin: 0 0 10px;
-  font-size: 15px;
-  font-weight: 600;
-}
-.cockpit-session-lede,
-.cockpit-chat-lede {
-  margin: 0 0 16px;
-  line-height: 1.55;
-}
-.cockpit-session-lede code,
-.cockpit-chat-lede code,
-.cockpit-attach-fallback code {
-  font-size: 0.92em;
-}
-.cockpit-session-status {
-  margin: 0 0 18px;
-  display: grid;
-  gap: 10px;
-}
-.cockpit-session-status > div {
-  display: grid;
-  grid-template-columns: 7.5rem 1fr;
-  gap: 8px;
-  align-items: baseline;
-}
-.cockpit-session-status dt {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
   margin: 0;
-  color: var(--dim);
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.cockpit-session-status dd {
-  margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  word-break: break-all;
+  padding: 8px 12px;
 }
 .cockpit-session-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
-.cockpit-attach-fallback {
-  margin: 16px 0 0;
-  line-height: 1.55;
+.cockpit-session .err {
+  flex: 1 1 100%;
+  margin: 0;
 }
 
-.cockpit-chat {
-  margin-top: 28px;
-}
-.cockpit-chat-messages {
+/* Cockpit attach as a terminal window, not chat bubbles. */
+.cockpit-term {
+  margin-top: 0;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-height: 160px;
-  max-height: min(48vh, 420px);
-  overflow-y: auto;
-  padding: 12px;
+}
+.cockpit-term-window {
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
-  background: var(--panel);
-}
-.cockpit-chat-empty {
-  margin: 0;
-  line-height: 1.55;
-}
-.cockpit-chat-bubble {
+  background: var(--term-bg);
+  color: var(--term-fg);
+  overflow: hidden;
+  box-shadow: var(--shadow-soft);
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-width: 92%;
 }
-.cockpit-chat-bubble-user {
-  align-self: flex-end;
+.cockpit-term-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
 }
-.cockpit-chat-bubble-assistant,
-.cockpit-chat-bubble-system {
-  align-self: flex-start;
+.cockpit-term-traffic {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
-.cockpit-chat-role {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+.cockpit-term-traffic i {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.cockpit-term-traffic i:nth-child(1) {
+  background: #ff5f56;
+}
+.cockpit-term-traffic i:nth-child(2) {
+  background: #ffbd2e;
+}
+.cockpit-term-traffic i:nth-child(3) {
+  background: #27c93f;
+}
+.cockpit-term-title {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cockpit-term-title-status {
+  color: var(--dim);
+  font-weight: 400;
+}
+.cockpit-term-error {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.cockpit-term-gate {
+  margin: 0;
+  padding: 14px;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--dim);
 }
-.cockpit-chat-text {
-  margin: 0;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--bg);
-  font: inherit;
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
+.cockpit-xterm {
+  flex: 1;
+  min-height: 200px;
+  padding: 8px 10px 12px;
 }
-.cockpit-chat-bubble-user .cockpit-chat-text {
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+.cockpit-xterm .xterm {
+  height: 100%;
 }
-.cockpit-chat-bubble-system .cockpit-chat-text {
-  color: var(--needs-human);
-  border-color: color-mix(in srgb, var(--needs-human) 40%, var(--line));
-}
-.cockpit-chat-bubble-streaming .cockpit-chat-text {
-  opacity: 0.92;
-}
-.cockpit-chat-gate {
-  margin: 10px 0 0;
-  line-height: 1.55;
-}
-.cockpit-chat-composer {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: stretch;
-}
-.cockpit-chat-composer button {
-  align-self: flex-end;
+.cockpit-xterm .xterm-viewport {
+  overflow-y: auto !important;
 }
 
 /* OperatorGuide — reusable MCP + first-loop onboarding (Board empty / Help). */
@@ -1625,8 +1735,16 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 
 @media (max-width: 620px) {
   .app { overflow-x: hidden; }
-  header.top { flex-wrap: wrap; gap: 6px 10px; }
-  header.top .stats { width: 100%; justify-content: flex-start; gap: 8px; font-size: 11px; }
+  header.top {
+    grid-template-columns: auto 1fr auto;
+    column-gap: 10px;
+  }
+  header.top .cockpit-bar-slot { justify-self: center; }
+  header.top .stats {
+    gap: 8px;
+    font-size: 11px;
+    flex-wrap: wrap;
+  }
 
   .shell { flex-direction: column; }
   .sidebar {
@@ -1660,6 +1778,10 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   .columns { display: block; }
   .column { width: auto; margin-bottom: 14px; }
   .drawer { position: static; width: auto; }
+  .cockpit-pane {
+    max-height: min(70vh, 640px);
+  }
+  main.with-side-panes { flex-direction: column; }
   .olevel { width: 38px; font-size: 8px; }
   .ostate { width: auto; font-size: 10px; }
   .obar { width: 44px; }

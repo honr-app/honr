@@ -139,6 +139,7 @@ export function Settings() {
 export function SandboxesPanelView({
   profiles,
   defaultId,
+  cockpitId,
   busy,
   error,
   editingId,
@@ -149,9 +150,11 @@ export function SandboxesPanelView({
   onCancelEdit,
   onSave,
   onSetDefault,
+  onSetCockpit,
 }: {
   profiles: SandboxProfile[];
   defaultId: string | null;
+  cockpitId: string | null;
   busy?: boolean;
   error?: string | null;
   editingId: string | null;
@@ -162,6 +165,7 @@ export function SandboxesPanelView({
   onCancelEdit: () => void;
   onSave: () => void;
   onSetDefault: (id: string) => void;
+  onSetCockpit: (id: string) => void;
 }) {
   const isCreate = editingId === "";
   const isEditing = editingId !== null;
@@ -172,8 +176,9 @@ export function SandboxesPanelView({
       <h3 id="openshell-profiles-title">Profiles</h3>
       <p className="dim">
         Named create-specs (image, policy, CPU, memory). The global default is
-        used when a Project has no override. Live card environments are managed
-        on the board, not here.
+        used when a Project has no override. Cockpit Start builds its seat from
+        the Cockpit profile. Live card environments are managed on the board,
+        not here.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -188,6 +193,7 @@ export function SandboxesPanelView({
           <ul className="sandbox-profile-ul">
             {profiles.map((p) => {
               const isDefault = defaultId === p.id;
+              const isCockpit = cockpitId === p.id;
               return (
                 <li
                   key={p.id}
@@ -201,6 +207,14 @@ export function SandboxesPanelView({
                       {isDefault && (
                         <span className="sandbox-default-badge" data-testid="sandbox-default-badge">
                           default
+                        </span>
+                      )}
+                      {isCockpit && (
+                        <span
+                          className="sandbox-default-badge"
+                          data-testid="sandbox-cockpit-badge"
+                        >
+                          Cockpit
                         </span>
                       )}
                     </div>
@@ -234,6 +248,16 @@ export function SandboxesPanelView({
                         data-testid={`sandbox-set-default-${p.id}`}
                       >
                         Set default
+                      </button>
+                    )}
+                    {!isCockpit && (
+                      <button
+                        type="button"
+                        disabled={busy || isEditing}
+                        onClick={() => onSetCockpit(p.id)}
+                        data-testid={`sandbox-set-cockpit-${p.id}`}
+                      >
+                        Use for Cockpit
                       </button>
                     )}
                   </div>
@@ -379,6 +403,7 @@ export function SandboxesPanelView({
 function SandboxesPanel() {
   const [profiles, setProfiles] = useState<SandboxProfile[]>([]);
   const [defaultId, setDefaultId] = useState<string | null>(null);
+  const [cockpitId, setCockpitId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -392,6 +417,7 @@ function SandboxesPanel() {
       .then((out) => {
         setProfiles(out.profiles);
         setDefaultId(out.default_sandbox_profile_id);
+        setCockpitId(out.cockpit_sandbox_profile_id);
         setError(null);
       })
       .catch((e) => setError(String(e)))
@@ -426,6 +452,7 @@ function SandboxesPanel() {
     <SandboxesPanelView
       profiles={profiles}
       defaultId={defaultId}
+      cockpitId={cockpitId}
       busy={busy}
       error={error}
       editingId={editingId}
@@ -460,6 +487,7 @@ function SandboxesPanel() {
         });
       }}
       onSetDefault={(id) => run(api.setDefaultSandboxProfile(id))}
+      onSetCockpit={(id) => run(api.setCockpitSandboxProfile(id))}
     />
   );
 }
@@ -1721,7 +1749,7 @@ export function OpenShellPanelView({
 
       {profiles}
 
-      <aside className="workspace-webhook-hint" data-testid="openshell-ops-hint">
+      <aside className="workspace-webhook-hint" data-testid="openshell-cockpit-hint">
         <h3>Host setup</h3>
         <p className="dim">
           Role checklist: compute driver → gateway (mTLS) → providers → profiles

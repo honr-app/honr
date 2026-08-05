@@ -39,6 +39,16 @@ const CLIENT_NAME_MAX: usize = 128;
 /// restarts do not invalidate a checked-in CLIENT_ID.
 pub const CURSOR_CLIENT_ID: &str = "honr-cursor";
 
+/// Public client for the sandboxed cockpit / Cockpit inject path.
+/// Tokens are minted server-side (no browser OAuth inside the box).
+pub const COCKPIT_CLIENT_ID: &str = "honr-cockpit";
+
+/// Default MCP URL as seen from inside the cockpit sandbox (Docker/OpenShell).
+pub const DEFAULT_COCKPIT_MCP_RESOURCE: &str = "http://host.docker.internal:8080/mcp";
+
+/// Access token lifetime (seconds) — exported for inject metadata.
+pub const MCP_ACCESS_TTL_SECS: u64 = ACCESS_TTL_SECS;
+
 fn cursor_redirect_uris() -> Vec<String> {
     vec![
         "http://localhost:8787/callback".into(),
@@ -55,6 +65,75 @@ fn ensure_static_clients(st: &mut OAuthStore) {
             redirect_uris: cursor_redirect_uris(),
             client_name: Some("Cursor (honr)".into()),
         });
+    st.clients
+        .entry(COCKPIT_CLIENT_ID.to_string())
+        .or_insert_with(|| ClientRecord {
+            // No browser redirect — mint path only. Placeholder keeps DCR shape.
+            redirect_uris: vec!["http://127.0.0.1/honr-cockpit-no-redirect".into()],
+            client_name: Some("honr cockpit (injected)".into()),
+        });
+}
+
+/// Tokens minted for the cockpit sandbox MCP client (never return refresh to browsers).
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsMcpTokens {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: u64,
+    pub expires_at: u64,
+    pub resource: String,
+    pub client_id: String,
+    pub sub: String,
+}
+
+/// MCP resource URL the sandbox will call (`aud` on the JWT).
+pub fn cockpit_mcp_resource() -> String {
+    std::env::var("HONR_MCP_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_COCKPIT_MCP_RESOURCE.to_string())
+}
+
+/// Mint access + refresh JWTs for the cockpit (`honr-cockpit` client).
+///
+/// `sub` is the board principal (logged-in login, or `"cockpit"` for supervisor
+/// fallback). `resource` should be the URL the sandbox uses (see
+/// [`cockpit_mcp_resource`]).
+pub fn mint_cockpit_seat_tokens(
+    board: &SharedBoard,
+    sub: &str,
+    resource: &str,
+) -> Result<OpsMcpTokens, String> {
+    let sub = sub.trim();
+    if sub.is_empty() {
+        return Err("sub required".into());
+    }
+    let resource = resource.trim().trim_end_matches('/');
+    if resource.is_empty() {
+        return Err("resource required".into());
+    }
+    {
+        let mut st = store().lock();
+        ensure_static_clients(&mut st);
+    }
+    let access = mint_access_token(board, sub, resource)?;
+    let refresh = mint_refresh_token(board, sub, COCKPIT_CLIENT_ID, resource)?;
+    let now = now_secs();
+    Ok(OpsMcpTokens {
+        access_token: access,
+        refresh_token: refresh,
+        expires_in: MCP_ACCESS_TTL_SECS,
+        expires_at: now.saturating_add(MCP_ACCESS_TTL_SECS),
+        resource: resource.to_string(),
+        client_id: COCKPIT_CLIENT_ID.to_string(),
+        sub: sub.to_string(),
+    })
+}
+
+/// Test / inject helper: verify an access token against the cockpit resource.
+pub fn verify_cockpit_access_token(board: &SharedBoard, token: &str, resource: &str) -> Option<String> {
+    verify_access_token(board, token, resource)
 }
 
 #[derive(Clone)]
@@ -1123,6 +1202,22 @@ mod tests {
             "http://127.0.0.1:8080/mcp",
             "http://127.0.0.1:8081/mcp"
         ));
+    }
+
+    #[test]
+    fn mint_cockpit_seat_tokens_round_trips_access_verify() {
+        let (board, _env) = board_with_admin();
+        let resource = DEFAULT_COCKPIT_MCP_RESOURCE;
+        let tokens = mint_cockpit_seat_tokens(&board, "admin", resource).expect("mint");
+        assert_eq!(tokens.client_id, COCKPIT_CLIENT_ID);
+        assert_eq!(tokens.sub, "admin");
+        assert_eq!(tokens.resource, resource);
+        assert_eq!(
+            verify_cockpit_access_token(&board, &tokens.access_token, resource).as_deref(),
+            Some("admin")
+        );
+        // Refresh must not verify as access.
+        assert!(verify_cockpit_access_token(&board, &tokens.refresh_token, resource).is_none());
     }
 
     #[test]

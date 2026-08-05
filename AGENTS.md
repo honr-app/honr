@@ -4,7 +4,7 @@ Orientation for the **operator** agent sitting with the human. If you are an
 agent honr dispatched to work on a card, you already have a briefing — ignore
 this file.
 
-**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`) — the ops
+**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`) — the cockpit
 seat (operator tools only; no worker verbs). Do not implement product work by
 editing this tree; shape Projects/Plans, triage Needs You / Review, let
 sandboxed workers open PRs. See
@@ -99,7 +99,7 @@ do not treat a stale local `main` as truth.
 | `src/store.rs` | The board — the only write path |
 | `src/supervisor.rs` | Dispatch, per-card lifecycle, briefing, lease sweeping |
 | `src/openshell.rs` | Typed wrapper over the CLI; every call has a deadline |
-| `src/ops_chat.rs` | Host-mediated ops chat bridge (prompt → sandbox seat → SSE) |
+| `src/cockpit_chat.rs` | Host-mediated cockpit chat bridge (prompt → sandbox seat → SSE) |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs |
 | `sandbox/` | Containerfile, network policy, metadata shim |
 | `web/` | React UI + `npm run shots` screenshot harness |

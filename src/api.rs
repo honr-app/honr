@@ -3,7 +3,7 @@
 
 use crate::model::{
     AgentRuntimeConfig, ItemId, OpenShellProviderDesired, OpenShellProviderRefreshDesired,
-    OpsSession, SandboxProfile, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
+    CockpitSession, SandboxProfile, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
 use crate::openshell::{ProviderRefreshSpec, ProviderTypeProfile};
 use crate::secrets::{open_string_map, seal_string_map};
@@ -14,6 +14,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -79,20 +80,27 @@ pub fn routes() -> Router<SharedBoard> {
             "/sandbox-profiles/{id}/default",
             post(set_default_sandbox_profile),
         )
+        .route(
+            "/sandbox-profiles/{id}/cockpit",
+            post(set_cockpit_sandbox_profile),
+        )
         .route("/workspace", get(get_workspace).put(put_workspace))
         .route("/webhook-poll", get(get_webhook_poll).put(put_webhook_poll))
         .route("/agent-runtime", get(get_agent_runtime).put(put_agent_runtime))
         .route(
-            "/ops-session",
-            get(get_ops_session)
-                .post(create_ops_session)
-                .put(update_ops_session)
-                .delete(stop_ops_session),
+            "/cockpit-session",
+            get(get_cockpit_session)
+                .post(create_cockpit_session)
+                .put(update_cockpit_session)
+                .delete(stop_cockpit_session),
         )
-        .route("/ops-session/park", post(park_ops_session))
-        .route("/ops-session/resume", post(resume_ops_session))
-        // Host-mediated ops chat bridge (Board ops_session is authoritative).
-        .merge(crate::ops_chat::routes())
+        .route("/cockpit-session/park", post(park_cockpit_session))
+        .route("/cockpit-session/resume", post(resume_cockpit_session))
+        .route("/cockpit-session/mcp-cred", post(provision_cockpit_mcp_cred))
+        // Host-mediated cockpit attach (interactive TTY) + legacy cockpit-chat bridge.
+        // Board cockpit_session stays authoritative for both.
+        .merge(crate::cockpit_attach::routes())
+        .merge(crate::cockpit_chat::routes())
         .route("/openshell/status", get(openshell_status))
         .route("/openshell", get(get_openshell).put(put_openshell))
         .route(
@@ -1265,15 +1273,21 @@ async fn list_openshell_provider_profiles(
 pub struct SandboxProfilesOut {
     pub profiles: Vec<SandboxProfile>,
     pub default_sandbox_profile_id: Option<String>,
+    pub cockpit_sandbox_profile_id: Option<String>,
+}
+
+fn sandbox_profiles_out(b: &crate::store::SharedBoard) -> SandboxProfilesOut {
+    SandboxProfilesOut {
+        profiles: b.list_sandbox_profiles(),
+        default_sandbox_profile_id: b.default_sandbox_profile_id(),
+        cockpit_sandbox_profile_id: b.cockpit_sandbox_profile_id(),
+    }
 }
 
 async fn list_sandbox_profiles(
     AxState(b): AxState<SharedBoard>,
 ) -> Json<SandboxProfilesOut> {
-    Json(SandboxProfilesOut {
-        profiles: b.list_sandbox_profiles(),
-        default_sandbox_profile_id: b.default_sandbox_profile_id(),
-    })
+    Json(sandbox_profiles_out(&b))
 }
 
 async fn get_sandbox_profile(
@@ -1333,10 +1347,15 @@ async fn set_default_sandbox_profile(
     Path(id): Path<String>,
 ) -> ApiResult<SandboxProfilesOut> {
     b.set_default_sandbox_profile(&id).map_err(ApiError)?;
-    Ok(Json(SandboxProfilesOut {
-        profiles: b.list_sandbox_profiles(),
-        default_sandbox_profile_id: b.default_sandbox_profile_id(),
-    }))
+    Ok(Json(sandbox_profiles_out(&b)))
+}
+
+async fn set_cockpit_sandbox_profile(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> ApiResult<SandboxProfilesOut> {
+    b.set_cockpit_sandbox_profile(&id).map_err(ApiError)?;
+    Ok(Json(sandbox_profiles_out(&b)))
 }
 
 #[derive(Deserialize)]
@@ -1357,16 +1376,16 @@ async fn set_item_sandbox_profile(
     ))
 }
 
-// ---------------------------------------------------------------- ops session
+// ---------------------------------------------------------------- cockpit session
 // Thin face: every rule lives on Board / machine.rs.
 
 #[derive(Serialize)]
-pub struct OpsSessionOut {
-    pub session: Option<OpsSession>,
+pub struct CockpitSessionOut {
+    pub session: Option<CockpitSession>,
 }
 
 #[derive(Deserialize)]
-pub struct CreateOpsSessionReq {
+pub struct CreateCockpitSessionReq {
     #[serde(default)]
     pub environment: Option<String>,
     #[serde(default)]
@@ -1374,7 +1393,7 @@ pub struct CreateOpsSessionReq {
 }
 
 #[derive(Deserialize)]
-pub struct UpdateOpsSessionReq {
+pub struct UpdateCockpitSessionReq {
     /// When present, sets (blank clears). Omitted leaves unchanged.
     #[serde(default)]
     pub environment: Option<String>,
@@ -1382,42 +1401,120 @@ pub struct UpdateOpsSessionReq {
     pub conversation_id: Option<String>,
 }
 
-async fn get_ops_session(AxState(b): AxState<SharedBoard>) -> Json<OpsSessionOut> {
-    Json(OpsSessionOut {
-        session: b.ops_session(),
+async fn get_cockpit_session(AxState(b): AxState<SharedBoard>) -> Json<CockpitSessionOut> {
+    Json(CockpitSessionOut {
+        session: b.cockpit_session(),
     })
 }
 
-async fn create_ops_session(
+async fn create_cockpit_session(
     AxState(b): AxState<SharedBoard>,
-    Json(req): Json<CreateOpsSessionReq>,
-) -> ApiResult<OpsSession> {
+    jar: CookieJar,
+    Json(req): Json<CreateCockpitSessionReq>,
+) -> ApiResult<CockpitSession> {
+    let session = b
+        .create_cockpit_session(req.environment, req.conversation_id)
+        .map_err(ApiError)?;
+    // Best-effort MCP inject when the environment is already known (rare on
+    // create — supervisor usually fills it). Cockpit also calls mcp-cred.
+    if let Some(env) = session
+        .environment
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let sub = crate::auth::session_user_from_jar(&b, &jar)
+            .map(|u| u.login)
+            .unwrap_or_else(|| crate::cockpit_mcp::COCKPIT_FALLBACK_SUB.to_string());
+        let os = b.openshell_client();
+        if let Err(e) = crate::cockpit_mcp::provision_cockpit_mcp(&b, &os, env, &sub).await {
+            tracing::warn!("cockpit MCP provision on start: {e}");
+        }
+    }
+    Ok(Json(session))
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpsMcpCredOut {
+    pub ok: bool,
+    pub environment: String,
+    pub resource: String,
+    pub client_id: String,
+    pub sub: String,
+    pub expires_at: u64,
+    /// True when files were written into the sandbox.
+    pub injected: bool,
+}
+
+/// Mint `honr-cockpit` tokens for the logged-in user and inject MCP config into
+/// the Board-named cockpit sandbox. Does not return refresh/access to the browser.
+async fn provision_cockpit_mcp_cred(
+    AxState(b): AxState<SharedBoard>,
+    jar: CookieJar,
+) -> Result<Json<OpsMcpCredOut>, ApiError> {
+    let user = crate::auth::session_user_from_jar(&b, &jar).ok_or_else(|| {
+        ApiError("authentication required".into())
+    })?;
+    let session = b.cockpit_session().ok_or_else(|| ApiError("no cockpit session".into()))?;
+    if session.status != crate::model::CockpitSessionStatus::Running {
+        return Err(ApiError(
+            "cockpit session is not Running — Start first".into(),
+        ));
+    }
+    let env = session
+        .environment
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError("cockpit session has no environment yet".into()))?
+        .to_string();
+
+    let os = b.openshell_client();
+    let tokens = crate::cockpit_mcp::provision_cockpit_mcp(&b, &os, &env, &user.login)
+        .await
+        .map_err(|e| ApiError(e.to_string()))?;
+
+    Ok(Json(OpsMcpCredOut {
+        ok: true,
+        environment: env,
+        resource: tokens.resource,
+        client_id: tokens.client_id,
+        sub: tokens.sub,
+        expires_at: tokens.expires_at,
+        injected: true,
+    }))
+}
+
+async fn update_cockpit_session(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<UpdateCockpitSessionReq>,
+) -> ApiResult<CockpitSession> {
     Ok(Json(
-        b.create_ops_session(req.environment, req.conversation_id)
+        b.update_cockpit_session(req.environment, req.conversation_id)
             .map_err(ApiError)?,
     ))
 }
 
-async fn update_ops_session(
-    AxState(b): AxState<SharedBoard>,
-    Json(req): Json<UpdateOpsSessionReq>,
-) -> ApiResult<OpsSession> {
-    Ok(Json(
-        b.update_ops_session(req.environment, req.conversation_id)
-            .map_err(ApiError)?,
-    ))
+async fn park_cockpit_session(AxState(b): AxState<SharedBoard>) -> ApiResult<CockpitSession> {
+    Ok(Json(b.park_cockpit_session().map_err(ApiError)?))
 }
 
-async fn park_ops_session(AxState(b): AxState<SharedBoard>) -> ApiResult<OpsSession> {
-    Ok(Json(b.park_ops_session().map_err(ApiError)?))
+async fn resume_cockpit_session(AxState(b): AxState<SharedBoard>) -> ApiResult<CockpitSession> {
+    Ok(Json(b.resume_cockpit_session().map_err(ApiError)?))
 }
 
-async fn resume_ops_session(AxState(b): AxState<SharedBoard>) -> ApiResult<OpsSession> {
-    Ok(Json(b.resume_ops_session().map_err(ApiError)?))
-}
-
-async fn stop_ops_session(AxState(b): AxState<SharedBoard>) -> Result<StatusCode, ApiError> {
-    b.stop_ops_session().map_err(ApiError)?;
+async fn stop_cockpit_session(AxState(b): AxState<SharedBoard>) -> Result<StatusCode, ApiError> {
+    if let Some(env) = b
+        .cockpit_session()
+        .and_then(|s| s.environment)
+        .filter(|e| !e.trim().is_empty())
+    {
+        let os = b.openshell_client();
+        if let Err(e) = crate::cockpit_mcp::clear_cockpit_mcp(&os, env.trim()).await {
+            tracing::debug!("cockpit MCP clear on stop: {e}");
+        }
+    }
+    b.stop_cockpit_session().map_err(ApiError)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2390,6 +2487,7 @@ mod tests {
         let Json(empty) = list_sandbox_profiles(AxState(b.clone())).await;
         assert!(empty.profiles.is_empty());
         assert!(empty.default_sandbox_profile_id.is_none());
+        assert!(empty.cockpit_sandbox_profile_id.is_none());
 
         let Ok(Json(created)) = upsert_sandbox_profile(
             AxState(b.clone()),
@@ -2463,6 +2561,21 @@ mod tests {
             Some("default")
         );
         assert_eq!(listed.profiles.len(), 2);
+
+        let Ok(Json(cockpit)) =
+            set_cockpit_sandbox_profile(AxState(b.clone()), Path("heavy".into())).await
+        else {
+            panic!("set cockpit");
+        };
+        assert_eq!(
+            cockpit.cockpit_sandbox_profile_id.as_deref(),
+            Some("heavy")
+        );
+        assert_eq!(
+            cockpit.default_sandbox_profile_id.as_deref(),
+            Some("default"),
+            "setting Cockpit must not clear the worker default"
+        );
 
         let Ok(Json(got)) =
             get_sandbox_profile(AxState(b.clone()), Path("heavy".into())).await
@@ -2959,5 +3072,126 @@ mod tests {
         let effective = b.effective_agents();
         assert_eq!(effective.engine, "agy");
         assert_eq!(effective.agent_timeout_secs, 600);
+    }
+
+    /// Board with sealed admin auth (session + JWT mint). Holds master-key env.
+    fn board_with_admin_auth(
+        label: &str,
+        openshell: Option<crate::openshell::OpenShell>,
+    ) -> (SharedBoard, crate::secrets::master_key_env::Guard) {
+        use crate::secrets::{seal_auth, AuthBundle};
+        use base64::Engine;
+        let hex = "cd".repeat(32);
+        let env = crate::secrets::master_key_env::Guard::with_hex_key(&hex);
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-{label}-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut board = crate::store::Board::new(crate::schema::Schema::default(), path);
+        board.openshell = openshell;
+        let board = std::sync::Arc::new(board);
+        let bundle = AuthBundle {
+            admin_username: "admin".into(),
+            password_hash: "unused-for-mcp-cred-tests".into(),
+            session_key_b64: base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
+        };
+        let sealed = seal_auth(&bundle).expect("seal");
+        board.set_auth_sealed(Some(sealed));
+        (board, env)
+    }
+
+    fn admin_jar(board: &SharedBoard) -> CookieJar {
+        use crate::auth::{mint_session_cookie_value, SessionKind, SessionUser};
+        use axum_extra::extract::cookie::Cookie;
+        let value = mint_session_cookie_value(
+            board,
+            &SessionUser {
+                kind: SessionKind::Admin,
+                login: "admin".into(),
+            },
+        )
+        .expect("mint session");
+        CookieJar::new().add(Cookie::new("honr_session", value))
+    }
+
+    #[tokio::test]
+    async fn mcp_cred_refuses_without_session_cookie() {
+        let (b, _env) = board_with_admin_auth("mcp-cred-nosess", None);
+        let err = provision_cockpit_mcp_cred(AxState(b), CookieJar::new())
+            .await
+            .expect_err("auth required");
+        assert!(
+            err.0.contains("authentication"),
+            "error={}",
+            err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_cred_refuses_without_cockpit_session() {
+        let (b, _env) = board_with_admin_auth("mcp-cred-nocockpit", None);
+        let err = provision_cockpit_mcp_cred(AxState(b.clone()), admin_jar(&b))
+            .await
+            .expect_err("no cockpit session");
+        assert!(err.0.contains("no cockpit session"), "error={}", err.0);
+    }
+
+    #[tokio::test]
+    async fn mcp_cred_refuses_without_environment() {
+        let (b, _env) = board_with_admin_auth("mcp-cred-noenv", None);
+        b.create_cockpit_session(None, None).expect("create");
+        let err = provision_cockpit_mcp_cred(AxState(b.clone()), admin_jar(&b))
+            .await
+            .expect_err("no environment");
+        assert!(
+            err.0.contains("no environment"),
+            "error={}",
+            err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_cred_refuses_when_parked() {
+        let (b, _env) = board_with_admin_auth("mcp-cred-parked", None);
+        b.create_cockpit_session(Some("honr-cockpit".into()), None)
+            .expect("create");
+        b.park_cockpit_session().expect("park");
+        let err = provision_cockpit_mcp_cred(AxState(b.clone()), admin_jar(&b))
+            .await
+            .expect_err("not Running");
+        assert!(
+            err.0.contains("not Running"),
+            "error={}",
+            err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_cred_succeeds_with_cookie_and_mock_openshell() {
+        let os = crate::openshell::OpenShell::mock(
+            |_| crate::openshell::Output {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            std::time::Duration::from_secs(5),
+        );
+        let (b, _env) = board_with_admin_auth("mcp-cred-ok", Some(os));
+        b.create_cockpit_session(Some("honr-cockpit".into()), None)
+            .expect("create");
+
+        let Json(out) = provision_cockpit_mcp_cred(AxState(b.clone()), admin_jar(&b))
+            .await
+            .expect("provision");
+        assert!(out.ok);
+        assert!(out.injected);
+        assert_eq!(out.environment, "honr-cockpit");
+        assert_eq!(out.client_id, crate::mcp_oauth::COCKPIT_CLIENT_ID);
+        assert_eq!(out.sub, "admin");
+        assert!(!out.resource.is_empty());
+        assert!(out.expires_at > 0);
     }
 }
