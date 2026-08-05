@@ -392,6 +392,26 @@ export interface Snapshot {
   default_model?: string;
 }
 
+/** Wire value for Board ops-session status (`snake_case` from Rust). */
+export type OpsSessionStatus = "running" | "parked";
+
+/**
+ * Board ops-session singleton — Cockpit is a thin face over this record.
+ * Do not invent a parallel lifecycle in React.
+ */
+export interface OpsSession {
+  environment?: string | null;
+  conversation_id?: string | null;
+  status: OpsSessionStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/ops-session */
+export interface OpsSessionOut {
+  session: OpsSession | null;
+}
+
 export type BoardEvent =
   | { type: "upsert"; seq: number; item: WorkItem }
   | { type: "story"; seq: number; goal: number; at: string; text: string }

@@ -778,6 +778,55 @@ main > :first-child { flex: 1; min-width: 0; }
   padding: 24px 28px 48px;
   max-width: 640px;
 }
+.cockpit-session {
+  margin-top: 28px;
+}
+.cockpit-session h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.cockpit-session-lede {
+  margin: 0 0 16px;
+  line-height: 1.55;
+}
+.cockpit-session-lede code,
+.cockpit-attach-fallback code {
+  font-size: 0.92em;
+}
+.cockpit-session-status {
+  margin: 0 0 18px;
+  display: grid;
+  gap: 10px;
+}
+.cockpit-session-status > div {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+.cockpit-session-status dt {
+  margin: 0;
+  color: var(--dim);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.cockpit-session-status dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+.cockpit-session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cockpit-attach-fallback {
+  margin: 16px 0 0;
+  line-height: 1.55;
+}
 
 /* OperatorGuide — reusable MCP + first-loop onboarding (Board empty / Help). */
 .operator-guide {
