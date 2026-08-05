@@ -4188,6 +4188,30 @@ facts are pasted, then unpark";
         )
     }
 
+    /// Host rebase could not run because the Review sandbox is gone and recreate
+    /// failed. Clears `rebase_requested` and escalates — silent forever-skip is
+    /// how Review cards used to look idle after MainAdvanced queued them.
+    pub fn fail_rebase_sandbox(&self, id: ItemId, detail: &str) -> Result<WorkItem, String> {
+        let question = format!(
+            "Host rebase blocked for card #{id}: sandbox unavailable ({detail})"
+        );
+        let options = vec![
+            EscalationOption {
+                label: "Retry host rebase".into(),
+                detail: "Answer and re-queue rebase once the sandbox gateway is healthy."
+                    .into(),
+            },
+            EscalationOption {
+                label: "Manually rebase the PR branch".into(),
+                detail: "Rebase onto main, force-push the card branch, then Approve.".into(),
+            },
+            EscalationOption {
+                label: "Bounce to Backlog".into(),
+                detail: "Return the card to Backlog for a fresh dispatch.".into(),
+            },
+        ];
+        self.escalate(id, "rebase", question, options, 0)
+    }
 
     /// Normalize a GitHub PR URL for matching board `pr_url` values.
     pub fn normalize_pr_url(url: &str) -> String {
@@ -7731,6 +7755,55 @@ mod tests {
         assert_eq!(updated2.state, State::Backlog);
         assert!(updated2.escalation.is_none());
         assert_eq!(updated2.last_conflict_files, vec!["src/store.rs"]);
+    }
+
+    #[test]
+    fn fail_rebase_sandbox_clears_queue_and_escalates() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-fail-rebase-sbx-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(None, "Fail Rebase Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t1 = b
+            .create(
+                Some(project.id),
+                "Task Fail Sbx",
+                "intent 1",
+                Some("dod 1".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.transition(t1.id, State::Shaping, "test", None).unwrap();
+        b.transition(t1.id, State::Backlog, "test", None).unwrap();
+        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
+        b.transition(t1.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(
+            t1.id,
+            Some("https://github.com/shanemcd/honr/pull/305".into()),
+        );
+        b.dispatch_rebase(t1.id).unwrap();
+        assert!(b.get(t1.id).unwrap().rebase_requested);
+
+        let updated = b
+            .fail_rebase_sandbox(t1.id, "recreate sandbox for rebase: gateway down")
+            .unwrap();
+        assert_eq!(updated.state, State::NeedsHuman);
+        assert!(!updated.rebase_requested);
+        assert!(!updated.awaiting_dispatch);
+        assert!(updated.escalation.is_some());
+        assert!(updated
+            .escalation
+            .as_ref()
+            .unwrap()
+            .question
+            .contains("sandbox unavailable"));
     }
 
     const SEED_POLICY_YAML: &str = "version: 1\n# seed-policy\nfilesystem_policy:\n  include_workdir: true\n";
