@@ -67,14 +67,20 @@ export function OpenShellProvidersPanelView({
         : [];
 
   return (
-    <div className="openshell-providers" data-testid="openshell-providers">
-      <div className="openshell-providers-head">
+    <div
+      className="openshell-band openshell-providers"
+      data-testid="openshell-providers"
+      aria-labelledby="openshell-providers-title"
+    >
+      <div className="openshell-band-head openshell-providers-head">
         <h3 id="openshell-providers-title">Providers</h3>
         <p className="dim">
-          Desired providers live on the board (credentials sealed). Save applies
-          to the gateway when it is reachable; Sync recreates after a wipe.
-          Provider <code>github</code> attaches <code>GH_TOKEN</code> from
-          Settings → GitHub App (installation token).
+          Desired provider list on the board (credentials sealed) — this is the
+          source of truth. Save applies to the gateway when it is reachable;
+          Sync all recreates after a wipe. Providers marked Attach pass on
+          sandbox create. Provider <code>github</code> is owned by Settings →
+          GitHub App (<code>GH_TOKEN</code> installation token); do not manage
+          that provider's credentials by hand here.
         </p>
       </div>
 
@@ -118,7 +124,8 @@ export function OpenShellProvidersPanelView({
 
       {providers.length === 0 && !draft ? (
         <p className="dim" data-testid="openshell-providers-empty">
-          No providers yet. Add one to attach credentials to sandboxes.
+          No providers yet. Add one; mark Attach so credentials pass on sandbox
+          create.
         </p>
       ) : (
         <ul className="openshell-provider-list" data-testid="openshell-provider-list">
@@ -172,7 +179,7 @@ export function OpenShellProvidersPanelView({
                   onChange={(e) => onToggleAttach(p, e.target.checked)}
                   data-testid={`openshell-provider-attach-${p.name}`}
                 />
-                Attach to sandboxes
+                Attach on create
               </label>
               <div className="btns">
                 <button
@@ -261,8 +268,9 @@ export function OpenShellProvidersPanelView({
                   className="dim sandbox-field-hint"
                   data-testid="openshell-provider-app-managed-note"
                 >
-                  Attached into sandboxes as <code>{key}</code>. Value comes from
-                  the App installation token — mint under Settings → GitHub App.
+                  Passed into the sandbox as <code>{key}</code>. Value comes
+                  from the App installation token — mint under Settings → GitHub
+                  App.
                 </span>
               )}
             </label>
@@ -311,7 +319,7 @@ export function OpenShellProvidersPanelView({
               }
               data-testid="openshell-provider-field-attach"
             />
-            Attach to sandboxes
+            Attach on create
           </label>
           <div className="btns">
             <button type="submit" className="primary" disabled={busy} data-testid="openshell-provider-save">
