@@ -82,15 +82,15 @@ order:
 
 Empty-catalog seed inserts two profiles: **`default`** (card worker — image/cpu/memory
 from `execution.agents`, policy from the built-in seed when
-`execution.agents.policy` is `embedded`) and **`ops`** (control-plane seat, from
-[`sandbox/ops-policy.yaml`](../sandbox/ops-policy.yaml) with lighter cpu/memory).
-Boards that already have a worker catalog still get `ops` via
-`ensure_ops_sandbox_profile` at boot when it is missing. The global default
-stays the worker profile; pick `ops` in Settings when starting an ops seat.
-The supervisor materializes that seat from the Board ops-session record
+`execution.agents.policy` is `embedded`) and **`cockpit`** (control-plane seat, from
+[`sandbox/cockpit-policy.yaml`](../sandbox/cockpit-policy.yaml) with lighter cpu/memory).
+Boards that already have a worker catalog still get `cockpit` via
+`ensure_cockpit_sandbox_profile` at boot when it is missing. The global default
+stays the worker profile; pick `cockpit` in Settings when starting a cockpit.
+The supervisor materializes that seat from the Board cockpit-session record
 (create/reuse sandbox, detached agent, park-like keep across restart, stop)
-without the card claim/heartbeat/report path. Cockpit chat is the primary
-attach; start / park / stop and optional TTY: [Ops seat](ops-seat.md).
+without the card claim/heartbeat/report path. Start, TTY attach/reconnect, and
+stop: [Cockpit](cockpit.md).
 
 Profile `policy` is **inline YAML text** stored on the board (edited in Settings
 as a textarea). That is the source of truth. At create, the supervisor writes a

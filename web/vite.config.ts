@@ -28,6 +28,7 @@ export default defineConfig({
       // comment so Vite does not buffer until the first 15s keep-alive.
       "/api/events": toHonr({ timeout: 0, proxyTimeout: 0 }),
       "/api/ws": toHonr({ ws: true }),
+      "/api/cockpit-attach": toHonr({ ws: true, timeout: 0, proxyTimeout: 0 }),
       // One origin in dev, so SSE and the MCP endpoint behave as they will in prod.
       "/api": toHonr(),
       "/auth": toHonr(),

@@ -37,6 +37,9 @@ pub struct BoardState {
     /// Global default profile id. Projects may override via `sandbox_profile_id`.
     #[serde(default)]
     pub default_sandbox_profile_id: Option<String>,
+    /// Profile used when Cockpit Start creates the cockpit sandbox.
+    #[serde(default)]
+    pub cockpit_sandbox_profile_id: Option<String>,
     /// Per-install forge/repo binding. Seeded from yaml; Board is SoT after.
     #[serde(default)]
     pub workspace: Option<WorkspaceBinding>,
@@ -76,10 +79,10 @@ pub struct BoardState {
     /// Last-seen default-branch tip SHAs keyed by `owner/name` (poll path).
     #[serde(default)]
     pub webhook_poll_tips: BTreeMap<String, String>,
-    /// Durable control-plane ops seat (sandbox + conversation + hold).
+    /// Durable control-plane cockpit (sandbox + conversation + hold).
     /// Singleton — not a WorkItem; reconnect reads this, not a chatbot shim.
     #[serde(default)]
-    pub ops_session: Option<OpsSession>,
+    pub cockpit_session: Option<CockpitSession>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
     /// Parent → child ids. Rebuilt after load; maintained on create/delete.
@@ -101,6 +104,7 @@ impl BoardState {
             stories: self.stories.clone(),
             sandbox_profiles: self.sandbox_profiles.clone(),
             default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
+            cockpit_sandbox_profile_id: self.cockpit_sandbox_profile_id.clone(),
             workspace: self.workspace.clone(),
             openshell_bin: self.openshell_bin.clone(),
             openshell_gateway_endpoint: self.openshell_gateway_endpoint.clone(),
@@ -114,7 +118,7 @@ impl BoardState {
             openshell_providers: self.openshell_providers.clone(),
             webhook_poll: self.webhook_poll.clone(),
             webhook_poll_tips: self.webhook_poll_tips.clone(),
-            ops_session: self.ops_session.clone(),
+            cockpit_session: self.cockpit_session.clone(),
             agent_logs: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
             ids_by_state: HashMap::new(),
@@ -534,8 +538,8 @@ impl Board {
             tracing::info!("seeded sandbox profile catalog from execution.agents");
             board.flush();
         }
-        if board.ensure_ops_sandbox_profile() {
-            tracing::info!("seeded ops sandbox profile for control-plane seat");
+        if board.ensure_cockpit_sandbox_profile() {
+            tracing::info!("seeded cockpit sandbox profile for control-plane seat");
             board.flush();
         }
         if board.seed_workspace_binding_if_empty() {
@@ -594,8 +598,8 @@ impl Board {
             tracing::info!("seeded sandbox profile catalog from execution.agents");
             board.flush();
         }
-        if board.ensure_ops_sandbox_profile() {
-            tracing::info!("seeded ops sandbox profile for control-plane seat");
+        if board.ensure_cockpit_sandbox_profile() {
+            tracing::info!("seeded cockpit sandbox profile for control-plane seat");
             board.flush();
         }
         if board.seed_workspace_binding_if_empty() {
@@ -1619,12 +1623,12 @@ impl Board {
     // Public surface for the follow-on api-supervisor card. Unit tests exercise
     // it; production callers land with REST/MCP wiring.
 
-    /// Seed worker `default` + ops seat profiles when the catalog is empty.
+    /// Seed worker `default` + cockpit profiles when the catalog is empty.
     /// Returns true when profiles were inserted. After seed, the board profile
     /// is authoritative — edit via Settings / `/api/sandbox-profiles`. Worker
     /// seed policy comes from `agents.policy` via
     /// [`crate::model::resolve_policy_yaml`] (usually the built-in embedded
-    /// default); ops still seeds from [`crate::model::OPS_SANDBOX_POLICY_PATH`].
+    /// default); cockpit still seeds from [`crate::model::COCKPIT_SANDBOX_POLICY_PATH`].
     pub fn seed_sandbox_profiles_if_empty(&self) -> bool {
         self.seed_sandbox_profiles_from(&self.schema.execution.agents)
     }
@@ -1657,34 +1661,51 @@ impl Board {
                 engine,
             },
         );
-        let ops = crate::model::ops_sandbox_profile_from_agents(agents);
-        s.sandbox_profiles.insert(ops.id.clone(), ops);
+        let cockpit_profile = crate::model::cockpit_sandbox_profile_from_agents(agents);
+        let cockpit_id = cockpit_profile.id.clone();
+        s.sandbox_profiles.insert(cockpit_id.clone(), cockpit_profile);
         s.default_sandbox_profile_id = Some(id);
+        s.cockpit_sandbox_profile_id = Some(cockpit_id);
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         true
     }
 
-    /// Insert the `ops` catalog entry when missing (never overwrite). Lets
-    /// boards that already have a worker default still select the ops seat in
-    /// Settings. Returns true when a profile was inserted.
-    pub fn ensure_ops_sandbox_profile(&self) -> bool {
-        self.ensure_ops_sandbox_profile_from(&self.schema.execution.agents)
+    /// Insert the `cockpit` catalog entry when missing (never overwrite), and
+    /// point `cockpit_sandbox_profile_id` at it when that preference is unset.
+    /// Boards that already had a worker default used to keep the preference
+    /// empty forever — resolve then fell through to the air-gapped worker
+    /// profile and Cockpit MCP stayed `policy_denied`.
+    pub fn ensure_cockpit_sandbox_profile(&self) -> bool {
+        self.ensure_cockpit_sandbox_profile_from(&self.schema.execution.agents)
     }
 
-    /// Same as [`Self::ensure_ops_sandbox_profile`] with an explicit AgentConfig.
-    pub fn ensure_ops_sandbox_profile_from(&self, agents: &AgentConfig) -> bool {
+    /// Same as [`Self::ensure_cockpit_sandbox_profile`] with an explicit AgentConfig.
+    pub fn ensure_cockpit_sandbox_profile_from(&self, agents: &AgentConfig) -> bool {
         let mut s = self.state.write();
-        if s.sandbox_profiles
-            .contains_key(crate::model::OPS_SANDBOX_PROFILE_ID)
+        let mut changed = false;
+        if !s
+            .sandbox_profiles
+            .contains_key(crate::model::COCKPIT_SANDBOX_PROFILE_ID)
         {
-            return false;
+            let cockpit_profile = crate::model::cockpit_sandbox_profile_from_agents(agents);
+            s.sandbox_profiles
+                .insert(cockpit_profile.id.clone(), cockpit_profile);
+            changed = true;
         }
-        let ops = crate::model::ops_sandbox_profile_from_agents(agents);
-        s.sandbox_profiles.insert(ops.id.clone(), ops);
+        if s.cockpit_sandbox_profile_id.is_none()
+            && s.sandbox_profiles
+                .contains_key(crate::model::COCKPIT_SANDBOX_PROFILE_ID)
+        {
+            s.cockpit_sandbox_profile_id =
+                Some(crate::model::COCKPIT_SANDBOX_PROFILE_ID.to_string());
+            changed = true;
+        }
         drop(s);
-        self.dirty.store(true, Ordering::Relaxed);
-        true
+        if changed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        changed
     }
 
     // ------------------------------------------------ workspace binding (board state)
@@ -2173,6 +2194,10 @@ impl Board {
         self.state.read().default_sandbox_profile_id.clone()
     }
 
+    pub fn cockpit_sandbox_profile_id(&self) -> Option<String> {
+        self.state.read().cockpit_sandbox_profile_id.clone()
+    }
+
     pub fn get_sandbox_profile(&self, id: &str) -> Option<SandboxProfile> {
         self.state.read().sandbox_profiles.get(id).cloned()
     }
@@ -2241,6 +2266,17 @@ impl Board {
         Ok(())
     }
 
+    pub fn set_cockpit_sandbox_profile(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.write();
+        if !s.sandbox_profiles.contains_key(id) {
+            return Err(format!("no sandbox profile `{id}`"));
+        }
+        s.cockpit_sandbox_profile_id = Some(id.to_string());
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Assign a Project's sandbox profile override. `None` clears (inherit global default).
     pub fn set_project_sandbox_profile(
         &self,
@@ -2278,8 +2314,8 @@ impl Board {
         Ok(item)
     }
 
-    /// Delete a profile. Refused while it is the global default or assigned to
-    /// any Project — reassign / clear those first.
+    /// Delete a profile. Refused while it is the global default, the Cockpit
+    /// profile, or assigned to any Project — reassign those first.
     pub fn delete_sandbox_profile(&self, id: &str) -> Result<(), String> {
         let mut s = self.state.write();
         if !s.sandbox_profiles.contains_key(id) {
@@ -2289,6 +2325,12 @@ impl Board {
             return Err(format!(
                 "cannot delete sandbox profile `{id}`: it is the global default; \
                  set another default first"
+            ));
+        }
+        if s.cockpit_sandbox_profile_id.as_deref() == Some(id) {
+            return Err(format!(
+                "cannot delete sandbox profile `{id}`: it is the Cockpit profile; \
+                 set another Cockpit profile first"
             ));
         }
         let in_use: Vec<ItemId> = s
@@ -2310,25 +2352,25 @@ impl Board {
         Ok(())
     }
 
-    // ------------------------------------------------ ops session (board state)
+    // ------------------------------------------------ cockpit session (board state)
     //
     // Durable control-plane seat. Mutations only here / machine.rs — not a
     // second lifecycle in api/mcp/supervisor glue, and not card claim/report.
 
-    pub fn ops_session(&self) -> Option<OpsSession> {
-        self.state.read().ops_session.clone()
+    pub fn cockpit_session(&self) -> Option<CockpitSession> {
+        self.state.read().cockpit_session.clone()
     }
 
-    /// Create the singleton ops session (`Running`). Fails if one already exists.
-    pub fn create_ops_session(
+    /// Create the singleton cockpit session (`Running`). Fails if one already exists.
+    pub fn create_cockpit_session(
         &self,
         environment: Option<String>,
         conversation_id: Option<String>,
-    ) -> Result<OpsSession, String> {
+    ) -> Result<CockpitSession, String> {
         let mut s = self.state.write();
-        machine::check_ops_create(&s.ops_session).map_err(|e| e.to_string())?;
-        let session = OpsSession::new(environment, conversation_id);
-        s.ops_session = Some(session.clone());
+        machine::check_cockpit_create(&s.cockpit_session).map_err(|e| e.to_string())?;
+        let session = CockpitSession::new(environment, conversation_id);
+        s.cockpit_session = Some(session.clone());
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         Ok(session)
@@ -2336,19 +2378,19 @@ impl Board {
 
     /// Patch sandbox environment and/or conversation id. `None` leaves a field
     /// unchanged; `Some(s)` sets it (blank clears). Hold status is unchanged.
-    pub fn update_ops_session(
+    pub fn update_cockpit_session(
         &self,
         environment: Option<String>,
         conversation_id: Option<String>,
-    ) -> Result<OpsSession, String> {
+    ) -> Result<CockpitSession, String> {
         let mut s = self.state.write();
-        machine::check_ops_present(&s.ops_session).map_err(|e| e.to_string())?;
-        let session = s.ops_session.as_mut().expect("checked present");
+        machine::check_cockpit_present(&s.cockpit_session).map_err(|e| e.to_string())?;
+        let session = s.cockpit_session.as_mut().expect("checked present");
         if environment.is_some() {
-            session.environment = normalize_ops_field(environment);
+            session.environment = normalize_cockpit_field(environment);
         }
         if conversation_id.is_some() {
-            session.conversation_id = normalize_ops_field(conversation_id);
+            session.conversation_id = normalize_cockpit_field(conversation_id);
         }
         session.updated_at = Utc::now();
         let out = session.clone();
@@ -2358,14 +2400,14 @@ impl Board {
     }
 
     /// Park-like hold: keep sandbox + conversation; mark `Parked`.
-    pub fn park_ops_session(&self) -> Result<OpsSession, String> {
+    pub fn park_cockpit_session(&self) -> Result<CockpitSession, String> {
         let mut s = self.state.write();
-        let session = machine::check_ops_present(&s.ops_session)
+        let session = machine::check_cockpit_present(&s.cockpit_session)
             .map_err(|e| e.to_string())?
             .clone();
-        machine::check_ops_park(&session).map_err(|e| e.to_string())?;
-        let slot = s.ops_session.as_mut().expect("checked present");
-        slot.status = OpsSessionStatus::Parked;
+        machine::check_cockpit_park(&session).map_err(|e| e.to_string())?;
+        let slot = s.cockpit_session.as_mut().expect("checked present");
+        slot.status = CockpitSessionStatus::Parked;
         slot.updated_at = Utc::now();
         let out = slot.clone();
         drop(s);
@@ -2374,14 +2416,14 @@ impl Board {
     }
 
     /// Clear park hold → `Running` (attach / reconcile resume path).
-    pub fn resume_ops_session(&self) -> Result<OpsSession, String> {
+    pub fn resume_cockpit_session(&self) -> Result<CockpitSession, String> {
         let mut s = self.state.write();
-        let session = machine::check_ops_present(&s.ops_session)
+        let session = machine::check_cockpit_present(&s.cockpit_session)
             .map_err(|e| e.to_string())?
             .clone();
-        machine::check_ops_resume(&session).map_err(|e| e.to_string())?;
-        let slot = s.ops_session.as_mut().expect("checked present");
-        slot.status = OpsSessionStatus::Running;
+        machine::check_cockpit_resume(&session).map_err(|e| e.to_string())?;
+        let slot = s.cockpit_session.as_mut().expect("checked present");
+        slot.status = CockpitSessionStatus::Running;
         slot.updated_at = Utc::now();
         let out = slot.clone();
         drop(s);
@@ -2389,10 +2431,10 @@ impl Board {
         Ok(out)
     }
 
-    /// Stop and clear the durable ops session. Idempotent when already absent.
-    pub fn stop_ops_session(&self) -> Result<(), String> {
+    /// Stop and clear the durable cockpit session. Idempotent when already absent.
+    pub fn stop_cockpit_session(&self) -> Result<(), String> {
         let mut s = self.state.write();
-        if s.ops_session.take().is_none() {
+        if s.cockpit_session.take().is_none() {
             return Ok(());
         }
         drop(s);
@@ -2400,20 +2442,24 @@ impl Board {
         Ok(())
     }
 
-    /// Create knobs for the ops seat: always the `ops` catalog profile (never
-    /// the card-worker default). Falls back to
-    /// [`crate::model::ops_sandbox_profile_from_agents`] when the catalog lacks
-    /// `ops`.
-    pub fn resolve_ops_sandbox_create(&self) -> ResolvedSandboxCreate {
+    /// Create knobs for the Cockpit / cockpit sandbox.
+    ///
+    /// Order: `cockpit_sandbox_profile_id` → `default_sandbox_profile_id` →
+    /// synthetic cockpit-from-agents.
+    pub fn resolve_cockpit_sandbox_create(&self) -> ResolvedSandboxCreate {
         let s = self.state.read();
-        if let Some(p) = s
-            .sandbox_profiles
-            .get(crate::model::OPS_SANDBOX_PROFILE_ID)
-        {
-            return ResolvedSandboxCreate::from_profile(p);
+        if let Some(ref cid) = s.cockpit_sandbox_profile_id {
+            if let Some(p) = s.sandbox_profiles.get(cid) {
+                return ResolvedSandboxCreate::from_profile(p);
+            }
+        }
+        if let Some(ref did) = s.default_sandbox_profile_id {
+            if let Some(p) = s.sandbox_profiles.get(did) {
+                return ResolvedSandboxCreate::from_profile(p);
+            }
         }
         drop(s);
-        ResolvedSandboxCreate::from_profile(&crate::model::ops_sandbox_profile_from_agents(
+        ResolvedSandboxCreate::from_profile(&crate::model::cockpit_sandbox_profile_from_agents(
             &self.effective_agents(),
         ))
     }
@@ -4780,140 +4826,141 @@ mod tests {
     }
 
     #[test]
-    fn ops_session_create_update_park_resume_stop_invariants() {
+    fn cockpit_session_create_update_park_resume_stop_invariants() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join("honr-test-ops-session.json"),
+            std::env::temp_dir().join("honr-test-cockpit-session.json"),
         );
-        assert!(b.ops_session().is_none());
+        assert!(b.cockpit_session().is_none());
 
         let created = b
-            .create_ops_session(Some("honr-ops".into()), None)
+            .create_cockpit_session(Some("honr-cockpit".into()), None)
             .expect("create");
-        assert_eq!(created.environment.as_deref(), Some("honr-ops"));
+        assert_eq!(created.environment.as_deref(), Some("honr-cockpit"));
         assert!(created.conversation_id.is_none());
-        assert_eq!(created.status, OpsSessionStatus::Running);
+        assert_eq!(created.status, CockpitSessionStatus::Running);
 
         let err = b
-            .create_ops_session(None, None)
+            .create_cockpit_session(None, None)
             .expect_err("second create must fail");
         assert!(err.contains("already exists"), "{err}");
 
         let updated = b
-            .update_ops_session(None, Some("conv-ops-1".into()))
+            .update_cockpit_session(None, Some("conv-cockpit-1".into()))
             .expect("set conversation");
-        assert_eq!(updated.environment.as_deref(), Some("honr-ops"));
-        assert_eq!(updated.conversation_id.as_deref(), Some("conv-ops-1"));
-        assert_eq!(updated.status, OpsSessionStatus::Running);
+        assert_eq!(updated.environment.as_deref(), Some("honr-cockpit"));
+        assert_eq!(updated.conversation_id.as_deref(), Some("conv-cockpit-1"));
+        assert_eq!(updated.status, CockpitSessionStatus::Running);
 
         // Blank clears a field; omitted (None) leaves the other alone.
         let cleared_env = b
-            .update_ops_session(Some("  ".into()), None)
+            .update_cockpit_session(Some("  ".into()), None)
             .expect("clear env");
         assert!(cleared_env.environment.is_none());
-        assert_eq!(cleared_env.conversation_id.as_deref(), Some("conv-ops-1"));
+        assert_eq!(cleared_env.conversation_id.as_deref(), Some("conv-cockpit-1"));
 
-        b.update_ops_session(Some("honr-ops".into()), None)
+        b.update_cockpit_session(Some("honr-cockpit".into()), None)
             .expect("restore env");
 
-        let parked = b.park_ops_session().expect("park");
-        assert_eq!(parked.status, OpsSessionStatus::Parked);
-        assert_eq!(parked.environment.as_deref(), Some("honr-ops"));
-        assert_eq!(parked.conversation_id.as_deref(), Some("conv-ops-1"));
-        let err = b.park_ops_session().expect_err("already parked");
+        let parked = b.park_cockpit_session().expect("park");
+        assert_eq!(parked.status, CockpitSessionStatus::Parked);
+        assert_eq!(parked.environment.as_deref(), Some("honr-cockpit"));
+        assert_eq!(parked.conversation_id.as_deref(), Some("conv-cockpit-1"));
+        let err = b.park_cockpit_session().expect_err("already parked");
         assert!(err.contains("already parked"), "{err}");
 
-        let resumed = b.resume_ops_session().expect("resume");
-        assert_eq!(resumed.status, OpsSessionStatus::Running);
-        assert_eq!(resumed.environment.as_deref(), Some("honr-ops"));
-        assert_eq!(resumed.conversation_id.as_deref(), Some("conv-ops-1"));
-        let err = b.resume_ops_session().expect_err("not parked");
+        let resumed = b.resume_cockpit_session().expect("resume");
+        assert_eq!(resumed.status, CockpitSessionStatus::Running);
+        assert_eq!(resumed.environment.as_deref(), Some("honr-cockpit"));
+        assert_eq!(resumed.conversation_id.as_deref(), Some("conv-cockpit-1"));
+        let err = b.resume_cockpit_session().expect_err("not parked");
         assert!(err.contains("not parked"), "{err}");
 
-        b.stop_ops_session().expect("stop");
-        assert!(b.ops_session().is_none());
-        b.stop_ops_session().expect("stop is idempotent");
+        b.stop_cockpit_session().expect("stop");
+        assert!(b.cockpit_session().is_none());
+        b.stop_cockpit_session().expect("stop is idempotent");
 
         // After stop, create works again — not card claim/report lifecycle.
         let again = b
-            .create_ops_session(Some("honr-ops-2".into()), Some("conv-2".into()))
+            .create_cockpit_session(Some("honr-cockpit-2".into()), Some("conv-2".into()))
             .expect("recreate");
-        assert_eq!(again.environment.as_deref(), Some("honr-ops-2"));
+        assert_eq!(again.environment.as_deref(), Some("honr-cockpit-2"));
         assert_eq!(again.conversation_id.as_deref(), Some("conv-2"));
     }
 
     #[test]
-    fn resolve_ops_sandbox_create_uses_ops_profile_not_worker_default() {
+    fn resolve_cockpit_sandbox_create_uses_cockpit_profile_preference() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-resolve-ops-{}",
+                "honr-test-resolve-cockpit-{}",
                 std::process::id()
             )),
         );
         assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
+        assert_eq!(
+            b.cockpit_sandbox_profile_id().as_deref(),
+            Some("cockpit"),
+            "seed points Cockpit at the cockpit profile"
+        );
+        let seeded = b.resolve_cockpit_sandbox_create();
+        assert_eq!(seeded.profile_id.as_deref(), Some("cockpit"));
+
+        b.set_cockpit_sandbox_profile("default")
+            .expect("point Cockpit at worker default");
+        let resolved = b.resolve_cockpit_sandbox_create();
+        assert_eq!(resolved.profile_id.as_deref(), Some("default"));
         let worker = b.get_sandbox_profile("default").expect("default");
-        let ops = b.resolve_ops_sandbox_create();
-        assert_eq!(ops.profile_id.as_deref(), Some("ops"));
-        assert_eq!(ops.cpu.as_deref(), Some(crate::model::OPS_SANDBOX_CPU));
-        assert_eq!(ops.memory.as_deref(), Some(crate::model::OPS_SANDBOX_MEMORY));
-        assert_ne!(
-            ops.cpu,
-            worker.cpu,
-            "ops create must not use worker default cpu"
-        );
-        assert!(
-            !ops.policy.contains("name: github"),
-            "ops policy must not be the worker GitHub allow-list"
-        );
+        assert_eq!(resolved.cpu, worker.cpu);
+        assert_eq!(resolved.image, worker.image);
     }
 
     #[test]
-    fn ops_session_update_requires_existing_session() {
+    fn cockpit_session_update_requires_existing_session() {
         let b = Board::new(
             Schema::default(),
-            std::env::temp_dir().join("honr-test-ops-session-missing.json"),
+            std::env::temp_dir().join("honr-test-cockpit-session-missing.json"),
         );
         let err = b
-            .update_ops_session(Some("x".into()), None)
+            .update_cockpit_session(Some("x".into()), None)
             .expect_err("no session");
-        assert!(err.contains("no ops session"), "{err}");
-        let err = b.park_ops_session().expect_err("no session");
-        assert!(err.contains("no ops session"), "{err}");
+        assert!(err.contains("no cockpit session"), "{err}");
+        let err = b.park_cockpit_session().expect_err("no session");
+        assert!(err.contains("no cockpit session"), "{err}");
     }
 
     #[test]
-    fn ops_session_round_trips_json_flush_load() {
+    fn cockpit_session_round_trips_json_flush_load() {
         let path = std::env::temp_dir().join(format!(
-            "honr-test-ops-session-json-{}.json",
+            "honr-test-cockpit-session-json-{}.json",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         let b = Board::new(Schema::default(), path.clone());
-        b.create_ops_session(Some("honr-ops".into()), Some("conv-a".into()))
+        b.create_cockpit_session(Some("honr-cockpit".into()), Some("conv-a".into()))
             .expect("create");
-        b.park_ops_session().expect("park");
+        b.park_cockpit_session().expect("park");
         b.dirty.store(true, Ordering::Relaxed);
         b.flush();
 
         let raw = std::fs::read_to_string(&path).expect("read board json");
         let state: BoardState = serde_json::from_str(&raw).expect("parse");
         assert_eq!(
-            state.ops_session.as_ref().map(|s| s.environment.as_deref()),
-            Some(Some("honr-ops"))
+            state.cockpit_session.as_ref().map(|s| s.environment.as_deref()),
+            Some(Some("honr-cockpit"))
         );
         assert_eq!(
             state
-                .ops_session
+                .cockpit_session
                 .as_ref()
                 .map(|s| s.conversation_id.as_deref()),
             Some(Some("conv-a"))
         );
         assert_eq!(
-            state.ops_session.as_ref().map(|s| s.status),
-            Some(OpsSessionStatus::Parked)
+            state.cockpit_session.as_ref().map(|s| s.status),
+            Some(CockpitSessionStatus::Parked)
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -7838,22 +7885,22 @@ mod tests {
         assert_eq!(p.cpu.as_deref(), Some("4"));
         assert_eq!(p.memory.as_deref(), Some("8Gi"));
         assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
-        let ops = b.get_sandbox_profile("ops").expect("ops");
-        assert_eq!(ops.name, "Ops");
-        assert_eq!(ops.image, "seed-image:test");
-        assert_eq!(ops.cpu.as_deref(), Some(crate::model::OPS_SANDBOX_CPU));
-        assert_eq!(ops.memory.as_deref(), Some(crate::model::OPS_SANDBOX_MEMORY));
+        let cockpit_profile = b.get_sandbox_profile("cockpit").expect("cockpit");
+        assert_eq!(cockpit_profile.name, "Cockpit");
+        assert_eq!(cockpit_profile.image, "seed-image:test");
+        assert_eq!(cockpit_profile.cpu.as_deref(), Some(crate::model::COCKPIT_SANDBOX_CPU));
+        assert_eq!(cockpit_profile.memory.as_deref(), Some(crate::model::COCKPIT_SANDBOX_MEMORY));
         assert_ne!(
-            ops.cpu, p.cpu,
-            "ops cpu must stay distinct from worker default"
+            cockpit_profile.cpu, p.cpu,
+            "cockpit cpu must stay distinct from worker default"
         );
         assert_ne!(
-            ops.memory, p.memory,
-            "ops memory must stay distinct from worker default"
+            cockpit_profile.memory, p.memory,
+            "cockpit memory must stay distinct from worker default"
         );
         assert!(
-            !ops.policy.contains("github.com") && !ops.policy.contains("name: github"),
-            "ops policy must not copy worker GitHub egress"
+            !cockpit_profile.policy.contains("github.com") && !cockpit_profile.policy.contains("name: github"),
+            "cockpit policy must not copy worker GitHub egress"
         );
         // Second seed is a no-op.
         assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
@@ -7861,11 +7908,11 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_profiles_ensure_ops_when_catalog_already_has_default() {
+    fn sandbox_profiles_ensure_cockpit_when_catalog_already_has_default() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-sbx-ensure-ops-{}",
+                "honr-test-sbx-ensure-cockpit-{}",
                 std::process::id()
             )),
         );
@@ -7880,13 +7927,18 @@ mod tests {
         })
         .expect("default");
         b.set_default_sandbox_profile("default").unwrap();
-        assert!(b.get_sandbox_profile("ops").is_none());
-        assert!(b.ensure_ops_sandbox_profile_from(&agents_for_seed()));
-        let ops = b.get_sandbox_profile("ops").expect("ops");
-        assert_eq!(ops.cpu.as_deref(), Some(crate::model::OPS_SANDBOX_CPU));
-        assert_eq!(ops.memory.as_deref(), Some(crate::model::OPS_SANDBOX_MEMORY));
-        // Never overwrite an existing ops entry.
-        assert!(!b.ensure_ops_sandbox_profile_from(&agents_for_seed()));
+        assert!(b.get_sandbox_profile("cockpit").is_none());
+        assert!(b.ensure_cockpit_sandbox_profile_from(&agents_for_seed()));
+        let cockpit_profile = b.get_sandbox_profile("cockpit").expect("cockpit");
+        assert_eq!(cockpit_profile.cpu.as_deref(), Some(crate::model::COCKPIT_SANDBOX_CPU));
+        assert_eq!(cockpit_profile.memory.as_deref(), Some(crate::model::COCKPIT_SANDBOX_MEMORY));
+        assert_eq!(
+            b.cockpit_sandbox_profile_id().as_deref(),
+            Some("cockpit"),
+            "ensure sets Cockpit preference when it was unset"
+        );
+        // Never overwrite an existing cockpit entry or preference.
+        assert!(!b.ensure_cockpit_sandbox_profile_from(&agents_for_seed()));
         assert_eq!(b.list_sandbox_profiles().len(), 2);
         assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
     }

@@ -8,8 +8,8 @@ import type {
   OpenShellProvidersOut,
   OpenShellSettings,
   OpenShellStatus,
-  OpsSession,
-  OpsSessionOut,
+  CockpitSession,
+  CockpitSessionOut,
   ProviderTypeProfile,
   SandboxProfile,
   SandboxProfilesOut,
@@ -169,6 +169,8 @@ export const api = {
   }): Promise<SandboxProfile> => post("/sandbox-profiles", profile),
   setDefaultSandboxProfile: (id: string): Promise<SandboxProfilesOut> =>
     post(`/sandbox-profiles/${encodeURIComponent(id)}/default`),
+  setCockpitSandboxProfile: (id: string): Promise<SandboxProfilesOut> =>
+    post(`/sandbox-profiles/${encodeURIComponent(id)}/cockpit`),
   /** Project only. Pass `null` (or omit) to inherit the global default. */
   setProjectSandboxProfile: (
     id: number,
@@ -221,25 +223,39 @@ export const api = {
   listOpenShellProviderProfiles: (): Promise<ProviderTypeProfile[]> =>
     fetch("/api/openshell/provider-profiles", fetchOpts).then(jsonOrThrow),
 
-  /** Board ops-session singleton — Cockpit polls this; no local lifecycle. */
-  getOpsSession: (): Promise<OpsSessionOut> =>
-    fetch("/api/ops-session", fetchOpts).then(jsonOrThrow),
-  startOpsSession: (body?: {
+  /** Board cockpit-session singleton — Cockpit polls this; no local lifecycle. */
+  getCockpitSession: (): Promise<CockpitSessionOut> =>
+    fetch("/api/cockpit-session", fetchOpts).then(jsonOrThrow),
+  startCockpitSession: (body?: {
     environment?: string | null;
     conversation_id?: string | null;
-  }): Promise<OpsSession> => post("/ops-session", body ?? {}),
-  parkOpsSession: (): Promise<OpsSession> => post("/ops-session/park"),
-  resumeOpsSession: (): Promise<OpsSession> => post("/ops-session/resume"),
-  stopOpsSession: (): Promise<null> => del("/ops-session"),
+  }): Promise<CockpitSession> => post("/cockpit-session", body ?? {}),
+  parkCockpitSession: (): Promise<CockpitSession> => post("/cockpit-session/park"),
+  resumeCockpitSession: (): Promise<CockpitSession> => post("/cockpit-session/resume"),
+  stopCockpitSession: (): Promise<null> => del("/cockpit-session"),
 
   /**
-   * Host-mediated ops chat — POST /api/ops-chat, SSE agent lines.
-   * Bridge reads environment/conversation_id from Board; no local lifecycle.
+   * Mint honr-cockpit MCP tokens for the logged-in user and inject mcp.json into
+   * the Board cockpit sandbox. Does not return secrets to the browser.
+   */
+  provisionCockpitMcp: (): Promise<{
+    ok: boolean;
+    environment: string;
+    resource: string;
+    client_id: string;
+    sub: string;
+    expires_at: number;
+    injected: boolean;
+  }> => post("/cockpit-session/mcp-cred"),
+
+  /**
+   * Legacy host-mediated cockpit chat — POST /api/cockpit-chat, SSE agent lines.
+   * Cockpit attach uses `/api/cockpit-attach` WebSocket instead.
    */
   streamOpsChat,
 };
 
-/** Ready payload from the ops-chat bridge `ready` SSE event. */
+/** Ready payload from the cockpit-chat bridge `ready` SSE event. */
 export type OpsChatReady = {
   environment: string;
   conversation_id?: string | null;
@@ -254,7 +270,7 @@ export type OpsChatHandlers = {
 };
 
 /**
- * Authenticated prompt into the Running ops seat; streams SSE
+ * Authenticated prompt into the Running cockpit; streams SSE
  * (`ready` / `agent` / `error` / `done`). Refuses with HTTP error when the
  * Board session is absent, parked, or missing environment.
  */
@@ -262,7 +278,7 @@ export async function streamOpsChat(
   prompt: string,
   handlers: OpsChatHandlers = {},
 ): Promise<void> {
-  const r = await fetch("/api/ops-chat", {
+  const r = await fetch("/api/cockpit-chat", {
     ...fetchOpts,
     method: "POST",
     headers: {
@@ -285,7 +301,7 @@ export async function streamOpsChat(
   }
 
   if (!r.body) {
-    throw new Error("ops chat response had no body");
+    throw new Error("cockpit chat response had no body");
   }
 
   const reader = r.body.getReader();

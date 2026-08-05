@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Thin face over Board /api/ops-session + OpenShell connect.
+# Thin face over Board /api/cockpit-session + OpenShell connect.
 # Does not store lifecycle: environment and conversation live on the Board.
 set -euo pipefail
 
 HONR_URL="${HONR_URL:-http://127.0.0.1:8080}"
-COOKIE_JAR="${HONR_COOKIE_JAR:-${TMPDIR:-/tmp}/honr-ops.cookies}"
+COOKIE_JAR="${HONR_COOKIE_JAR:-${TMPDIR:-/tmp}/honr-cockpit.cookies}"
 USER="${HONR_USER:-}"
 PASS="${HONR_PASSWORD:-}"
 
 usage() {
   cat <<'EOF'
-Usage: ops-seat.sh <start|status|attach|park|resume|stop|login>
+Usage: cockpit.sh <start|status|attach|park|resume|stop|login>
 
-Board owns ops-session lifecycle. This script only calls REST and
+Board owns cockpit-session lifecycle. This script only calls REST and
 `openshell sandbox connect` — no local session file beyond the auth cookie jar.
 
 Env:
   HONR_URL          default http://127.0.0.1:8080
-  HONR_COOKIE_JAR   default $TMPDIR/honr-ops.cookies
+  HONR_COOKIE_JAR   default $TMPDIR/honr-cockpit.cookies
   HONR_USER / HONR_PASSWORD   for login (or run `login` interactively)
 EOF
 }
@@ -55,7 +55,7 @@ login() {
 ensure_auth() {
   local code
   code=$(curl -sS -o /dev/null -w '%{http_code}' -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
-    "${HONR_URL}/api/ops-session" || true)
+    "${HONR_URL}/api/cockpit-session" || true)
   if [[ "$code" == "401" ]]; then
     if [[ -n "${USER:-}" && -n "${PASS:-}" ]]; then
       login
@@ -67,7 +67,7 @@ ensure_auth() {
 }
 
 session_json() {
-  api GET /api/ops-session
+  api GET /api/cockpit-session
 }
 
 environment() {
@@ -83,9 +83,9 @@ case "$cmd" in
   start)
     need_jq
     ensure_auth
-    api POST /api/ops-session -d '{}'
+    api POST /api/cockpit-session -d '{}'
     echo >&2
-    echo "Board session created; supervisor materializes the ops sandbox." >&2
+    echo "Board session created; supervisor materializes the cockpit sandbox." >&2
     echo "Poll: $0 status" >&2
     ;;
   status)
@@ -108,20 +108,20 @@ case "$cmd" in
   park)
     need_jq
     ensure_auth
-    api POST /api/ops-session/park -d ''
+    api POST /api/cockpit-session/park -d ''
     echo >&2
     ;;
   resume)
     need_jq
     ensure_auth
-    api POST /api/ops-session/resume -d ''
+    api POST /api/cockpit-session/resume -d ''
     echo >&2
     ;;
   stop)
     need_jq
     ensure_auth
-    api DELETE /api/ops-session
-    echo "ops session cleared (supervisor stops agent + deletes sandbox)" >&2
+    api DELETE /api/cockpit-session
+    echo "cockpit session cleared (supervisor stcockpit agent + deletes sandbox)" >&2
     ;;
   ""|-h|--help|help)
     usage

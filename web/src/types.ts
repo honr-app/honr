@@ -66,6 +66,7 @@ export interface SandboxProfile {
 export interface SandboxProfilesOut {
   profiles: SandboxProfile[];
   default_sandbox_profile_id: string | null;
+  cockpit_sandbox_profile_id: string | null;
 }
 
 /**
@@ -392,24 +393,24 @@ export interface Snapshot {
   default_model?: string;
 }
 
-/** Wire value for Board ops-session status (`snake_case` from Rust). */
-export type OpsSessionStatus = "running" | "parked";
+/** Wire value for Board cockpit-session status (`snake_case` from Rust). */
+export type CockpitSessionStatus = "running" | "parked";
 
 /**
- * Board ops-session singleton — Cockpit is a thin face over this record.
+ * Board cockpit-session singleton — Cockpit is a thin face over this record.
  * Do not invent a parallel lifecycle in React.
  */
-export interface OpsSession {
+export interface CockpitSession {
   environment?: string | null;
   conversation_id?: string | null;
-  status: OpsSessionStatus;
+  status: CockpitSessionStatus;
   created_at: string;
   updated_at: string;
 }
 
-/** GET /api/ops-session */
-export interface OpsSessionOut {
-  session: OpsSession | null;
+/** GET /api/cockpit-session */
+export interface CockpitSessionOut {
+  session: CockpitSession | null;
 }
 
 export type BoardEvent =

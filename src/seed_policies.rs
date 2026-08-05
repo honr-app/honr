@@ -8,7 +8,7 @@
 /// the catalog is empty. After seed, edit the profile on the board.
 pub const DEFAULT_WORKER_SANDBOX_POLICY: &str = r#"# honr card-worker sandbox: reach Vertex / Cursor for inference and GitHub for
 # code. Default-deny includes honr MCP — workers stay air-gapped from the board.
-# The privileged ops seat uses sandbox/ops-policy.yaml (ops profile) instead.
+# The privileged cockpit uses sandbox/cockpit-policy.yaml (cockpit profile) instead.
 # Live edits: Settings → OpenShell → Profiles → default (not this string).
 version: 1
 

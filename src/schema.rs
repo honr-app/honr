@@ -201,9 +201,9 @@ pub fn card_sandbox_stem(prefix: &str, id: impl std::fmt::Display) -> String {
     format!("{}-card-{}-", sandbox_prefix_slug(prefix), id)
 }
 
-/// Stable singleton name for the control-plane ops seat: `{slug}-ops`.
-pub fn ops_sandbox_name(prefix: &str) -> String {
-    format!("{}-ops", sandbox_prefix_slug(prefix))
+/// Stable singleton name for the control-plane cockpit: `{slug}-cockpit`.
+pub fn cockpit_sandbox_name(prefix: &str) -> String {
+    format!("{}-cockpit", sandbox_prefix_slug(prefix))
 }
 
 impl Default for AgentConfig {
@@ -384,8 +384,8 @@ mod tests {
         assert_eq!(card_sandbox_name("acme/widgets", 3, 1), "acme-widgets-card-3-a1");
         assert_eq!(card_branch_name("", 1), "honr/card-1");
         assert_eq!(card_sandbox_stem("honr", 9), "honr-card-9-");
-        assert_eq!(ops_sandbox_name("honr"), "honr-ops");
-        assert_eq!(ops_sandbox_name("acme/widgets"), "acme-widgets-ops");
+        assert_eq!(cockpit_sandbox_name("honr"), "honr-cockpit");
+        assert_eq!(cockpit_sandbox_name("acme/widgets"), "acme-widgets-cockpit");
     }
 
     #[test]

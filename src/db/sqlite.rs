@@ -1,18 +1,19 @@
 //! SQLite `BoardStore` — row-level board persistence and one-shot JSON import.
 
 use super::codec::{
-    item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME, META_DEFAULT_SANDBOX_PROFILE_ID,
-    META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_BIN, META_OPENSHELL_GATEWAY_ENDPOINT,
-    META_AUTH_ALLOWED_TEAMS, META_AUTH_ALLOWED_USERS, META_AUTH_SEALED,
-    META_GITHUB_APP_INSTALLATION_ID, META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED,
-    META_OPENSHELL_PROVIDERS, META_OPS_SESSION, META_SANDBOX_PROFILES, META_WEBHOOK_POLL,
-    META_WEBHOOK_POLL_TIPS, META_WORKSPACE_BINDING,
+    item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME,
+    META_COCKPIT_SANDBOX_PROFILE_ID, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
+    META_NEXT_ID, META_OPENSHELL_BIN, META_OPENSHELL_GATEWAY_ENDPOINT, META_AUTH_ALLOWED_TEAMS,
+    META_AUTH_ALLOWED_USERS, META_AUTH_SEALED, META_GITHUB_APP_INSTALLATION_ID,
+    META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS,
+    META_COCKPIT_SESSION, META_SANDBOX_PROFILES, META_WEBHOOK_POLL, META_WEBHOOK_POLL_TIPS,
+    META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
 use crate::model::{
-    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, OpsSession, SandboxProfile,
+    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, CockpitSession, SandboxProfile,
     WebhookPollConfig,
     WorkItem, WorkspaceBinding,
 };
@@ -65,6 +66,7 @@ impl SqliteBoardStore {
         let stories = self.load_all_stories().await?;
         let sandbox_profiles = self.load_sandbox_profiles().await?;
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
+        let cockpit_sandbox_profile_id = self.load_cockpit_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
         let openshell_bin = self.load_openshell_bin().await?;
         let openshell_gateway_endpoint = self.load_openshell_gateway_endpoint().await?;
@@ -78,13 +80,14 @@ impl SqliteBoardStore {
         let openshell_providers = self.load_openshell_providers().await?;
         let webhook_poll = self.load_webhook_poll().await?;
         let webhook_poll_tips = self.load_webhook_poll_tips().await?;
-        let ops_session = self.load_ops_session().await?;
+        let cockpit_session = self.load_cockpit_session().await?;
         let mut state = BoardState {
             next_id,
             items,
             stories,
             sandbox_profiles,
             default_sandbox_profile_id,
+            cockpit_sandbox_profile_id,
             workspace,
             openshell_bin,
             openshell_gateway_endpoint,
@@ -98,7 +101,7 @@ impl SqliteBoardStore {
             openshell_providers,
             webhook_poll,
             webhook_poll_tips,
-            ops_session,
+            cockpit_session,
             agent_logs: BTreeMap::new(),
             ..Default::default()
         };
@@ -162,6 +165,12 @@ impl SqliteBoardStore {
             &mut tx,
             META_DEFAULT_SANDBOX_PROFILE_ID,
             state.default_sandbox_profile_id.as_deref().unwrap_or(""),
+        )
+        .await?;
+        set_meta_tx(
+            &mut tx,
+            META_COCKPIT_SANDBOX_PROFILE_ID,
+            state.cockpit_sandbox_profile_id.as_deref().unwrap_or(""),
         )
         .await?;
         let workspace_json = match &state.workspace {
@@ -233,12 +242,12 @@ impl SqliteBoardStore {
         let tips_json = serde_json::to_string(&state.webhook_poll_tips)
             .map_err(|e| StoreError::Query(format!("serialize webhook_poll_tips: {e}")))?;
         set_meta_tx(&mut tx, META_WEBHOOK_POLL_TIPS, &tips_json).await?;
-        let ops_session_json = match &state.ops_session {
+        let cockpit_session_json = match &state.cockpit_session {
             None => String::new(),
             Some(session) => serde_json::to_string(session)
-                .map_err(|e| StoreError::Query(format!("serialize ops_session: {e}")))?,
+                .map_err(|e| StoreError::Query(format!("serialize cockpit_session: {e}")))?,
         };
-        set_meta_tx(&mut tx, META_OPS_SESSION, &ops_session_json).await?;
+        set_meta_tx(&mut tx, META_COCKPIT_SESSION, &cockpit_session_json).await?;
 
         tx.commit()
             .await
@@ -285,6 +294,13 @@ impl SqliteBoardStore {
     async fn load_default_sandbox_profile_id(&self) -> Result<Option<String>, StoreError> {
         Ok(self
             .meta_get(META_DEFAULT_SANDBOX_PROFILE_ID)
+            .await?
+            .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_cockpit_sandbox_profile_id(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .meta_get(META_COCKPIT_SANDBOX_PROFILE_ID)
             .await?
             .filter(|s| !s.is_empty()))
     }
@@ -404,12 +420,12 @@ impl SqliteBoardStore {
         }
     }
 
-    async fn load_ops_session(&self) -> Result<Option<OpsSession>, StoreError> {
-        match self.meta_get(META_OPS_SESSION).await? {
+    async fn load_cockpit_session(&self) -> Result<Option<CockpitSession>, StoreError> {
+        match self.meta_get(META_COCKPIT_SESSION).await? {
             None => Ok(None),
             Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(None),
             Some(raw) => serde_json::from_str(&raw)
-                .map_err(|e| StoreError::Query(format!("decode ops_session: {e}"))),
+                .map_err(|e| StoreError::Query(format!("decode cockpit_session: {e}"))),
         }
     }
 }
@@ -1033,6 +1049,7 @@ mod tests {
             },
         );
         state.default_sandbox_profile_id = Some("default".into());
+        state.cockpit_sandbox_profile_id = Some("cockpit".into());
         state.workspace = Some(crate::model::WorkspaceBinding {
             forge: "github".into(),
         });
@@ -1045,6 +1062,7 @@ mod tests {
             Some("default")
         );
         assert_eq!(again.default_sandbox_profile_id.as_deref(), Some("default"));
+        assert_eq!(again.cockpit_sandbox_profile_id.as_deref(), Some("cockpit"));
         assert_eq!(again.sandbox_profiles.get("default").unwrap().image, "img:1");
         assert!(
             again
@@ -1079,23 +1097,25 @@ mod tests {
         assert_eq!(rt.engine, "agy");
         assert_eq!(rt.max_concurrent, 1);
 
-        // Ops session meta round-trip.
-        let mut with_ops = rt_again;
-        with_ops.ops_session = Some(crate::model::OpsSession::new(
-            Some("honr-ops".into()),
+        // Cockpit session meta round-trip.
+        let mut with_cockpit = rt_again;
+        with_cockpit.cockpit_session = Some(crate::model::CockpitSession::new(
+            Some("honr-cockpit".into()),
             Some("conv-db".into()),
         ));
-        with_ops.ops_session.as_mut().unwrap().status =
-            crate::model::OpsSessionStatus::Parked;
+        with_cockpit.cockpit_session.as_mut().unwrap().status =
+            crate::model::CockpitSessionStatus::Parked;
         store
-            .save_board_state(&with_ops)
+            .save_board_state(&with_cockpit)
             .await
-            .expect("save ops session");
-        let ops_again = store.load_board_state().await.expect("reload ops");
-        let ops = ops_again.ops_session.expect("ops_session round-trip");
-        assert_eq!(ops.environment.as_deref(), Some("honr-ops"));
-        assert_eq!(ops.conversation_id.as_deref(), Some("conv-db"));
-        assert_eq!(ops.status, crate::model::OpsSessionStatus::Parked);
+            .expect("save cockpit session");
+        let cockpit_again = store.load_board_state().await.expect("reload cockpit");
+        let session = cockpit_again
+            .cockpit_session
+            .expect("cockpit_session round-trip");
+        assert_eq!(session.environment.as_deref(), Some("honr-cockpit"));
+        assert_eq!(session.conversation_id.as_deref(), Some("conv-db"));
+        assert_eq!(session.status, crate::model::CockpitSessionStatus::Parked);
     }
 
     #[tokio::test]

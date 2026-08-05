@@ -16,6 +16,7 @@ use tokio_stream::wrappers::BroadcastStream;
 #[derive(Debug, PartialEq, Eq)]
 pub enum WsFrame {
     Text(String),
+    Binary(Vec<u8>),
     Ping(Vec<u8>),
     Pong(Vec<u8>),
     Close,
@@ -146,6 +147,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             Ok(Some(WsFrame::Text(text)))
         }
+        0x2 => Ok(Some(WsFrame::Binary(payload))),
         0x8 => Ok(Some(WsFrame::Close)),
         0x9 => Ok(Some(WsFrame::Ping(payload))),
         0xA => Ok(Some(WsFrame::Pong(payload))),
@@ -159,6 +161,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 ) -> std::io::Result<()> {
     let (opcode, payload) = match frame {
         WsFrame::Text(text) => (0x81u8, text.into_bytes()),
+        WsFrame::Binary(data) => (0x82u8, data),
         WsFrame::Ping(data) => (0x89u8, data),
         WsFrame::Pong(data) => (0x8Au8, data),
         WsFrame::Close => (0x88u8, vec![]),
@@ -244,6 +247,9 @@ where
                                 ClientMessage::Pong => {}
                             }
                         }
+                    }
+                    Ok(Some(WsFrame::Binary(_))) => {
+                        // Board sync is text-only; ignore binary frames.
                     }
                     Ok(Some(WsFrame::Ping(data))) => {
                         if tx.send(WsFrame::Pong(data)).await.is_err() {

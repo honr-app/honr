@@ -48,20 +48,20 @@ Task.
 | Role | Who | Reach |
 |---|---|---|
 | **Operator (host)** | Human + chat agent on the host | MCP `/mcp`: shape Projects, triage Needs You / Review, dispatch, park / steer / halt. No worker verbs. |
-| **Ops seat** | Privileged agent in an OpenShell sandbox on the `ops` profile | Narrow egress to host honr MCP (+ inference); operator tools only. No GitHub / package-registry identity. Selectable in Settings → OpenShell → Profiles |
+| **Cockpit** | Privileged agent in an OpenShell sandbox on the `cockpit` profile | Narrow egress to host honr MCP (+ inference); operator tools only. No GitHub / package-registry identity. Selectable in Settings → OpenShell → Profiles |
 | **Worker** | Agent inside an OpenShell sandbox on the default / project profile | GitHub + inference egress. No network path to honr. Supervisor calls `claim` / `heartbeat` / `report` on its behalf |
 
 An agent that could reach honr's MCP could approve its own review. Worker
 containment is intentional: the card worker is material, not a participant. The
-ops seat is a separate sandbox profile (seeded from `sandbox/ops-policy.yaml`) so that
+cockpit is a separate sandbox profile (seeded from `sandbox/cockpit-policy.yaml`) so that
 privileged MCP reach does not share the worker network allow-list.
 
-The durable **ops session** (sandbox environment name, conversation id, running
+The durable **cockpit session** (sandbox environment name, conversation id, running
 or parked-like hold) lives on the Board as a singleton record — not a WorkItem
-and not card claim/heartbeat/report lifecycle. Cockpit chat (primary attach) and
-optional TTY reconnect are faces over that Board record — they read and mutate
-it so they do not grow a second state machine. The supervisor materializes the
-seat from that record: ops profile sandbox, detached agent, reconcile across
+and not card claim/heartbeat/report lifecycle. TTY attach (primary) and optional
+chat reconnect are faces over that Board record — they read and mutate it so
+they do not grow a second state machine. The supervisor materializes the seat
+from that record: cockpit profile sandbox, interactive agent, reconcile across
 honr restart, and clean stop.
 
 ## Invariants worth protecting
@@ -85,5 +85,5 @@ humans merge.
 - New to the board → [Quickstart](quickstart.md)
 - Day-to-day operation → [Workflow](workflow.md)
 - Turn on sandboxed agents → [Agents](agents.md)
-- Ops seat Cockpit chat / start / stop → [Ops seat](ops-seat.md)
+- Cockpit start / TTY attach / stop → [Cockpit](cockpit.md)
 - How the pieces fit → [Architecture](architecture.md)

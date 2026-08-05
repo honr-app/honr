@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, AuthRequiredError } from "./api.js";
 import { Board } from "./components/Board";
-import { Cockpit } from "./components/Cockpit";
+import { CockpitDrop, CockpitToggle } from "./components/Cockpit";
 import { DetailDrawer } from "./components/Detail";
 import { Help } from "./components/Help";
 import { Login } from "./components/Login";
@@ -95,6 +95,7 @@ function AuthedApp({
   const now = useNow();
   const [open, setOpen] = useState<number | null>(null);
   const [view, setView] = useState<AppView>("board");
+  const [cockpitOpen, setCockpitOpen] = useState(false);
   const [themePref, setThemePref] = useState<ThemePreference>(() =>
     readThemePreference(),
   );
@@ -157,6 +158,12 @@ function AuthedApp({
           </button>
           {totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
         </div>
+        <div className="cockpit-bar-slot">
+          <CockpitToggle
+            open={cockpitOpen}
+            onToggle={() => setCockpitOpen((was) => !was)}
+          />
+        </div>
         <div className="stats">
           <span className="live">{live} working</span>
           <span className={b.connected ? "conn ok" : "conn off"}>
@@ -192,6 +199,8 @@ function AuthedApp({
         </div>
       </header>
 
+      <CockpitDrop open={cockpitOpen} />
+
       {staleFor !== null && (
         <div className="err banner">
           ⚠ NOT LIVE — showing state from {Math.round(staleFor / 1000)}s ago.
@@ -212,7 +221,7 @@ function AuthedApp({
           }}
         />
 
-        <main className={open && view === "board" ? "with-drawer" : ""}>
+        <main className={view === "board" && open != null ? "with-side-panes" : ""}>
           {view === "board" ? (
             <>
               {!b.loaded ? (
@@ -244,8 +253,6 @@ function AuthedApp({
                 />
               )}
             </>
-          ) : view === "cockpit" ? (
-            <Cockpit />
           ) : view === "help" ? (
             <Help />
           ) : (

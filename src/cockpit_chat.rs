@@ -1,12 +1,12 @@
-//! Host-mediated ops chat bridge.
+//! Host-mediated cockpit chat bridge.
 //!
-//! Authenticated browser prompts are forwarded into the Board-named ops sandbox
-//! conversation and streamed back. Board `ops_session` stays authoritative for
+//! Authenticated browser prompts are forwarded into the Board-named cockpit sandbox
+//! conversation and streamed back. Board `cockpit_session` stays authoritative for
 //! environment / conversation_id / status — this module is a thin face: it
 //! reads those fields, refuses when the seat is not ready, and never parks,
 //! resumes, or stops the session.
 
-use crate::model::OpsSessionStatus;
+use crate::model::CockpitSessionStatus;
 use crate::store::SharedBoard;
 use crate::supervisor::{parse_conversation_id, setup_agy_auth, shell_quote};
 
@@ -31,7 +31,7 @@ const AGENT_PID: &str = "/tmp/agent.pid";
 const WORKDIR: &str = "/sandbox/repo";
 
 pub fn routes() -> Router<SharedBoard> {
-    Router::new().route("/ops-chat", post(ops_chat))
+    Router::new().route("/cockpit-chat", post(cockpit_chat))
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,25 +74,25 @@ impl IntoResponse for BridgeError {
 /// Preconditions for a chat turn. Read-only over Board — no lifecycle writes.
 fn ready_target(board: &SharedBoard) -> Result<(String, Option<String>, String), BridgeError> {
     let session = board
-        .ops_session()
-        .ok_or_else(|| BridgeError::conflict("no ops session"))?;
+        .cockpit_session()
+        .ok_or_else(|| BridgeError::conflict("no cockpit session"))?;
     match session.status {
-        OpsSessionStatus::Parked => {
-            return Err(BridgeError::conflict("ops session is parked"));
+        CockpitSessionStatus::Parked => {
+            return Err(BridgeError::conflict("cockpit session is parked"));
         }
-        OpsSessionStatus::Running => {}
+        CockpitSessionStatus::Running => {}
     }
     let environment = session
         .environment
         .filter(|e| !e.trim().is_empty())
-        .ok_or_else(|| BridgeError::conflict("ops session has no environment yet"))?;
+        .ok_or_else(|| BridgeError::conflict("cockpit session has no environment yet"))?;
     let conversation_id = session.conversation_id.filter(|c| !c.trim().is_empty());
-    let engine = resolve_ops_engine(board);
+    let engine = resolve_cockpit_engine(board);
     Ok((environment, conversation_id, engine))
 }
 
-fn resolve_ops_engine(board: &SharedBoard) -> String {
-    let resolved = board.resolve_ops_sandbox_create();
+fn resolve_cockpit_engine(board: &SharedBoard) -> String {
+    let resolved = board.resolve_cockpit_sandbox_create();
     if let Some(e) = resolved
         .engine
         .as_deref()
@@ -153,7 +153,7 @@ fn stop_live_agent_script() -> String {
     )
 }
 
-async fn ops_chat(
+async fn cockpit_chat(
     AxState(board): AxState<SharedBoard>,
     Json(req): Json<OpsChatReq>,
 ) -> Response {
@@ -230,7 +230,7 @@ async fn run_turn(
     };
     if env_now != environment {
         return Err(format!(
-            "ops session environment changed ({environment} → {env_now})"
+            "cockpit session environment changed ({environment} → {env_now})"
         ));
     }
     let conversation_id = cid_now.as_deref().or(conversation_id);
@@ -246,7 +246,7 @@ async fn run_turn(
 
     // Free the seat's detached print process so this turn injects into the
     // same conversation rather than racing a parallel agent. Does not touch
-    // Board status — park/stop stay on /api/ops-session*.
+    // Board status — park/stop stay on /api/cockpit-session*.
     let _ = os
         .exec(
             environment,
@@ -265,7 +265,7 @@ async fn run_turn(
     let result = os
         .exec_streaming(environment, &script, timeout, move |line| {
             if let Some(cid) = parse_conversation_id(line) {
-                let _ = board_lines.update_ops_session(None, Some(cid));
+                let _ = board_lines.update_cockpit_session(None, Some(cid));
             }
             let ev = Event::default().event("agent").data(line);
             // Non-blocking: drop if the client is slow rather than stalling the
@@ -289,7 +289,7 @@ async fn run_turn(
             }
             s
         };
-        return Err(format!("ops chat turn exited {}: {detail}", result.code));
+        return Err(format!("cockpit chat turn exited {}: {detail}", result.code));
     }
     Ok(())
 }
@@ -309,7 +309,7 @@ mod tests {
         Arc::new(Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-ops-chat-{}.json",
+                "honr-test-cockpit-chat-{}.json",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -353,9 +353,9 @@ mod tests {
     fn ready_target_refuses_absent_parked_and_missing_environment() {
         let b = board();
         let err = ready_target(&b).expect_err("no session");
-        assert!(err.message.contains("no ops session"), "{}", err.message);
+        assert!(err.message.contains("no cockpit session"), "{}", err.message);
 
-        b.create_ops_session(None, None).expect("create");
+        b.create_cockpit_session(None, None).expect("create");
         let err = ready_target(&b).expect_err("no environment");
         assert!(
             err.message.contains("no environment"),
@@ -363,15 +363,15 @@ mod tests {
             err.message
         );
 
-        b.update_ops_session(Some("honr-ops".into()), None)
+        b.update_cockpit_session(Some("honr-cockpit".into()), None)
             .expect("env");
-        b.park_ops_session().expect("park");
+        b.park_cockpit_session().expect("park");
         let err = ready_target(&b).expect_err("parked");
         assert!(err.message.contains("parked"), "{}", err.message);
 
-        b.resume_ops_session().expect("resume");
+        b.resume_cockpit_session().expect("resume");
         let (env, cid, engine) = ready_target(&b).expect("running");
-        assert_eq!(env, "honr-ops");
+        assert_eq!(env, "honr-cockpit");
         assert!(cid.is_none());
         assert!(!engine.is_empty());
     }
@@ -379,20 +379,20 @@ mod tests {
     #[test]
     fn ready_target_passes_conversation_id_through() {
         let b = board();
-        b.create_ops_session(Some("honr-ops".into()), Some("conv-9".into()))
+        b.create_cockpit_session(Some("honr-cockpit".into()), Some("conv-9".into()))
             .expect("create");
         let (env, cid, _) = ready_target(&b).expect("ready");
-        assert_eq!(env, "honr-ops");
+        assert_eq!(env, "honr-cockpit");
         assert_eq!(cid.as_deref(), Some("conv-9"));
     }
 
     #[tokio::test]
-    async fn ops_chat_route_refuses_without_session() {
+    async fn cockpit_chat_route_refuses_without_session() {
         let b = board();
         let mut app = Router::new().nest("/api", routes()).with_state(b);
         let req = Request::builder()
             .method("POST")
-            .uri("/api/ops-chat")
+            .uri("/api/cockpit-chat")
             .header("content-type", "application/json")
             .body(Body::from(r#"{"prompt":"hello"}"#))
             .unwrap();
@@ -401,20 +401,20 @@ mod tests {
         let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(
-            v["error"].as_str().unwrap_or("").contains("no ops session"),
+            v["error"].as_str().unwrap_or("").contains("no cockpit session"),
             "{v}"
         );
     }
 
     #[tokio::test]
-    async fn ops_chat_route_refuses_empty_prompt() {
+    async fn cockpit_chat_route_refuses_empty_prompt() {
         let b = board();
-        b.create_ops_session(Some("honr-ops".into()), None)
+        b.create_cockpit_session(Some("honr-cockpit".into()), None)
             .expect("create");
         let mut app = Router::new().nest("/api", routes()).with_state(b);
         let req = Request::builder()
             .method("POST")
-            .uri("/api/ops-chat")
+            .uri("/api/cockpit-chat")
             .header("content-type", "application/json")
             .body(Body::from(r#"{"prompt":"  "}"#))
             .unwrap();
@@ -429,15 +429,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ops_chat_route_refuses_parked_session() {
+    async fn cockpit_chat_route_refuses_parked_session() {
         let b = board();
-        b.create_ops_session(Some("honr-ops".into()), Some("c1".into()))
+        b.create_cockpit_session(Some("honr-cockpit".into()), Some("c1".into()))
             .expect("create");
-        b.park_ops_session().expect("park");
+        b.park_cockpit_session().expect("park");
         let mut app = Router::new().nest("/api", routes()).with_state(b);
         let req = Request::builder()
             .method("POST")
-            .uri("/api/ops-chat")
+            .uri("/api/cockpit-chat")
             .header("content-type", "application/json")
             .body(Body::from(r#"{"prompt":"hello"}"#))
             .unwrap();
@@ -452,9 +452,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ops_chat_route_streams_agent_lines_when_running() {
+    async fn cockpit_chat_route_streams_agent_lines_when_running() {
         let path = std::env::temp_dir().join(format!(
-            "honr-test-ops-chat-stream-{}.json",
+            "honr-test-cockpit-chat-stream-{}.json",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -486,13 +486,13 @@ mod tests {
             Duration::from_secs(5),
         ));
         let b: SharedBoard = Arc::new(board);
-        b.create_ops_session(Some("honr-ops".into()), Some("conv-old".into()))
+        b.create_cockpit_session(Some("honr-cockpit".into()), Some("conv-old".into()))
             .expect("create");
 
         let mut app = Router::new().nest("/api", routes()).with_state(b.clone());
         let req = Request::builder()
             .method("POST")
-            .uri("/api/ops-chat")
+            .uri("/api/cockpit-chat")
             .header("content-type", "application/json")
             .body(Body::from(r#"{"prompt":"ping"}"#))
             .unwrap();
@@ -513,7 +513,7 @@ mod tests {
             body.contains("event:ready") || body.contains("event: ready"),
             "{body}"
         );
-        assert!(body.contains("honr-ops"), "{body}");
+        assert!(body.contains("honr-cockpit"), "{body}");
         assert!(
             body.contains("event:agent")
                 || body.contains("event: agent")
@@ -525,14 +525,14 @@ mod tests {
             "{body}"
         );
 
-        let cid = b.ops_session().and_then(|s| s.conversation_id);
+        let cid = b.cockpit_session().and_then(|s| s.conversation_id);
         assert_eq!(cid.as_deref(), Some("conv-from-stream"));
     }
 
     #[tokio::test]
-    async fn ops_chat_does_not_create_or_stop_session() {
+    async fn cockpit_chat_does_not_create_or_stop_session() {
         let path = std::env::temp_dir().join(format!(
-            "honr-test-ops-chat-lifecycle-{}.json",
+            "honr-test-cockpit-chat-lifecycle-{}.json",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -548,13 +548,13 @@ mod tests {
             Duration::from_secs(5),
         ));
         let b: SharedBoard = Arc::new(board);
-        b.create_ops_session(Some("honr-ops".into()), None)
+        b.create_cockpit_session(Some("honr-cockpit".into()), None)
             .expect("create");
 
         let mut app = Router::new().nest("/api", routes()).with_state(b.clone());
         let req = Request::builder()
             .method("POST")
-            .uri("/api/ops-chat")
+            .uri("/api/cockpit-chat")
             .header("content-type", "application/json")
             .body(Body::from(r#"{"prompt":"stay running"}"#))
             .unwrap();
@@ -564,8 +564,8 @@ mod tests {
             .await
             .unwrap();
 
-        let session = b.ops_session().expect("session must remain");
-        assert_eq!(session.status, OpsSessionStatus::Running);
-        assert_eq!(session.environment.as_deref(), Some("honr-ops"));
+        let session = b.cockpit_session().expect("session must remain");
+        assert_eq!(session.status, CockpitSessionStatus::Running);
+        assert_eq!(session.environment.as_deref(), Some("honr-cockpit"));
     }
 }

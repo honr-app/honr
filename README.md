@@ -85,7 +85,7 @@ make dev-ui               # Vite on :5173 (proxies to :8080)
 
 Connect an operator MCP client (honr must already be listening). After admin
 bootstrap, `/mcp` uses MCP OAuth 2.1 — Authenticate / Connect in the client and
-sign in with the same board credentials. That endpoint is the ops seat:
+sign in with the same board credentials. That endpoint is the cockpit:
 operator tools only (no `claim` / `heartbeat` / `report` / worker verbs).
 
 **Cursor** ([`.cursor/mcp.json`](.cursor/mcp.json)):

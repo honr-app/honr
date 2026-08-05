@@ -19,14 +19,14 @@ Empty boards seed `default` from the built-in string in
 sandboxes. Policy filesystem/process sections are immutable on a live sandbox;
 set them at create time.
 
-## `ops-policy.yaml`
+## `cockpit-policy.yaml`
 
-The **ops** control-plane seat policy: narrow egress to the host honr MCP
+The **cockpit** control-plane seat policy: narrow egress to the host honr MCP
 endpoint (`host.docker.internal` / `127.0.0.1` / `localhost` on port 8080) plus
 inference. It does not include GitHub or package-registry egress — those stay
-on the worker identity. Seeded into the sandbox-profile catalog as id `ops`
+on the worker identity. Seeded into the sandbox-profile catalog as id `cockpit`
 (Settings → OpenShell → Profiles) with lighter cpu/memory than the worker
-default. After seed, the board profile is authoritative for ops too.
+default. After seed, the board profile is authoritative for cockpit too.
 
 ## `Containerfile`
 

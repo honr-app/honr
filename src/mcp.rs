@@ -3,11 +3,11 @@
 //! human reading the board, and an agent has to without any human at all.
 //!
 //! Two families share one state machine; seats gate which family is visible:
-//!   * operator tools — what a liaison / ops seat needs to triage and decide
+//!   * operator tools — what a liaison / cockpit needs to triage and decide
 //!   * worker verbs  — `list_ready` `claim` `heartbeat` `split` `escalate`
 //!     `report` `release`, and nothing else
 //!
-//! `/mcp` (OAuth) is the **ops seat**: operator tools only. Worker verbs stay
+//! `/mcp` (OAuth) is the **cockpit**: operator tools only. Worker verbs stay
 //! on the host seat for supervisor/host tooling; the live supervisor path
 //! calls `Board` directly. If the worker surface grows past roughly that size,
 //! the orchestrator has started leaking its own complexity into the workers.
@@ -37,20 +37,20 @@ type Out<T> = Result<ToolJson<T>, ErrorData>;
 
 /// Which MCP tool family a session may use.
 ///
-/// Ops (default `/mcp`) is the privileged chatbot / OAuth operator client.
+/// Cockpit (default `/mcp`) is the privileged chatbot / OAuth operator client.
 /// Host keeps worker verbs for supervisor-facing tooling and tests; production
 /// card lifecycle still goes through `Board` in `store.rs`, not this seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum McpSeat {
     /// Operator tools only — no claim/heartbeat/report/split/escalate/release/list_ready.
     #[default]
-    Ops,
+    Cockpit,
     /// Operator tools plus worker verbs (host / supervisor tooling).
     #[allow(dead_code)] // constructed via `Operator::host` (tests + host tooling)
     Host,
 }
 
-/// Worker-verb tool names. Ops seat hides these from `tools/list` and rejects calls.
+/// Worker-verb tool names. Cockpit hides these from `tools/list` and rejects calls.
 pub const WORKER_VERB_TOOLS: &[&str] = &[
     "list_ready",
     "claim",
@@ -367,9 +367,9 @@ pub struct Operator {
 
 #[tool_router]
 impl Operator {
-    /// Ops seat — operator tools only. This is what `/mcp` mounts.
+    /// Cockpit — operator tools only. This is what `/mcp` mounts.
     pub fn new(board: SharedBoard) -> Self {
-        Self::with_seat(board, McpSeat::Ops)
+        Self::with_seat(board, McpSeat::Cockpit)
     }
 
     /// Host seat — operator tools plus worker verbs (supervisor/host tooling).
@@ -380,7 +380,7 @@ impl Operator {
 
     pub fn with_seat(board: SharedBoard, seat: McpSeat) -> Self {
         let mut tool_router = Self::tool_router();
-        if seat == McpSeat::Ops {
+        if seat == McpSeat::Cockpit {
             for name in WORKER_VERB_TOOLS {
                 tool_router.disable_route(*name);
             }
@@ -398,9 +398,9 @@ impl Operator {
     }
 
     fn deny_worker(&self, verb: &str) -> Result<(), ErrorData> {
-        if self.seat == McpSeat::Ops {
+        if self.seat == McpSeat::Cockpit {
             return Err(bad(format!(
-                "{verb} is a worker verb; ops seat is operator tools only"
+                "{verb} is a worker verb; cockpit is operator tools only"
             )));
         }
         Ok(())
@@ -1059,8 +1059,8 @@ impl ServerHandler for Operator {
             me
         })
         .with_instructions(match self.seat {
-            McpSeat::Ops => {
-                "honr — an agent orchestration board. You are the ops seat: the human's \
+            McpSeat::Cockpit => {
+                "honr — an agent orchestration board. You are the cockpit: the human's \
                  liaison over operator tools only (no claim/heartbeat/report/split/escalate/\
                  release/list_ready — those are worker verbs on the host/supervisor path).\n\n\
                  Start with board_snapshot. Triage in this order, because urgency differs:\n\
@@ -1091,7 +1091,7 @@ impl ServerHandler for Operator {
                 "honr — host MCP seat: operator tools plus worker verbs \
                  (list_ready/claim/heartbeat/split/escalate/report/release). \
                  Card lifecycle mutations still go through Board; this seat is for \
-                 supervisor/host tooling, not the ops chatbot."
+                 supervisor/host tooling, not the cockpit chatbot."
             }
         })
     }
@@ -1099,7 +1099,7 @@ impl ServerHandler for Operator {
 
 /// Mounted on the same axum router, same port, same state as the human face.
 ///
-/// `/mcp` is the **ops seat** (operator tools only). Stateless on purpose:
+/// `/mcp` is the **cockpit** (operator tools only). Stateless on purpose:
 /// tools are request/response over `SharedBoard`; an in-memory `Mcp-Session-Id`
 /// only made Cursor brittle across `cargo run` restarts ("Session not found")
 /// without buying us server→client streams.
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn cut_scope_list_ready_and_split_return_record_with_items() {
         let (board, goal_id) = test_board();
-        // Worker-verb shape checks use the host seat (ops hides list_ready).
+        // Worker-verb shape checks use the host seat (cockpit hides list_ready).
         let operator = Operator::host(board.clone());
 
         // list_ready
@@ -1568,12 +1568,12 @@ mod tests {
     }
 
     #[test]
-    fn ops_seat_lists_operator_tools_and_hides_worker_verbs() {
+    fn cockpit_seat_lists_operator_tools_and_hides_worker_verbs() {
         let (board, _) = test_board();
-        let ops = Operator::new(board);
-        assert_eq!(ops.seat(), McpSeat::Ops);
+        let cockpit = Operator::new(board);
+        assert_eq!(cockpit.seat(), McpSeat::Cockpit);
 
-        let names: Vec<_> = ops
+        let names: Vec<_> = cockpit
             .tool_router
             .list_all()
             .into_iter()
@@ -1591,58 +1591,58 @@ mod tests {
         ] {
             assert!(
                 names.iter().any(|n| n == tool),
-                "ops seat must list operator tool {tool}; got {names:?}"
+                "cockpit must list operator tool {tool}; got {names:?}"
             );
             assert!(
-                ops.tool_router.has_route(tool),
-                "ops seat must expose {tool}"
+                cockpit.tool_router.has_route(tool),
+                "cockpit must expose {tool}"
             );
         }
 
         for verb in WORKER_VERB_TOOLS {
             assert!(
                 !names.iter().any(|n| n == *verb),
-                "ops seat must not list worker verb {verb}; got {names:?}"
+                "cockpit must not list worker verb {verb}; got {names:?}"
             );
             assert!(
-                !ops.tool_router.has_route(verb),
-                "ops seat must disable {verb}"
+                !cockpit.tool_router.has_route(verb),
+                "cockpit must disable {verb}"
             );
         }
     }
 
     #[test]
-    fn ops_seat_invokes_operator_tools_and_denies_worker_verbs() {
+    fn cockpit_seat_invokes_operator_tools_and_denies_worker_verbs() {
         let (board, goal_id) = test_board();
-        let ops = Operator::new(board.clone());
+        let cockpit = Operator::new(board.clone());
 
-        let snap = ops.board_snapshot().expect("ops board_snapshot");
-        assert!(!snap.0.goals.is_empty(), "ops can read the board");
+        let snap = cockpit.board_snapshot().expect("cockpit board_snapshot");
+        assert!(!snap.0.goals.is_empty(), "cockpit can read the board");
 
-        let park = ops.park(Parameters(ReasonArg {
+        let park = cockpit.park(Parameters(ReasonArg {
             id: goal_id,
-            reason: Some("ops seat smoke".into()),
+            reason: Some("cockpit smoke".into()),
         }));
         if let Err(e) = &park {
             assert!(
                 !e.message.contains("worker verb"),
-                "ops park must not be seat-denied: {}",
+                "cockpit park must not be seat-denied: {}",
                 e.message
             );
         }
 
-        let claim = ops.claim(Parameters(ClaimArg {
+        let claim = cockpit.claim(Parameters(ClaimArg {
             item_id: goal_id,
-            agent_id: "ops-agent".into(),
+            agent_id: "cockpit-agent".into(),
             model: None,
             lease_secs: 60,
         }));
         let err = match claim {
-            Ok(_) => panic!("ops must deny claim"),
+            Ok(_) => panic!("cockpit must deny claim"),
             Err(e) => e,
         };
         assert!(
-            err.message.contains("worker verb") && err.message.contains("ops seat"),
+            err.message.contains("worker verb") && err.message.contains("cockpit"),
             "unexpected deny message: {}",
             err.message
         );
@@ -1650,93 +1650,99 @@ mod tests {
         for (label, result) in [
             (
                 "list_ready",
-                ops.list_ready(Parameters(ListReadyArg {
-                    capabilities: vec!["any".into()],
-                }))
-                .map(|_| ()),
+                cockpit
+                    .list_ready(Parameters(ListReadyArg {
+                        capabilities: vec!["any".into()],
+                    }))
+                    .map(|_| ()),
             ),
             (
                 "heartbeat",
-                ops.heartbeat(Parameters(HeartbeatArg {
-                    item_id: goal_id,
-                    agent_id: "ops-agent".into(),
-                    progress: 0.1,
-                    lease_secs: 30,
-                    cost_cents: 0,
-                }))
-                .map(|_| ()),
+                cockpit
+                    .heartbeat(Parameters(HeartbeatArg {
+                        item_id: goal_id,
+                        agent_id: "cockpit-agent".into(),
+                        progress: 0.1,
+                        lease_secs: 30,
+                        cost_cents: 0,
+                    }))
+                    .map(|_| ()),
             ),
             (
                 "report",
-                ops.report(Parameters(ReportArg {
-                    item_id: goal_id,
-                    agent_id: "ops-agent".into(),
-                    lines_added: 1,
-                    lines_removed: 0,
-                }))
-                .map(|_| ()),
+                cockpit
+                    .report(Parameters(ReportArg {
+                        item_id: goal_id,
+                        agent_id: "cockpit-agent".into(),
+                        lines_added: 1,
+                        lines_removed: 0,
+                    }))
+                    .map(|_| ()),
             ),
             (
                 "release",
-                ops.release(Parameters(AgentItemArg {
-                    item_id: goal_id,
-                    agent_id: "ops-agent".into(),
-                }))
-                .map(|_| ()),
+                cockpit
+                    .release(Parameters(AgentItemArg {
+                        item_id: goal_id,
+                        agent_id: "cockpit-agent".into(),
+                    }))
+                    .map(|_| ()),
             ),
             (
                 "escalate",
-                ops.escalate(Parameters(EscalateArg {
-                    item_id: goal_id,
-                    agent_id: "ops-agent".into(),
-                    question: "pick?".into(),
-                    options: vec![
-                        OptionSpec {
-                            label: "A".into(),
-                            detail: "one".into(),
-                        },
-                        OptionSpec {
-                            label: "B".into(),
-                            detail: "two".into(),
-                        },
-                    ],
-                    recommended: 0,
-                }))
-                .map(|_| ()),
+                cockpit
+                    .escalate(Parameters(EscalateArg {
+                        item_id: goal_id,
+                        agent_id: "cockpit-agent".into(),
+                        question: "pick?".into(),
+                        options: vec![
+                            OptionSpec {
+                                label: "A".into(),
+                                detail: "one".into(),
+                            },
+                            OptionSpec {
+                                label: "B".into(),
+                                detail: "two".into(),
+                            },
+                        ],
+                        recommended: 0,
+                    }))
+                    .map(|_| ()),
             ),
             (
                 "split",
-                ops.split(Parameters(SplitArg {
-                    item_id: goal_id,
-                    agent_id: "ops-agent".into(),
-                    children: vec![
-                        ChildSpec {
-                            title: "a".into(),
-                            intent: "a".into(),
-                            definition_of_done: "a".into(),
-                            capability: None,
-                            key: None,
-                            blocked_by_keys: vec![],
-                            blocked_by: vec![],
-                            repo: None,
-                        },
-                        ChildSpec {
-                            title: "b".into(),
-                            intent: "b".into(),
-                            definition_of_done: "b".into(),
-                            capability: None,
-                            key: None,
-                            blocked_by_keys: vec![],
-                            blocked_by: vec![],
-                            repo: None,
-                        },
-                    ],
-                }))
-                .map(|_| ()),
+                cockpit
+                    .split(Parameters(SplitArg {
+                        item_id: goal_id,
+                        agent_id: "cockpit-agent".into(),
+                        children: vec![
+                            ChildSpec {
+                                title: "a".into(),
+                                intent: "a".into(),
+                                definition_of_done: "a".into(),
+                                capability: None,
+                                key: None,
+                                blocked_by_keys: vec![],
+                                blocked_by: vec![],
+                                repo: None,
+                            },
+                            ChildSpec {
+                                title: "b".into(),
+                                intent: "b".into(),
+                                definition_of_done: "b".into(),
+                                capability: None,
+                                key: None,
+                                blocked_by_keys: vec![],
+                                blocked_by: vec![],
+                                repo: None,
+                            },
+                        ],
+                    }))
+                    .map(|_| ()),
             ),
         ] {
             match result {
-                Ok(_) => panic!("ops must deny {label}"),
+                Ok(_) => panic!("cockpit must deny {label}"),
                 Err(e) => assert!(
                     e.message.contains("worker verb"),
                     "{label} deny message: {}",

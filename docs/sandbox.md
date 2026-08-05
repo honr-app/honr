@@ -106,14 +106,14 @@ Set it at create time; `policy set --wait` is expensive.
 **Binary paths are matched literally** in the policy. Lists are deliberately
 generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 
-## Ops vs worker containment
+## Cockpit vs worker containment
 
 | Catalog id | Seed source | Egress |
 |---|---|---|
 | `default` (worker) | Built-in `src/seed_policies.rs` when catalog empty; then **board profile only** | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
-| `ops` | [`ops-policy.yaml`](../sandbox/ops-policy.yaml) at seed; then **board profile only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference. **No** GitHub or package-registry allow-list. |
+| `cockpit` | [`cockpit-policy.yaml`](../sandbox/cockpit-policy.yaml) at seed; then **board profile only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference. **No** GitHub or package-registry allow-list. |
 
-Settings → OpenShell → Profiles is the live source of truth for both. The ops
+Settings → OpenShell → Profiles is the live source of truth for both. The cockpit
 profile seeds with distinct cpu/memory (`1` / `2Gi`) from the worker default.
 Card dispatch keeps using the worker default unless a Project overrides the
 profile id.
@@ -132,4 +132,4 @@ profile id.
 ## Assets
 
 See [`sandbox/README.md`](../sandbox/README.md) for profile vs seed policy,
-`ops-policy.yaml`, `Containerfile`, and `metadata-shim.py` in short form.
+`cockpit-policy.yaml`, `Containerfile`, and `metadata-shim.py` in short form.
