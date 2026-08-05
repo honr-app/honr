@@ -84,16 +84,26 @@ make release              # cargo build --release
 make dev-ui               # Vite on :5173 (proxies to :8080)
 ```
 
-Connect an operator MCP client (honr must already be listening):
+Connect an operator MCP client (honr must already be listening). After admin
+bootstrap, `/mcp` uses MCP OAuth 2.1 — Authenticate / Connect in the client and
+sign in with the same board credentials.
 
 **Cursor** ([`.cursor/mcp.json`](.cursor/mcp.json)):
 
 ```json
 {
   "mcpServers": {
-    "honr": { "type": "http", "url": "http://127.0.0.1:8080/mcp" }
+    "honr": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "auth": { "CLIENT_ID": "honr-cursor", "scopes": ["mcp"] }
+    }
   }
 }
+```
+
+```bash
+agent mcp login honr
 ```
 
 **Claude Code:**

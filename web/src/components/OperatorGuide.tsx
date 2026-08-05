@@ -2,7 +2,11 @@ const MCP_URL = "http://127.0.0.1:8080/mcp";
 
 const CURSOR_MCP_JSON = `{
   "mcpServers": {
-    "honr": { "type": "http", "url": "${MCP_URL}" }
+    "honr": {
+      "type": "http",
+      "url": "${MCP_URL}",
+      "auth": { "CLIENT_ID": "honr-cursor", "scopes": ["mcp"] }
+    }
   }
 }`;
 
@@ -44,6 +48,11 @@ export function OperatorGuide() {
           </li>
           <li>
             Add an MCP server named <code>honr</code> at that URL.
+          </li>
+          <li>
+            After local admin exists, authenticate via MCP OAuth (browser login /
+            consent — same admin or GitHub allowlist as the board). In Cursor:
+            Tools &amp; MCP → Authenticate / Connect.
           </li>
           <li>Enable or reload the server if your client requires it.</li>
         </ol>

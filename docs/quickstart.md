@@ -48,16 +48,35 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 
 ## Connect the operator MCP
 
-honr must already be listening.
+honr must already be listening. After local admin bootstrap, `/mcp` requires
+MCP OAuth 2.1 (Bearer). Clients discover the authorization server from
+`/.well-known/oauth-protected-resource` and open a browser login/consent that
+reuses the same admin / GitHub allowlist as the board UI.
 
 **Cursor**: project config is [`.cursor/mcp.json`](../.cursor/mcp.json):
 
 ```json
-{ "mcpServers": { "honr": { "type": "http", "url": "http://127.0.0.1:8080/mcp" } } }
+{
+  "mcpServers": {
+    "honr": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "auth": { "CLIENT_ID": "honr-cursor", "scopes": ["mcp"] }
+    }
+  }
+}
 ```
 
-Then **Cursor Settings → Tools & MCP**, enable **honr**, and reload if needed.
-With the operator rule in
+`CLIENT_ID` `honr-cursor` is a built-in public client (no secret). Authenticate
+from the CLI:
+
+```bash
+agent mcp login honr
+```
+
+That opens a browser for board login + consent. Or use **Cursor Settings →
+Tools & MCP → Authenticate**. Reload if the tools list stays empty. With the
+operator rule in
 [`.cursor/rules/honr-operator.mdc`](../.cursor/rules/honr-operator.mdc), the
 chat agent drives Projects / Plans via MCP; sandboxed workers claim Ready Tasks
 and open PRs.
@@ -67,6 +86,8 @@ and open PRs.
 ```bash
 claude mcp add --transport http honr http://localhost:8080/mcp
 ```
+
+Complete the OAuth browser flow when Claude prompts for authorization.
 
 ## Empty board
 

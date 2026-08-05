@@ -57,3 +57,4 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls", 
 time = "0.3.55"
 tower = { version = "0.5.3", features = ["util"] }
 jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
+serde_urlencoded = "0.7"

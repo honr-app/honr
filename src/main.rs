@@ -9,6 +9,7 @@ mod github_app;
 mod github_poll;
 mod machine;
 mod mcp;
+mod mcp_oauth;
 mod model;
 mod openshell;
 mod secrets;
@@ -128,11 +129,18 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api", api::routes())
         .route("/api/events", get(sse::events))
         .route("/api/ws", get(ws::ws_handler))
-        .route("/healthz", get(|| async { "ok" }));
+        .route("/healthz", get(|| async { "ok" }))
+        .nest("/.well-known", mcp_oauth::well_known_routes())
+        .nest("/oauth", mcp_oauth::oauth_routes());
 
-    // The operator MCP endpoint. Same process, same port, same state.
-    // Exempt from session auth (localhost-bound; Cursor cannot do cookie OAuth).
-    app = app.nest("/mcp", mcp::router(board.clone()));
+    // Operator MCP: Bearer via MCP OAuth once admin exists (bootstrap stays open).
+    app = app.nest(
+        "/mcp",
+        mcp::router(board.clone()).layer(middleware::from_fn_with_state(
+            board.clone(),
+            mcp_oauth::require_mcp_bearer,
+        )),
+    );
 
     if web_dist.exists() {
         app = app.fallback_service(
