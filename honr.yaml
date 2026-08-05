@@ -39,7 +39,11 @@ execution:
 
     # Needs a Rust toolchain to build honr: docker build -f sandbox/Containerfile .
     image: honr-sandbox:latest
-    policy: sandbox/policy.yaml
+    # Worker network policy lives on the board sandbox profile (Settings →
+    # Profiles → default). `embedded` seeds that profile from the built-in
+    # default when the catalog is empty — do not put a host policy.yaml path
+    # here; editing a file does not change live sandboxes.
+    policy: embedded
 
     # Default remotes when a card already has pull_request facts; first clone
     # still follows intent/DoD prose until report sets pull_request.

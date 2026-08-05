@@ -163,7 +163,8 @@ pub struct AgentConfig {
 }
 
 fn d_image() -> String { "honr-sandbox:latest".into() }
-fn d_policy() -> String { "sandbox/policy.yaml".into() }
+/// Marker: resolve to the built-in worker seed policy (not a host file).
+fn d_policy() -> String { "embedded".into() }
 fn d_engine() -> String { "cursor".into() }
 fn d_concurrent() -> usize { 2 }
 fn d_agent_timeout() -> u64 { 1800 }
@@ -235,7 +236,17 @@ impl AgentConfig {
         if !self.enabled {
             return Ok(());
         }
-        if !std::path::Path::new(&self.policy).exists() {
+        // Live policy is the board sandbox profile. `agents.policy` is seed /
+        // YAML-fallback only: embedded default, inline YAML, or an optional path.
+        let p = self.policy.trim();
+        if p.is_empty()
+            || p == "embedded"
+            || p == "sandbox/policy.yaml"
+            || crate::model::is_inline_policy_yaml(p)
+        {
+            return Ok(());
+        }
+        if !std::path::Path::new(p).exists() {
             return Err(format!("execution.agents.policy {:?} does not exist", self.policy));
         }
         Ok(())

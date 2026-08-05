@@ -66,8 +66,9 @@ docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 ```
 
 The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock` changes
-materially. Matching `/opt` entries belong in `policy.yaml` (documented inline
-in the Containerfile).
+materially. Matching `/opt` entries belong in the worker **board** sandbox
+profile policy (Settings → Profiles → `default`; seed text in
+`src/seed_policies.rs`).
 
 Pass `--offline` in gate commands so a cache miss fails loudly instead of
 hanging on a denied fetch.
@@ -107,16 +108,15 @@ generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 
 ## Ops vs worker containment
 
-Two network policies ship under [`sandbox/`](../sandbox/):
-
-| Asset | Catalog id | Egress |
+| Catalog id | Seed source | Egress |
 |---|---|---|
-| [`policy.yaml`](../sandbox/policy.yaml) | `default` (worker) | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
-| [`ops-policy.yaml`](../sandbox/ops-policy.yaml) | `ops` | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference. **No** GitHub or package-registry allow-list. |
+| `default` (worker) | Built-in `src/seed_policies.rs` when catalog empty; then **board profile only** | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
+| `ops` | [`ops-policy.yaml`](../sandbox/ops-policy.yaml) at seed; then **board profile only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference. **No** GitHub or package-registry allow-list. |
 
-Settings → OpenShell → Profiles can select either. The ops profile seeds with
-distinct cpu/memory (`1` / `2Gi`) from the worker default. Card dispatch keeps
-using the worker default unless a Project overrides the profile id.
+Settings → OpenShell → Profiles is the live source of truth for both. The ops
+profile seeds with distinct cpu/memory (`1` / `2Gi`) from the worker default.
+Card dispatch keeps using the worker default unless a Project overrides the
+profile id.
 
 ## Failure signatures
 
@@ -131,5 +131,5 @@ using the worker default unless a Project overrides the profile id.
 
 ## Assets
 
-See [`sandbox/README.md`](../sandbox/README.md) for `policy.yaml`,
+See [`sandbox/README.md`](../sandbox/README.md) for profile vs seed policy,
 `ops-policy.yaml`, `Containerfile`, and `metadata-shim.py` in short form.

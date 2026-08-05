@@ -10,7 +10,8 @@
 # Build from the REPO ROOT, so Cargo.lock and web/package-lock.json are in context:
 #   docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 #
-# Then pair it with policy.yaml's companion entries — see the note at the bottom.
+# Then pair it with the worker board-profile policy companion entries — see the
+# note at the bottom (and src/seed_policies.rs for the empty-catalog seed).
 
 FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
@@ -100,9 +101,9 @@ RUN mkdir -p /opt/cargo /opt/npm-cache \
 USER sandbox
 WORKDIR /sandbox
 
-# ---- policy.yaml companion changes ----------------------------------------
+# ---- board profile policy companion changes -------------------------------
 # OpenShell matches binary paths LITERALLY and does not follow the toolchain's
-# own symlinks, so policy.yaml needs, at minimum:
+# own symlinks, so the worker sandbox profile (Settings → default) needs, at minimum:
 #
 #   filesystem_policy.read_write:  add /opt/cargo and /opt/npm-cache
 #   filesystem_policy.read_only:   add /opt/rust

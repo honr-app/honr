@@ -14,6 +14,7 @@ mod openshell;
 mod ops_chat;
 mod secrets;
 mod schema;
+mod seed_policies;
 mod sse;
 mod store;
 mod supervisor;

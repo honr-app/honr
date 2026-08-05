@@ -1,8 +1,8 @@
 # honr ops sandbox: privileged control-plane seat.
 # Narrow egress to the host honr MCP endpoint the operator already uses, plus
 # inference so the ops agent can run. No GitHub / package-registry egress —
-# those belong to the card-worker identity in sandbox/policy.yaml. Worker
-# sandboxes stay air-gapped from honr (no honr MCP allow-list there).
+# those belong to the card-worker board profile (`default`). Worker sandboxes
+# stay air-gapped from honr (no honr MCP allow-list there).
 version: 1
 
 filesystem_policy:
@@ -60,7 +60,7 @@ network_policies:
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
 
-  # Cursor Agent CLI — same L4 passthrough notes as sandbox/policy.yaml.
+  # Cursor Agent CLI — same L4 passthrough notes as the worker board profile.
   cursor:
     name: cursor
     endpoints:

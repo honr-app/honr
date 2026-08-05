@@ -1619,11 +1619,12 @@ impl Board {
     // Public surface for the follow-on api-supervisor card. Unit tests exercise
     // it; production callers land with REST/MCP wiring.
 
-    /// Seed worker `default` + ops seat profiles from YAML when the catalog is
-    /// empty. Returns true when profiles were inserted. YAML remains fallback
-    /// only after the catalog is populated. Policy is stored as YAML **content**
-    /// (file at `agents.policy` / [`crate::model::OPS_SANDBOX_POLICY_PATH`]
-    /// is read once at seed).
+    /// Seed worker `default` + ops seat profiles when the catalog is empty.
+    /// Returns true when profiles were inserted. After seed, the board profile
+    /// is authoritative — edit via Settings / `/api/sandbox-profiles`. Worker
+    /// seed policy comes from `agents.policy` via
+    /// [`crate::model::resolve_policy_yaml`] (usually the built-in embedded
+    /// default); ops still seeds from [`crate::model::OPS_SANDBOX_POLICY_PATH`].
     pub fn seed_sandbox_profiles_if_empty(&self) -> bool {
         self.seed_sandbox_profiles_from(&self.schema.execution.agents)
     }

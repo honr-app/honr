@@ -6,17 +6,18 @@ breaks if you change them: [`docs/sandbox.md`](../docs/sandbox.md).
 Card context is briefing-only (`/sandbox/.honr` contracts); see
 [`docs/sandbox.md`](../docs/sandbox.md).
 
-## `policy.yaml`
+## Worker network policy (board profile)
 
-The **card-worker** network policy: Vertex for inference, GitHub for code,
-default-deny for everything else — including honr's MCP. Workers stay
-air-gapped from the board. Passed with `--policy` at `sandbox create`.
+The **card-worker** network policy is **not** a file in this directory. It lives
+on the board sandbox profile (`default`): Settings → OpenShell → Profiles, or
+`GET`/`POST /api/sandbox-profiles`. That YAML is what OpenShell gets at
+`sandbox create`.
 
-It must be set **at creation** — the filesystem and process sections are immutable on a live
-sandbox, and `policy set --wait` costs ~50s.
-
-Binary paths are matched literally, so the lists are deliberately generous (git's real remote helper
-is `/usr/lib/git-core/git-remote-http`, note **not** `-https`).
+Empty boards seed `default` from the built-in string in
+`src/seed_policies.rs` (`policy: embedded` in `honr.yaml`). After seed, edit the
+**profile on the board** — changing source or docs does not change live
+sandboxes. Policy filesystem/process sections are immutable on a live sandbox;
+set them at create time.
 
 ## `ops-policy.yaml`
 
@@ -25,7 +26,7 @@ endpoint (`host.docker.internal` / `127.0.0.1` / `localhost` on port 8080) plus
 inference. It does not include GitHub or package-registry egress — those stay
 on the worker identity. Seeded into the sandbox-profile catalog as id `ops`
 (Settings → OpenShell → Profiles) with lighter cpu/memory than the worker
-default.
+default. After seed, the board profile is authoritative for ops too.
 
 ## `Containerfile`
 
@@ -40,21 +41,10 @@ Build from the **repo root**, not this directory:
 docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 ```
 
-Rebuild when `Cargo.lock` changes. It needs matching `/opt` entries in `policy.yaml`; the
-Containerfile documents them inline.
+Rebuild when `Cargo.lock` changes. Matching `/opt` entries belong in the worker
+**board** profile policy (and the embedded seed in `src/seed_policies.rs`).
 
 ## `metadata-shim.py`
 
 A minimal GCE metadata server, uploaded to the sandbox and run on `127.0.0.1:8127` for the lifetime
 of an agent.
-
-Claude Code's Vertex mode walks google-auth's ADC chain and ends at the GCE metadata server, which
-OpenShell blocks permanently as SSRF hardening. Pointing `GCE_METADATA_HOST` at this shim gives
-google-auth a token source it *is* allowed to reach.
-
-The token it serves is OpenShell's **opaque placeholder**, not a real credential — the egress proxy
-substitutes the real value on the way out. So no secret ever exists inside the sandbox.
-
-Serves the endpoints `gcp-metadata` probes: the root (with the `Metadata-Flavor: Google` header),
-`/token`, `/project/project-id`, `/service-accounts/default/{email,scopes}`, and
-`/universe/universe-domain`.
