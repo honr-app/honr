@@ -66,7 +66,7 @@ MCP with operator tools only.
 | Ops seat (operator tools only) | MCP streamable HTTP at `/mcp` | Chat / ops agents on the host (OAuth) |
 | Host seat (operator + worker verbs) | `Operator::host` (in-process) | Supervisor/host tooling and tests |
 | Human UI | REST + board SSE | React app; one-tap answers and approvals |
-| Ops chat bridge | `POST /api/ops-chat` (SSE) | Cockpit / browser; prompts into Board ops seat |
+| Ops chat bridge | `POST /api/ops-chat` (SSE) | Cockpit primary attach; prompts into Board ops seat |
 
 `/mcp` does not expose worker verbs (`claim`, `heartbeat`, `report`, `split`,
 `escalate`, `release`, `list_ready`). Ops clients triage and dispatch; they do
@@ -86,5 +86,5 @@ Optional one-shot import from legacy `honr.json` when the DB is empty. See
 
 - [Concepts](concepts.md): product model and invariants
 - [Agents](agents.md): enabling the execution path
-- [Ops seat](ops-seat.md): start / TTY attach / stop over Board ops session
+- [Ops seat](ops-seat.md): Cockpit chat (primary) over Board ops session; TTY optional
 - [Sandbox](sandbox.md): sandbox stack and gotchas

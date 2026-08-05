@@ -10,7 +10,7 @@ slugs: ready to map to a docs site later.
 | [Workflow](workflow.md) | Day-to-day: Project → plan → Approve → dispatch; Needs You / Review; park / steer / halt |
 | [Agents](agents.md) | Enabling real agents: compute driver, OpenShell, `honr.yaml` / Settings |
 | [Sandbox](sandbox.md) | How a sandboxed run works and the gotchas that matter |
-| [Ops seat](ops-seat.md) | Durable ops chatbot: start, TTY attach/reconnect, park/stop |
+| [Ops seat](ops-seat.md) | Durable ops chatbot: Cockpit chat (primary), park/stop; TTY optional |
 | [Architecture](architecture.md) | One page: Board / store, supervisor, MCP / REST, persistence |
 | [Clone targets](task-repo-binding.md) | Clone from task prose; `pull_request` after report; Initial plan via `plan.json` |
 
