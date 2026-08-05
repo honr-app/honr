@@ -67,7 +67,7 @@ docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 
 The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock` changes
 materially. Matching `/opt` entries belong in the worker **board** sandbox
-profile policy (Settings → Profiles → `default`; seed text in
+profile policy (Settings → OpenShell → Profiles → `default`; seed text in
 `src/seed_policies.rs`).
 
 Pass `--offline` in gate commands so a cache miss fails loudly instead of

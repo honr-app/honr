@@ -27,7 +27,7 @@ UI / MCP / supervisor
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
 | `src/api.rs` `src/sse.rs` `src/cockpit_chat.rs` | The human face (REST + board SSE + cockpit chat bridge). |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs. |
-| `src/openshell.rs` | Typed async wrapper over the `openshell` CLI; every call has a deadline. |
+| `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board endpoint + sealed mTLS); every call has a deadline. |
 | `src/supervisor.rs` | Card dispatch + durable cockpit start/reconcile/stop; briefing; lease sweeping. |
 | `honr.yaml` | Level schema (Project + Task) and execution config. |
 | `sandbox/` | Container image, network policy, metadata shim. |
