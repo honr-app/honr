@@ -80,13 +80,17 @@ Ingress is `POST /api/webhooks/github`. A push to the default branch emits
 `MainAdvanced`, which:
 
 1. **Merged card → Done** when a Review / NeedsHuman card's `pr_url` matches
-   the merged PR.
-2. **Review rebase catch-up** for sibling PRs still in Review that are behind
-   `main` (supervisor-driven git on the PR branch).
+   the merged PR; same-parent Review siblings with open PRs get
+   `rebase_requested` (merge→Done catch-up).
+2. **Review rebase catch-up** on tip advance: every Review card with an open
+   PR is queued for supervisor-driven git rebase onto the new default-branch
+   tip (not only cards that share a parent with a Done sibling). Clean rebase
+   keeps the card in Review; conflict may bounce to Backlog.
 3. **Live runs**: each Claimed / Running card gets a steer note to fetch /
    rebase onto upstream main. Because steer alone does not inject mid-turn,
    honr then parks and unparks so the agent acts on resume. Sandbox and
-   conversation id are preserved.
+   conversation id are preserved. Review cards are not parked to reuse this
+   path — they stay in Review until conflict or a human bounce.
 
 Dev-only local forwarding:
 

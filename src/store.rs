@@ -3841,10 +3841,12 @@ facts are pasted, then unpark";
 
     /// Notify connected subscribers that the main branch advanced (via push or PR merge).
     ///
-    /// Review cards with open PRs get a rebase dispatch. Claimed/Running cards get a
+    /// Review cards with open PRs get a rebase dispatch (tip-driven; not limited to
+    /// parents that already have a Done child). Claimed/Running cards get a
     /// steer note telling the agent to fetch and rebase onto upstream/main, then a
     /// park+unpark so the supervisor re-claims with that note — the supervisor does
-    /// not touch the live worktree itself.
+    /// not touch the live worktree itself. Review stays Review until conflict or
+    /// human bounce — it is not parked to reuse the Running path.
     pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
         tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
         self.record_and_send(BoardEvent::MainAdvanced {
@@ -3936,28 +3938,22 @@ facts are pasted, then unpark";
         results
     }
 
-    /// Identify all open sibling PRs in Review that are behind main across the entire board.
+    /// Identify every Review card with an open PR for tip-driven catch-up.
+    ///
+    /// `MainAdvanced` (push / poll tip) means the default branch moved under open
+    /// PRs — not only under parents that already have a Done child. Filtering on
+    /// Done siblings skipped live Review PRs when main advanced without a board
+    /// merge (direct push, or a merge of a PR that is not a card). Merge→Done
+    /// still uses [`Self::identify_behind_sibling_prs`] for same-parent siblings.
     pub fn identify_all_behind_sibling_prs(&self) -> Vec<WorkItem> {
         let s = self.state.read();
-        let mut results = Vec::new();
-        let parents_with_done: std::collections::HashSet<ItemId> = s
+        let mut results: Vec<_> = s
             .items
             .values()
-            .filter(|i| i.state == State::Done)
-            .filter_map(|i| i.parent)
+            .filter(|i| i.state == State::Review && i.pr_url().is_some())
+            .cloned()
             .collect();
-
-        for parent_id in parents_with_done {
-            for child_id in s.items.values().filter(|i| i.parent == Some(parent_id)).map(|i| i.id) {
-                if let Some(child) = s.items.get(&child_id) {
-                    if child.state == State::Review && child.pr_url().is_some() {
-                        results.push(child.clone());
-                    }
-                }
-            }
-        }
         results.sort_by_key(|i| i.entered_state_at);
-        results.dedup_by_key(|i| i.id);
         results
     }
 
@@ -4001,11 +3997,11 @@ facts are pasted, then unpark";
         dispatched
     }
 
-    /// Identify all sibling PRs in Review behind main across the board and dispatch rebase requests.
+    /// Queue rebase for every Review card with an open PR (tip-driven MainAdvanced).
     pub fn trigger_rebase_for_all_behind_siblings(&self) -> Vec<WorkItem> {
-        let siblings = self.identify_all_behind_sibling_prs();
+        let candidates = self.identify_all_behind_sibling_prs();
         let mut dispatched = Vec::new();
-        for s in siblings {
+        for s in candidates {
             if let Ok(item) = self.dispatch_rebase(s.id) {
                 dispatched.push(item);
             }
@@ -7046,6 +7042,246 @@ mod tests {
         let t2_updated = b.get(t2.id).unwrap();
         assert!(t2_updated.rebase_requested, "t2 rebase_requested should be true");
         assert!(t2_updated.awaiting_dispatch, "t2 awaiting_dispatch should be true");
+        assert_eq!(
+            t2_updated.state,
+            State::Review,
+            "Review must stay Review when rebase is only queued"
+        );
+    }
+
+    /// Tip advance (push / poll) must queue Review PRs even when no sibling is
+    /// Done yet — the old parents_with_done filter skipped those live cards.
+    #[test]
+    fn notify_main_advanced_queues_review_rebase_without_done_sibling() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-rebase-tip-no-done-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Tip No Done Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let review = b
+            .create(
+                Some(project.id),
+                "Open Review PR",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+
+        b.transition(review.id, State::Shaping, "test", None).unwrap();
+        b.transition(review.id, State::Backlog, "test", None).unwrap();
+        b.transition(review.id, State::Claimed, "agent", None).unwrap();
+        b.transition(review.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(
+            review.id,
+            Some("https://github.com/shanemcd/honr/pull/404".into()),
+        );
+
+        // No Done sibling on the board — tip-driven MainAdvanced only.
+        assert!(
+            b.identify_all_behind_sibling_prs()
+                .iter()
+                .any(|i| i.id == review.id),
+            "tip-driven identify must include Review PRs without a Done sibling"
+        );
+
+        b.notify_main_advanced("refs/heads/main", Some("tipdeadbeef".into()));
+
+        let after = b.get(review.id).unwrap();
+        assert_eq!(after.state, State::Review);
+        assert!(
+            after.rebase_requested,
+            "MainAdvanced without Done sibling must still set rebase_requested"
+        );
+        assert!(after.awaiting_dispatch);
+    }
+
+    /// Review catch-up must not be skipped when MainAdvanced also steers a
+    /// Running card — park/unpark is for live runs only.
+    #[test]
+    fn notify_main_advanced_queues_review_while_steering_running() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-rebase-review-and-running-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Review And Running Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let done = b
+            .create(
+                Some(project.id),
+                "Already Merged",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let review = b
+            .create(
+                Some(project.id),
+                "Still In Review",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let running = b
+            .create(
+                Some(project.id),
+                "Live Run",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+
+        b.transition(done.id, State::Shaping, "test", None).unwrap();
+        b.transition(done.id, State::Done, "test", None).unwrap();
+
+        b.transition(review.id, State::Shaping, "test", None).unwrap();
+        b.transition(review.id, State::Backlog, "test", None).unwrap();
+        b.transition(review.id, State::Claimed, "agent", None).unwrap();
+        b.transition(review.id, State::Review, "agent", None).unwrap();
+        b.set_pr_url(
+            review.id,
+            Some("https://github.com/shanemcd/honr/pull/505".into()),
+        );
+
+        b.transition(running.id, State::Shaping, "test", None).unwrap();
+        b.transition(running.id, State::Backlog, "test", None).unwrap();
+        b.transition(running.id, State::Claimed, "agent", None).unwrap();
+        b.transition(running.id, State::Running, "agent", None).unwrap();
+
+        b.notify_main_advanced("refs/heads/main", Some("bothpaths".into()));
+
+        let review_after = b.get(review.id).unwrap();
+        assert_eq!(review_after.state, State::Review);
+        assert!(
+            review_after.rebase_requested,
+            "Review must get rebase_requested even when a Running card is steered"
+        );
+        assert!(
+            !review_after.notes.iter().any(|n| n.text.contains("Main advanced")),
+            "Review must not be steered/parked via the Running path: {:?}",
+            review_after.notes
+        );
+
+        let running_after = b.get(running.id).unwrap();
+        assert_eq!(running_after.state, State::Backlog);
+        assert!(running_after.awaiting_dispatch);
+        assert!(
+            running_after
+                .notes
+                .iter()
+                .any(|n| n.text.contains("bothpaths") && n.text.contains("upstream/main")),
+            "Running still gets steer + park/unpark: {:?}",
+            running_after.notes
+        );
+    }
+
+    #[test]
+    fn complete_for_merged_pr_by_queues_sibling_review_catch_up() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-merge-done-sibling-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Merge Done Sibling Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let merged = b
+            .create(
+                Some(project.id),
+                "Merging Now",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let sibling = b
+            .create(
+                Some(project.id),
+                "Sibling Review",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+
+        for (id, url) in [
+            (merged.id, "https://github.com/shanemcd/honr/pull/601"),
+            (sibling.id, "https://github.com/shanemcd/honr/pull/602"),
+        ] {
+            b.transition(id, State::Shaping, "test", None).unwrap();
+            b.transition(id, State::Backlog, "test", None).unwrap();
+            b.transition(id, State::Claimed, "agent", None).unwrap();
+            b.transition(id, State::Review, "agent", None).unwrap();
+            b.set_pr_url(id, Some(url.into()));
+        }
+
+        let completed = b
+            .complete_for_merged_pr_by(
+                "https://github.com/shanemcd/honr/pull/601",
+                Some(601),
+                "github-webhook",
+            )
+            .expect("merged card Done");
+        assert_eq!(completed, merged.id);
+        assert_eq!(b.get(merged.id).unwrap().state, State::Done);
+
+        let sibling_after = b.get(sibling.id).unwrap();
+        assert_eq!(sibling_after.state, State::Review);
+        assert!(
+            sibling_after.rebase_requested,
+            "merge→Done must queue sibling Review catch-up"
+        );
+        assert!(sibling_after.awaiting_dispatch);
     }
 
     #[test]
