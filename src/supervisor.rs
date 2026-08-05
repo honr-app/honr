@@ -3485,6 +3485,8 @@ mod tests {
         let containerfile =
             std::fs::read_to_string(root.join("sandbox/Containerfile")).expect("Containerfile");
         let policy = std::fs::read_to_string(root.join("sandbox/policy.yaml")).expect("policy.yaml");
+        let ops_policy = std::fs::read_to_string(root.join("sandbox/ops-policy.yaml"))
+            .expect("ops-policy.yaml");
         let supervisor_src =
             std::fs::read_to_string(root.join("src/supervisor.rs")).expect("supervisor.rs");
         // Only the production module — this test's own source mentions the
@@ -3502,6 +3504,11 @@ mod tests {
         assert!(
             !policy.contains("/usr/local/bin/bd") && !policy.to_lowercase().contains("beads"),
             "policy.yaml must not allowlist bd/beads"
+        );
+        assert!(
+            !ops_policy.contains("/usr/local/bin/bd")
+                && !ops_policy.to_lowercase().contains("beads"),
+            "ops-policy.yaml must not allowlist bd/beads"
         );
         assert!(
             !prod.contains("sync_beads_into_sandbox") && !prod.contains("BEADS_SANDBOX_DIR"),

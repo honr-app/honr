@@ -47,11 +47,19 @@ Task.
 
 | Role | Who | Reach |
 |---|---|---|
+<<<<<<< HEAD
 | **Operator / ops seat** | Human + chat agent on the host | MCP `/mcp`: shape Projects, triage Needs You / Review, dispatch, park / steer / halt. No worker verbs. |
 | **Worker** | Agent inside an OpenShell sandbox | No network path to honr. Supervisor calls `claim` / `heartbeat` / `report` on its behalf |
+=======
+| **Operator (host)** | Human + chat agent on the host | MCP into honr: shape Projects, triage Needs You / Review, dispatch, park / steer / halt |
+| **Ops seat** | Privileged agent in an OpenShell sandbox on the `ops` profile | Narrow egress to host honr MCP (+ inference). No GitHub / package-registry identity. Selectable in Settings → OpenShell → Profiles |
+| **Worker** | Agent inside an OpenShell sandbox on the default / project profile | GitHub + inference egress. No network path to honr. Supervisor calls `claim` / `heartbeat` / `report` on its behalf |
+>>>>>>> 43d29d2 (Add ops sandbox policy and seedable catalog profile.)
 
-An agent that could reach honr's MCP could approve its own review. Containment
-is intentional: the worker is material, not a participant.
+An agent that could reach honr's MCP could approve its own review. Worker
+containment is intentional: the card worker is material, not a participant. The
+ops seat is a separate profile and policy (`sandbox/ops-policy.yaml`) so that
+privileged MCP reach does not share the worker network allow-list.
 
 The durable **ops session** (sandbox environment name, conversation id, running
 or parked-like hold) lives on the Board as a singleton record — not a WorkItem

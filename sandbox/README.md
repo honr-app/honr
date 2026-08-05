@@ -8,14 +8,24 @@ Card context is briefing-only (`/sandbox/.honr` contracts); see
 
 ## `policy.yaml`
 
-The sandbox network policy: Vertex for inference, GitHub for code, default-deny for everything else.
-Passed with `--policy` at `sandbox create`.
+The **card-worker** network policy: Vertex for inference, GitHub for code,
+default-deny for everything else — including honr's MCP. Workers stay
+air-gapped from the board. Passed with `--policy` at `sandbox create`.
 
 It must be set **at creation** — the filesystem and process sections are immutable on a live
 sandbox, and `policy set --wait` costs ~50s.
 
 Binary paths are matched literally, so the lists are deliberately generous (git's real remote helper
 is `/usr/lib/git-core/git-remote-http`, note **not** `-https`).
+
+## `ops-policy.yaml`
+
+The **ops** control-plane seat policy: narrow egress to the host honr MCP
+endpoint (`host.docker.internal` / `127.0.0.1` / `localhost` on port 8080) plus
+inference. It does not include GitHub or package-registry egress — those stay
+on the worker identity. Seeded into the sandbox-profile catalog as id `ops`
+(Settings → OpenShell → Profiles) with lighter cpu/memory than the worker
+default.
 
 ## `Containerfile`
 
