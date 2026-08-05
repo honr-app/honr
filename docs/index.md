@@ -13,5 +13,6 @@ slugs: ready to map to a docs site later.
 | [Architecture](architecture.md) | One page: Board / store, supervisor, MCP / REST, beads, persistence |
 | [Task repo binding](task-repo-binding.md) | Task-scoped remotes: init_plan, resolve order, multi-repo under one Project |
 | [Sandbox without beads](sandbox-without-beads.md) | Contract: no bd/image/upload in agent sandboxes; briefing-only context |
+| [GitHub App sandbox token smoke](github-app-sandbox-token-smoke.md) | Plan: installation-token GITHUB_TOKEN push smoke (no mint product scope) |
 
 Machine contracts (not prose): [`schemas/report.schema.json`](schemas/report.schema.json).
