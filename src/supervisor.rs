@@ -115,7 +115,7 @@ async fn sweeper_loop(
             false,
         )
         .await;
-        let _ = process_awaiting_rebases(&board, &os, &cfg.agents).await;
+        let _ = process_awaiting_mergeable_checks(&board, &cfg.agents).await;
         // Refresh installation token into the gateway well before the ~1h expiry.
         if let Err(e) = crate::github_app::ensure_github_provider(&board).await {
             tracing::warn!("GitHub App provider sync: {e}");
@@ -2051,23 +2051,6 @@ pub const MARK_REBASED: &str = "HONR-BRANCH-REBASED";
 pub const MARK_CONFLICT: &str = "HONR-BRANCH-CONFLICT";
 pub const MARK_CONFLICT_FILES: &str = "HONR-CONFLICT-FILES=";
 
-/// Parse comma-separated conflicting file paths from rebase script output.
-pub fn parse_conflict_files(stdout: &str) -> Vec<String> {
-    for line in stdout.lines() {
-        if let Some(rest) = line.trim().strip_prefix(MARK_CONFLICT_FILES) {
-            let files: Vec<String> = rest
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !files.is_empty() {
-                return files;
-            }
-        }
-    }
-    Vec::new()
-}
-
 /// Empty `/sandbox/repo` directory for the agent to clone into.
 fn empty_workdir_script() -> String {
     format!(
@@ -2113,54 +2096,9 @@ test -d {VERDICT_DIR}"#
     Ok(())
 }
 
-/// Clone the card branch into a fresh sandbox workdir and attempt rebase onto
-/// base. Used when recovering a dead Review sandbox for host rebase; cold runs
-/// still leave clone to the agent briefing.
-fn clone_script(cfg: &AgentConfig, branch: &str) -> String {
-    let clone = cfg.repo.clone_target();
-    let upstream = cfg.repo.upstream.trim();
-    let base = cfg.repo.base.trim();
-    let base_ref = cfg.repo.base_ref();
-    let setup_upstream = if cfg.repo.uses_cross_fork() {
-        format!(
-            r#"git remote add upstream https://github.com/{upstream}.git
-git -c '{GIT_CRED}' fetch -q upstream {base}
-"#
-        )
-    } else {
-        format!("git -c '{GIT_CRED}' fetch -q origin {base}\n")
-    };
-    format!(
-        r#"set -e
-export GIT_TERMINAL_PROMPT=0
-rm -rf {WORKDIR}
-git -c '{GIT_CRED}' clone -q --branch {base} https://github.com/{clone}.git {WORKDIR}
-cd {WORKDIR}
-git config user.email "agent@honr.local"
-git config user.name "honr agent"
-{setup_upstream}if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
-  git -c '{GIT_CRED}' fetch -q origin {branch}
-  git checkout -q -B {branch} origin/{branch}
-else
-  git checkout -q -B {branch} {base_ref}
-  echo {MARK_FRESH}
-  exit 0
-fi
-if git rebase -q {base_ref} >/dev/null 2>&1; then
-  echo {MARK_REBASED}
-else
-  files=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-  git rebase --abort >/dev/null 2>&1 || true
-  echo {MARK_CONFLICT}
-  if [ -n "$files" ]; then
-    echo "{MARK_CONFLICT_FILES}$files"
-  fi
-fi"#
-    )
-}
-
 /// Refresh an existing sandbox repository in-place (git fetch & rebase)
-/// without wiping the workdir or build caches.
+/// without wiping the workdir or build caches. Cold runs leave clone to the
+/// agent; this path only runs when a reused sandbox already has a checkout.
 fn refresh_script(cfg: &AgentConfig, branch: &str) -> String {
     let upstream = cfg.repo.upstream.trim();
     let base = cfg.repo.base.trim();
@@ -2209,227 +2147,116 @@ fi"#
     )
 }
 
-/// Standalone rebase script for cards in Review that need catching up onto base.
-pub fn rebase_script(cfg: &AgentConfig, branch: &str) -> String {
-    let upstream = cfg.repo.upstream.trim();
-    let base = cfg.repo.base.trim();
-    let base_ref = cfg.repo.base_ref();
-    let fetch_base = if cfg.repo.uses_cross_fork() {
-        format!(
-            r#"git remote add upstream https://github.com/{upstream}.git 2>/dev/null || true
-git -c '{GIT_CRED}' fetch -q upstream {base}
-"#
-        )
-    } else {
-        format!("git -c '{GIT_CRED}' fetch -q origin {base}\n")
-    };
-    format!(
-        r#"set -e
-export GIT_TERMINAL_PROMPT=0
-if [ ! -d {WORKDIR}/.git ]; then
-  echo "repository missing in workdir" >&2
-  exit 1
-fi
-cd {WORKDIR}
-git config user.email "agent@honr.local"
-git config user.name "honr agent"
-{fetch_base}git reset --hard >/dev/null 2>&1 || true
-git clean -fd >/dev/null 2>&1 || true
-if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
-  git -c '{GIT_CRED}' fetch -q origin {branch}
-  git checkout -q -B {branch} origin/{branch}
-elif git rev-parse --verify {branch} >/dev/null 2>&1; then
-  git checkout -q {branch}
-else
-  echo "branch {branch} missing" >&2
-  exit 1
-fi
-if git rebase {base_ref} >/dev/null 2>&1; then
-  git -c '{GIT_CRED}' push -f origin {branch} >/dev/null 2>&1 || true
-  echo {MARK_REBASED}
-else
-  files=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-  git rebase --abort >/dev/null 2>&1 || true
-  echo {MARK_CONFLICT}
-  if [ -n "$files" ]; then
-    echo "{MARK_CONFLICT_FILES}$files"
-  fi
-fi"#
-    )
-}
+type MergeableFetchFut<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<Option<crate::github_app::PrConflictCheck>, String>,
+            > + Send
+            + 'a,
+    >,
+>;
 
-/// Ensure a live sandbox for host rebase. When the Review box is gone, recreate
-/// it and report that the workdir needs a fresh clone. Never silent-continue:
-/// recreate failure is surfaced on the card.
-async fn ensure_live_sandbox_for_rebase(
+/// After MainAdvanced queues Review cards (`rebase_requested`), ask GitHub
+/// whether each open PR is still mergeable. No sandbox recreate, no host
+/// `git rebase` — CONFLICTING bounces to Backlog for a worker to reclaim.
+pub async fn process_awaiting_mergeable_checks(
     board: &SharedBoard,
-    os: &OpenShell,
-    cfg: &AgentConfig,
-    item: &crate::model::WorkItem,
-    sandbox: &str,
-) -> Result<(String, bool), String> {
-    if is_sandbox_live(os, sandbox).await {
-        let has_repo = os
-            .exec(
-                sandbox,
-                &format!("test -d {WORKDIR}/.git"),
-                Duration::from_secs(10),
-            )
-            .await
-            .map(|o| o.ok())
-            .unwrap_or(false);
-        return Ok((sandbox.to_string(), !has_repo));
-    }
-
-    tracing::warn!(
-        "sandbox {sandbox} not live for card #{}; recreating for host rebase",
-        item.id
-    );
-    if let Err(e) = crate::github_app::ensure_github_provider(board).await {
-        tracing::warn!(
-            "GitHub App provider sync before rebase recreate for #{}: {e}",
-            item.id
-        );
-    }
-
-    let _ = os.delete(sandbox).await;
-    let resolved = board.resolve_sandbox_create(item.id);
-    let attach = board.sandbox_attach_provider_names();
-    let name = if sandbox.is_empty() {
-        crate::schema::card_sandbox_name(&cfg.branch_prefix, item.id, item.run_failures + 1)
-    } else {
-        sandbox.to_string()
-    };
-    let spec = sandbox_spec_for_card(item.id, &name, &resolved, &attach);
-    if let Err(e) = os.create(&spec).await {
-        // Race: sandbox may have become reachable while create ran.
-        if is_sandbox_live(os, &name).await {
-            let has_repo = os
-                .exec(
-                    &name,
-                    &format!("test -d {WORKDIR}/.git"),
-                    Duration::from_secs(10),
-                )
-                .await
-                .map(|o| o.ok())
-                .unwrap_or(false);
-            board.set_environment(item.id, Some(name.clone()));
-            return Ok((name, !has_repo));
-        }
-        return Err(format!("recreate sandbox for rebase: {e}"));
-    }
-    board.set_environment(item.id, Some(name.clone()));
-    Ok((name, true))
-}
-
-fn record_rebase_stdout(
-    board: &SharedBoard,
-    id: crate::model::ItemId,
-    stdout: &str,
-) -> Option<Result<crate::model::WorkItem, String>> {
-    if stdout.contains(MARK_REBASED) {
-        Some(board.complete_rebase_clean(id))
-    } else if stdout.contains(MARK_CONFLICT) {
-        let files = parse_conflict_files(stdout);
-        Some(board.complete_rebase_conflict(id, &files, Some("git rebase conflict")))
-    } else {
-        None
-    }
-}
-
-/// Process cards in Review that have pending rebase requests.
-pub async fn process_awaiting_rebases(
-    board: &SharedBoard,
-    os: &OpenShell,
     cfg: &AgentConfig,
 ) -> Vec<Result<crate::model::WorkItem, String>> {
+    process_awaiting_mergeable_checks_with(board, cfg, |board, pr_url| {
+        let board = board.clone();
+        let pr_url = pr_url.to_string();
+        Box::pin(async move {
+            crate::github_app::fetch_pr_conflict_check(&board, &pr_url)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+}
+
+async fn process_awaiting_mergeable_checks_with<F>(
+    board: &SharedBoard,
+    cfg: &AgentConfig,
+    mut fetch: F,
+) -> Vec<Result<crate::model::WorkItem, String>>
+where
+    F: for<'a> FnMut(&'a SharedBoard, &'a str) -> MergeableFetchFut<'a>,
+{
+    use crate::github_app::PrMergeableState;
+
     let awaiting = board.list_awaiting_rebase();
     let mut results = Vec::new();
     for item in awaiting {
-        let branch = crate::schema::card_branch_name(&cfg.branch_prefix, item.id);
-        let wanted = item.environment.clone().unwrap_or_else(|| {
-            crate::schema::card_sandbox_name(&cfg.branch_prefix, item.id, item.run_failures + 1)
-        });
+        let Some(pr_url) = item.pr_url().filter(|u| !u.trim().is_empty()) else {
+            tracing::warn!(
+                "mergeable check skipped for card #{}: no pr_url",
+                item.id
+            );
+            continue;
+        };
 
-        let (sandbox, needs_clone) =
-            match ensure_live_sandbox_for_rebase(board, os, cfg, &item, &wanted).await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("rebase sandbox recovery failed for card #{}: {e}", item.id);
-                    results.push(board.fail_rebase_sandbox(item.id, &e));
-                    continue;
-                }
-            };
+        let expected_base = match board.resolve_card_repo(item.id) {
+            Ok(Some(repo)) => repo.base,
+            Ok(None) => cfg.repo.base.clone(),
+            Err(e) => {
+                tracing::warn!(
+                    "mergeable check skipped for card #{}: cannot resolve remotes: {e}",
+                    item.id
+                );
+                continue;
+            }
+        };
 
-        let mut card_cfg = cfg.clone();
-        match board.resolve_card_repo(item.id) {
-            Ok(Some(repo)) => card_cfg.repo = repo,
+        let check = match fetch(board, pr_url).await {
+            Ok(Some(c)) => c,
             Ok(None) => {
+                // App not configured, or PR 404 — retry next sweep.
                 tracing::warn!(
-                    "rebase skipped for card #{}: no pull_request remotes",
+                    "mergeable check deferred for card #{}: no App token or PR not found",
                     item.id
                 );
                 continue;
             }
             Err(e) => {
                 tracing::warn!(
-                    "rebase skipped for card #{}: cannot resolve remotes: {e}",
+                    "mergeable check failed for card #{}: {e}; will retry",
                     item.id
                 );
                 continue;
             }
-        }
+        };
 
-        if needs_clone {
-            let clone_res = os
-                .exec(
-                    &sandbox,
-                    &clone_script(&card_cfg, &branch),
-                    Duration::from_secs(120),
-                )
-                .await;
-            match clone_res {
-                Ok(out) => {
-                    if out.stdout.contains(MARK_CONFLICT) {
-                        let files = parse_conflict_files(&out.stdout);
-                        results.push(board.complete_rebase_conflict(
-                            item.id,
-                            &files,
-                            Some("git rebase conflict"),
-                        ));
-                        continue;
-                    }
-                    if !out.ok() && !out.stdout.contains(MARK_REBASED) {
-                        let detail = format!("clone for rebase failed: {}", outerr(&out));
-                        tracing::warn!("card #{}: {detail}", item.id);
-                        results.push(board.fail_rebase_sandbox(item.id, &detail));
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    let detail = format!("clone for rebase failed: {e}");
-                    tracing::warn!("card #{}: {detail}", item.id);
-                    results.push(board.fail_rebase_sandbox(item.id, &detail));
-                    continue;
-                }
+        if let Some(base) = check.base_ref.as_deref() {
+            if !base.eq_ignore_ascii_case(expected_base.trim()) {
+                tracing::info!(
+                    "mergeable check skipped for card #{}: PR base {base} != {expected_base}",
+                    item.id
+                );
+                // Not a same-base catch-up target — clear the queue so Review
+                // does not look idle-queued forever.
+                results.push(board.complete_rebase_clean(item.id));
+                continue;
             }
         }
 
-        let script = rebase_script(&card_cfg, &branch);
-        let exec_res = os.exec(&sandbox, &script, Duration::from_secs(60)).await;
-        match exec_res {
-            Ok(out) => {
-                if let Some(r) = record_rebase_stdout(board, item.id, &out.stdout) {
-                    results.push(r);
-                } else {
-                    tracing::warn!(
-                        "rebase for card #{} produced no outcome marker",
-                        item.id
-                    );
-                }
+        match check.mergeable {
+            PrMergeableState::Mergeable => {
+                results.push(board.complete_rebase_clean(item.id));
             }
-            Err(e) => {
-                tracing::warn!("rebase execution failed for card #{}: {e}", item.id);
+            PrMergeableState::Conflicting => {
+                results.push(board.complete_rebase_conflict(
+                    item.id,
+                    &[],
+                    Some("GitHub PR mergeable is CONFLICTING"),
+                ));
+            }
+            PrMergeableState::Unknown => {
+                // GitHub computes mergeable asynchronously — leave queued.
+                tracing::debug!(
+                    "mergeable UNKNOWN for card #{}; retry next sweep",
+                    item.id
+                );
             }
         }
     }
@@ -3624,22 +3451,20 @@ mod tests {
         assert!(q.contains(r"'\''"), "single quotes must be escaped: {q}");
     }
 
-    /// Re-running a card must resume its branch, not start over. Always
+    /// Reusing a sandbox must resume the card branch, not start over. Always
     /// branching from base meant the push was rejected as non-fast-forward
     /// against the card's own earlier work — which is exactly the
     /// "changes requested, go fix it" path.
     #[test]
-    fn clone_resumes_an_existing_branch() {
+    fn refresh_resumes_an_existing_branch() {
         let cfg = repo_cfg();
-        let s = clone_script(&cfg, "honr/card-8");
+        let s = refresh_script(&cfg, "honr/card-8");
         assert!(s.contains("ls-remote --exit-code --heads origin honr/card-8"), "{s}");
         assert!(s.contains("checkout -q -B honr/card-8 origin/honr/card-8"), "{s}");
         assert!(s.contains("rebase -q upstream/main"), "{s}");
         // A conflict is the agent's problem to resolve, so the supervisor must
         // back out rather than leave a half-applied rebase behind.
         assert!(s.contains("rebase --abort"), "{s}");
-        // Shallow history cannot be rebased reliably.
-        assert!(!s.contains("--depth"), "clone must not be shallow: {s}");
     }
 
     /// Nothing syncs the fork, so its own base freezes at the moment it was
@@ -3647,12 +3472,12 @@ mod tests {
     /// Rebasing onto the fork's base would tell the agent it was current when
     /// it was not, and produce a PR that conflicts with what it targets.
     #[test]
-    fn base_comes_from_upstream_not_the_fork() {
-        let s = clone_script(&repo_cfg(), "honr/card-8");
+    fn refresh_base_comes_from_upstream_not_the_fork() {
+        let s = refresh_script(&repo_cfg(), "honr/card-8");
         assert!(s.contains("git remote add upstream https://github.com/shanemcd/honr.git"), "{s}");
         assert!(s.contains("fetch -q upstream main"), "{s}");
         assert!(s.contains("rebase -q upstream/main"), "{s}");
-        // A brand-new card must also start from upstream, not the stale fork.
+        // Missing local branch still starts from upstream, not the stale fork.
         assert!(s.contains("checkout -q -B honr/card-8 upstream/main"), "{s}");
         assert!(!s.contains("rebase -q origin/main"), "must not rebase onto the fork: {s}");
     }
@@ -5317,25 +5142,6 @@ mod tests {
         assert_eq!(item.pr_url(), Some(pr_url));
     }
 
-    #[test]
-    fn parse_conflict_files_extracts_conflicting_paths() {
-        let stdout = format!("some logs...\n{MARK_CONFLICT}\n{MARK_CONFLICT_FILES}src/main.rs,src/store.rs\nother logs");
-        let files = parse_conflict_files(&stdout);
-        assert_eq!(files, vec!["src/main.rs", "src/store.rs"]);
-
-        let empty_stdout = "clean output\n";
-        assert!(parse_conflict_files(empty_stdout).is_empty());
-    }
-
-    #[test]
-    fn rebase_script_includes_git_rebase_and_conflict_extraction() {
-        let cfg = repo_cfg();
-        let script = rebase_script(&cfg, "honr/card-7");
-        assert!(script.contains("git rebase upstream/main"), "script: {script}");
-        assert!(script.contains("git diff --name-only --diff-filter=U"), "script: {script}");
-        assert!(script.contains(MARK_CONFLICT_FILES), "script: {script}");
-    }
-
     /// Project override wins over the global default; unset Project inherits
     /// the default when the supervisor builds create knobs.
     #[test]
@@ -5487,11 +5293,11 @@ mod tests {
         assert_eq!(spec.providers, vec!["vertex".to_string()]);
     }
 
-    fn review_awaiting_rebase_board(env: &str) -> (SharedBoard, crate::model::WorkItem) {
+    fn review_awaiting_mergeable_board() -> (SharedBoard, crate::model::WorkItem) {
         let board = Arc::new(crate::store::Board::new(
             crate::schema::Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-awaiting-rebase-{}.json",
+                "honr-test-awaiting-mergeable-{}.json",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -5499,14 +5305,14 @@ mod tests {
             )),
         ));
         let project = board
-            .create(None, "Rebase Proj", "why", None, Origin::Human, true, None)
+            .create(None, "Mergeable Proj", "why", None, Origin::Human, true, None)
             .unwrap();
         let task = board
             .create(
                 Some(project.id),
-                "Review rebase",
+                "Review mergeable",
                 "catch up",
-                Some("rebased".into()),
+                Some("checked".into()),
                 Origin::Human,
                 false,
                 None,
@@ -5535,59 +5341,35 @@ mod tests {
                 )),
             }),
         );
-        board.set_environment(task.id, Some(env.into()));
         board.dispatch_rebase(task.id).unwrap();
         let item = board.get(task.id).unwrap();
         (board, item)
     }
 
-    fn ok_out(stdout: &str) -> crate::openshell::Output {
-        crate::openshell::Output {
-            code: 0,
-            stdout: stdout.into(),
-            stderr: String::new(),
+    fn fixed_mergeable_fetch(
+        check: crate::github_app::PrConflictCheck,
+    ) -> impl for<'a> FnMut(&'a SharedBoard, &'a str) -> MergeableFetchFut<'a> {
+        move |_board, _pr_url| {
+            let check = check.clone();
+            Box::pin(async move { Ok(Some(check)) })
         }
     }
 
-    fn fail_out(stderr: &str) -> crate::openshell::Output {
-        crate::openshell::Output {
-            code: 1,
-            stdout: String::new(),
-            stderr: stderr.into(),
-        }
-    }
-
-    /// Live sandbox + clean host rebase keeps the card in Review.
+    /// MERGEABLE clears the queue and keeps the card in Review.
     #[tokio::test]
-    async fn process_awaiting_rebases_clean_stays_review() {
-        let env = "honr-card-rebase-clean-a1";
-        let (board, item) = review_awaiting_rebase_board(env);
+    async fn process_awaiting_mergeable_checks_mergeable_stays_review() {
+        let (board, item) = review_awaiting_mergeable_board();
         assert!(item.rebase_requested);
 
-        let os = OpenShell::mock(
-            move |args| match (
-                args.first().map(String::as_str),
-                args.get(1).map(String::as_str),
-            ) {
-                (Some("sandbox"), Some("exec")) => {
-                    let script = args.last().map(String::as_str).unwrap_or("");
-                    if script == "true" {
-                        return ok_out("");
-                    }
-                    if script.contains("test -d") {
-                        return ok_out("");
-                    }
-                    if script.contains("git rebase") {
-                        return ok_out(&format!("{MARK_REBASED}\n"));
-                    }
-                    fail_out("unexpected exec")
-                }
-                _ => fail_out("unexpected"),
-            },
-            Duration::from_secs(5),
-        );
-
-        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
+        let results = process_awaiting_mergeable_checks_with(
+            &board,
+            &repo_cfg(),
+            fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
+                mergeable: crate::github_app::PrMergeableState::Mergeable,
+                base_ref: Some("main".into()),
+            }),
+        )
+        .await;
         assert_eq!(results.len(), 1);
         let updated = results[0].as_ref().unwrap();
         assert_eq!(updated.state, State::Review);
@@ -5595,39 +5377,21 @@ mod tests {
         assert!(!updated.awaiting_dispatch);
     }
 
-    /// Conflicting host rebase bounces to Backlog with BINDING notes as today.
+    /// CONFLICTING bounces to Backlog with a BINDING note for the next claim.
     #[tokio::test]
-    async fn process_awaiting_rebases_conflict_bounces_backlog() {
-        let env = "honr-card-rebase-conflict-a1";
-        let (board, item) = review_awaiting_rebase_board(env);
+    async fn process_awaiting_mergeable_checks_conflicting_bounces_backlog() {
+        let (board, item) = review_awaiting_mergeable_board();
         assert!(item.rebase_requested);
 
-        let os = OpenShell::mock(
-            move |args| match (
-                args.first().map(String::as_str),
-                args.get(1).map(String::as_str),
-            ) {
-                (Some("sandbox"), Some("exec")) => {
-                    let script = args.last().map(String::as_str).unwrap_or("");
-                    if script == "true" {
-                        return ok_out("");
-                    }
-                    if script.contains("test -d") {
-                        return ok_out("");
-                    }
-                    if script.contains("git rebase") {
-                        return ok_out(&format!(
-                            "{MARK_CONFLICT}\n{MARK_CONFLICT_FILES}docs/concepts.md\n"
-                        ));
-                    }
-                    fail_out("unexpected exec")
-                }
-                _ => fail_out("unexpected"),
-            },
-            Duration::from_secs(5),
-        );
-
-        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
+        let results = process_awaiting_mergeable_checks_with(
+            &board,
+            &repo_cfg(),
+            fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
+                mergeable: crate::github_app::PrMergeableState::Conflicting,
+                base_ref: Some("main".into()),
+            }),
+        )
+        .await;
         assert_eq!(results.len(), 1);
         let updated = results[0].as_ref().unwrap();
         assert_eq!(updated.state, State::Backlog);
@@ -5636,110 +5400,45 @@ mod tests {
             .last_bounce_reason
             .as_deref()
             .unwrap_or("")
-            .contains("docs/concepts.md"));
+            .contains("CONFLICTING"));
         assert!(updated
             .notes
             .iter()
-            .any(|n| n.text.contains("BINDING") || n.author == "rebase"));
+            .any(|n| n.text.contains("BINDING") && n.text.contains("do-not-re-report-while-CONFLICTING")));
     }
 
-    /// Dead sandbox is recreated; clone + rebase clears the queue (no forever skip).
+    /// UNKNOWN leaves the card queued — GitHub has not finished computing.
     #[tokio::test]
-    async fn process_awaiting_rebases_recovers_dead_sandbox() {
-        let env = "honr-card-rebase-recover-a1";
-        let (board, item) = review_awaiting_rebase_board(env);
-        assert!(item.rebase_requested);
-        let created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let created_flag = created.clone();
-
-        let os = OpenShell::mock(
-            move |args| match (
-                args.first().map(String::as_str),
-                args.get(1).map(String::as_str),
-            ) {
-                (Some("sandbox"), Some("delete")) => ok_out(""),
-                (Some("sandbox"), Some("create")) => {
-                    created_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    ok_out("")
-                }
-                (Some("sandbox"), Some("exec")) => {
-                    let script = args.last().map(String::as_str).unwrap_or("");
-                    if script == "true" {
-                        if created_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                            return ok_out("");
-                        }
-                        return fail_out("sandbox gone");
-                    }
-                    if script.contains("git clone") {
-                        return ok_out(&format!("{MARK_REBASED}\n"));
-                    }
-                    if script.contains("git rebase") {
-                        return ok_out(&format!("{MARK_REBASED}\n"));
-                    }
-                    fail_out("unexpected exec")
-                }
-                _ => fail_out("unexpected"),
-            },
-            Duration::from_secs(5),
-        );
-
-        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
-        assert!(created.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(results.len(), 1);
-        let updated = results[0].as_ref().unwrap();
-        assert_eq!(updated.state, State::Review);
-        assert!(!updated.rebase_requested);
-        assert!(!updated.awaiting_dispatch);
-    }
-
-    /// Recreate failure must escalate — not leave rebase_requested queued forever.
-    #[tokio::test]
-    async fn process_awaiting_rebases_surfaces_sandbox_recreate_failure() {
-        let env = "honr-card-rebase-dead-a1";
-        let (board, item) = review_awaiting_rebase_board(env);
+    async fn process_awaiting_mergeable_checks_unknown_retries() {
+        let (board, item) = review_awaiting_mergeable_board();
         assert!(item.rebase_requested);
 
-        let os = OpenShell::mock(
-            move |args| match (
-                args.first().map(String::as_str),
-                args.get(1).map(String::as_str),
-            ) {
-                (Some("sandbox"), Some("delete")) => ok_out(""),
-                (Some("sandbox"), Some("create")) => fail_out("gateway down"),
-                (Some("sandbox"), Some("exec")) => {
-                    let script = args.last().map(String::as_str).unwrap_or("");
-                    if script == "true" {
-                        return fail_out("sandbox gone");
-                    }
-                    fail_out("unexpected exec")
-                }
-                _ => fail_out("unexpected"),
-            },
-            Duration::from_secs(5),
+        let results = process_awaiting_mergeable_checks_with(
+            &board,
+            &repo_cfg(),
+            fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
+                mergeable: crate::github_app::PrMergeableState::Unknown,
+                base_ref: Some("main".into()),
+            }),
+        )
+        .await;
+        assert!(results.is_empty());
+        let still = board.get(item.id).unwrap();
+        assert_eq!(still.state, State::Review);
+        assert!(
+            still.rebase_requested,
+            "UNKNOWN must leave rebase_requested queued for the next sweep"
         );
-
-        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
-        assert_eq!(results.len(), 1);
-        let updated = results[0].as_ref().unwrap();
-        assert_eq!(updated.state, State::NeedsHuman);
-        assert!(!updated.rebase_requested);
-        assert!(!updated.awaiting_dispatch);
-        assert!(updated.escalation.is_some());
-        let q = &updated.escalation.as_ref().unwrap().question;
-        assert!(q.contains("sandbox unavailable"), "{q}");
     }
 
-    /// BINDING regression: after MainAdvanced, Running is steered (park/unpark)
-    /// while Review only has `rebase_requested`. If the Review sandbox is down,
-    /// delayed catch-up must recover (or escalate) — Review must not look idle
-    /// forever with only the Running path having visibly moved.
+    /// After MainAdvanced, Running is steered (park/unpark) while Review gets
+    /// `rebase_requested`. A MERGEABLE API check clears Review without sandbox work.
     #[tokio::test]
-    async fn main_advanced_review_not_idle_when_sandbox_down_after_running_steered() {
-        let env = "honr-card-rebase-idle-race-a1";
+    async fn main_advanced_review_clears_via_mergeable_api_after_running_steered() {
         let board = Arc::new(crate::store::Board::new(
             crate::schema::Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-main-adv-sandbox-down-{}.json",
+                "honr-test-main-adv-mergeable-{}.json",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -5809,7 +5508,6 @@ mod tests {
                 )),
             }),
         );
-        board.set_environment(review.id, Some(env.into()));
 
         board.transition(running.id, State::Shaping, "test", None).unwrap();
         board.transition(running.id, State::Backlog, "test", None).unwrap();
@@ -5845,54 +5543,21 @@ mod tests {
             review_queued.notes
         );
 
-        let created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let created_flag = created.clone();
-        let os = OpenShell::mock(
-            move |args| match (
-                args.first().map(String::as_str),
-                args.get(1).map(String::as_str),
-            ) {
-                (Some("sandbox"), Some("delete")) => ok_out(""),
-                (Some("sandbox"), Some("create")) => {
-                    created_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    ok_out("")
-                }
-                (Some("sandbox"), Some("exec")) => {
-                    let script = args.last().map(String::as_str).unwrap_or("");
-                    if script == "true" {
-                        if created_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                            return ok_out("");
-                        }
-                        return fail_out("sandbox gone");
-                    }
-                    if script.contains("git clone") {
-                        return ok_out(&format!("{MARK_REBASED}\n"));
-                    }
-                    if script.contains("git rebase") {
-                        return ok_out(&format!("{MARK_REBASED}\n"));
-                    }
-                    fail_out("unexpected exec")
-                }
-                _ => fail_out("unexpected"),
-            },
-            Duration::from_secs(5),
-        );
-
-        let results = process_awaiting_rebases(&board, &os, &repo_cfg()).await;
-        assert!(
-            created.load(std::sync::atomic::Ordering::SeqCst),
-            "sandbox-down must recreate, not silent-continue"
-        );
+        let results = process_awaiting_mergeable_checks_with(
+            &board,
+            &repo_cfg(),
+            fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
+                mergeable: crate::github_app::PrMergeableState::Mergeable,
+                base_ref: Some("main".into()),
+            }),
+        )
+        .await;
         assert_eq!(results.len(), 1);
         let updated = results[0].as_ref().unwrap();
-        assert_eq!(
-            updated.state,
-            State::Review,
-            "clean delayed catch-up keeps Review"
-        );
+        assert_eq!(updated.state, State::Review);
         assert!(
             !updated.rebase_requested,
-            "Review must not stay queued forever looking idle"
+            "MERGEABLE must clear the queue so Review does not look idle"
         );
         assert!(!updated.awaiting_dispatch);
     }

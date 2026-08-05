@@ -389,30 +389,30 @@ pub struct Board {
 
 pub type SharedBoard = Arc<Board>;
 
-/// The result of attempting a git rebase for a card in Review.
+/// Outcome of a Review catch-up check after main advanced (GitHub API mergeable).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebaseOutcome {
-    /// Rebase succeeded cleanly.
+    /// GitHub reports MERGEABLE — stay in Review.
     Clean,
-    /// Rebase encountered git merge conflicts.
+    /// GitHub reports CONFLICTING — bounce to Backlog for an agent to rebase.
     Conflict {
         conflicting_files: Vec<String>,
         reason: Option<String>,
     },
 }
 
-/// Binding note appended when a Review rebase conflict returns the card to
-/// Backlog. Must reach the next claim briefing so a reused conversation does
-/// not hollow-report while GitHub still says CONFLICTING.
+/// Binding note when a Review card bounces because GitHub reports CONFLICTING.
+/// Must reach the next claim briefing so a reused conversation does not
+/// hollow-report while the PR is still unmergeable.
 pub fn conflict_bounce_note(conflicting_files: &[String]) -> String {
     let files = if conflicting_files.is_empty() {
-        "(unknown)".to_string()
+        "GitHub PR mergeable is CONFLICTING".to_string()
     } else {
-        conflicting_files.join(", ")
+        format!("conflicting files: {}", conflicting_files.join(", "))
     };
     format!(
-        "BINDING: rebase conflict — conflicting files: {files}. \
-         do-not-re-report-while-CONFLICTING; resolve onto upstream base before finishing."
+        "BINDING: main advanced — {files}. \
+         do-not-re-report-while-CONFLICTING; rebase onto upstream base before finishing."
     )
 }
 
@@ -4157,11 +4157,11 @@ facts are pasted, then unpark";
         items
     }
 
-    /// Record the outcome of a rebase operation for a card in Review.
+    /// Record the outcome of a Review catch-up mergeable check.
     ///
-    /// If Clean: the card remains in Review, and `rebase_requested` & `awaiting_dispatch` are cleared.
-    /// If Conflict: the card transitions to Backlog with `last_bounce_reason` set containing
-    /// the failure reason and conflicting file details, and `rebase_requested` & `awaiting_dispatch` are cleared.
+    /// If Clean (GitHub MERGEABLE): stay in Review; clear queue flags.
+    /// If Conflict (GitHub CONFLICTING): bounce to Backlog (or escalate on
+    /// repeated overlapping conflict files); clear queue flags.
     pub fn record_rebase_outcome(&self, id: ItemId, outcome: RebaseOutcome) -> Result<WorkItem, String> {
         let (title, previous_files) = {
             let s = self.state.read();
@@ -4186,7 +4186,10 @@ facts are pasted, then unpark";
                     out
                 };
                 self.emit(&item);
-                self.story(id, format!("{title}: rebase clean — retained in Review."));
+                self.story(
+                    id,
+                    format!("{title}: still mergeable after main advance — retained in Review."),
+                );
                 Ok(item)
             }
             RebaseOutcome::Conflict { conflicting_files, reason } => {
@@ -4203,7 +4206,8 @@ facts are pasted, then unpark";
                         .cloned()
                         .collect();
 
-                    let base_reason = reason.unwrap_or_else(|| "git rebase conflict".to_string());
+                    let base_reason = reason
+                        .unwrap_or_else(|| "GitHub PR mergeable is CONFLICTING".to_string());
                     let bounce_reason = format!(
                         "{base_reason}: decomposition failure: repeated conflict on overlapping files: {}",
                         overlapping.join(", ")
@@ -4244,7 +4248,8 @@ facts are pasted, then unpark";
 
                     self.escalate(id, "rebase", question, options, 0)
                 } else {
-                    let base_reason = reason.unwrap_or_else(|| "git rebase conflict".to_string());
+                    let base_reason = reason
+                        .unwrap_or_else(|| "GitHub PR mergeable is CONFLICTING".to_string());
                     let bounce_reason = if curr_files.is_empty() {
                         base_reason
                     } else {
@@ -4272,19 +4277,24 @@ facts are pasted, then unpark";
                         out
                     };
                     self.emit(&item);
-                    self.story(id, format!("{title}: rebase conflict — returned to Backlog ({bounce_reason})."));
+                    self.story(
+                        id,
+                        format!(
+                            "{title}: GitHub CONFLICTING after main advance — returned to Backlog ({bounce_reason})."
+                        ),
+                    );
                     Ok(item)
                 }
             }
         }
     }
 
-    /// Convenience wrapper to record a clean rebase for a card in Review.
+    /// GitHub reports MERGEABLE — clear catch-up queue, stay in Review.
     pub fn complete_rebase_clean(&self, id: ItemId) -> Result<WorkItem, String> {
         self.record_rebase_outcome(id, RebaseOutcome::Clean)
     }
 
-    /// Convenience wrapper to record a rebase conflict for a card in Review.
+    /// GitHub reports CONFLICTING — bounce to Backlog for an agent to rebase.
     pub fn complete_rebase_conflict(
         &self,
         id: ItemId,
@@ -4298,31 +4308,6 @@ facts are pasted, then unpark";
                 reason: reason.map(|r| r.to_string()),
             },
         )
-    }
-
-    /// Host rebase could not run because the Review sandbox is gone and recreate
-    /// failed. Clears `rebase_requested` and escalates — silent forever-skip is
-    /// how Review cards used to look idle after MainAdvanced queued them.
-    pub fn fail_rebase_sandbox(&self, id: ItemId, detail: &str) -> Result<WorkItem, String> {
-        let question = format!(
-            "Host rebase blocked for card #{id}: sandbox unavailable ({detail})"
-        );
-        let options = vec![
-            EscalationOption {
-                label: "Retry host rebase".into(),
-                detail: "Answer and re-queue rebase once the sandbox gateway is healthy."
-                    .into(),
-            },
-            EscalationOption {
-                label: "Manually rebase the PR branch".into(),
-                detail: "Rebase onto main, force-push the card branch, then Approve.".into(),
-            },
-            EscalationOption {
-                label: "Bounce to Backlog".into(),
-                detail: "Return the card to Backlog for a fresh dispatch.".into(),
-            },
-        ];
-        self.escalate(id, "rebase", question, options, 0)
     }
 
     /// Normalize a GitHub PR URL for matching board `pr_url` values.
@@ -7918,55 +7903,6 @@ mod tests {
         assert_eq!(updated2.state, State::Backlog);
         assert!(updated2.escalation.is_none());
         assert_eq!(updated2.last_conflict_files, vec!["src/store.rs"]);
-    }
-
-    #[test]
-    fn fail_rebase_sandbox_clears_queue_and_escalates() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-fail-rebase-sbx-{}.json",
-                std::process::id()
-            )),
-        );
-        let project = b
-            .create(None, "Fail Rebase Proj", "intent", None, Origin::Human, true, None)
-            .unwrap();
-        let t1 = b
-            .create(
-                Some(project.id),
-                "Task Fail Sbx",
-                "intent 1",
-                Some("dod 1".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .unwrap();
-        b.transition(t1.id, State::Shaping, "test", None).unwrap();
-        b.transition(t1.id, State::Backlog, "test", None).unwrap();
-        b.transition(t1.id, State::Claimed, "agent", None).unwrap();
-        b.transition(t1.id, State::Review, "agent", None).unwrap();
-        b.set_pr_url(
-            t1.id,
-            Some("https://github.com/shanemcd/honr/pull/305".into()),
-        );
-        b.dispatch_rebase(t1.id).unwrap();
-        assert!(b.get(t1.id).unwrap().rebase_requested);
-
-        let updated = b
-            .fail_rebase_sandbox(t1.id, "recreate sandbox for rebase: gateway down")
-            .unwrap();
-        assert_eq!(updated.state, State::NeedsHuman);
-        assert!(!updated.rebase_requested);
-        assert!(!updated.awaiting_dispatch);
-        assert!(updated.escalation.is_some());
-        assert!(updated
-            .escalation
-            .as_ref()
-            .unwrap()
-            .question
-            .contains("sandbox unavailable"));
     }
 
     const SEED_POLICY_YAML: &str = "version: 1\n# seed-policy\nfilesystem_policy:\n  include_workdir: true\n";
