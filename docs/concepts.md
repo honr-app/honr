@@ -53,6 +53,11 @@ Task.
 An agent that could reach honr's MCP could approve its own review. Containment
 is intentional: the worker is material, not a participant.
 
+The durable **ops session** (sandbox environment name, conversation id, running
+or parked-like hold) lives on the Board as a singleton record — not a WorkItem
+and not card claim/heartbeat/report lifecycle. Chat and TTY reconnect read and
+mutate that Board record so they do not grow a second state machine.
+
 ## Invariants worth protecting
 
 **One state machine.** If a rule belongs in the lifecycle, it lives in
