@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { api } from "../api.js";
 import type { OpsSession } from "../types.js";
 
@@ -6,6 +6,111 @@ const POLL_MS = 4000;
 
 function statusLabel(status: OpsSession["status"]): string {
   return status === "parked" ? "Parked" : "Running";
+}
+
+export type CockpitChatRole = "user" | "assistant" | "system";
+
+export type CockpitChatMessage = {
+  id: string;
+  role: CockpitChatRole;
+  text: string;
+  streaming?: boolean;
+};
+
+/**
+ * Extract displayable assistant text from one ops-chat `agent` SSE line
+ * (Cursor/Claude stream-json or plain stdout). Returns null to skip.
+ */
+export function opsChatLineText(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  if (!trimmed.startsWith("{")) return trimmed;
+
+  try {
+    const obj = JSON.parse(trimmed) as Record<string, unknown>;
+
+    if (obj.type === "thinking") return null;
+    if (obj.type === "tool_call" || obj.event === "step_update") return null;
+    if (
+      typeof obj.type === "string" &&
+      [
+        "message_start",
+        "message_delta",
+        "message_stop",
+        "content_block_stop",
+        "ping",
+        "system",
+        "result",
+      ].includes(obj.type)
+    ) {
+      return null;
+    }
+
+    if (obj.type === "content_block_start") {
+      const cb = obj.content_block as { type?: string; text?: string } | undefined;
+      if (cb?.type === "text" && cb.text) return cb.text;
+      return null;
+    }
+
+    if (obj.type === "content_block_delta") {
+      const delta = obj.delta as { type?: string; text?: string } | undefined;
+      if (delta?.text) return delta.text;
+      return null;
+    }
+
+    if (obj.type === "error" || obj.error) {
+      const err = obj.error;
+      const msg =
+        typeof err === "string"
+          ? err
+          : err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : JSON.stringify(err ?? obj);
+      return `Error: ${msg}`;
+    }
+
+    const content =
+      (obj.message as { content?: unknown } | undefined)?.content ?? obj.content;
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const item of content) {
+        if (
+          item &&
+          typeof item === "object" &&
+          (item as { type?: string }).type === "text" &&
+          typeof (item as { text?: unknown }).text === "string"
+        ) {
+          parts.push((item as { text: string }).text);
+        }
+      }
+      return parts.length > 0 ? parts.join("") : null;
+    }
+    if (typeof content === "string" && content.trim()) return content;
+
+    return null;
+  } catch {
+    return trimmed;
+  }
+}
+
+/** Why the composer is locked — mirrors Board session readiness only. */
+export function cockpitChatGate(
+  session: OpsSession | null,
+): { canSend: boolean; reason: string | null } {
+  if (session == null) {
+    return { canSend: false, reason: "Start an ops session to chat with the seat." };
+  }
+  if (session.status === "parked") {
+    return { canSend: false, reason: "Resume the ops session to continue chatting." };
+  }
+  const environment = session.environment?.trim();
+  if (!environment) {
+    return {
+      canSend: false,
+      reason: "Waiting for the supervisor to provision the ops environment…",
+    };
+  }
+  return { canSend: true, reason: null };
 }
 
 /**
@@ -129,15 +234,161 @@ export function CockpitSessionView({
 }
 
 /**
- * Cockpit — primary-nav surface for the ops-seat control plane.
- * Thin face over Board /api/ops-session*: poll status, REST for Start / Park /
- * Resume / Stop. No local session files or shadow lifecycle.
+ * Presentational ops chat — message list + composer over /api/ops-chat.
+ * Enablement comes from Board session status only; no local lifecycle.
+ */
+export function CockpitChatView({
+  messages,
+  canSend,
+  disabledReason,
+  streaming,
+  error,
+  draft,
+  onDraftChange,
+  onSend,
+}: {
+  messages: CockpitChatMessage[];
+  canSend: boolean;
+  disabledReason?: string | null;
+  streaming?: boolean;
+  error?: string | null;
+  draft: string;
+  onDraftChange: (value: string) => void;
+  onSend: () => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const composerDisabled = !canSend || !!streaming;
+  const sendDisabled = composerDisabled || !draft.trim();
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
+  return (
+    <section
+      className="cockpit-chat"
+      aria-labelledby={titleId}
+      data-testid="cockpit-chat"
+    >
+      <h2 id={titleId}>Ops chat</h2>
+      <p className="dim cockpit-chat-lede">
+        Primary attach: prompts go through the host{" "}
+        <code>/api/ops-chat</code> bridge into the Board-named seat. Transcript
+        below is browser-local — conversation id stays on the Board session.
+      </p>
+
+      {error && (
+        <div className="err" data-testid="cockpit-chat-error">
+          {error}
+        </div>
+      )}
+
+      <div
+        className="cockpit-chat-messages"
+        ref={listRef}
+        data-testid="cockpit-chat-messages"
+        role="log"
+        aria-live="polite"
+      >
+        {messages.length === 0 && (
+          <p className="dim cockpit-chat-empty" data-testid="cockpit-chat-empty">
+            {disabledReason ??
+              "Send a prompt to steer the board via the ops seat."}
+          </p>
+        )}
+        {messages.map((m) => (
+          <div
+            key={m.id}
+            className={`cockpit-chat-bubble cockpit-chat-bubble-${m.role}${
+              m.streaming ? " cockpit-chat-bubble-streaming" : ""
+            }`}
+            data-testid={`cockpit-chat-msg-${m.role}`}
+            data-role={m.role}
+          >
+            <span className="cockpit-chat-role">
+              {m.role === "user"
+                ? "You"
+                : m.role === "assistant"
+                  ? "Ops"
+                  : "System"}
+            </span>
+            <pre className="cockpit-chat-text">
+              {m.text || (m.streaming ? "…" : "")}
+            </pre>
+          </div>
+        ))}
+      </div>
+
+      {disabledReason && !streaming && (
+        <p className="dim cockpit-chat-gate" data-testid="cockpit-chat-gate">
+          {disabledReason}
+        </p>
+      )}
+
+      <form
+        className="cockpit-chat-composer"
+        data-testid="cockpit-chat-composer"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!sendDisabled) onSend();
+        }}
+      >
+        <textarea
+          value={draft}
+          onChange={(e) => onDraftChange(e.target.value)}
+          disabled={composerDisabled}
+          rows={3}
+          placeholder={
+            canSend
+              ? "Message the ops seat…"
+              : "Chat unavailable until the session is Running"
+          }
+          data-testid="cockpit-chat-input"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              if (!sendDisabled) onSend();
+            }
+          }}
+        />
+        <button
+          type="submit"
+          className="primary"
+          disabled={sendDisabled}
+          data-testid="cockpit-chat-send"
+        >
+          {streaming ? "Streaming…" : "Send"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+/**
+ * Cockpit — primary-nav surface for steering the board via the ops seat.
+ * Chat is the primary attach UX; session controls are a thin face over
+ * /api/ops-session*. No local session files or shadow lifecycle.
  */
 export function Cockpit() {
   const [session, setSession] = useState<OpsSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [messages, setMessages] = useState<CockpitChatMessage[]>([]);
+  const [draft, setDraft] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const msgSeq = useRef(0);
+
+  const nextId = () => {
+    msgSeq.current += 1;
+    return `m-${msgSeq.current}`;
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -162,8 +413,18 @@ export function Cockpit() {
     return () => {
       alive = false;
       clearInterval(poll);
+      abortRef.current?.abort();
     };
   }, [refresh]);
+
+  // Drop the browser transcript when the Board session is gone — not a
+  // lifecycle store, just avoid showing stale turns after Stop.
+  useEffect(() => {
+    if (session == null && messages.length > 0 && !streaming) {
+      setMessages([]);
+      setChatError(null);
+    }
+  }, [session, messages.length, streaming]);
 
   const runAction = useCallback(
     async (action: () => Promise<unknown>) => {
@@ -183,17 +444,100 @@ export function Cockpit() {
     [refresh],
   );
 
+  const gate = cockpitChatGate(session);
+
+  const sendChat = useCallback(async () => {
+    const prompt = draft.trim();
+    if (!prompt || streaming || !gate.canSend) return;
+
+    const userId = nextId();
+    const assistantId = nextId();
+    setDraft("");
+    setChatError(null);
+    setMessages((prev) => [
+      ...prev,
+      { id: userId, role: "user", text: prompt },
+      { id: assistantId, role: "assistant", text: "", streaming: true },
+    ]);
+    setStreaming(true);
+
+    const ac = new AbortController();
+    abortRef.current = ac;
+
+    const appendAssistant = (chunk: string) => {
+      if (!chunk) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId ? { ...m, text: m.text + chunk } : m,
+        ),
+      );
+    };
+
+    try {
+      await api.streamOpsChat(prompt, {
+        signal: ac.signal,
+        onAgentLine: (line) => {
+          const text = opsChatLineText(line);
+          if (text) appendAssistant(text);
+        },
+        onError: (message) => {
+          setChatError(message);
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId && !m.text
+                ? { ...m, text: message, streaming: false }
+                : m,
+            ),
+          );
+        },
+      });
+    } catch (e) {
+      if (ac.signal.aborted) return;
+      const msg = e instanceof Error ? e.message : String(e);
+      setChatError(msg);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId && !m.text
+            ? { ...m, role: "system", text: msg, streaming: false }
+            : m,
+        ),
+      );
+    } finally {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId ? { ...m, streaming: false } : m,
+        ),
+      );
+      setStreaming(false);
+      if (abortRef.current === ac) abortRef.current = null;
+      // conversation_id may have landed on the Board mid-turn
+      await refresh();
+    }
+  }, [draft, streaming, gate.canSend, refresh]);
+
   return (
     <div className="cockpit-page" data-testid="cockpit-page">
       <header className="board-hero">
         <h1>Cockpit</h1>
         <p className="board-lede">
-          Ops seat control plane: live session status and Start / Park / Resume
-          / Stop against the Board. Optional{" "}
-          <code>openshell sandbox connect</code> stays a TTY fallback — not an
-          in-browser terminal.
+          Steer the board by chatting with the ops seat in the browser. Session
+          Start / Park / Resume / Stop call Board{" "}
+          <code>/api/ops-session*</code>; chat uses the host{" "}
+          <code>/api/ops-chat</code> bridge. Optional{" "}
+          <code>openshell sandbox connect</code> remains a TTY fallback.
         </p>
       </header>
+
+      <CockpitChatView
+        messages={messages}
+        canSend={gate.canSend}
+        disabledReason={gate.reason}
+        streaming={streaming}
+        error={chatError}
+        draft={draft}
+        onDraftChange={setDraft}
+        onSend={() => void sendChat()}
+      />
 
       <CockpitSessionView
         session={session}
