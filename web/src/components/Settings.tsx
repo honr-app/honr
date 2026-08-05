@@ -63,8 +63,8 @@ export function Settings() {
         <p className="settings-lede">
           Control-plane preferences. Forge holds provider and webhook poll. Each
           card’s <code>pull_request</code> (after report) holds work remotes.
-          OpenShell holds gateway connectivity, providers, and sandbox profiles
-          (including which agent engine a profile runs). GitHub App holds sealed
+          OpenShell holds Connectivity, Providers, and Profiles (including which
+          agent engine a profile runs). GitHub App holds sealed
           App credentials for installation tokens. Agent runtime holds
           concurrency, timeouts, and the fallback engine.
         </p>
