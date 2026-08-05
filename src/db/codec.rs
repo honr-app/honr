@@ -105,6 +105,9 @@ pub const META_WEBHOOK_POLL: &str = "webhook_poll";
 /// JSON object: `owner/name` → last-seen default-branch tip SHA (poll path).
 pub const META_WEBHOOK_POLL_TIPS: &str = "webhook_poll_tips";
 
+/// JSON blob: optional [`crate::model::OpsSession`] (control-plane ops seat).
+pub const META_OPS_SESSION: &str = "ops_session";
+
 /// Fields without dedicated columns — portable JSON blob on `items.extras_json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ItemExtras {

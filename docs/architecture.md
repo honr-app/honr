@@ -22,8 +22,8 @@ UI / MCP / supervisor
 
 | Path | What |
 |---|---|
-| `src/model.rs` | One node type. Project (container) + Task (claimable leaf). |
-| `src/machine.rs` | Legal transitions + lifecycle invariants. |
+| `src/model.rs` | One node type. Project (container) + Task (claimable leaf). Ops session singleton. |
+| `src/machine.rs` | Legal transitions + lifecycle invariants (cards and ops session). |
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
 | `src/api.rs` `src/sse.rs` | The human face (REST + SSE). |
 | `src/mcp.rs` | Operator tools and worker verbs. |
