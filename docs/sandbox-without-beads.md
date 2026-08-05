@@ -1,11 +1,9 @@
-# Sandbox agent surface: no beads
+# Sandbox agent surface
 
-**Status:** landed (`t1`–`t3`). Host/operator beads remain; the **sandbox agent
-surface** does not include `bd`, a beads DB, or beads CLI workflow.
-
-Card / Project context reaches agents only through supervisor briefings (and
-`/sandbox/.honr` contract files). Agent outputs stay the existing reporting
-contracts — not beads mutations.
+**Status:** landed (`t1`–`t3`). Sandbox agents receive card context through
+supervisor briefings and `/sandbox/.honr` contract files. They publish via
+`report.json` / `plan.json` / `escalate.json` / `split.json`. Host/operator
+beads stay on the host.
 
 **Board epic:** [#290](https://github.com/shanemcd/honr/issues/290)
 (`honr-tr6`).
