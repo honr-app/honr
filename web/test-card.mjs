@@ -494,12 +494,15 @@ assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should exp
 
 const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
+assert(helpHtml.includes("data-testid=\"operator-guide\""), "Help embeds OperatorGuide");
+assert(helpHtml.includes("data-testid=\"operator-guide-mcp\""), "Help shows OperatorGuide MCP section");
+assert(helpHtml.includes("data-testid=\"operator-guide-loop\""), "Help shows OperatorGuide Project loop");
 assert(helpHtml.includes("create_project"), "Help should document create_project");
 assert(helpHtml.includes("plan.json"), "Help should document plan.json");
 assert(helpHtml.includes("dispatch"), "Help should document dispatch");
 assert(helpHtml.includes("8080/mcp"), "Help should show MCP URL");
 
-// OperatorGuide — reusable MCP connect + first Project loop (Board empty / Help embed later)
+// OperatorGuide — reusable MCP connect + first Project loop (Board empty / Help)
 const guideHtml = renderToString(React.createElement(OperatorGuide));
 assert(guideHtml.includes("data-testid=\"operator-guide\""), "OperatorGuide root testid");
 assert(guideHtml.includes("data-testid=\"operator-guide-mcp\""), "OperatorGuide MCP section");
