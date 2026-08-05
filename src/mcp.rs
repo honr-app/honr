@@ -101,8 +101,12 @@ pub struct AutoDispatchArg {
 pub struct CreateProjectArg {
     /// Short and distinct — you cannot chunk what you cannot name.
     pub title: String,
-    /// One sentence of intent. This is the contract everything below inherits.
+    /// One sentence of product intent (not the clone target — use `clone_repo`).
     pub intent: String,
+    /// Repository Initial plan clones for planning (`owner/name`). Required.
+    /// Stamped into Project intent and the seeded Initial plan so workers do
+    /// not invent a remotes target. Proposed Tasks usually use the same repo.
+    pub clone_repo: String,
     /// Projects are roots. Nesting a Project under another is refused.
     #[serde(default)]
     pub parent: Option<ItemId>,
@@ -111,8 +115,7 @@ pub struct CreateProjectArg {
     /// Standing agent instructions for this Project (defaults on create if omitted).
     #[serde(default)]
     pub project_prompt: Option<String>,
-    /// Ignored — remotes are task-scoped. Accepted so mistaken callers do not
-    /// invent a Project `product_repo` field.
+    /// Ignored — use `clone_repo`. Kept so old callers do not invent `product_repo`.
     #[serde(default)]
     #[schemars(skip)]
     pub product_repo: Option<serde_json::Value>,
@@ -565,10 +568,13 @@ impl Operator {
 
     #[tool(
         name = "create_project",
-        description = "Create a Project container. Auto-seeds one Backlog Initial plan Task. \
-                       Optional project_prompt overrides default standing instructions. \
-                       Dispatch the Initial plan when ready; the planner writes plan.json \
-                       (proposed Tasks name clone targets in intent/DoD)."
+        description = "Create a Project container. Requires clone_repo (`owner/name`) — the \
+                       repository Initial plan clones into for planning (and the default for \
+                       proposed Tasks). Auto-seeds one Backlog Initial plan Task with that \
+                       clone target stamped in. Optional project_prompt overrides default \
+                       standing instructions. Dispatch the Initial plan when ready; the \
+                       planner writes plan.json (each proposed Task names its clone target \
+                       in intent/DoD, usually the same clone_repo)."
     )]
     fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
         if a.parent.is_some() {
@@ -577,19 +583,14 @@ impl Operator {
         let _ = a.product_repo;
         let item = self
             .board
-            .create(
-                None,
+            .create_project(
                 a.title,
                 a.intent,
-                None,
-                crate::model::Origin::Human,
+                &a.clone_repo,
                 a.above_line,
-                None,
+                a.project_prompt,
             )
             .map_err(bad)?;
-        if let Some(prompt) = a.project_prompt {
-            let _ = self.board.update_item(item.id, None, None, None, None, Some(prompt));
-        }
         let _ = self.board.transition(item.id, State::Shaping, "operator", None);
         self.ack(
             item.id,
@@ -600,9 +601,10 @@ impl Operator {
     #[tool(
         name = "init_plan",
         description = "Ensure a Project has an Initial plan Task (usually already auto-seeded \
-                       by create_project). Idempotent. Each proposed task must name the \
-                       repository to clone in its intent/DoD. Dispatch the Initial plan to \
-                       write plan.json."
+                       by create_project). Idempotent. Project intent should already name \
+                       clone_repo (`Clone repository: owner/name …`). Each proposed task \
+                       must name the repository to clone in its intent/DoD. Dispatch the \
+                       Initial plan to write plan.json."
     )]
     fn init_plan(&self, Parameters(a): Parameters<InitPlanArg>) -> Out<Ack> {
         let seed = self.board.init_plan(a.project).map_err(bad)?;

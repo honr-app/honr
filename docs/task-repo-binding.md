@@ -10,17 +10,20 @@ Related empty-state onboarding: [#279](https://github.com/shanemcd/honr/issues/2
 ## Happy path
 
 ```text
-create_project(title, intent, …)  → Project + auto-seeded Initial plan Task
-dispatch Initial plan             → write plan.json (proposed Tasks name
-                                    clone targets in intent/DoD) → Review
-Approve                           → sibling Tasks (prose carries clone targets)
-dispatch impl Task                → agent clones from card text; opens PR
-report.json                       → card.pull_request set → resume remotes
+create_project(title, intent, clone_repo, …)
+  → Project + Initial plan (clone_repo stamped in prose)
+dispatch Initial plan → clone clone_repo; write plan.json (proposed Tasks
+                        name clone targets in intent/DoD) → Review
+Approve               → sibling Tasks (prose carries clone targets)
+dispatch impl Task    → agent clones from card text; opens PR
+report.json           → card.pull_request set → resume remotes
 ```
 
-MCP: `create_project` seeds Initial plan. `init_plan` re-seeds if a Project
-somehow has none. REST: `POST /api/items/{project_id}/init-plan` with `{}` is
-the same.
+`clone_repo` is required (`owner/name`). It is stamped into Project intent and
+the seeded Initial plan so Remotes can clone without inventing a name. MCP
+`create_project` and REST Project create both require it. `init_plan` re-seeds
+if a Project somehow has none. REST: `POST /api/items/{project_id}/init-plan`
+with `{}` is the same.
 
 ## Resolution order
 

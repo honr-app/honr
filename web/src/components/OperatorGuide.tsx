@@ -94,13 +94,15 @@ export function OperatorGuide() {
         <h2 id="operator-guide-loop-title">First Project loop</h2>
         <ol className="operator-guide-steps" data-testid="operator-guide-loop-steps">
           <li>
-            <code>create_project</code> — auto-seeds a claimable{" "}
-            <strong>Initial plan</strong> Task.
+            <code>create_project</code> with required{" "}
+            <code>clone_repo</code> (<code>owner/name</code>) — auto-seeds a
+            claimable <strong>Initial plan</strong> Task stamped with that
+            planning clone target.
           </li>
           <li>
-            <code>dispatch</code> the Initial plan — the agent writes{" "}
-            <code>plan.json</code>. Each proposed task names its clone target
-            in intent/DoD.
+            <code>dispatch</code> the Initial plan — the agent clones{" "}
+            <code>clone_repo</code> and writes <code>plan.json</code>. Each
+            proposed task names its clone target in intent/DoD.
           </li>
           <li>
             <strong>Approve</strong> — creates sibling Tasks under the Project.

@@ -3284,7 +3284,12 @@ pub(crate) fn cockpit_briefing() -> String {
     b.push_str(
         "Start with board_snapshot. Triage Needs You first, then Review. Interrupt the \
          human only for irreversible actions, ambiguity blocking several items, or repeated \
-         failure on the same card.\n",
+         failure on the same card.\n\n",
+    );
+    b.push_str(
+        "When creating a Project, `create_project` requires `clone_repo` (`owner/name`) — \
+         the repository Initial plan clones for planning. Do not dispatch Initial plan \
+         until that clone target is set.\n",
     );
     b
 }
@@ -4231,6 +4236,10 @@ mod tests {
         assert!(cold.contains("cockpit"), "{cold}");
         assert!(cold.contains("operator"), "{cold}");
         assert!(cold.contains("board_snapshot"), "{cold}");
+        assert!(
+            cold.contains("clone_repo") && cold.contains("owner/name"),
+            "briefing must require create_project clone_repo: {cold}"
+        );
         assert!(
             cold.contains("/sandbox/.honr/mcp/"),
             "briefing must point at injected MCP creds: {cold}"

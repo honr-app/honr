@@ -208,10 +208,13 @@ pub struct CreateItem {
     capability: Option<String>,
     #[serde(default)]
     above_line: bool,
-    /// Accepted on create; clone targets are named in intent/DoD.
+    /// Required for Projects — `owner/name` Initial plan clones for planning.
+    #[serde(default)]
+    clone_repo: Option<String>,
+    /// Accepted on Task create; clone targets are named in intent/DoD.
     #[serde(default)]
     repo: Option<crate::schema::RepoConfig>,
-    /// Accepted and unused on create.
+    /// Accepted and unused — use `clone_repo` on Project create.
     #[serde(default)]
     product_repo: Option<serde_json::Value>,
 }
@@ -221,9 +224,16 @@ async fn create_item(
     Json(req): Json<CreateItem>,
 ) -> ApiResult<WorkItem> {
     let _ = req.product_repo;
-    let _ = req.repo; // name clone target in intent/DoD
-    let item = b
-        .create(
+    let _ = req.repo; // Task clone targets live in intent/DoD
+    let item = if req.parent.is_none() {
+        let clone = req
+            .clone_repo
+            .as_deref()
+            .ok_or_else(|| ApiError("clone_repo is required for Projects (`owner/name`)".into()))?;
+        b.create_project(req.title, req.intent, clone, req.above_line, None)
+            .map_err(ApiError)?
+    } else {
+        b.create(
             req.parent,
             req.title,
             req.intent,
@@ -232,7 +242,8 @@ async fn create_item(
             req.above_line,
             req.capability,
         )
-        .map_err(ApiError)?;
+        .map_err(ApiError)?
+    };
     // A project dropped in plain language starts shaping immediately.
     let item = b.transition(item.id, State::Shaping, "human", None).unwrap_or(item);
 
@@ -1764,7 +1775,7 @@ mod tests {
             "Project detail JSON should omit unused product_repo: {proj_v}"
         );
 
-        // create Project with accidental product_repo — ignored.
+        // create Project requires clone_repo; product_repo / task repo body ignored.
         let Ok(Json(created)) = create_item(
             AxState(b.clone()),
             Json(CreateItem {
@@ -1774,6 +1785,7 @@ mod tests {
                 definition_of_done: None,
                 capability: None,
                 above_line: true,
+                clone_repo: Some("acme/widgets".into()),
                 repo: Some(crate::schema::RepoConfig {
                     upstream: "should/ignore".into(),
                     fork: String::new(),
@@ -1788,6 +1800,34 @@ mod tests {
         };
         assert!(created.is_project());
         assert!(created.repo.is_none());
+        assert!(
+            created.intent.contains("Clone repository: acme/widgets"),
+            "Project intent must stamp clone_repo: {}",
+            created.intent
+        );
+
+        let Err(ApiError(missing)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: None,
+                title: "Missing clone".into(),
+                intent: "why".into(),
+                definition_of_done: None,
+                capability: None,
+                above_line: true,
+                clone_repo: None,
+                repo: None,
+                product_repo: None,
+            }),
+        )
+        .await
+        else {
+            panic!("Project create without clone_repo must fail");
+        };
+        assert!(
+            missing.contains("clone_repo"),
+            "expected clone_repo error, got {missing}"
+        );
 
         // update Project with product_repo / repo — both ignored.
         let Ok(Json(updated)) = update_item(
@@ -1854,6 +1894,7 @@ mod tests {
                 definition_of_done: Some("done in acme/widgets".into()),
                 capability: None,
                 above_line: false,
+                clone_repo: None,
                 repo: None,
                 product_repo: None,
             }),
@@ -1875,6 +1916,7 @@ mod tests {
                 definition_of_done: Some("done".into()),
                 capability: None,
                 above_line: false,
+                clone_repo: None,
                 repo: Some(crate::schema::RepoConfig {
                     upstream: "acme/widgets".into(),
                     fork: String::new(),
