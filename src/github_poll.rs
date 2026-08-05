@@ -397,6 +397,17 @@ mod tests {
         merged: bool,
         tip_sha: &'static str,
     ) -> (String, tokio::task::JoinHandle<()>) {
+        spawn_poll_mock_for_pr(merged, tip_sha, None).await
+    }
+
+    /// When `merged_only_number` is set, only that PR number reports `merged: true`.
+    async fn spawn_poll_mock_for_pr(
+        merged: bool,
+        tip_sha: &'static str,
+        merged_only_number: Option<u64>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::extract::Path;
+
         let app = Router::new()
             .route(
                 "/app/installations/{id}/access_tokens",
@@ -409,10 +420,14 @@ mod tests {
             )
             .route(
                 "/repos/{owner}/{repo}/pulls/{number}",
-                get(move || async move {
+                get(move |Path((_owner, _repo, number)): Path<(String, String, u64)>| async move {
+                    let is_merged = match merged_only_number {
+                        Some(n) => merged && number == n,
+                        None => merged,
+                    };
                     Json(serde_json::json!({
-                        "merged": merged,
-                        "html_url": "https://github.com/acme/widgets/pull/7"
+                        "merged": is_merged,
+                        "html_url": format!("https://github.com/acme/widgets/pull/{number}")
                     }))
                 }),
             )
@@ -488,11 +503,24 @@ mod tests {
                 None,
             )
             .unwrap();
-        let _ = board.transition(t.id, State::Shaping, "test", None);
-        let _ = board.transition(t.id, State::Backlog, "test", None);
-        let _ = board.transition(t.id, State::Claimed, "test", None);
-        let _ = board.transition(t.id, State::Running, "test", None);
-        let _ = board.transition(t.id, State::Review, "test", None);
+        let sibling = board
+            .create(
+                Some(p.id),
+                "Sibling Review",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        for id in [t.id, sibling.id] {
+            let _ = board.transition(id, State::Shaping, "test", None);
+            let _ = board.transition(id, State::Backlog, "test", None);
+            let _ = board.transition(id, State::Claimed, "test", None);
+            let _ = board.transition(id, State::Running, "test", None);
+            let _ = board.transition(id, State::Review, "test", None);
+        }
         board.set_pull_request(
             t.id,
             Some(crate::model::PullRequest {
@@ -501,8 +529,16 @@ mod tests {
                 head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/t")),
             }),
         );
+        board.set_pull_request(
+            sibling.id,
+            Some(crate::model::PullRequest {
+                url: "https://github.com/acme/widgets/pull/8".into(),
+                base: Some(crate::model::PullRequestEnd::new("acme/widgets", "main")),
+                head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/sib")),
+            }),
+        );
 
-        let (base, handle) = spawn_poll_mock(true, "aaa111").await;
+        let (base, handle) = spawn_poll_mock_for_pr(true, "aaa111", Some(7)).await;
         let _api = github_api_env::Guard::set(&base);
 
         tick(&board).await.expect("tick");
@@ -515,6 +551,16 @@ mod tests {
             .map(|h| h.by.clone())
             .unwrap_or_default();
         assert_eq!(by, POLL_BY);
+
+        // Poll merge uses the same Board complete_for_merged_pr_by path as
+        // webhooks — sibling Review PRs must get rebase_requested.
+        let sib = board.get(sibling.id).unwrap();
+        assert_eq!(sib.state, State::Review);
+        assert!(
+            sib.rebase_requested,
+            "github-poll merge must queue sibling Review catch-up like webhook"
+        );
+        assert!(sib.awaiting_dispatch);
 
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);
