@@ -1,7 +1,7 @@
 //! The state machine is the contract. Neither transport owns any of this —
 //! REST handlers and MCP tools both route every mutation through here.
 
-use crate::model::{State, WorkItem};
+use crate::model::{OpsSession, OpsSessionStatus, State, WorkItem};
 
 /// Legal edges, straight off the lifecycle diagram.
 pub fn allowed(from: State, to: State) -> bool {
@@ -123,6 +123,56 @@ pub fn check(
     Ok(())
 }
 
+// --------------------------------------------------------------- ops session
+//
+// Singleton Board record for the control-plane ops seat. Not a WorkItem and
+// not card claim/heartbeat/report. Transports must call Board; these helpers
+// are the only place the create/park/resume/stop rules live.
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OpsSessionError {
+    #[error("ops session already exists")]
+    AlreadyExists,
+    #[error("no ops session")]
+    NotFound,
+    #[error("ops session is already parked")]
+    AlreadyParked,
+    #[error("ops session is not parked")]
+    NotParked,
+}
+
+/// Create only when the Board has no ops session.
+pub fn check_ops_create(existing: &Option<OpsSession>) -> Result<(), OpsSessionError> {
+    if existing.is_some() {
+        Err(OpsSessionError::AlreadyExists)
+    } else {
+        Ok(())
+    }
+}
+
+/// Mutate (update / park / resume) only when a session exists.
+pub fn check_ops_present(
+    existing: &Option<OpsSession>,
+) -> Result<&OpsSession, OpsSessionError> {
+    existing.as_ref().ok_or(OpsSessionError::NotFound)
+}
+
+/// Park-hold only from Running.
+pub fn check_ops_park(session: &OpsSession) -> Result<(), OpsSessionError> {
+    match session.status {
+        OpsSessionStatus::Running => Ok(()),
+        OpsSessionStatus::Parked => Err(OpsSessionError::AlreadyParked),
+    }
+}
+
+/// Resume only from Parked (Running → Running is not a resume).
+pub fn check_ops_resume(session: &OpsSession) -> Result<(), OpsSessionError> {
+    match session.status {
+        OpsSessionStatus::Parked => Ok(()),
+        OpsSessionStatus::Running => Err(OpsSessionError::NotParked),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +270,29 @@ mod tests {
         let item = { let mut i = leaf(); i.state = Backlog; i };
         let err = check(&item, Claimed, false, &[41]).unwrap_err();
         assert!(matches!(err, TransitionError::Blocked { .. }));
+    }
+
+    #[test]
+    fn ops_session_create_requires_absence() {
+        assert!(check_ops_create(&None).is_ok());
+        let existing = Some(OpsSession::new(None, None));
+        assert_eq!(
+            check_ops_create(&existing),
+            Err(OpsSessionError::AlreadyExists)
+        );
+    }
+
+    #[test]
+    fn ops_session_park_resume_are_strict() {
+        let mut s = OpsSession::new(Some("honr-ops".into()), Some("conv-1".into()));
+        assert!(check_ops_park(&s).is_ok());
+        assert_eq!(check_ops_resume(&s), Err(OpsSessionError::NotParked));
+
+        s.status = OpsSessionStatus::Parked;
+        assert_eq!(check_ops_park(&s), Err(OpsSessionError::AlreadyParked));
+        assert!(check_ops_resume(&s).is_ok());
+
+        assert_eq!(check_ops_present(&None), Err(OpsSessionError::NotFound));
+        assert!(check_ops_present(&Some(s)).is_ok());
     }
 }

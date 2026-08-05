@@ -650,6 +650,55 @@ impl Default for WorkspaceBinding {
     }
 }
 
+/// Hold for the durable control-plane ops seat. Distinct from card `parked`:
+/// this is not claim/heartbeat/report lifecycle — it is the Board record that
+/// lets chat/TTY reconnect keep the same sandbox + conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OpsSessionStatus {
+    /// Ops agent may be live in the sandbox.
+    #[default]
+    Running,
+    /// Park-like hold: sandbox + conversation kept; agent stopped until resume.
+    Parked,
+}
+
+/// Durable ops-session singleton on the Board. Chat and TTY are faces over this
+/// record — they must not grow a second lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpsSession {
+    /// OpenShell sandbox environment name (e.g. `honr-ops`).
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// agy conversation id for reconnect (`--conversation`).
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub status: OpsSessionStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl OpsSession {
+    pub fn new(environment: Option<String>, conversation_id: Option<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            environment: normalize_ops_field(environment),
+            conversation_id: normalize_ops_field(conversation_id),
+            status: OpsSessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+/// Trim; empty → `None`.
+pub fn normalize_ops_field(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Named create-spec for OpenShell sandboxes. Board-state catalog entries;
 /// yaml `execution.agents` seeds the catalog when empty at boot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

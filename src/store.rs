@@ -76,6 +76,10 @@ pub struct BoardState {
     /// Last-seen default-branch tip SHAs keyed by `owner/name` (poll path).
     #[serde(default)]
     pub webhook_poll_tips: BTreeMap<String, String>,
+    /// Durable control-plane ops seat (sandbox + conversation + hold).
+    /// Singleton — not a WorkItem; reconnect reads this, not a chatbot shim.
+    #[serde(default)]
+    pub ops_session: Option<OpsSession>,
     #[serde(skip)]
     pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
     /// Parent → child ids. Rebuilt after load; maintained on create/delete.
@@ -110,6 +114,7 @@ impl BoardState {
             openshell_providers: self.openshell_providers.clone(),
             webhook_poll: self.webhook_poll.clone(),
             webhook_poll_tips: self.webhook_poll_tips.clone(),
+            ops_session: self.ops_session.clone(),
             agent_logs: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
             ids_by_state: HashMap::new(),
@@ -2266,6 +2271,96 @@ impl Board {
             ));
         }
         s.sandbox_profiles.remove(id);
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    // ------------------------------------------------ ops session (board state)
+    //
+    // Durable control-plane seat. Mutations only here / machine.rs — not a
+    // second lifecycle in api/mcp/supervisor glue, and not card claim/report.
+
+    pub fn ops_session(&self) -> Option<OpsSession> {
+        self.state.read().ops_session.clone()
+    }
+
+    /// Create the singleton ops session (`Running`). Fails if one already exists.
+    pub fn create_ops_session(
+        &self,
+        environment: Option<String>,
+        conversation_id: Option<String>,
+    ) -> Result<OpsSession, String> {
+        let mut s = self.state.write();
+        machine::check_ops_create(&s.ops_session).map_err(|e| e.to_string())?;
+        let session = OpsSession::new(environment, conversation_id);
+        s.ops_session = Some(session.clone());
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(session)
+    }
+
+    /// Patch sandbox environment and/or conversation id. `None` leaves a field
+    /// unchanged; `Some(s)` sets it (blank clears). Hold status is unchanged.
+    pub fn update_ops_session(
+        &self,
+        environment: Option<String>,
+        conversation_id: Option<String>,
+    ) -> Result<OpsSession, String> {
+        let mut s = self.state.write();
+        machine::check_ops_present(&s.ops_session).map_err(|e| e.to_string())?;
+        let session = s.ops_session.as_mut().expect("checked present");
+        if environment.is_some() {
+            session.environment = normalize_ops_field(environment);
+        }
+        if conversation_id.is_some() {
+            session.conversation_id = normalize_ops_field(conversation_id);
+        }
+        session.updated_at = Utc::now();
+        let out = session.clone();
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(out)
+    }
+
+    /// Park-like hold: keep sandbox + conversation; mark `Parked`.
+    pub fn park_ops_session(&self) -> Result<OpsSession, String> {
+        let mut s = self.state.write();
+        let session = machine::check_ops_present(&s.ops_session)
+            .map_err(|e| e.to_string())?
+            .clone();
+        machine::check_ops_park(&session).map_err(|e| e.to_string())?;
+        let slot = s.ops_session.as_mut().expect("checked present");
+        slot.status = OpsSessionStatus::Parked;
+        slot.updated_at = Utc::now();
+        let out = slot.clone();
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(out)
+    }
+
+    /// Clear park hold → `Running` (attach / reconcile resume path).
+    pub fn resume_ops_session(&self) -> Result<OpsSession, String> {
+        let mut s = self.state.write();
+        let session = machine::check_ops_present(&s.ops_session)
+            .map_err(|e| e.to_string())?
+            .clone();
+        machine::check_ops_resume(&session).map_err(|e| e.to_string())?;
+        let slot = s.ops_session.as_mut().expect("checked present");
+        slot.status = OpsSessionStatus::Running;
+        slot.updated_at = Utc::now();
+        let out = slot.clone();
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(out)
+    }
+
+    /// Stop and clear the durable ops session. Idempotent when already absent.
+    pub fn stop_ops_session(&self) -> Result<(), String> {
+        let mut s = self.state.write();
+        if s.ops_session.take().is_none() {
+            return Ok(());
+        }
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         Ok(())
@@ -4610,6 +4705,119 @@ mod tests {
             "unpark should queue the supervisor (same as Start)"
         );
         assert!(b.may_claim(id), "unpark restores claimability");
+    }
+
+    #[test]
+    fn ops_session_create_update_park_resume_stop_invariants() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-ops-session.json"),
+        );
+        assert!(b.ops_session().is_none());
+
+        let created = b
+            .create_ops_session(Some("honr-ops".into()), None)
+            .expect("create");
+        assert_eq!(created.environment.as_deref(), Some("honr-ops"));
+        assert!(created.conversation_id.is_none());
+        assert_eq!(created.status, OpsSessionStatus::Running);
+
+        let err = b
+            .create_ops_session(None, None)
+            .expect_err("second create must fail");
+        assert!(err.contains("already exists"), "{err}");
+
+        let updated = b
+            .update_ops_session(None, Some("conv-ops-1".into()))
+            .expect("set conversation");
+        assert_eq!(updated.environment.as_deref(), Some("honr-ops"));
+        assert_eq!(updated.conversation_id.as_deref(), Some("conv-ops-1"));
+        assert_eq!(updated.status, OpsSessionStatus::Running);
+
+        // Blank clears a field; omitted (None) leaves the other alone.
+        let cleared_env = b
+            .update_ops_session(Some("  ".into()), None)
+            .expect("clear env");
+        assert!(cleared_env.environment.is_none());
+        assert_eq!(cleared_env.conversation_id.as_deref(), Some("conv-ops-1"));
+
+        b.update_ops_session(Some("honr-ops".into()), None)
+            .expect("restore env");
+
+        let parked = b.park_ops_session().expect("park");
+        assert_eq!(parked.status, OpsSessionStatus::Parked);
+        assert_eq!(parked.environment.as_deref(), Some("honr-ops"));
+        assert_eq!(parked.conversation_id.as_deref(), Some("conv-ops-1"));
+        let err = b.park_ops_session().expect_err("already parked");
+        assert!(err.contains("already parked"), "{err}");
+
+        let resumed = b.resume_ops_session().expect("resume");
+        assert_eq!(resumed.status, OpsSessionStatus::Running);
+        assert_eq!(resumed.environment.as_deref(), Some("honr-ops"));
+        assert_eq!(resumed.conversation_id.as_deref(), Some("conv-ops-1"));
+        let err = b.resume_ops_session().expect_err("not parked");
+        assert!(err.contains("not parked"), "{err}");
+
+        b.stop_ops_session().expect("stop");
+        assert!(b.ops_session().is_none());
+        b.stop_ops_session().expect("stop is idempotent");
+
+        // After stop, create works again — not card claim/report lifecycle.
+        let again = b
+            .create_ops_session(Some("honr-ops-2".into()), Some("conv-2".into()))
+            .expect("recreate");
+        assert_eq!(again.environment.as_deref(), Some("honr-ops-2"));
+        assert_eq!(again.conversation_id.as_deref(), Some("conv-2"));
+    }
+
+    #[test]
+    fn ops_session_update_requires_existing_session() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-ops-session-missing.json"),
+        );
+        let err = b
+            .update_ops_session(Some("x".into()), None)
+            .expect_err("no session");
+        assert!(err.contains("no ops session"), "{err}");
+        let err = b.park_ops_session().expect_err("no session");
+        assert!(err.contains("no ops session"), "{err}");
+    }
+
+    #[test]
+    fn ops_session_round_trips_json_flush_load() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-ops-session-json-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b = Board::new(Schema::default(), path.clone());
+        b.create_ops_session(Some("honr-ops".into()), Some("conv-a".into()))
+            .expect("create");
+        b.park_ops_session().expect("park");
+        b.dirty.store(true, Ordering::Relaxed);
+        b.flush();
+
+        let raw = std::fs::read_to_string(&path).expect("read board json");
+        let state: BoardState = serde_json::from_str(&raw).expect("parse");
+        assert_eq!(
+            state.ops_session.as_ref().map(|s| s.environment.as_deref()),
+            Some(Some("honr-ops"))
+        );
+        assert_eq!(
+            state
+                .ops_session
+                .as_ref()
+                .map(|s| s.conversation_id.as_deref()),
+            Some(Some("conv-a"))
+        );
+        assert_eq!(
+            state.ops_session.as_ref().map(|s| s.status),
+            Some(OpsSessionStatus::Parked)
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
