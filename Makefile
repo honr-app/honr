@@ -2,10 +2,11 @@
 #
 #   make          build both (cargo binary + web/dist for :8080)
 #   make run      build both, then serve on :8080
+#   make dev      cargo-watch → cargo run (API hot-reload on :8080)
 #   make dev-ui   Vite hot-reload on :5173 (proxies API to :8080)
 #   make test     cargo + web unit tests
 
-.PHONY: all build api release ui install-ui run dev-ui test test-api test-ui clippy sandbox clean help
+.PHONY: all build api release ui install-ui run dev dev-ui test test-api test-ui clippy sandbox clean help
 
 all: build
 
@@ -16,6 +17,7 @@ help:
 	@echo "  make release        cargo build --release"
 	@echo "  make ui             npm build → web/dist (served by the API)"
 	@echo "  make run            Build both, then cargo run (debug)"
+	@echo "  make dev            cargo watch -x run (API hot-reload on :8080)"
 	@echo "  make dev-ui         Vite dev server (:5173 → :8080)"
 	@echo "  make sandbox        Rebuild honr-sandbox:latest (warm crates/npm caches)"
 	@echo "  make test           cargo nextest/test + web tests"
@@ -38,6 +40,25 @@ ui: install-ui
 
 run: build
 	cargo run
+
+# Rebuild + restart the API when Rust/config/migration sources change.
+# Pair with `make dev-ui` for Vite on :5173. Requires `cargo install cargo-watch`
+# (or `brew install cargo-watch`).
+dev:
+	@command -v cargo-watch >/dev/null 2>&1 || { \
+		echo "cargo-watch not found. Install: cargo install cargo-watch   # or: brew install cargo-watch"; \
+		exit 1; \
+	}
+	cargo watch \
+		-w src \
+		-w Cargo.toml \
+		-w Cargo.lock \
+		-w migrations \
+		-w honr.yaml \
+		-w sandbox \
+		-i target \
+		-i web \
+		-x run
 
 dev-ui: install-ui
 	npm --prefix web run dev

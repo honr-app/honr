@@ -1744,7 +1744,7 @@ export function OpenShellProvidersPanelView({
   const typeOptions = profiles.length
     ? profiles.map((p) => p.id)
     : ["github", "google-vertex-ai", "cursor", "claude"];
-  // Prefer a non-App type for "Add" — github/GITHUB_TOKEN is owned by GitHub App.
+  // Prefer a non-App type for "Add" — github/GH_TOKEN is owned by GitHub App.
   const defaultAddType =
     typeOptions.find((t) => t !== "github") ?? typeOptions[0] ?? "google-vertex-ai";
   const selectedProfile = draft
@@ -1753,15 +1753,14 @@ export function OpenShellProvidersPanelView({
   const draftManaged = draft
     ? isGitHubAppManagedProvider(draft.name, draft.type)
     : false;
-  // Same env-var list as other providers; App-managed only changes how values are set.
-  const credKeys =
-    selectedProfile?.credential_env_vars?.length
+  // App-managed github is always GH_TOKEN only (never GITHUB_TOKEN).
+  const credKeys = draftManaged
+    ? ["GH_TOKEN"]
+    : selectedProfile?.credential_env_vars?.length
       ? selectedProfile.credential_env_vars
       : draft?.type === "github"
-        ? ["GITHUB_TOKEN"]
-        : draftManaged
-          ? ["GITHUB_TOKEN"]
-          : [];
+        ? ["GH_TOKEN"]
+        : [];
 
   return (
     <div className="openshell-providers" data-testid="openshell-providers">
@@ -1770,7 +1769,7 @@ export function OpenShellProvidersPanelView({
         <p className="dim">
           Desired providers live on the board (credentials sealed). Save applies
           to the gateway when it is reachable; Sync recreates after a wipe.
-          Provider <code>github</code> attaches <code>GITHUB_TOKEN</code> from
+          Provider <code>github</code> attaches <code>GH_TOKEN</code> from
           Settings → GitHub App (installation token), not a pasted PAT.
         </p>
       </div>
@@ -1825,7 +1824,7 @@ export function OpenShellProvidersPanelView({
               (p.credential_keys ?? []).length > 0
                 ? (p.credential_keys ?? [])
                 : managed
-                  ? ["GITHUB_TOKEN"]
+                  ? ["GH_TOKEN"]
                   : [];
             return (
             <li key={p.name} className="openshell-provider-row" data-testid={`openshell-provider-${p.name}`}>

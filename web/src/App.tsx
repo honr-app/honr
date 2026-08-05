@@ -136,7 +136,24 @@ function AuthedApp({
     <div className="app">
       <header className="top">
         <div className="brand">
-          honr
+          <button
+            type="button"
+            className="brand-home"
+            onClick={() => {
+              setOpen(null);
+              setView("board");
+            }}
+            aria-label="Go to board"
+            data-testid="brand-mark"
+          >
+            <img
+              src="/honr-logo.png"
+              alt=""
+              className="brand-mark"
+              width={44}
+              height={44}
+            />
+          </button>
           {totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
         </div>
         <div className="stats">
