@@ -17,8 +17,8 @@
 //!   detached and writes to a log, so watching is a thing a *different* honr
 //!   process can pick up after a restart. See `reconcile`.
 
-use crate::model::{ItemId, CockpitSession, CockpitSessionStatus, State, WorkItem};
-use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_ITEM, LABEL_COCKPIT};
+use crate::model::{CockpitSession, CockpitSessionStatus, ItemId, State, WorkItem};
+use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_COCKPIT, LABEL_ITEM};
 use crate::schema::{AgentConfig, ExecutionConfig};
 use crate::store::{ClaimGrant, SharedBoard};
 
@@ -70,10 +70,7 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
         tokio::spawn(sweeper_loop(board, cfg, Arc::default()));
         return;
     }
-    let cfg = ExecutionConfig {
-        agents,
-        ..cfg
-    };
+    let cfg = ExecutionConfig { agents, ..cfg };
     // The sweeper starts *inside* `dispatch_loop`, once reconciliation has
     // finished. A card that was mid-run when honr died has not been
     // heartbeaten since, so a sweep that lands first requeues a run that is
@@ -91,11 +88,7 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
 /// Also periodically reconciles sandbox inventory (reap terminal / keep parked).
 /// `active` must be the same set dispatch uses so we never treat an in-flight
 /// setup as "no live agent" and bounce the card back to Backlog.
-async fn sweeper_loop(
-    board: SharedBoard,
-    cfg: ExecutionConfig,
-    active: Active,
-) {
+async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig, active: Active) {
     let mut t = tokio::time::interval(Duration::from_millis(cfg.sweep_interval_ms));
     loop {
         t.tick().await;
@@ -291,16 +284,17 @@ impl Fleet {
                         // dispatching for a while rather than spending the
                         // card's retry budget on a broken machine.
                         tracing::warn!("#{id}: infrastructure failure, not counting it: {msg}");
-                        *f.cooldown.lock() =
-                            Some(std::time::Instant::now() + INFRA_COOLDOWN);
+                        *f.cooldown.lock() = Some(std::time::Instant::now() + INFRA_COOLDOWN);
                         let _ = f.board.release(id, &agent_id);
                     } else {
                         tracing::error!("#{id} failed: {msg}");
                         // Count it. After `max_attempts` this becomes a human's
                         // problem instead of an overnight loop.
-                        if let Err(e2) =
-                            f.board.record_run_failure(id, &msg, f.board.effective_agents().max_attempts)
-                        {
+                        if let Err(e2) = f.board.record_run_failure(
+                            id,
+                            &msg,
+                            f.board.effective_agents().max_attempts,
+                        ) {
                             tracing::error!("#{id}: could not record failure: {e2}");
                         }
                     }
@@ -348,7 +342,11 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         if fleet.in_flight.load(Ordering::Relaxed) as usize >= agents.max_concurrent {
             continue;
         }
-        if fleet.cooldown.lock().is_some_and(|t| std::time::Instant::now() < t) {
+        if fleet
+            .cooldown
+            .lock()
+            .is_some_and(|t| std::time::Instant::now() < t)
+        {
             continue;
         }
         // The compute driver / gateway stop on their own. Claiming a card we
@@ -364,19 +362,15 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
         board.auto_enqueue_all();
 
         let awaiting = board.list_awaiting_dispatch();
-        let Some(item) = awaiting.into_iter().find(|i| {
-            !fleet.active.lock().contains(&i.id) && board.may_claim(i.id)
-        }) else {
+        let Some(item) = awaiting
+            .into_iter()
+            .find(|i| !fleet.active.lock().contains(&i.id) && board.may_claim(i.id))
+        else {
             continue;
         };
 
         let agent_id = format!("sandbox-{}", item.id);
-        let grant = match board.claim(
-            item.id,
-            &agent_id,
-            None,
-            agents.agent_timeout_secs as i64,
-        ) {
+        let grant = match board.claim(item.id, &agent_id, None, agents.agent_timeout_secs as i64) {
             Ok(g) => g,
             Err(e) => {
                 tracing::debug!("claim of #{} refused: {e}", item.id);
@@ -384,7 +378,11 @@ async fn dispatch_loop(board: SharedBoard, cfg: ExecutionConfig) {
             }
         };
 
-        fleet.supervise(item.id, agent_id.clone(), run_card(fleet.clone(), agent_id, grant));
+        fleet.supervise(
+            item.id,
+            agent_id.clone(),
+            run_card(fleet.clone(), agent_id, grant),
+        );
     }
 }
 
@@ -495,14 +493,7 @@ async fn reconcile_once_reachable(
     // `reopen_backlog`: repair cards that old detach-as-failure left in Backlog
     // with a live sandbox (e.g. #145 after Ctrl-C).
     let os = board.openshell_client();
-    reconcile(
-        &os,
-        board,
-        &Active::default(),
-        timeout_secs,
-        true,
-    )
-    .await
+    reconcile(&os, board, &Active::default(), timeout_secs, true).await
 }
 
 /// Match live sandboxes back to the board, before anything else touches them.
@@ -558,10 +549,7 @@ async fn reconcile(
 
         if let Some(item) = adoptable(card.as_ref(), &sb.name) {
             // Fixed deadline already passed — bounce without resetting the clock.
-            if item
-                .run_deadline_at
-                .is_some_and(|d| chrono::Utc::now() > d)
-            {
+            if item.run_deadline_at.is_some_and(|d| chrono::Utc::now() > d) {
                 tracing::warn!("#{id}: run deadline already past; requeueing");
                 let _ = board.transition(
                     id,
@@ -573,7 +561,11 @@ async fn reconcile(
             }
             match adopt(os, board, item, &sb.name).await {
                 Some(a) => {
-                    tracing::info!("#{id}: re-attached to {} from line {}", sb.name, a.from_line);
+                    tracing::info!(
+                        "#{id}: re-attached to {} from line {}",
+                        sb.name,
+                        a.from_line
+                    );
                     adopted.push(a);
                 }
                 None => {
@@ -639,7 +631,10 @@ async fn adopt(
     // A probe that hangs is a sandbox we cannot reason about, and this stack
     // fails as a hang. Treat it as "no live run" and give the card back rather
     // than watching something that may not be there.
-    let out = match os.exec(sandbox, &probe_script(), Duration::from_secs(30)).await {
+    let out = match os
+        .exec(sandbox, &probe_script(), Duration::from_secs(30))
+        .await
+    {
         Ok(o) if o.ok() => o,
         Ok(o) => {
             tracing::warn!("#{id}: probe of {sandbox} failed: {}", outerr(&o));
@@ -663,7 +658,10 @@ async fn adopt(
     if let Err(e) = board.heartbeat(id, &agent_id, item.progress, 0) {
         tracing::error!("#{id}: adopted {sandbox} but could not mark it running: {e}");
     }
-    board.story(id, format!("honr restarted; picked {sandbox} back up rather than killing it."));
+    board.story(
+        id,
+        format!("honr restarted; picked {sandbox} back up rather than killing it."),
+    );
 
     Some(Adoption {
         item_id: id,
@@ -678,7 +676,12 @@ fn probe_of(stdout: &str) -> Option<u64> {
     if !stdout.contains(MARK_ALIVE) && !stdout.contains(MARK_EXITED) {
         return None;
     }
-    let lines: u64 = stdout.lines().find_map(|l| l.strip_prefix(MARK_LINES))?.trim().parse().ok()?;
+    let lines: u64 = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix(MARK_LINES))?
+        .trim()
+        .parse()
+        .ok()?;
     Some(lines + 1)
 }
 
@@ -713,10 +716,8 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     let existing_env = board.get(id).and_then(|i| i.environment);
     let (name, is_reused) = match existing_env {
         Some(ref env_name)
-            if with_board_cancel(board, id, async {
-                Ok(is_sandbox_live(os, env_name).await)
-            })
-            .await? =>
+            if with_board_cancel(board, id, async { Ok(is_sandbox_live(os, env_name).await) })
+                .await? =>
         {
             (env_name.clone(), true)
         }
@@ -725,8 +726,7 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
                 .get(id)
                 .map(|i| (i.run_failures + 1, i.environment.clone()))
                 .unwrap_or((1, None));
-            let new_name =
-                crate::schema::card_sandbox_name(&agents.branch_prefix, id, attempt);
+            let new_name = crate::schema::card_sandbox_name(&agents.branch_prefix, id, attempt);
             // Drop the previous attempt before renaming — reconcile used to
             // reap by exact environment match and raced the new create.
             if let Some(prev) = prev_env {
@@ -759,7 +759,7 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     }
 
     let resolved = board.resolve_sandbox_create(id);
-    let attach = board.sandbox_attach_provider_names();
+    let attach = board.attach_providers_for_resolved(&resolved);
     let spec = sandbox_spec_for_card(id, &name, &resolved, &attach);
 
     let result = run_inside(
@@ -805,16 +805,7 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     let branch = crate::schema::card_branch_name(&agents.branch_prefix, id);
     let cfg = &agents;
     let result = async {
-        let run = watch_agent(
-            board,
-            os,
-            cfg,
-            &a.agent_id,
-            id,
-            &a.sandbox,
-            a.from_line,
-        )
-        .await?;
+        let run = watch_agent(board, os, cfg, &a.agent_id, id, &a.sandbox, a.from_line).await?;
         finish(board, os, cfg, &a.agent_id, id, &a.sandbox, &branch, &run).await
     }
     .await;
@@ -1006,19 +997,18 @@ async fn run_inside(
                 return Err(e);
             }
         }
-        with_board_cancel(board, id, async { os.create(spec).await.map_err(Into::into) }).await?;
+        with_board_cancel(board, id, async {
+            os.create(spec).await.map_err(Into::into)
+        })
+        .await?;
         with_board_cancel(board, id, wait_until_sandbox_ready(os, name)).await?;
         beat(0.01)?;
 
         with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
         beat(0.02)?;
 
-        let _ = with_board_cancel(
-            board,
-            id,
-            ensure_report_schema_in_sandbox(os, name, short),
-        )
-        .await;
+        let _ =
+            with_board_cancel(board, id, ensure_report_schema_in_sandbox(os, name, short)).await;
 
         // Agent owns the clone. Supervisor only clears `/sandbox/repo`.
         let _ = with_board_cancel(
@@ -1034,28 +1024,16 @@ async fn run_inside(
         with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
         beat(0.02)?;
 
-        let _ = with_board_cancel(
-            board,
-            id,
-            ensure_report_schema_in_sandbox(os, name, short),
-        )
-        .await;
+        let _ =
+            with_board_cancel(board, id, ensure_report_schema_in_sandbox(os, name, short)).await;
 
         // Reuse: refresh only if the agent already left a checkout. Otherwise
         // empty workdir again — never supervisor-clone.
-        let has_repo = with_board_cancel(
-            board,
-            id,
-            async {
-                os.exec(
-                    name,
-                    &format!("test -d {WORKDIR}/.git"),
-                    short,
-                )
+        let has_repo = with_board_cancel(board, id, async {
+            os.exec(name, &format!("test -d {WORKDIR}/.git"), short)
                 .await
                 .map_err(Into::into)
-            },
-        )
+        })
         .await
         .map(|o| o.ok())
         .unwrap_or(false);
@@ -1088,9 +1066,7 @@ async fn run_inside(
     // Conversation resume flag is independent of briefing shape: a conflicted
     // branch still needs the cold CONFLICTS briefing even when agy/cursor can
     // `--conversation` continue the same session.
-    let resume = is_reused
-        && matches!(engine, "agy" | "cursor")
-        && conversation_id.is_some();
+    let resume = is_reused && matches!(engine, "agy" | "cursor") && conversation_id.is_some();
     let briefing_text = choose_briefing(grant, branch_state, branch, &cfg.repo, resume);
     if resume {
         board.story(
@@ -1102,8 +1078,7 @@ async fn run_inside(
         );
     }
     if engine == "agy" {
-        with_board_cancel(board, id, setup_agy_auth(os, name))
-            .await?;
+        with_board_cancel(board, id, setup_agy_auth(os, name)).await?;
     }
     let start = with_board_cancel(board, id, async {
         os.exec(
@@ -1511,14 +1486,18 @@ async fn process_verdict(
 
     if let Err(e) = os.download(name, remote_path, &local_dest_str).await {
         let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(anyhow::anyhow!("could not download verdict file {remote_path}: {e}"));
+        return Err(anyhow::anyhow!(
+            "could not download verdict file {remote_path}: {e}"
+        ));
     }
 
     let content = match std::fs::read_to_string(&local_dest) {
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            return Err(anyhow::anyhow!("could not read downloaded verdict file: {e}"));
+            return Err(anyhow::anyhow!(
+                "could not read downloaded verdict file: {e}"
+            ));
         }
     };
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -1707,9 +1686,10 @@ async fn process_verdict(
                 return Ok(true);
             }
             // Impl cards: proposal and publish are mutually exclusive.
-            if board.get(id).is_some_and(|i| {
-                i.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty())
-            }) {
+            if board
+                .get(id)
+                .is_some_and(|i| i.proposal.as_ref().is_some_and(|p| !p.tasks.is_empty()))
+            {
                 board
                     .escalate(
                         id,
@@ -1741,7 +1721,11 @@ async fn process_verdict(
                 let url = pr
                     .as_ref()
                     .and_then(|p| p.url_str().map(|s| s.to_string()))
-                    .or_else(|| board.get(id).and_then(|i| i.pr_url().map(|s| s.to_string())));
+                    .or_else(|| {
+                        board
+                            .get(id)
+                            .and_then(|i| i.pr_url().map(|s| s.to_string()))
+                    });
                 if let Some(url) = url {
                     if let Ok(out) = os.exec(name, &pr_view_binding_script(&url), short).await {
                         if let Some(filled) = parse_pr_binding_line(&out.stdout) {
@@ -1762,7 +1746,8 @@ async fn process_verdict(
                     pr = Some(crate::model::PullRequest::from_url(url));
                 }
             }
-            let pr = pr.ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?;
+            let pr =
+                pr.ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?;
             let pr_url = pr.url.clone();
             board.set_pull_request(id, Some(pr));
             let mut finish_cfg = cfg.clone();
@@ -1789,17 +1774,16 @@ async fn process_verdict(
             };
             // Hollow Review after a conflict bounce: refuse report while GitHub
             // still says CONFLICTING. UNKNOWN/null is not a hard fail.
-            let mergeable = match os.exec(name, &pr_lookup_script(&finish_cfg, branch), short).await {
+            let mergeable = match os
+                .exec(name, &pr_lookup_script(&finish_cfg, branch), short)
+                .await
+            {
                 Ok(out) if out.ok() => parse_pr_mergeable(&out.stdout),
                 _ => PrMergeable::Unknown,
             };
             if mergeable == PrMergeable::Conflicting {
                 board
-                    .release_with_reason(
-                        id,
-                        agent_id,
-                        Some(CONFLICTING_PR_BOUNCE_REASON),
-                    )
+                    .release_with_reason(id, agent_id, Some(CONFLICTING_PR_BOUNCE_REASON))
                     .map_err(|e| anyhow::anyhow!("release conflicting PR: {e}"))?;
                 tracing::info!(
                     "#{id}: refused report — PR mergeable CONFLICTING; returned to Backlog"
@@ -1840,13 +1824,15 @@ async fn finish(
     // happened. Containment is the owner-only default-branch ruleset plus human
     // merge — not a supervisor shell that re-implements `gh`.
     let pr = os.exec(name, &pr_lookup_script(cfg, branch), short).await?;
-    anyhow::ensure!(pr.ok(), "could not ask GitHub about the PR: {}", outerr(&pr));
+    anyhow::ensure!(
+        pr.ok(),
+        "could not ask GitHub about the PR: {}",
+        outerr(&pr)
+    );
     let url = parse_pr_url(&pr.stdout)
         // A Review card with no PR is a card you cannot action, so this is a
         // failure rather than a quietly empty field.
-        .ok_or_else(|| {
-            anyhow::anyhow!("agent finished but opened no PR for {branch}")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?;
     board.set_pr_url(id, Some(url.clone()));
 
     // Refuse hollow Review while GitHub still reports CONFLICTING. UNKNOWN
@@ -2014,7 +2000,13 @@ echo '{settings}' > /sandbox/.gemini/antigravity-cli/settings.json
     let home = std::env::var("HOME").unwrap_or_default();
     let host_token = format!("{home}/.gemini/antigravity-cli/antigravity-oauth-token");
     if std::path::Path::new(&host_token).exists() {
-        let _ = os.upload(name, &host_token, "/sandbox/.gemini/antigravity-cli/antigravity-oauth-token").await;
+        let _ = os
+            .upload(
+                name,
+                &host_token,
+                "/sandbox/.gemini/antigravity-cli/antigravity-oauth-token",
+            )
+            .await;
     }
     Ok(())
 }
@@ -2032,10 +2024,16 @@ fn agent_env() -> Vec<(String, String)> {
         ("RUSTUP_HOME".into(), "/opt/rust".into()),
         ("CARGO_HOME".into(), "/opt/cargo".into()),
         ("NPM_CONFIG_CACHE".into(), "/opt/npm-cache".into()),
-        ("PATH".into(), "/opt/cargo/bin:/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin".into()),
+        (
+            "PATH".into(),
+            "/opt/cargo/bin:/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin".into(),
+        ),
         // Cursor Agent CLI compile cache (defaults to $HOME/Library/... on darwin
         // host builds of the wrapper; keep it under the writable sandbox tree).
-        ("NODE_COMPILE_CACHE".into(), "/tmp/cursor-compile-cache".into()),
+        (
+            "NODE_COMPILE_CACHE".into(),
+            "/tmp/cursor-compile-cache".into(),
+        ),
     ]
 }
 
@@ -2149,9 +2147,8 @@ fi"#
 
 type MergeableFetchFut<'a> = std::pin::Pin<
     Box<
-        dyn std::future::Future<
-                Output = Result<Option<crate::github_app::PrConflictCheck>, String>,
-            > + Send
+        dyn std::future::Future<Output = Result<Option<crate::github_app::PrConflictCheck>, String>>
+            + Send
             + 'a,
     >,
 >;
@@ -2189,10 +2186,7 @@ where
     let mut results = Vec::new();
     for item in awaiting {
         let Some(pr_url) = item.pr_url().filter(|u| !u.trim().is_empty()) else {
-            tracing::warn!(
-                "mergeable check skipped for card #{}: no pr_url",
-                item.id
-            );
+            tracing::warn!("mergeable check skipped for card #{}: no pr_url", item.id);
             continue;
         };
 
@@ -2253,10 +2247,7 @@ where
             }
             PrMergeableState::Unknown => {
                 // GitHub computes mergeable asynchronously — leave queued.
-                tracing::debug!(
-                    "mergeable UNKNOWN for card #{}; retry next sweep",
-                    item.id
-                );
+                tracing::debug!("mergeable UNKNOWN for card #{}; retry next sweep", item.id);
             }
         }
     }
@@ -2790,7 +2781,11 @@ fn is_cockpit_stopped(err: &str) -> bool {
 ///
 /// Running and Parked keep the Board-named environment (and the stable
 /// `{prefix}-cockpit` singleton). No session → reap.
-fn should_keep_cockpit_sandbox(session: Option<&CockpitSession>, sandbox: &str, branch_prefix: &str) -> bool {
+fn should_keep_cockpit_sandbox(
+    session: Option<&CockpitSession>,
+    sandbox: &str,
+    branch_prefix: &str,
+) -> bool {
     let Some(s) = session else {
         return false;
     };
@@ -2828,9 +2823,12 @@ fn sandbox_spec_for_cockpit(
 
 /// Inference providers only — cockpit policy has no GitHub egress; do not attach
 /// the card-worker GitHub App identity.
-fn cockpit_attach_providers(board: &SharedBoard) -> Vec<String> {
+fn cockpit_attach_providers(
+    board: &SharedBoard,
+    resolved: &crate::model::ResolvedSandboxCreate,
+) -> Vec<String> {
     board
-        .sandbox_attach_provider_names()
+        .attach_providers_for_resolved(resolved)
         .into_iter()
         .filter(|n| n != crate::github_app::PROVIDER_NAME)
         .collect()
@@ -2907,7 +2905,7 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<()> {
 
     let agents = board.effective_agents();
     let resolved = board.resolve_cockpit_sandbox_create();
-    let attach = cockpit_attach_providers(&board);
+    let attach = cockpit_attach_providers(&board, &resolved);
     let engine = cockpit_engine(&board, &resolved);
 
     let session = board
@@ -2939,10 +2937,9 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<()> {
                 }
             }
             ensure_cockpit_running(&board)?;
-            let live = with_cockpit_cancel(&board, async {
-                Ok(is_sandbox_live(&os, &new_name).await)
-            })
-            .await?;
+            let live =
+                with_cockpit_cancel(&board, async { Ok(is_sandbox_live(&os, &new_name).await) })
+                    .await?;
             if live {
                 board
                     .update_cockpit_session(Some(new_name.clone()), None)
@@ -3192,7 +3189,9 @@ async fn cockpit_seat_loop(board: SharedBoard, _cfg: ExecutionConfig) {
         tokio::spawn(async move {
             match run_cockpit_seat(board2).await {
                 Ok(()) => tracing::info!("cockpit: run completed"),
-                Err(e) if is_cockpit_parked(&e.to_string()) || is_cockpit_stopped(&e.to_string()) => {
+                Err(e)
+                    if is_cockpit_parked(&e.to_string()) || is_cockpit_stopped(&e.to_string()) =>
+                {
                     tracing::info!("cockpit: {e}");
                 }
                 Err(e) if is_supervisor_detach(&e.to_string()) => {
@@ -3335,9 +3334,7 @@ mod tests {
         let id = task.id;
         let halt = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(80)).await;
-            board_halt
-                .halt(id, Some("test halt".into()))
-                .expect("halt");
+            board_halt.halt(id, Some("test halt".into())).expect("halt");
         });
 
         let began = std::time::Instant::now();
@@ -3387,9 +3384,7 @@ mod tests {
         let id = task.id;
         let park = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(80)).await;
-            board_park
-                .park(id, Some("test park".into()))
-                .expect("park");
+            board_park.park(id, Some("test park".into())).expect("park");
         });
 
         let err = with_board_cancel(&board, id, async {
@@ -3459,8 +3454,14 @@ mod tests {
     fn refresh_resumes_an_existing_branch() {
         let cfg = repo_cfg();
         let s = refresh_script(&cfg, "honr/card-8");
-        assert!(s.contains("ls-remote --exit-code --heads origin honr/card-8"), "{s}");
-        assert!(s.contains("checkout -q -B honr/card-8 origin/honr/card-8"), "{s}");
+        assert!(
+            s.contains("ls-remote --exit-code --heads origin honr/card-8"),
+            "{s}"
+        );
+        assert!(
+            s.contains("checkout -q -B honr/card-8 origin/honr/card-8"),
+            "{s}"
+        );
         assert!(s.contains("rebase -q upstream/main"), "{s}");
         // A conflict is the agent's problem to resolve, so the supervisor must
         // back out rather than leave a half-applied rebase behind.
@@ -3474,12 +3475,21 @@ mod tests {
     #[test]
     fn refresh_base_comes_from_upstream_not_the_fork() {
         let s = refresh_script(&repo_cfg(), "honr/card-8");
-        assert!(s.contains("git remote add upstream https://github.com/shanemcd/honr.git"), "{s}");
+        assert!(
+            s.contains("git remote add upstream https://github.com/shanemcd/honr.git"),
+            "{s}"
+        );
         assert!(s.contains("fetch -q upstream main"), "{s}");
         assert!(s.contains("rebase -q upstream/main"), "{s}");
         // Missing local branch still starts from upstream, not the stale fork.
-        assert!(s.contains("checkout -q -B honr/card-8 upstream/main"), "{s}");
-        assert!(!s.contains("rebase -q origin/main"), "must not rebase onto the fork: {s}");
+        assert!(
+            s.contains("checkout -q -B honr/card-8 upstream/main"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("rebase -q origin/main"),
+            "must not rebase onto the fork: {s}"
+        );
     }
 
     /// The supervisor asks GitHub a question; it does not create anything.
@@ -3493,9 +3503,18 @@ mod tests {
             s.contains("--head clankrshq:honr/card-8"),
             "cross-fork needs owner:branch: {s}"
         );
-        assert!(s.contains(PR_URL_MARK), "url must come from a marked line: {s}");
-        assert!(!s.contains("gh pr create"), "supervisor looks up PRs; agent creates them: {s}");
-        assert!(!s.contains("push"), "supervisor looks up PRs; agent pushes: {s}");
+        assert!(
+            s.contains(PR_URL_MARK),
+            "url must come from a marked line: {s}"
+        );
+        assert!(
+            !s.contains("gh pr create"),
+            "supervisor looks up PRs; agent creates them: {s}"
+        );
+        assert!(
+            !s.contains("push"),
+            "supervisor looks up PRs; agent pushes: {s}"
+        );
     }
 
     /// If the agent did not open a PR, the card must not reach Review looking
@@ -3503,7 +3522,10 @@ mod tests {
     #[test]
     fn no_pr_means_no_url_to_report() {
         let s = pr_lookup_script(&repo_cfg(), "honr/card-8");
-        assert!(s.contains("// empty"), "must yield nothing rather than error: {s}");
+        assert!(
+            s.contains("// empty"),
+            "must yield nothing rather than error: {s}"
+        );
     }
 
     /// Publishing moved into the agent's job, so the briefing is now the only
@@ -3564,7 +3586,10 @@ mod tests {
             b.contains("Do not assume cargo"),
             "must point at Project prompt for gates: {b}"
         );
-        assert!(b.contains("/sandbox/.honr/report.json"), "verdict path invariant: {b}");
+        assert!(
+            b.contains("/sandbox/.honr/report.json"),
+            "verdict path invariant: {b}"
+        );
     }
 
     #[test]
@@ -3587,15 +3612,27 @@ mod tests {
             &crate::schema::card_branch_name("widgets", 7),
             &cross_fork_repo(),
         );
-        assert!(b.contains("widgets/card-7"), "briefing must use configured prefix: {b}");
-        assert!(!b.contains("honr/card-7"), "must not force honr/card- hardcode: {b}");
+        assert!(
+            b.contains("widgets/card-7"),
+            "briefing must use configured prefix: {b}"
+        );
+        assert!(
+            !b.contains("honr/card-7"),
+            "must not force honr/card- hardcode: {b}"
+        );
     }
 
     #[test]
     fn branch_state_is_read_from_the_clone_output() {
         assert_eq!(branch_state_of("HONR-BRANCH-FRESH\n"), BranchState::Fresh);
-        assert_eq!(branch_state_of("noise\nHONR-BRANCH-REBASED\n"), BranchState::Rebased);
-        assert_eq!(branch_state_of("HONR-BRANCH-CONFLICT\n"), BranchState::Conflicted);
+        assert_eq!(
+            branch_state_of("noise\nHONR-BRANCH-REBASED\n"),
+            BranchState::Rebased
+        );
+        assert_eq!(
+            branch_state_of("HONR-BRANCH-CONFLICT\n"),
+            BranchState::Conflicted
+        );
         // Unrecognised output must not silently claim a clean rebase.
         assert_eq!(branch_state_of("something else"), BranchState::Fresh);
     }
@@ -3604,9 +3641,17 @@ mod tests {
     /// on top of a branch that cannot merge.
     #[test]
     fn the_briefing_tells_the_agent_about_a_conflict() {
-        let conflicted = briefing(&grant(), BranchState::Conflicted, "honr/card-7", &cross_fork_repo());
+        let conflicted = briefing(
+            &grant(),
+            BranchState::Conflicted,
+            "honr/card-7",
+            &cross_fork_repo(),
+        );
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
-        assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
+        assert!(
+            conflicted.to_lowercase().contains("resolve"),
+            "{conflicted}"
+        );
         // Fork base freezes; rebase onto upstream, never origin/<base> as the target.
         assert!(
             conflicted.contains("upstream/main"),
@@ -3622,7 +3667,12 @@ mod tests {
             "must not instruct rebase onto the fork base: {conflicted}"
         );
 
-        let fresh = briefing(&grant(), BranchState::Fresh, "honr/card-7", &cross_fork_repo());
+        let fresh = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "honr/card-7",
+            &cross_fork_repo(),
+        );
         assert!(!fresh.contains("CONFLICTS"));
         assert!(
             !fresh.contains("You are on a new branch off the base"),
@@ -3645,7 +3695,10 @@ mod tests {
             true,
         );
         assert!(conflicted.contains("CONFLICTS"), "{conflicted}");
-        assert!(conflicted.to_lowercase().contains("resolve"), "{conflicted}");
+        assert!(
+            conflicted.to_lowercase().contains("resolve"),
+            "{conflicted}"
+        );
         assert!(
             !conflicted.contains("parked mid-run"),
             "must not use the short park resume prompt on CONFLICTS: {conflicted}"
@@ -3676,7 +3729,10 @@ mod tests {
             parse_pr_mergeable("HONR-PR-MERGEABLE=UNKNOWN\n"),
             PrMergeable::Unknown
         );
-        assert_eq!(parse_pr_mergeable("HONR-PR-URL=https://x\n"), PrMergeable::Unknown);
+        assert_eq!(
+            parse_pr_mergeable("HONR-PR-URL=https://x\n"),
+            PrMergeable::Unknown
+        );
         assert_eq!(parse_pr_mergeable(""), PrMergeable::Unknown);
         assert_eq!(
             parse_pr_mergeable("HONR-PR-MERGEABLE=\n"),
@@ -3689,7 +3745,10 @@ mod tests {
         let s = pr_lookup_script(&repo_cfg(), "honr/card-8");
         assert!(s.contains("mergeable"), "{s}");
         assert!(s.contains(PR_MERGEABLE_MARK), "{s}");
-        assert!(s.contains("// empty"), "must yield nothing rather than error: {s}");
+        assert!(
+            s.contains("// empty"),
+            "must yield nothing rather than error: {s}"
+        );
     }
 
     /// Changes-requested notes are the whole steering mechanism: they reach the
@@ -3715,11 +3774,20 @@ mod tests {
     fn the_agent_outlives_the_exec_that_starts_it() {
         let s = start_script(&repo_cfg(), "do the thing", "claude", None);
         assert!(s.contains("setsid nohup"), "must be detached: {s}");
-        assert!(s.trim_end().contains("&\n") || s.contains("2>&1 &"), "must background it: {s}");
+        assert!(
+            s.trim_end().contains("&\n") || s.contains("2>&1 &"),
+            "must background it: {s}"
+        );
         // The three files are the whole contract with whoever watches next.
-        assert!(s.contains(AGENT_LOG) && s.contains(AGENT_PID) && s.contains(AGENT_STATUS), "{s}");
+        assert!(
+            s.contains(AGENT_LOG) && s.contains(AGENT_PID) && s.contains(AGENT_STATUS),
+            "{s}"
+        );
         // Starting must return once the run is up, not hold the exec open.
-        assert!(s.contains("exit 0"), "must return as soon as the pid lands: {s}");
+        assert!(
+            s.contains("exit 0"),
+            "must return as soon as the pid lands: {s}"
+        );
     }
 
     /// The deadline has to live inside the sandbox. Once the agent is detached
@@ -3744,8 +3812,14 @@ mod tests {
     #[test]
     fn the_briefing_crosses_the_inner_shell_intact() {
         let s = start_script(&repo_cfg(), "it's a card; rm -rf /", "claude", None);
-        assert!(s.contains(r"it'\''s a card; rm -rf /"), "must be escaped once: {s}");
-        assert!(s.contains(r#"$HONR_BRIEFING"#), "inner shell reads the var: {s}");
+        assert!(
+            s.contains(r"it'\''s a card; rm -rf /"),
+            "must be escaped once: {s}"
+        );
+        assert!(
+            s.contains(r#"$HONR_BRIEFING"#),
+            "inner shell reads the var: {s}"
+        );
     }
 
     #[test]
@@ -3757,7 +3831,10 @@ mod tests {
             Some("8f9c6cee-964a-44ce-8698-c92a4ea473ef"),
         );
         assert!(s.contains("--conversation \"$HONR_CONVERSATION\""), "{s}");
-        assert!(s.contains("HONR_CONVERSATION='8f9c6cee-964a-44ce-8698-c92a4ea473ef'"), "{s}");
+        assert!(
+            s.contains("HONR_CONVERSATION='8f9c6cee-964a-44ce-8698-c92a4ea473ef'"),
+            "{s}"
+        );
         let fresh = start_script(&repo_cfg(), "start", "agy", None);
         assert!(!fresh.contains("--conversation"), "{fresh}");
         assert!(!fresh.contains("HONR_CONVERSATION="), "{fresh}");
@@ -3791,7 +3868,10 @@ mod tests {
     fn cursor_engine_uses_agent_cli_flags() {
         let s = start_script(&repo_cfg(), "do the thing", "cursor", None);
         assert!(s.contains("timeout --foreground"), "{s}");
-        assert!(s.contains("agent -p --force --trust --sandbox disabled"), "{s}");
+        assert!(
+            s.contains("agent -p --force --trust --sandbox disabled"),
+            "{s}"
+        );
         assert!(s.contains("--output-format stream-json"), "{s}");
         assert!(!s.contains("--resume"), "{s}");
         let resume = start_script(
@@ -3800,7 +3880,10 @@ mod tests {
             "cursor",
             Some("c6b62c6f-7ead-4fd6-9922-e952131177ff"),
         );
-        assert!(resume.contains("--resume \"$HONR_CONVERSATION\""), "{resume}");
+        assert!(
+            resume.contains("--resume \"$HONR_CONVERSATION\""),
+            "{resume}"
+        );
         assert!(
             resume.contains("HONR_CONVERSATION='c6b62c6f-7ead-4fd6-9922-e952131177ff'"),
             "{resume}"
@@ -3811,14 +3894,24 @@ mod tests {
     fn resume_briefing_is_short_and_carries_notes() {
         let mut g = grant();
         g.notes = vec!["Parked: cargo test deadlocked on Board RwLock.".into()];
-        let b = resume_briefing(&g, &crate::schema::RepoConfig { upstream: "acme/widgets".into(), fork: "acme/widgets".into(), base: "main".into() });
+        let b = resume_briefing(
+            &g,
+            &crate::schema::RepoConfig {
+                upstream: "acme/widgets".into(),
+                fork: "acme/widgets".into(),
+                base: "main".into(),
+            },
+        );
         assert!(b.contains("parked mid-run"), "{b}");
         assert!(b.contains("Board RwLock"), "{b}");
         assert!(b.contains("BINDING"), "{b}");
         assert!(b.contains("origin/main"), "{b}");
         assert!(b.contains("acme/widgets"), "{b}");
         assert!(b.contains("report.schema.json"), "{b}");
-        assert!(!b.contains("Standing constraints"), "must not dump the cold briefing: {b}");
+        assert!(
+            !b.contains("Standing constraints"),
+            "must not dump the cold briefing: {b}"
+        );
     }
 
     /// Card intent must ride in the grant and briefing; agents must not be told
@@ -3919,8 +4012,14 @@ mod tests {
         let s = follow_script(118);
         assert!(s.contains("tail -n +118"), "{s}");
         assert!(s.contains("--pid="), "must stop when the agent does: {s}");
-        assert!(s.contains(AGENT_STATUS), "must exit with the agent's own code: {s}");
-        assert!(!s.contains("claude"), "following must not start anything: {s}");
+        assert!(
+            s.contains(AGENT_STATUS),
+            "must exit with the agent's own code: {s}"
+        );
+        assert!(
+            !s.contains("claude"),
+            "following must not start anything: {s}"
+        );
     }
 
     /// A run can finish while honr is down. Waiting on a pid that is already
@@ -3929,8 +4028,13 @@ mod tests {
     fn a_finished_run_is_not_waited_on() {
         let s = follow_script(1);
         let wait = s.find("--pid=").expect("waits somewhere");
-        let done = s.find(&format!("if [ -f {AGENT_STATUS} ]")).expect("checks for the status");
-        assert!(done < wait, "the already-finished case must come first: {s}");
+        let done = s
+            .find(&format!("if [ -f {AGENT_STATUS} ]"))
+            .expect("checks for the status");
+        assert!(
+            done < wait,
+            "the already-finished case must come first: {s}"
+        );
     }
 
     /// The card decides what happens to a sandbox, not the sandbox.
@@ -3944,7 +4048,10 @@ mod tests {
         // The previous attempt's sandbox is kept for inspection and carries the
         // same `honr.item` label. Adopting it would attach to a dead log while
         // the real run went unwatched.
-        assert!(adoptable(Some(&item), "honr-card-9-a1").is_none(), "reap the old attempt");
+        assert!(
+            adoptable(Some(&item), "honr-card-9-a1").is_none(),
+            "reap the old attempt"
+        );
 
         // Not running: cannot adopt, but sandbox is kept by reconcile for review/reclaim
         item.state = State::Review;
@@ -3996,18 +4103,38 @@ mod tests {
 
         // Configured non-honr prefix keeps matching sandboxes.
         item.environment = Some("widgets-card-9-a2".into());
-        assert!(should_keep_sandbox(Some(&item), "widgets-card-9-a1", "widgets"));
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1", "widgets"));
+        assert!(should_keep_sandbox(
+            Some(&item),
+            "widgets-card-9-a1",
+            "widgets"
+        ));
+        assert!(!should_keep_sandbox(
+            Some(&item),
+            "honr-card-9-a1",
+            "widgets"
+        ));
     }
 
     #[test]
     fn should_keep_cockpit_sandbox_follows_board_session() {
         let mut session = CockpitSession::new(Some("honr-cockpit".into()), Some("conv-1".into()));
-        assert!(should_keep_cockpit_sandbox(Some(&session), "honr-cockpit", "honr"));
+        assert!(should_keep_cockpit_sandbox(
+            Some(&session),
+            "honr-cockpit",
+            "honr"
+        ));
         // Stable singleton name kept even before Board records environment.
         let bare = CockpitSession::new(None, None);
-        assert!(should_keep_cockpit_sandbox(Some(&bare), "honr-cockpit", "honr"));
-        assert!(!should_keep_cockpit_sandbox(Some(&bare), "honr-card-1-a1", "honr"));
+        assert!(should_keep_cockpit_sandbox(
+            Some(&bare),
+            "honr-cockpit",
+            "honr"
+        ));
+        assert!(!should_keep_cockpit_sandbox(
+            Some(&bare),
+            "honr-card-1-a1",
+            "honr"
+        ));
 
         session.status = CockpitSessionStatus::Parked;
         assert!(
@@ -4030,13 +4157,16 @@ mod tests {
             memory: Some("2Gi".into()),
             engine: Some("agy".into()),
             profile_id: Some("cockpit".into()),
+            providers: Vec::new(),
         };
         let spec = sandbox_spec_for_cockpit("honr-cockpit", &resolved, &[]);
         assert_eq!(spec.name, "honr-cockpit");
         assert_eq!(spec.cpu.as_deref(), Some("1"));
         assert_eq!(spec.memory.as_deref(), Some("2Gi"));
         assert!(
-            spec.labels.iter().any(|(k, v)| k == LABEL_COCKPIT && v == "1"),
+            spec.labels
+                .iter()
+                .any(|(k, v)| k == LABEL_COCKPIT && v == "1"),
             "cockpit label required: {:?}",
             spec.labels
         );
@@ -4122,8 +4252,10 @@ mod tests {
             .split("// ----------------------------------------------------- durable cockpit")
             .nth(1)
             .and_then(|rest| {
-                rest.split("// ----------------------------------------------------------------- helpers")
-                    .next()
+                rest.split(
+                    "// ----------------------------------------------------------------- helpers",
+                )
+                .next()
             })
             .expect("cockpit section");
         for needle in [
@@ -4143,7 +4275,10 @@ mod tests {
             cockpit_pol.contains("ready for Cockpit attach"),
             "cockpit must hand the agent to Cockpit attach"
         );
-        assert!(cockpit_pol.contains("LABEL_COCKPIT"), "cockpit must label sandboxes");
+        assert!(
+            cockpit_pol.contains("LABEL_COCKPIT"),
+            "cockpit must label sandboxes"
+        );
     }
 
     #[test]
@@ -4166,8 +4301,14 @@ mod tests {
         let cfg = repo_cfg();
         let s = refresh_script(&cfg, "honr/card-8");
         assert!(s.contains("cd /sandbox/repo"), "{s}");
-        assert!(s.contains("git reset --hard"), "must reset tracked files: {s}");
-        assert!(s.contains("git clean -fd"), "must clean untracked files: {s}");
+        assert!(
+            s.contains("git reset --hard"),
+            "must reset tracked files: {s}"
+        );
+        assert!(
+            s.contains("git clean -fd"),
+            "must clean untracked files: {s}"
+        );
         assert!(s.contains("fetch -q upstream main"), "{s}");
         assert!(s.contains("fetch -q origin honr/card-8"), "{s}");
         assert!(s.contains("rebase -q upstream/main"), "{s}");
@@ -4205,8 +4346,14 @@ mod tests {
         let began = std::time::Instant::now();
         let adopted = reconcile_once_reachable(&board, 600, grace).await;
 
-        assert!(adopted.is_empty(), "nothing can be adopted through a dead gateway");
-        assert!(began.elapsed() >= grace, "must wait for the gateway, not skip past it");
+        assert!(
+            adopted.is_empty(),
+            "nothing can be adopted through a dead gateway"
+        );
+        assert!(
+            began.elapsed() >= grace,
+            "must wait for the gateway, not skip past it"
+        );
     }
 
     /// The wait is bounded on purpose. A gateway that is never coming back must
@@ -4215,7 +4362,10 @@ mod tests {
     async fn a_gateway_that_never_answers_does_not_freeze_the_board() {
         let began = std::time::Instant::now();
         reconcile_once_reachable(&test_board(), 600, Duration::from_millis(50)).await;
-        assert!(began.elapsed() < Duration::from_secs(30), "gave up in bounded time");
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "gave up in bounded time"
+        );
     }
 
     /// Never flushed, so the path is only ever a name.
@@ -4251,7 +4401,13 @@ mod tests {
         pr_lookup_url: Option<&str>,
         deny_download_substr: Option<&str>,
     ) -> OpenShell {
-        verdict_openshell_mergeable(kind, payload_path, pr_lookup_url, None, deny_download_substr)
+        verdict_openshell_mergeable(
+            kind,
+            payload_path,
+            pr_lookup_url,
+            None,
+            deny_download_substr,
+        )
     }
 
     fn verdict_openshell_mergeable(
@@ -4347,8 +4503,14 @@ mod tests {
     #[test]
     fn probe_verdict_script_checks_locations() {
         let s = probe_verdict_script();
-        assert!(!s.contains("{WORKDIR}/.honr"), "probe script must not search {WORKDIR}/.honr: {s}");
-        assert!(!s.contains("WORKDIR"), "probe script must not reference WORKDIR: {s}");
+        assert!(
+            !s.contains("{WORKDIR}/.honr"),
+            "probe script must not search {WORKDIR}/.honr: {s}"
+        );
+        assert!(
+            !s.contains("WORKDIR"),
+            "probe script must not reference WORKDIR: {s}"
+        );
         assert!(s.contains("escalate.json"), "{s}");
         assert!(s.contains(".honr"), "{s}");
         assert!(s.contains("/work/.honr"), "{s}");
@@ -4375,7 +4537,11 @@ mod tests {
             "options": ["Postgres", "SQLite"]
         }"#;
         let esc2: EscalateFile = serde_json::from_str(json2).unwrap();
-        let opts: Vec<_> = esc2.options.into_iter().map(|o| o.into_escalation_option()).collect();
+        let opts: Vec<_> = esc2
+            .options
+            .into_iter()
+            .map(|o| o.into_escalation_option())
+            .collect();
         assert_eq!(opts[0].label, "Postgres");
         assert_eq!(opts[0].detail, "Postgres");
         assert_eq!(opts[1].label, "SQLite");
@@ -4391,7 +4557,11 @@ mod tests {
             "evidence": {"auth_login": "shanemcd"}
         }"#;
         let esc3: EscalateFile = serde_json::from_str(json3).unwrap();
-        let opts: Vec<_> = esc3.options.into_iter().map(|o| o.into_escalation_option()).collect();
+        let opts: Vec<_> = esc3
+            .options
+            .into_iter()
+            .map(|o| o.into_escalation_option())
+            .collect();
         assert_eq!(opts[0].label, "Accept smoke");
         assert_eq!(opts[0].detail, "No PR");
         assert_eq!(opts[1].label, "Re-run");
@@ -4401,7 +4571,10 @@ mod tests {
     #[test]
     fn committed_split_json_inside_workdir_cannot_trigger_split() {
         let script = probe_verdict_script();
-        assert!(!script.contains("{WORKDIR}"), "probe_verdict_script must not reference WORKDIR: {script}");
+        assert!(
+            !script.contains("{WORKDIR}"),
+            "probe_verdict_script must not reference WORKDIR: {script}"
+        );
 
         let temp_dir = std::env::temp_dir().join(format!(
             "honr-test-workdir-{}",
@@ -4410,8 +4583,11 @@ mod tests {
         let honr_dir = temp_dir.join(".honr");
         std::fs::create_dir_all(&honr_dir).expect("create .honr in temp workdir");
         let split_file = honr_dir.join("split.json");
-        std::fs::write(&split_file, r#"{"children":[{"title":"Fake Child","intent":"Fake Intent"}]}"#)
-            .expect("write fake split.json in workdir");
+        std::fs::write(
+            &split_file,
+            r#"{"children":[{"title":"Fake Child","intent":"Fake Intent"}]}"#,
+        )
+        .expect("write fake split.json in workdir");
 
         let output = std::process::Command::new("bash")
             .arg("-c")
@@ -4431,9 +4607,20 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_escalate_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-12", &cross_fork_repo());
-        assert!(b.contains("/sandbox/.honr/escalate.json"), "briefing must mention /sandbox/.honr/escalate.json: {b}");
-        assert!(!b.contains("`.honr/escalate.json`"), "briefing must omit WORKDIR .honr/escalate.json: {b}");
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "honr/card-12",
+            &cross_fork_repo(),
+        );
+        assert!(
+            b.contains("/sandbox/.honr/escalate.json"),
+            "briefing must mention /sandbox/.honr/escalate.json: {b}"
+        );
+        assert!(
+            !b.contains("`.honr/escalate.json`"),
+            "briefing must omit WORKDIR .honr/escalate.json: {b}"
+        );
     }
 
     /// Unbound first runs used to say "clone per the Project prompt" with no
@@ -4583,9 +4770,20 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_split_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-13", &cross_fork_repo());
-        assert!(b.contains("/sandbox/.honr/split.json"), "briefing must mention /sandbox/.honr/split.json: {b}");
-        assert!(!b.contains("`.honr/split.json`"), "briefing must omit WORKDIR .honr/split.json: {b}");
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "honr/card-13",
+            &cross_fork_repo(),
+        );
+        assert!(
+            b.contains("/sandbox/.honr/split.json"),
+            "briefing must mention /sandbox/.honr/split.json: {b}"
+        );
+        assert!(
+            !b.contains("`.honr/split.json`"),
+            "briefing must omit WORKDIR .honr/split.json: {b}"
+        );
         assert!(
             b.contains("smaller slices of the same outcome"),
             "briefing must instruct slice-only splits: {b}"
@@ -4609,7 +4807,10 @@ mod tests {
         let mut g = grant();
         g.title = crate::model::initial_plan_title("Test Project");
         let b = briefing(&g, BranchState::Fresh, "honr/card-92", &cross_fork_repo());
-        assert!(b.contains("Initial plan"), "briefing must identify Initial plan: {b}");
+        assert!(
+            b.contains("Initial plan"),
+            "briefing must identify Initial plan: {b}"
+        );
         assert!(
             b.contains("plan.json"),
             "briefing must require plan.json for Initial plan: {b}"
@@ -4654,10 +4855,24 @@ mod tests {
 
     #[test]
     fn briefing_mentions_verdict_report_protocol() {
-        let b = briefing(&grant(), BranchState::Fresh, "honr/card-17", &cross_fork_repo());
-        assert!(b.contains("/sandbox/.honr/report.json"), "briefing must mention /sandbox/.honr/report.json: {b}");
-        assert!(!b.contains("`.honr/report.json`"), "briefing must omit WORKDIR .honr/report.json: {b}");
-        assert!(b.contains("diffstat"), "briefing must mention diffstat: {b}");
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "honr/card-17",
+            &cross_fork_repo(),
+        );
+        assert!(
+            b.contains("/sandbox/.honr/report.json"),
+            "briefing must mention /sandbox/.honr/report.json: {b}"
+        );
+        assert!(
+            !b.contains("`.honr/report.json`"),
+            "briefing must omit WORKDIR .honr/report.json: {b}"
+        );
+        assert!(
+            b.contains("diffstat"),
+            "briefing must mention diffstat: {b}"
+        );
     }
 
     #[test]
@@ -4779,9 +4994,17 @@ mod tests {
 
         let os = verdict_openshell("split", &split_json_path, None, None);
         let cfg = repo_cfg();
-        let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
-            .await
-            .unwrap();
+        let handled = process_verdict(
+            &board,
+            &os,
+            &cfg,
+            "agent-1",
+            task.id,
+            "sandbox-1",
+            "honr/card-1",
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -4839,9 +5062,17 @@ mod tests {
             None,
         );
         let cfg = repo_cfg();
-        let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
-            .await
-            .unwrap();
+        let handled = process_verdict(
+            &board,
+            &os,
+            &cfg,
+            "agent-1",
+            task.id,
+            "sandbox-1",
+            "honr/card-1",
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -4859,7 +5090,15 @@ mod tests {
     async fn process_verdict_refuses_split_when_children_are_off_theme() {
         let board = test_board();
         let project = board
-            .create(None, "User Authentication", "Manage user accounts", None, Origin::Human, true, None)
+            .create(
+                None,
+                "User Authentication",
+                "Manage user accounts",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let task = board
             .create(
@@ -4896,9 +5135,17 @@ mod tests {
 
         let os = verdict_openshell("split", &split_json_path, None, None);
         let cfg = repo_cfg();
-        let handled = process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-1")
-            .await
-            .unwrap();
+        let handled = process_verdict(
+            &board,
+            &os,
+            &cfg,
+            "agent-1",
+            task.id,
+            "sandbox-1",
+            "honr/card-1",
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -4906,7 +5153,9 @@ mod tests {
         assert_eq!(item.state, State::NeedsHuman);
         let esc = item.escalation.expect("escalation set");
         assert!(esc.question.contains("refused by governor"));
-        assert!(esc.question.contains("does not relate to parent card or project theme"));
+        assert!(esc
+            .question
+            .contains("does not relate to parent card or project theme"));
     }
 
     #[tokio::test]
@@ -4915,9 +5164,7 @@ mod tests {
         let project = board
             .create(None, "Proj", "why", None, Origin::Human, true, None)
             .unwrap();
-        let seed = board
-            .init_plan(project.id)
-            .expect("init_plan");
+        let seed = board.init_plan(project.id).expect("init_plan");
         let seed_id = seed.id;
         let _ = board.transition(project.id, State::Shaping, "t", None);
         let _ = board.claim(seed_id, "agent-1", None, 60).unwrap();
@@ -4948,10 +5195,17 @@ mod tests {
 
         let os = verdict_openshell("report", &report_path, None, None);
         let cfg = repo_cfg();
-        let handled =
-            process_verdict(&board, &os, &cfg, "agent-1", seed_id, "sandbox-1", "honr/card-ip")
-                .await
-                .unwrap();
+        let handled = process_verdict(
+            &board,
+            &os,
+            &cfg,
+            "agent-1",
+            seed_id,
+            "sandbox-1",
+            "honr/card-ip",
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -4974,9 +5228,7 @@ mod tests {
         let project = board
             .create(None, "Proj", "why", None, Origin::Human, true, None)
             .unwrap();
-        let seed = board
-            .init_plan(project.id)
-            .expect("init_plan");
+        let seed = board.init_plan(project.id).expect("init_plan");
         let seed_id = seed.id;
         let _ = board.transition(project.id, State::Shaping, "t", None);
         let _ = board.claim(seed_id, "agent-1", None, 60).unwrap();
@@ -4996,10 +5248,17 @@ mod tests {
 
         let os = verdict_openshell("report", &report_path, None, Some("plan.json"));
         let cfg = repo_cfg();
-        let handled =
-            process_verdict(&board, &os, &cfg, "agent-1", seed_id, "sandbox-1", "honr/card-ip2")
-                .await
-                .unwrap();
+        let handled = process_verdict(
+            &board,
+            &os,
+            &cfg,
+            "agent-1",
+            seed_id,
+            "sandbox-1",
+            "honr/card-ip2",
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -5060,15 +5319,26 @@ mod tests {
             None,
         );
         let cfg = repo_cfg();
-        let handled =
-            process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-166")
-                .await
-                .unwrap();
+        let handled = process_verdict(
+            &board,
+            &os,
+            &cfg,
+            "agent-1",
+            task.id,
+            "sandbox-1",
+            "honr/card-166",
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
         let item = board.get(task.id).unwrap();
-        assert_eq!(item.state, State::Backlog, "must not reach Review while CONFLICTING");
+        assert_eq!(
+            item.state,
+            State::Backlog,
+            "must not reach Review while CONFLICTING"
+        );
         assert_eq!(item.pr_url(), Some(pr_url));
         assert_eq!(
             item.last_bounce_reason.as_deref(),
@@ -5130,10 +5400,17 @@ mod tests {
             None,
         );
         let cfg = repo_cfg();
-        let handled =
-            process_verdict(&board, &os, &cfg, "agent-1", task.id, "sandbox-1", "honr/card-167")
-                .await
-                .unwrap();
+        let handled = process_verdict(
+            &board,
+            &os,
+            &cfg,
+            "agent-1",
+            task.id,
+            "sandbox-1",
+            "honr/card-167",
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(handled);
@@ -5176,6 +5453,7 @@ mod tests {
                 cpu: Some("2".into()),
                 memory: Some("4Gi".into()),
                 engine: None,
+                provider_names: Vec::new(),
             })
             .unwrap();
         board
@@ -5187,6 +5465,7 @@ mod tests {
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
                 engine: None,
+                provider_names: Vec::new(),
             })
             .unwrap();
         board.set_default_sandbox_profile("default").unwrap();
@@ -5208,8 +5487,7 @@ mod tests {
 
         // Unset Project → global default.
         let unset = board.resolve_sandbox_create(task.id);
-        let unset_spec =
-            sandbox_spec_for_card(task.id, "honr-card-test", &unset, &[]);
+        let unset_spec = sandbox_spec_for_card(task.id, "honr-card-test", &unset, &[]);
         assert_eq!(unset.profile_id.as_deref(), Some("default"));
         assert_eq!(unset_spec.from, "default-image:1");
         assert_eq!(unset_spec.policy.as_deref(), Some(default_policy));
@@ -5221,8 +5499,7 @@ mod tests {
             .set_project_sandbox_profile(project.id, Some("heavy".into()))
             .unwrap();
         let over = board.resolve_sandbox_create(task.id);
-        let over_spec =
-            sandbox_spec_for_card(task.id, "honr-card-test", &over, &[]);
+        let over_spec = sandbox_spec_for_card(task.id, "honr-card-test", &over, &[]);
         assert_eq!(over.profile_id.as_deref(), Some("heavy"));
         assert_eq!(over_spec.from, "heavy-image:1");
         assert_eq!(over_spec.policy.as_deref(), Some(heavy_policy));
@@ -5260,14 +5537,6 @@ mod tests {
         let cfg = board.effective_agents();
         assert_eq!(cfg.engine, "claude");
 
-        let resolved = crate::model::ResolvedSandboxCreate {
-            image: "img:1".into(),
-            policy: "version: 1\n".into(),
-            cpu: None,
-            memory: None,
-            engine: None,
-            profile_id: None,
-        };
         board.upsert_openshell_provider(crate::model::OpenShellProviderDesired {
             name: "vertex".into(),
             provider_type: "google-vertex-ai".into(),
@@ -5275,7 +5544,6 @@ mod tests {
             credentials_sealed: None,
             credential_keys: Vec::new(),
             refresh: None,
-            attach_to_sandboxes: true,
         });
         board.upsert_openshell_provider(crate::model::OpenShellProviderDesired {
             name: "local-only".into(),
@@ -5284,9 +5552,17 @@ mod tests {
             credentials_sealed: None,
             credential_keys: Vec::new(),
             refresh: None,
-            attach_to_sandboxes: false,
         });
-        let attach = board.sandbox_attach_provider_names();
+        let resolved = crate::model::ResolvedSandboxCreate {
+            image: "img:1".into(),
+            policy: "version: 1\n".into(),
+            cpu: None,
+            memory: None,
+            engine: None,
+            profile_id: Some("default".into()),
+            providers: vec!["vertex".into(), "missing".into()],
+        };
+        let attach = board.attach_providers_for_resolved(&resolved);
         let spec = sandbox_spec_for_card(1, "honr-card-1-a1", &resolved, &attach);
         assert_eq!(spec.from, "img:1");
         assert_eq!(spec.policy.as_deref(), Some("version: 1\n"));
@@ -5305,7 +5581,15 @@ mod tests {
             )),
         ));
         let project = board
-            .create(None, "Mergeable Proj", "why", None, Origin::Human, true, None)
+            .create(
+                None,
+                "Mergeable Proj",
+                "why",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
             .unwrap();
         let task = board
             .create(
@@ -5404,7 +5688,8 @@ mod tests {
         assert!(updated
             .notes
             .iter()
-            .any(|n| n.text.contains("BINDING") && n.text.contains("do-not-re-report-while-CONFLICTING")));
+            .any(|n| n.text.contains("BINDING")
+                && n.text.contains("do-not-re-report-while-CONFLICTING")));
     }
 
     /// UNKNOWN leaves the card queued — GitHub has not finished computing.
@@ -5490,13 +5775,25 @@ mod tests {
             )
             .unwrap();
 
-        board.transition(done.id, State::Shaping, "test", None).unwrap();
-        board.transition(done.id, State::Done, "test", None).unwrap();
+        board
+            .transition(done.id, State::Shaping, "test", None)
+            .unwrap();
+        board
+            .transition(done.id, State::Done, "test", None)
+            .unwrap();
 
-        board.transition(review.id, State::Shaping, "test", None).unwrap();
-        board.transition(review.id, State::Backlog, "test", None).unwrap();
-        board.transition(review.id, State::Claimed, "agent", None).unwrap();
-        board.transition(review.id, State::Review, "agent", None).unwrap();
+        board
+            .transition(review.id, State::Shaping, "test", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Backlog, "test", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Claimed, "agent", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Review, "agent", None)
+            .unwrap();
         board.set_pull_request(
             review.id,
             Some(crate::model::PullRequest {
@@ -5509,10 +5806,18 @@ mod tests {
             }),
         );
 
-        board.transition(running.id, State::Shaping, "test", None).unwrap();
-        board.transition(running.id, State::Backlog, "test", None).unwrap();
-        board.transition(running.id, State::Claimed, "agent", None).unwrap();
-        board.transition(running.id, State::Running, "agent", None).unwrap();
+        board
+            .transition(running.id, State::Shaping, "test", None)
+            .unwrap();
+        board
+            .transition(running.id, State::Backlog, "test", None)
+            .unwrap();
+        board
+            .transition(running.id, State::Claimed, "agent", None)
+            .unwrap();
+        board
+            .transition(running.id, State::Running, "agent", None)
+            .unwrap();
 
         board.notify_main_advanced("refs/heads/main", Some("idle-race-sha".into()));
 
@@ -5562,4 +5867,3 @@ mod tests {
         assert!(!updated.awaiting_dispatch);
     }
 }
-

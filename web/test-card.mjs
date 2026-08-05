@@ -711,9 +711,9 @@ assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should 
 assert(!settingsHtml.includes("data-testid=\"settings-nav-sandboxes\""), "Sandboxes nav item removed");
 assert(settingsHtml.includes("data-testid=\"settings-nav-openshell\""), "Settings should nav to OpenShell");
 assert(settingsHtml.includes("data-testid=\"openshell-panel\""), "Default section is OpenShell");
-assert(settingsHtml.includes("data-testid=\"openshell-profiles\""), "OpenShell hosts Profiles band");
-assert(settingsHtml.includes("data-testid=\"sandboxes-panel\""), "Profiles band keeps sandboxes panel testid");
-assert(settingsHtml.includes("data-testid=\"openshell-connectivity\""), "OpenShell hosts Connectivity band");
+assert(settingsHtml.includes("data-testid=\"openshell-subnav\""), "OpenShell has section subnav");
+assert(settingsHtml.includes("data-testid=\"openshell-tab-profiles\""), "OpenShell tab for Profiles");
+assert(settingsHtml.includes("data-testid=\"openshell-connectivity\""), "Default OpenShell tab is Connectivity");
 assert(settingsHtml.includes("Connectivity"), "Settings OpenShell names Connectivity");
 assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Forge (workspace id)");
@@ -784,12 +784,12 @@ assert(openshellHtml.includes("data-testid=\"openshell-field-endpoint\""), "Open
 assert(openshellHtml.includes("data-testid=\"openshell-field-ca\""), "OpenShell CA PEM field");
 assert(!openshellHtml.includes("data-testid=\"openshell-field-binary\""), "OpenShell must not expose CLI binary path");
 assert(!openshellHtml.includes("openshell-health-bin"), "Legacy binary health CSS class removed");
-assert(openshellHtml.includes("data-testid=\"openshell-cockpit-hint\""), "OpenShell host setup hint");
+assert(openshellHtml.includes("data-testid=\"openshell-subnav\""), "OpenShell subnav for sections");
 assert(
-  openshellHtml.includes("Connectivity") &&
-    openshellHtml.includes("Providers") &&
-    openshellHtml.includes("Profiles"),
-  "OpenShell intro names Connectivity / Providers / Profiles",
+  openshellHtml.includes("data-testid=\"openshell-tab-connectivity\"") &&
+    openshellHtml.includes("data-testid=\"openshell-tab-providers\"") &&
+    openshellHtml.includes("data-testid=\"openshell-tab-profiles\""),
+  "OpenShell tabs: Connectivity / Providers / Profiles",
 );
 
 const openshellUnhealthyHtml = renderToString(
@@ -814,7 +814,6 @@ const openshellProvidersHtml = renderToString(
         credential_keys: ["GH_TOKEN"],
         has_credentials: true,
         has_refresh: false,
-        attach_to_sandboxes: true,
         gateway_synced: true,
       },
     ],
@@ -836,7 +835,6 @@ const openshellProvidersHtml = renderToString(
     onEdit: () => {},
     onDelete: () => {},
     onSync: () => {},
-    onToggleAttach: () => {},
   }),
 );
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers\""), "Providers band renders");
@@ -854,8 +852,12 @@ assert(
   "Providers intro points at GitHub App for tokens",
 );
 assert(
-  openshellProvidersHtml.includes("Attach on create"),
-  "Providers use Attach on create copy (not Sandboxes leftover)",
+  !openshellProvidersHtml.includes("openshell-provider-attach-"),
+  "Attach toggles live on Profiles, not Providers",
+);
+assert(
+  openshellProvidersHtml.includes("per") && openshellProvidersHtml.includes("Profile"),
+  "Providers copy points attach to Profiles",
 );
 
 const openshellManagedGithubHtml = renderToString(
@@ -868,7 +870,6 @@ const openshellManagedGithubHtml = renderToString(
         credential_keys: ["GH_TOKEN"],
         has_credentials: true,
         has_refresh: false,
-        attach_to_sandboxes: true,
         gateway_synced: true,
       },
     ],
@@ -879,7 +880,6 @@ const openshellManagedGithubHtml = renderToString(
       type: "github",
       config: {},
       credentials: {},
-      attach_to_sandboxes: true,
     },
     onDraftChange: () => {},
     onSave: () => {},
@@ -887,7 +887,6 @@ const openshellManagedGithubHtml = renderToString(
     onEdit: () => {},
     onDelete: () => {},
     onSync: () => {},
-    onToggleAttach: () => {},
   }),
 );
 assert(
@@ -923,7 +922,6 @@ const openshellProvidersEmptyHtml = renderToString(
     onEdit: () => {},
     onDelete: () => {},
     onSync: () => {},
-    onToggleAttach: () => {},
   }),
 );
 assert(openshellProvidersEmptyHtml.includes("data-testid=\"openshell-providers-empty\""), "Empty providers state");
@@ -932,6 +930,7 @@ assert(openshellProvidersEmptyHtml.includes("gateway offline"), "Offline gateway
 const openshellWithBandsHtml = renderToString(
   React.createElement(OpenShellPanelView, {
     ...openshellPanelProps,
+    activeTab: "providers",
     status: {
       healthy: true,
       summary: "ok",
@@ -941,13 +940,20 @@ const openshellWithBandsHtml = renderToString(
     profiles: React.createElement("div", { "data-testid": "openshell-profiles-slot" }, "profiles"),
   }),
 );
-assert(openshellWithBandsHtml.includes("data-testid=\"openshell-providers-slot\""), "OpenShell panel hosts providers band");
-assert(openshellWithBandsHtml.includes("data-testid=\"openshell-profiles-slot\""), "OpenShell panel hosts profiles band");
-assert(openshellWithBandsHtml.includes("data-testid=\"openshell-connectivity\""), "OpenShell panel hosts connectivity band");
-assert(
-  openshellWithBandsHtml.includes("Providers → Profiles"),
-  "OpenShell hint mentions Providers then Profiles",
+assert(openshellWithBandsHtml.includes("data-testid=\"openshell-providers-slot\""), "Providers tab hosts providers slot");
+assert(!openshellWithBandsHtml.includes("data-testid=\"openshell-profiles-slot\""), "Profiles slot hidden off-tab");
+assert(!openshellWithBandsHtml.includes("data-testid=\"openshell-connectivity\""), "Connectivity pane hidden off-tab");
+
+const openshellProfilesTabHtml = renderToString(
+  React.createElement(OpenShellPanelView, {
+    ...openshellPanelProps,
+    activeTab: "profiles",
+    status: { healthy: true, summary: "ok", not_configured: false },
+    providers: React.createElement("div", { "data-testid": "openshell-providers-slot" }, "providers"),
+    profiles: React.createElement("div", { "data-testid": "openshell-profiles-slot" }, "profiles"),
+  }),
 );
+assert(openshellProfilesTabHtml.includes("data-testid=\"openshell-profiles-slot\""), "Profiles tab hosts profiles slot");
 
 const workspaceHtml = renderToString(
   React.createElement(WorkspacePanelView, {
@@ -1004,21 +1010,46 @@ const fixtureProfiles = [
   },
 ];
 
+const sandboxPanelBase = {
+  profiles: fixtureProfiles,
+  defaultId: "default",
+  cockpitId: "default",
+  availableProviders: [
+    {
+      name: "vertex",
+      type: "google-vertex-ai",
+      config: {},
+      credential_keys: [],
+      has_credentials: true,
+      has_refresh: false,
+      gateway_synced: true,
+    },
+  ],
+  selectedId: "default",
+  editingId: null,
+  draft: {
+    id: "",
+    name: "",
+    image: "",
+    policy: "",
+    cpu: "",
+    memory: "",
+    engine: "cursor",
+    provider_names: [],
+  },
+  onSelect: () => {},
+  onDraftChange: () => {},
+  onStartCreate: () => {},
+  onStartEdit: () => {},
+  onCancelEdit: () => {},
+  onSave: () => {},
+  onDelete: () => {},
+  onSetDefault: () => {},
+  onSetCockpit: () => {},
+};
+
 const sandboxesHtml = renderToString(
-  React.createElement(SandboxesPanelView, {
-    profiles: fixtureProfiles,
-    defaultId: "default",
-    cockpitId: "default",
-    editingId: null,
-    draft: { id: "", name: "", image: "", policy: "", cpu: "", memory: "", engine: "cursor" },
-    onDraftChange: () => {},
-    onStartCreate: () => {},
-    onStartEdit: () => {},
-    onCancelEdit: () => {},
-    onSave: () => {},
-    onSetDefault: () => {},
-    onSetCockpit: () => {},
-  }),
+  React.createElement(SandboxesPanelView, sandboxPanelBase),
 );
 assert(sandboxesHtml.includes("data-testid=\"openshell-profiles\""), "Profiles band wrapper");
 assert(sandboxesHtml.includes("data-testid=\"sandboxes-panel\""), "Profiles panel should render");
@@ -1028,25 +1059,30 @@ assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-default\""), "Shoul
 assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-heavy\""), "Should list heavy profile");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-default-badge\""), "Default profile should be badged");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-cockpit-badge\""), "Cockpit profile should be badged");
-assert(sandboxesHtml.includes("data-testid=\"sandbox-set-default-heavy\""), "Non-default should offer Set default");
-assert(sandboxesHtml.includes("data-testid=\"sandbox-set-cockpit-heavy\""),
-  "Non-Cockpit should offer Use for Cockpit");
-assert(!sandboxesHtml.includes("data-testid=\"sandbox-set-cockpit-default\""),
-  "Current Cockpit profile should not offer Use for Cockpit");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Profiles panel should support create");
-assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Profiles panel should support edit");
-assert(sandboxesHtml.includes("cursor"), "Profile list shows engine");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Selected profile offers Edit");
+assert(sandboxesHtml.includes("cursor"), "Selected profile shows engine");
+assert(!sandboxesHtml.includes("data-testid=\"sandbox-delete-default\""), "Cannot delete default/cockpit profile");
 assert(!sandboxesHtml.includes("data-testid=\"sandbox-destroy\""),
   "Profiles panel must not offer live OpenShell sandbox destroy");
 assert(!/destroy sandbox|delete environment|openshell.*delete/i.test(sandboxesHtml),
   "Profiles panel must not offer live OpenShell sandbox destroy controls");
-// List meta should not dump full YAML or imply a host path field.
-assert(!sandboxesHtml.includes("version: 1"), "Profile list should not dump inline policy YAML");
+
+const sandboxesHeavyHtml = renderToString(
+  React.createElement(SandboxesPanelView, {
+    ...sandboxPanelBase,
+    cockpitId: "default",
+    selectedId: "heavy",
+  }),
+);
+assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-set-default-heavy\""), "Non-default offers Set default");
+assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-set-cockpit-heavy\""),
+  "Non-Cockpit offers Use for Cockpit");
+assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-delete-heavy\""), "Deletable profile offers Delete");
 
 const createFormHtml = renderToString(
   React.createElement(SandboxesPanelView, {
-    profiles: fixtureProfiles,
-    defaultId: "default",
+    ...sandboxPanelBase,
     cockpitId: "cockpit",
     editingId: "",
     draft: {
@@ -1057,14 +1093,8 @@ const createFormHtml = renderToString(
       cpu: "",
       memory: "",
       engine: "cursor",
+      provider_names: ["vertex"],
     },
-    onDraftChange: () => {},
-    onStartCreate: () => {},
-    onStartEdit: () => {},
-    onCancelEdit: () => {},
-    onSave: () => {},
-    onSetDefault: () => {},
-    onSetCockpit: () => {},
   }),
 );
 assert(createFormHtml.includes("data-testid=\"sandbox-profile-form\""), "Create/edit form should render");
@@ -1073,19 +1103,16 @@ assert(!createFormHtml.includes("data-testid=\"sandbox-field-id\""),
 assert(createFormHtml.includes("data-testid=\"sandbox-field-name\""), "Create form should include name");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-engine\""), "Form should include engine field");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-policy\""), "Form should include policy field");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-providers\""), "Form includes per-profile providers");
+assert(createFormHtml.includes("data-testid=\"sandbox-provider-vertex\""), "Form lists available providers");
 assert(createFormHtml.includes("<textarea"), "Policy control should be a textarea for inline YAML");
-assert(
-  /Inline OpenShell policy YAML/i.test(createFormHtml),
-  "Policy hint should describe inline YAML",
-);
 assert(!/policy path|path to.*policy|host path/i.test(createFormHtml),
   "Settings must not ask for a host filesystem policy path");
 assert(createFormHtml.includes("data-testid=\"sandbox-save\""), "Form should include save");
 
 const editFormHtml = renderToString(
   React.createElement(SandboxesPanelView, {
-    profiles: fixtureProfiles,
-    defaultId: "default",
+    ...sandboxPanelBase,
     cockpitId: null,
     editingId: "default",
     draft: {
@@ -1096,14 +1123,8 @@ const editFormHtml = renderToString(
       cpu: "",
       memory: "",
       engine: "cursor",
+      provider_names: ["vertex"],
     },
-    onDraftChange: () => {},
-    onStartCreate: () => {},
-    onStartEdit: () => {},
-    onCancelEdit: () => {},
-    onSave: () => {},
-    onSetDefault: () => {},
-    onSetCockpit: () => {},
   }),
 );
 assert(editFormHtml.includes("data-testid=\"sandbox-field-id\""),

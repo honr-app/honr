@@ -85,10 +85,11 @@ pub enum Origin {
     Human,
     Planner,
     /// Machine-born: an agent discovered the work was bigger than its card.
-    Split { from: ItemId },
+    Split {
+        from: ItemId,
+    },
     Reflection,
 }
-
 
 /// Who holds the card while a run is in flight. The hard stop is
 /// [`WorkItem::run_deadline_at`] (agent timeout), not lease renewal.
@@ -251,7 +252,10 @@ impl PlanArtifact {
             PlanStatus::Empty => "no_plan".into(),
             PlanStatus::AwaitingApproval => "awaiting_approval".into(),
             PlanStatus::Approved => {
-                format!("approved_v{}", self.approved_revision.unwrap_or(self.revision))
+                format!(
+                    "approved_v{}",
+                    self.approved_revision.unwrap_or(self.revision)
+                )
             }
         }
     }
@@ -400,11 +404,7 @@ impl PullRequest {
 
     pub fn to_repo_config(&self) -> Option<crate::schema::RepoConfig> {
         let base = self.base.as_ref().filter(|b| b.is_usable())?;
-        let head = self
-            .head
-            .as_ref()
-            .filter(|h| h.is_usable())
-            .unwrap_or(base);
+        let head = self.head.as_ref().filter(|h| h.is_usable()).unwrap_or(base);
         Some(
             crate::schema::RepoConfig {
                 upstream: base.repo.clone(),
@@ -414,7 +414,6 @@ impl PullRequest {
             .normalized(),
         )
     }
-
 }
 
 /// One Task row as shown to an agent from the Project Plan.
@@ -451,13 +450,6 @@ pub struct OpenShellProviderDesired {
     /// Optional gateway-owned refresh bootstrap (e.g. gcloud ADC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<OpenShellProviderRefreshDesired>,
-    /// When true, sandbox create attaches this provider by name.
-    #[serde(default = "default_true")]
-    pub attach_to_sandboxes: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Refresh material for [`OpenShellProviderDesired`] (Vertex ADC, etc.).
@@ -718,6 +710,10 @@ pub struct SandboxProfile {
     /// When unset, claim/run falls back to Settings → Agent runtime engine.
     #[serde(default)]
     pub engine: Option<String>,
+    /// OpenShell provider names to attach on sandbox create for this profile.
+    /// Empty = attach none. Unknown names are dropped at create time.
+    #[serde(default)]
+    pub provider_names: Vec<String>,
 }
 
 /// Catalog id for the privileged cockpit control-plane seat (not the card worker).
@@ -749,6 +745,7 @@ pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) 
         cpu: Some(COCKPIT_SANDBOX_CPU.into()),
         memory: Some(COCKPIT_SANDBOX_MEMORY.into()),
         engine,
+        provider_names: Vec::new(),
     }
 }
 
@@ -789,6 +786,8 @@ pub struct ResolvedSandboxCreate {
     pub engine: Option<String>,
     /// Catalog profile that won, if any. `None` means YAML fallback.
     pub profile_id: Option<String>,
+    /// Provider names to attach (from the winning profile; empty for YAML fallback).
+    pub providers: Vec<String>,
 }
 
 impl ResolvedSandboxCreate {
@@ -805,6 +804,7 @@ impl ResolvedSandboxCreate {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),
             profile_id: Some(p.id.clone()),
+            providers: p.provider_names.clone(),
         }
     }
 
@@ -825,6 +825,7 @@ impl ResolvedSandboxCreate {
             memory: agents.memory.clone(),
             engine,
             profile_id: None,
+            providers: Vec::new(),
         }
     }
 }
@@ -911,11 +912,7 @@ impl SplitChildSpec {
 
     #[must_use]
     #[allow(dead_code)] // used from unit tests; production builds via SplitChildSpec fields
-    pub fn with_deps(
-        mut self,
-        key: impl Into<String>,
-        blocked_by_keys: Vec<String>,
-    ) -> Self {
+    pub fn with_deps(mut self, key: impl Into<String>, blocked_by_keys: Vec<String>) -> Self {
         self.key = Some(key.into());
         self.blocked_by_keys = blocked_by_keys;
         self

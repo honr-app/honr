@@ -61,6 +61,8 @@ export interface SandboxProfile {
   memory?: string | null;
   /** Agent CLI (`cursor` / `agy` / `claude`). Unset → Agent runtime default. */
   engine?: string | null;
+  /** Providers to attach on sandbox create (`[]` = none). */
+  provider_names?: string[];
 }
 
 export interface SandboxProfilesOut {
@@ -196,7 +198,6 @@ export interface OpenShellProviderView {
   credential_keys: string[];
   has_credentials: boolean;
   has_refresh: boolean;
-  attach_to_sandboxes: boolean;
   gateway_synced?: boolean | null;
 }
 
@@ -211,7 +212,6 @@ export interface OpenShellProviderWrite {
   config?: Record<string, string>;
   /** Write-only. Omit on update to keep sealed credentials. */
   credentials?: Record<string, string> | null;
-  attach_to_sandboxes?: boolean;
 }
 
 export interface ProviderTypeProfile {

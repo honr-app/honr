@@ -1,21 +1,19 @@
 //! SQLite `BoardStore` — row-level board persistence and one-shot JSON import.
 
 use super::codec::{
-    item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME,
-    META_COCKPIT_SANDBOX_PROFILE_ID, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
-    META_NEXT_ID, META_OPENSHELL_GATEWAY_ENDPOINT, META_AUTH_ALLOWED_TEAMS,
-    META_AUTH_ALLOWED_USERS, META_AUTH_SEALED, META_GITHUB_APP_INSTALLATION_ID,
-    META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS,
-    META_COCKPIT_SESSION, META_SANDBOX_PROFILES, META_WEBHOOK_POLL, META_WEBHOOK_POLL_TIPS,
-    META_WORKSPACE_BINDING,
+    item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME, META_AUTH_ALLOWED_TEAMS,
+    META_AUTH_ALLOWED_USERS, META_AUTH_SEALED, META_COCKPIT_SANDBOX_PROFILE_ID,
+    META_COCKPIT_SESSION, META_DEFAULT_SANDBOX_PROFILE_ID, META_GITHUB_APP_INSTALLATION_ID,
+    META_GITHUB_APP_SEALED, META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_GATEWAY_ENDPOINT,
+    META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS, META_SANDBOX_PROFILES, META_WEBHOOK_POLL,
+    META_WEBHOOK_POLL_TIPS, META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
 use crate::model::{
-    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, CockpitSession, SandboxProfile,
-    WebhookPollConfig,
-    WorkItem, WorkspaceBinding,
+    AgentRuntimeConfig, CockpitSession, ItemId, OpenShellProviderDesired, SandboxProfile,
+    WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
@@ -263,18 +261,15 @@ impl SqliteBoardStore {
                 )))
             }
         };
-        let state: BoardState = serde_json::from_str(&raw).map_err(|e| {
-            StoreError::Query(format!("parse {}: {e}", json_path.display()))
-        })?;
+        let state: BoardState = serde_json::from_str(&raw)
+            .map_err(|e| StoreError::Query(format!("parse {}: {e}", json_path.display())))?;
         self.save_board_state(&state).await?;
         self.meta_set(META_JSON_IMPORTED, &Utc::now().to_rfc3339())
             .await?;
         Ok(true)
     }
 
-    async fn load_sandbox_profiles(
-        &self,
-    ) -> Result<BTreeMap<String, SandboxProfile>, StoreError> {
+    async fn load_sandbox_profiles(&self) -> Result<BTreeMap<String, SandboxProfile>, StoreError> {
         match self.meta_get(META_SANDBOX_PROFILES).await? {
             None => Ok(BTreeMap::new()),
             Some(raw) if raw.is_empty() || raw == "{}" => Ok(BTreeMap::new()),
@@ -334,11 +329,11 @@ impl SqliteBoardStore {
         match self.meta_get(META_GITHUB_APP_INSTALLATION_ID).await? {
             None => Ok(None),
             Some(raw) if raw.trim().is_empty() => Ok(None),
-            Some(raw) => raw
-                .trim()
-                .parse()
-                .map(Some)
-                .map_err(|e| StoreError::Query(format!("decode github_app_installation_id: {e}"))),
+            Some(raw) => {
+                raw.trim().parse().map(Some).map_err(|e| {
+                    StoreError::Query(format!("decode github_app_installation_id: {e}"))
+                })
+            }
         }
     }
 
@@ -582,14 +577,12 @@ async fn replace_blockers_tx(
         .await
         .map_err(|e| StoreError::Query(e.to_string()))?;
     for &bid in blocker_ids {
-        sqlx::query(
-            "INSERT INTO item_blockers (item_id, blocker_id) VALUES (?, ?)",
-        )
-        .bind(item_id as i64)
-        .bind(bid as i64)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+        sqlx::query("INSERT INTO item_blockers (item_id, blocker_id) VALUES (?, ?)")
+            .bind(item_id as i64)
+            .bind(bid as i64)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?;
     }
     Ok(())
 }
@@ -605,16 +598,14 @@ async fn replace_stories_tx(
         .await
         .map_err(|e| StoreError::Query(e.to_string()))?;
     for (pos, line) in lines.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO stories (goal_id, position, at, text) VALUES (?, ?, ?, ?)",
-        )
-        .bind(goal_id as i64)
-        .bind(pos as i64)
-        .bind(line.at.to_rfc3339())
-        .bind(&line.text)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+        sqlx::query("INSERT INTO stories (goal_id, position, at, text) VALUES (?, ?, ?, ?)")
+            .bind(goal_id as i64)
+            .bind(pos as i64)
+            .bind(line.at.to_rfc3339())
+            .bind(&line.text)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?;
     }
     Ok(())
 }
@@ -757,12 +748,13 @@ impl BoardStore for SqliteBoardStore {
     }
 
     async fn load_blockers(&self, item_id: ItemId) -> Result<Vec<ItemId>, StoreError> {
-        let rows: Vec<(i64,)> =
-            sqlx::query_as("SELECT blocker_id FROM item_blockers WHERE item_id = ? ORDER BY blocker_id")
-                .bind(item_id as i64)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| StoreError::Query(e.to_string()))?;
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT blocker_id FROM item_blockers WHERE item_id = ? ORDER BY blocker_id",
+        )
+        .bind(item_id as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StoreError::Query(e.to_string()))?;
         Ok(rows.into_iter().map(|(id,)| id as ItemId).collect())
     }
 
@@ -784,13 +776,12 @@ impl BoardStore for SqliteBoardStore {
     }
 
     async fn load_stories(&self, goal_id: ItemId) -> Result<Vec<StoryLine>, StoreError> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT at, text FROM stories WHERE goal_id = ? ORDER BY position",
-        )
-        .bind(goal_id as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT at, text FROM stories WHERE goal_id = ? ORDER BY position")
+                .bind(goal_id as i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| StoreError::Query(e.to_string()))?;
         let mut out = Vec::with_capacity(rows.len());
         for (at, text) in rows {
             let at = chrono::DateTime::parse_from_rfc3339(&at)
@@ -925,24 +916,22 @@ impl BoardStore for SqliteBoardStore {
     }
 
     async fn query_children_of(&self, id: ItemId) -> Result<Vec<ItemId>, StoreError> {
-        let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT id FROM items WHERE parent_id = ? ORDER BY id",
-        )
-        .bind(id as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+        let rows: Vec<(i64,)> =
+            sqlx::query_as("SELECT id FROM items WHERE parent_id = ? ORDER BY id")
+                .bind(id as i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| StoreError::Query(e.to_string()))?;
         Ok(rows.into_iter().map(|(i,)| i as ItemId).collect())
     }
 
     async fn query_has_non_retired_children(&self, id: ItemId) -> Result<bool, StoreError> {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT non_retired_child_count FROM items WHERE id = ?",
-        )
-        .bind(id as i64)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT non_retired_child_count FROM items WHERE id = ?")
+                .bind(id as i64)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| StoreError::Query(e.to_string()))?;
         Ok(row.map(|(c,)| c > 0).unwrap_or(false))
     }
 }
@@ -1030,6 +1019,7 @@ mod tests {
                 cpu: Some("2".into()),
                 memory: None,
                 engine: None,
+                provider_names: Vec::new(),
             },
         );
         state.default_sandbox_profile_id = Some("default".into());
@@ -1047,7 +1037,10 @@ mod tests {
         );
         assert_eq!(again.default_sandbox_profile_id.as_deref(), Some("default"));
         assert_eq!(again.cockpit_sandbox_profile_id.as_deref(), Some("cockpit"));
-        assert_eq!(again.sandbox_profiles.get("default").unwrap().image, "img:1");
+        assert_eq!(
+            again.sandbox_profiles.get("default").unwrap().image,
+            "img:1"
+        );
         assert!(
             again
                 .sandbox_profiles
@@ -1071,7 +1064,10 @@ mod tests {
             max_attempts: 3,
             ..Default::default()
         });
-        store.save_board_state(&with_rt).await.expect("save runtime");
+        store
+            .save_board_state(&with_rt)
+            .await
+            .expect("save runtime");
         let rt_again = store.load_board_state().await.expect("reload runtime");
         let rt = rt_again
             .agent_runtime
@@ -1178,14 +1174,8 @@ mod tests {
 
         // Second boot: stamp present — no re-import even if we wipe items in JSON.
         std::fs::write(&json_path, "{}").unwrap();
-        assert!(!store
-            .import_json_if_empty(&json_path)
-            .await
-            .expect("skip"));
-        assert_eq!(
-            store.get_item(4).await.unwrap().unwrap().title,
-            "Imported"
-        );
+        assert!(!store.import_json_if_empty(&json_path).await.expect("skip"));
+        assert_eq!(store.get_item(4).await.unwrap().unwrap().title, "Imported");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1210,13 +1200,10 @@ mod tests {
                 .expect("connect file db"),
         );
         let schema = crate::schema::Schema::default();
-        let board = crate::store::Board::load_with_store(
-            schema.clone(),
-            json_path.clone(),
-            store.clone(),
-        )
-        .await
-        .expect("open empty");
+        let board =
+            crate::store::Board::load_with_store(schema.clone(), json_path.clone(), store.clone())
+                .await
+                .expect("open empty");
 
         let project = board
             .create(
@@ -1242,13 +1229,9 @@ mod tests {
                 .await
                 .expect("reconnect"),
         );
-        let board2 = crate::store::Board::load_with_store(
-            schema,
-            json_path.clone(),
-            store2,
-        )
-        .await
-        .expect("reopen");
+        let board2 = crate::store::Board::load_with_store(schema, json_path.clone(), store2)
+            .await
+            .expect("reopen");
         let restored = board2.get(project.id).expect("item survives");
         assert_eq!(restored.title, "DB Project");
         let stories = board2.stories_for(project.id);
@@ -1310,19 +1293,15 @@ mod tests {
         store.save_board_state(&state).await.expect("save");
 
         // Denorm columns persisted.
-        let nrc: (i64,) = sqlx::query_as(
-            "SELECT non_retired_child_count FROM items WHERE id = 1",
-        )
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+        let nrc: (i64,) = sqlx::query_as("SELECT non_retired_child_count FROM items WHERE id = 1")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
         assert_eq!(nrc.0, 4);
-        let obc: (i64,) = sqlx::query_as(
-            "SELECT open_blocker_count FROM items WHERE id = 3",
-        )
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+        let obc: (i64,) = sqlx::query_as("SELECT open_blocker_count FROM items WHERE id = 3")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
         assert_eq!(obc.0, 1);
 
         let backlog = store

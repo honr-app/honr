@@ -28,7 +28,6 @@ export function OpenShellProvidersPanelView({
   onEdit,
   onDelete,
   onSync,
-  onToggleAttach,
 }: {
   providers: OpenShellProviderView[];
   gatewayReachable: boolean;
@@ -43,7 +42,6 @@ export function OpenShellProvidersPanelView({
   onEdit: (p: OpenShellProviderView) => void;
   onDelete: (name: string) => void;
   onSync: () => void;
-  onToggleAttach: (p: OpenShellProviderView, attach: boolean) => void;
 }) {
   const typeOptions = profiles.length
     ? profiles.map((p) => p.id)
@@ -75,12 +73,12 @@ export function OpenShellProvidersPanelView({
       <div className="openshell-band-head openshell-providers-head">
         <h3 id="openshell-providers-title">Providers</h3>
         <p className="dim">
-          Desired provider list on the board (credentials sealed) — this is the
-          source of truth. Save applies to the gateway when it is reachable;
-          Sync all recreates after a wipe. Providers marked Attach pass on
-          sandbox create. Provider <code>github</code> is owned by Settings →
-          GitHub App (<code>GH_TOKEN</code> installation token); do not manage
-          that provider's credentials by hand here.
+          Desired provider catalog on the board (credentials sealed). Save
+          applies to the gateway when reachable; Sync all recreates after a
+          wipe. Which providers attach on create is chosen per{" "}
+          <strong>Profile</strong>, not here. Provider <code>github</code> is
+          owned by Settings → GitHub App (<code>GH_TOKEN</code>); do not manage
+          those credentials by hand.
         </p>
       </div>
 
@@ -102,7 +100,6 @@ export function OpenShellProvidersPanelView({
               type: defaultAddType,
               config: {},
               credentials: {},
-              attach_to_sandboxes: true,
             })
           }
           data-testid="openshell-providers-add"
@@ -124,7 +121,7 @@ export function OpenShellProvidersPanelView({
 
       {providers.length === 0 && !draft ? (
         <p className="dim" data-testid="openshell-providers-empty">
-          No providers yet. Add one; mark Attach so credentials pass on sandbox
+          No providers yet. Add one here, then attach it on a Profile for sandbox
           create.
         </p>
       ) : (
@@ -171,16 +168,6 @@ export function OpenShellProvidersPanelView({
                     }`
                   : "no secrets"}
               </div>
-              <label className="agent-runtime-check">
-                <input
-                  type="checkbox"
-                  checked={p.attach_to_sandboxes}
-                  disabled={busy}
-                  onChange={(e) => onToggleAttach(p, e.target.checked)}
-                  data-testid={`openshell-provider-attach-${p.name}`}
-                />
-                Attach on create
-              </label>
               <div className="btns">
                 <button
                   type="button"
@@ -309,18 +296,6 @@ export function OpenShellProvidersPanelView({
               </label>
             </>
           )}
-          <label className="agent-runtime-check">
-            <input
-              type="checkbox"
-              checked={draft.attach_to_sandboxes ?? true}
-              disabled={busy}
-              onChange={(e) =>
-                onDraftChange({ ...draft, attach_to_sandboxes: e.target.checked })
-              }
-              data-testid="openshell-provider-field-attach"
-            />
-            Attach on create
-          </label>
           <div className="btns">
             <button type="submit" className="primary" disabled={busy} data-testid="openshell-provider-save">
               Save provider
@@ -397,7 +372,6 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
           type: p.type,
           config: { ...p.config },
           credentials: {},
-          attach_to_sandboxes: p.attach_to_sandboxes,
         });
         setHint(null);
         setError(null);
@@ -462,21 +436,6 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
             if (out.errors.length) setError(errBits);
             return refresh();
           })
-          .catch((e) => setError(String(e)))
-          .finally(() => setBusy(false));
-      }}
-      onToggleAttach={(p, attach) => {
-        setBusy(true);
-        setError(null);
-        api
-          .updateOpenShellProvider(p.name, {
-            name: p.name,
-            type: p.type,
-            config: p.config,
-            credentials: null,
-            attach_to_sandboxes: attach,
-          })
-          .then(() => refresh())
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));
       }}

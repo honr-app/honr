@@ -4,6 +4,14 @@ import type { OpenShellSettings, OpenShellStatus } from "../types.js";
 import { OpenShellProvidersPanel } from "./OpenShellProviders.js";
 import { SandboxesPanel } from "./OpenShellProfiles.js";
 
+export type OpenShellTab = "connectivity" | "providers" | "profiles";
+
+const TABS: { id: OpenShellTab; label: string }[] = [
+  { id: "connectivity", label: "Connectivity" },
+  { id: "providers", label: "Providers" },
+  { id: "profiles", label: "Profiles" },
+];
+
 export function OpenShellPanelView({
   status,
   gatewayEndpoint,
@@ -14,6 +22,8 @@ export function OpenShellPanelView({
   busy,
   error,
   savedHint,
+  activeTab: activeTabProp,
+  onTabChange,
   onGatewayEndpointChange,
   onCaPemChange,
   onClientCertPemChange,
@@ -34,6 +44,9 @@ export function OpenShellPanelView({
   busy?: boolean;
   error?: string | null;
   savedHint?: string | null;
+  /** Controlled tab (tests). Uncontrolled when omitted. */
+  activeTab?: OpenShellTab;
+  onTabChange?: (tab: OpenShellTab) => void;
   onGatewayEndpointChange: (next: string) => void;
   onCaPemChange: (next: string) => void;
   onClientCertPemChange: (next: string) => void;
@@ -42,11 +55,16 @@ export function OpenShellPanelView({
   onSave: () => void;
   onImportCliMtls: () => void;
   onClearMtls: () => void;
-  /** Optional providers band (live panel passes a mounted subview). */
   providers?: ReactNode;
-  /** Optional profiles band (live panel passes SandboxesPanel). */
   profiles?: ReactNode;
 }) {
+  const [internalTab, setInternalTab] = useState<OpenShellTab>("connectivity");
+  const tab = activeTabProp ?? internalTab;
+  const setTab = (next: OpenShellTab) => {
+    onTabChange?.(next);
+    if (activeTabProp === undefined) setInternalTab(next);
+  };
+
   const healthLabel = !status
     ? "…"
     : status.healthy
@@ -65,15 +83,35 @@ export function OpenShellPanelView({
 
   return (
     <section aria-labelledby="openshell-title" data-testid="openshell-panel">
-      <h2 id="openshell-title">OpenShell</h2>
-      <p className="dim">
-        Source of truth for gateway talk: <strong>Connectivity</strong>{" "}
-        (endpoint + sealed mTLS + health), <strong>Providers</strong> (desired
-        list on the board, sync to gateway), and <strong>Profiles</strong>{" "}
-        (image / policy / cpu / memory / engine; cockpit vs worker). Honr
-        reaches the gateway in-process over gRPC — no CLI binary path. Host
-        Docker / Colima stay outside honr.
-      </p>
+      <header className="openshell-hero">
+        <h2 id="openshell-title">OpenShell</h2>
+        <p className="dim openshell-hero-lead">
+          Gateway talk for sandboxes: connect once, define providers, then choose
+          what each profile attaches at create. Host Docker / Colima stay outside
+          honr.
+        </p>
+        <div
+          className="openshell-status-chip"
+          data-testid="openshell-health"
+          data-healthy={status?.healthy ? "true" : "false"}
+        >
+          <span className="dim">Gateway</span>
+          <strong className={healthClass} data-testid="openshell-health-label">
+            {healthLabel}
+          </strong>
+          <span className="dim">·</span>
+          <span className="dim">mTLS</span>
+          <strong data-testid="openshell-mtls-label">{mtlsLabel}</strong>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onRefresh}
+            data-testid="openshell-refresh"
+          >
+            Refresh
+          </button>
+        </div>
+      </header>
 
       {error && <div className="err">{error}</div>}
       {savedHint && (
@@ -82,158 +120,160 @@ export function OpenShellPanelView({
         </p>
       )}
 
-      <div
-        className="openshell-band openshell-connectivity"
-        data-testid="openshell-connectivity"
-        aria-labelledby="openshell-connectivity-title"
+      <nav
+        className="openshell-subnav"
+        aria-label="OpenShell sections"
+        data-testid="openshell-subnav"
       >
-        <div className="openshell-band-head">
-          <h3 id="openshell-connectivity-title">Connectivity</h3>
-          <p className="dim">
-            Gateway endpoint and mTLS PEMs (CA, client cert, client key). Paste
-            or import from the local OpenShell config dir; PEMs seal into the
-            board database with a host master key (
-            <code>~/.config/honr/master.key</code>). The API never returns
-            private key material. Refresh status probes the live gateway.
-          </p>
-        </div>
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={
+              tab === t.id ? "openshell-subnav-btn active" : "openshell-subnav-btn"
+            }
+            aria-current={tab === t.id ? "page" : undefined}
+            onClick={() => setTab(t.id)}
+            data-testid={`openshell-tab-${t.id}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </nav>
 
-        <div className="openshell-health" data-testid="openshell-health">
-          <div className="openshell-health-row">
-            <span className="dim">Gateway</span>
-            <strong
-              className={healthClass}
-              data-testid="openshell-health-label"
-              data-healthy={status?.healthy ? "true" : "false"}
-            >
-              {healthLabel}
-            </strong>
+      {tab === "connectivity" && (
+        <div
+          className="openshell-pane openshell-connectivity"
+          data-testid="openshell-connectivity"
+          aria-labelledby="openshell-connectivity-title"
+        >
+          <div className="openshell-band-head">
+            <h3 id="openshell-connectivity-title">Connectivity</h3>
+            <p className="dim">
+              Gateway endpoint and mTLS PEMs. Paste or import from the local
+              OpenShell config dir; PEMs seal into the board database (
+              <code>~/.config/honr/master.key</code>). The API never returns
+              private key material.
+            </p>
           </div>
-          <div className="openshell-health-row">
-            <span className="dim">mTLS material</span>
-            <strong data-testid="openshell-mtls-label">{mtlsLabel}</strong>
-          </div>
+
           {status?.summary && (
-            <pre className="openshell-health-summary" data-testid="openshell-health-summary">
+            <pre
+              className="openshell-health-summary"
+              data-testid="openshell-health-summary"
+            >
               {status.summary}
             </pre>
           )}
-          <div className="btns">
-            <button
-              type="button"
-              className="primary"
-              disabled={busy}
-              onClick={onRefresh}
-              data-testid="openshell-refresh"
-            >
-              Refresh status
-            </button>
-          </div>
+
+          <form
+            className="sandbox-profile-form workspace-form"
+            data-testid="openshell-gateway-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onSave();
+            }}
+          >
+            <label>
+              Gateway endpoint
+              <input
+                className="search-input"
+                value={gatewayEndpoint}
+                disabled={busy}
+                placeholder="https://127.0.0.1:17670"
+                onChange={(e) => onGatewayEndpointChange(e.target.value)}
+                data-testid="openshell-field-endpoint"
+              />
+            </label>
+            <label>
+              CA certificate (PEM)
+              <textarea
+                className="search-input"
+                rows={4}
+                value={caPem}
+                disabled={busy}
+                placeholder={
+                  mtls?.ca
+                    ? "Configured — paste to replace"
+                    : "-----BEGIN CERTIFICATE-----"
+                }
+                onChange={(e) => onCaPemChange(e.target.value)}
+                data-testid="openshell-field-ca"
+              />
+            </label>
+            <label>
+              Client certificate (PEM)
+              <textarea
+                className="search-input"
+                rows={4}
+                value={clientCertPem}
+                disabled={busy}
+                placeholder={
+                  mtls?.client_cert
+                    ? "Configured — paste to replace"
+                    : "-----BEGIN CERTIFICATE-----"
+                }
+                onChange={(e) => onClientCertPemChange(e.target.value)}
+                data-testid="openshell-field-client-cert"
+              />
+            </label>
+            <label>
+              Client private key (PEM)
+              <textarea
+                className="search-input"
+                rows={4}
+                value={clientKeyPem}
+                disabled={busy}
+                placeholder={
+                  mtls?.client_key
+                    ? "Configured — paste to replace"
+                    : "-----BEGIN PRIVATE KEY-----"
+                }
+                onChange={(e) => onClientKeyPemChange(e.target.value)}
+                data-testid="openshell-field-client-key"
+              />
+            </label>
+            <div className="btns">
+              <button
+                type="submit"
+                className="primary"
+                disabled={busy}
+                data-testid="openshell-save"
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={onImportCliMtls}
+                data-testid="openshell-import-cli-mtls"
+              >
+                Import from local config
+              </button>
+              <button
+                type="button"
+                disabled={busy || !mtls?.complete}
+                onClick={onClearMtls}
+                data-testid="openshell-clear-mtls"
+              >
+                Clear mTLS
+              </button>
+            </div>
+          </form>
         </div>
+      )}
 
-        <form
-          className="sandbox-profile-form workspace-form"
-          data-testid="openshell-gateway-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            onSave();
-          }}
-        >
-          <label>
-            Gateway endpoint
-            <input
-              className="search-input"
-              value={gatewayEndpoint}
-              disabled={busy}
-              placeholder="https://127.0.0.1:17670"
-              onChange={(e) => onGatewayEndpointChange(e.target.value)}
-              data-testid="openshell-field-endpoint"
-            />
-          </label>
-          <label>
-            CA certificate (PEM)
-            <textarea
-              className="search-input"
-              rows={4}
-              value={caPem}
-              disabled={busy}
-              placeholder={
-                mtls?.ca
-                  ? "Configured — paste to replace"
-                  : "-----BEGIN CERTIFICATE-----"
-              }
-              onChange={(e) => onCaPemChange(e.target.value)}
-              data-testid="openshell-field-ca"
-            />
-          </label>
-          <label>
-            Client certificate (PEM)
-            <textarea
-              className="search-input"
-              rows={4}
-              value={clientCertPem}
-              disabled={busy}
-              placeholder={
-                mtls?.client_cert
-                  ? "Configured — paste to replace"
-                  : "-----BEGIN CERTIFICATE-----"
-              }
-              onChange={(e) => onClientCertPemChange(e.target.value)}
-              data-testid="openshell-field-client-cert"
-            />
-          </label>
-          <label>
-            Client private key (PEM)
-            <textarea
-              className="search-input"
-              rows={4}
-              value={clientKeyPem}
-              disabled={busy}
-              placeholder={
-                mtls?.client_key
-                  ? "Configured — paste to replace"
-                  : "-----BEGIN PRIVATE KEY-----"
-              }
-              onChange={(e) => onClientKeyPemChange(e.target.value)}
-              data-testid="openshell-field-client-key"
-            />
-          </label>
-          <div className="btns">
-            <button type="submit" className="primary" disabled={busy} data-testid="openshell-save">
-              Save
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onImportCliMtls}
-              data-testid="openshell-import-cli-mtls"
-            >
-              Import from local config
-            </button>
-            <button
-              type="button"
-              disabled={busy || !mtls?.complete}
-              onClick={onClearMtls}
-              data-testid="openshell-clear-mtls"
-            >
-              Clear mTLS
-            </button>
-          </div>
-        </form>
-      </div>
+      {tab === "providers" && (
+        <div className="openshell-pane" data-testid="openshell-providers-host">
+          {providers}
+        </div>
+      )}
 
-      {providers}
-
-      {profiles}
-
-      <aside className="workspace-webhook-hint" data-testid="openshell-cockpit-hint">
-        <h3>Host setup</h3>
-        <p className="dim">
-          Role checklist: compute driver → Connectivity (endpoint + mTLS) →
-          Providers → Profiles (image / policy). Details in{" "}
-          <code>docs/agents.md</code> and <code>docs/sandbox.md</code>.
-        </p>
-      </aside>
+      {tab === "profiles" && (
+        <div className="openshell-pane" data-testid="openshell-profiles-host">
+          {profiles}
+        </div>
+      )}
     </section>
   );
 }
@@ -249,6 +289,7 @@ export function OpenShellPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedHint, setSavedHint] = useState<string | null>(null);
+  const [tab, setTab] = useState<OpenShellTab>("connectivity");
 
   const applySaved = useCallback((cfg: OpenShellSettings, st?: OpenShellStatus) => {
     setGatewayEndpoint(cfg.gateway_endpoint ?? st?.gateway_endpoint ?? "");
@@ -304,6 +345,8 @@ export function OpenShellPanel() {
       busy={busy || loading}
       error={error}
       savedHint={savedHint}
+      activeTab={tab}
+      onTabChange={setTab}
       onGatewayEndpointChange={(next) => {
         setSavedHint(null);
         setGatewayEndpoint(next);
