@@ -86,6 +86,9 @@ from [`sandbox/ops-policy.yaml`](../sandbox/ops-policy.yaml) with lighter
 cpu/memory). Boards that already have a worker catalog still get `ops` via
 `ensure_ops_sandbox_profile` at boot when it is missing. The global default
 stays the worker profile; pick `ops` in Settings when starting an ops seat.
+The supervisor materializes that seat from the Board ops-session record
+(create/reuse sandbox, detached agent, park-like keep across restart, stop)
+without the card claim/heartbeat/report path.
 
 Profile `policy` is **inline YAML text** stored on the board (edited in Settings
 as a textarea). At create, the supervisor writes a temp file for OpenShell's
