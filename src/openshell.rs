@@ -81,6 +81,13 @@ impl Sandbox {
     pub fn item_id(&self) -> Option<u64> {
         self.labels.get(LABEL_ITEM)?.parse().ok()
     }
+
+    /// Control-plane ops seat sandbox (`honr.ops=1`), not a card worker.
+    pub fn is_ops(&self) -> bool {
+        self.labels
+            .get(LABEL_OPS)
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    }
 }
 
 /// How a sandbox is created. Mirrors the flags proven in phase 0.
@@ -144,6 +151,8 @@ impl Output {
 }
 
 pub const LABEL_ITEM: &str = "honr.item";
+/// Marks the durable control-plane ops seat sandbox (not a card worker).
+pub const LABEL_OPS: &str = "honr.ops";
 
 #[cfg(test)]
 type MockHandler = std::sync::Arc<dyn Fn(&[String]) -> Output + Send + Sync>;
@@ -426,6 +435,11 @@ impl OpenShell {
     /// Sandboxes this honr created, keyed by work item.
     pub async fn list_ours(&self) -> Result<Vec<Sandbox>> {
         Ok(self.list().await?.into_iter().filter(|s| s.item_id().is_some()).collect())
+    }
+
+    /// Ops-seat sandboxes (`honr.ops`), distinct from card `list_ours`.
+    pub async fn list_ops(&self) -> Result<Vec<Sandbox>> {
+        Ok(self.list().await?.into_iter().filter(|s| s.is_ops()).collect())
     }
 
     /// Create and wait until Ready. We exec into it afterwards.

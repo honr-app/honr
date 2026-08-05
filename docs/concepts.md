@@ -59,7 +59,9 @@ privileged MCP reach does not share the worker network allow-list.
 The durable **ops session** (sandbox environment name, conversation id, running
 or parked-like hold) lives on the Board as a singleton record — not a WorkItem
 and not card claim/heartbeat/report lifecycle. Chat and TTY reconnect read and
-mutate that Board record so they do not grow a second state machine.
+mutate that Board record so they do not grow a second state machine. The
+supervisor materializes the seat from that record: ops profile sandbox, detached
+agent, reconcile across honr restart, and clean stop.
 
 ## Invariants worth protecting
 
