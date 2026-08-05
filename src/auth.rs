@@ -104,6 +104,10 @@ pub struct GithubCallbackQuery {
     pub state: Option<String>,
     pub error: Option<String>,
     pub error_description: Option<String>,
+    /// Present when GitHub finishes App install/update (Setup URL = this callback).
+    /// That flow has no OAuth `state` — do not treat it as Sign in with GitHub.
+    pub installation_id: Option<u64>,
+    pub setup_action: Option<String>,
 }
 
 pub fn routes() -> Router<SharedBoard> {
@@ -589,6 +593,36 @@ async fn github_callback(
             format!("GitHub OAuth error: {err} {detail}"),
         ));
     }
+
+    // App Setup URL / post-install redirect: `?installation_id=&setup_action=install`.
+    // GitHub may also send a user `code` here; that is not our Sign-in CSRF flow.
+    let setup = q
+        .setup_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if matches!(setup, Some("install") | Some("update")) || q.installation_id.is_some() {
+        let Some(id) = q.installation_id.filter(|&n| n > 0) else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "GitHub App setup missing installation_id".into(),
+            ));
+        };
+        board.set_github_app_installation_id(Some(id));
+        // Best-effort mint into OpenShell `github` — install page should not fail if
+        // the gateway is down; Settings → Mint / sync remains the retry.
+        let board_bg = board.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::github_app::ensure_github_provider(&board_bg).await {
+                tracing::warn!("post-install GitHub App token sync: {e}");
+            }
+        });
+        return Ok((
+            jar,
+            Redirect::temporary("/?github_app=installed"),
+        ));
+    }
+
     let Some(code) = q.code.filter(|s| !s.is_empty()) else {
         return Err((StatusCode::BAD_REQUEST, "missing code".into()));
     };
@@ -1060,6 +1094,42 @@ mod tests {
         assert!(path_exempt("/healthz"));
         assert!(!path_exempt("/api/board"));
         assert!(!path_exempt("/api/auth/settings"));
+    }
+
+    #[tokio::test]
+    async fn app_install_callback_saves_installation_without_oauth_state() {
+        let hex = "a1".repeat(32);
+        let _env = master_key_env::Guard::with_hex_key(&hex);
+        let dir = std::env::temp_dir().join(format!(
+            "honr-auth-install-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let board = Arc::new(Board::new(
+            crate::schema::Schema::default(),
+            dir.join("board.json"),
+        ));
+
+        let (_jar, _redirect) = github_callback(
+            State(board.clone()),
+            CookieJar::new(),
+            Query(GithubCallbackQuery {
+                code: Some("unused_user_code".into()),
+                state: None,
+                error: None,
+                error_description: None,
+                installation_id: Some(151366427),
+                setup_action: Some("install".into()),
+            }),
+        )
+        .await
+        .expect("install callback");
+        assert_eq!(board.github_app_installation_id(), Some(151366427));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

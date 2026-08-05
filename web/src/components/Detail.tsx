@@ -41,99 +41,6 @@ export function emptyPlanTask(n: number): EditPlanTask {
   };
 }
 
-/** Repo fields for Project `init_plan` (Task-scoped remotes). */
-export type InitPlanRepoDraft = {
-  upstream: string;
-  fork: string;
-  base: string;
-};
-
-export function emptyInitPlanRepo(): InitPlanRepoDraft {
-  return { upstream: "", fork: "", base: "main" };
-}
-
-/**
- * Start planning — seeds Initial plan with Task repo. Shown on Projects that
- * have no Initial plan yet (create_project is container-only).
- */
-export function InitPlanForm({
-  draft,
-  setDraft,
-  busy,
-  onSubmit,
-}: {
-  draft: InitPlanRepoDraft;
-  setDraft: (next: InitPlanRepoDraft) => void;
-  busy?: boolean;
-  onSubmit: () => void;
-}) {
-  const upstreamOk = draft.upstream.trim().includes("/");
-  return (
-    <div data-testid="init-plan-form" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <p className="dim" style={{ margin: 0, fontSize: 12 }}>
-        Product remotes are Task-scoped. <code>init_plan</code> creates the
-        Initial plan Task bound to this repo so dispatch can pre-clone.
-        Optional fork for cross-fork push; base defaults to main. Sibling Tasks
-        may override per-child (multi-repo under one Project).
-      </p>
-      <div>
-        <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
-          Upstream (owner/name)
-        </label>
-        <input
-          type="text"
-          className="search-input"
-          style={{ width: "100%" }}
-          data-testid="init-plan-upstream"
-          placeholder="acme/widgets"
-          value={draft.upstream}
-          onChange={(e) => setDraft({ ...draft, upstream: e.target.value })}
-        />
-      </div>
-      <div>
-        <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
-          Fork (optional)
-        </label>
-        <input
-          type="text"
-          className="search-input"
-          style={{ width: "100%" }}
-          data-testid="init-plan-fork"
-          placeholder="same as upstream"
-          value={draft.fork}
-          onChange={(e) => setDraft({ ...draft, fork: e.target.value })}
-        />
-      </div>
-      <div>
-        <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
-          Base
-        </label>
-        <input
-          type="text"
-          className="search-input"
-          style={{ width: "100%" }}
-          data-testid="init-plan-base"
-          placeholder="main"
-          value={draft.base}
-          onChange={(e) => setDraft({ ...draft, base: e.target.value })}
-        />
-      </div>
-      <div className="btns">
-        <button
-          type="button"
-          className="primary"
-          data-testid="init-plan-submit"
-          disabled={busy || !upstreamOk}
-          title="Seed Initial plan Task with this Task repo"
-          onClick={onSubmit}
-        >
-          Start planning
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function PlanEditor({
   planTasks,
   setPlanTasks,
@@ -598,8 +505,6 @@ export function DetailDrawer({
   const [sandboxPickerBusy, setSandboxPickerBusy] = useState(false);
   const [sandboxPickerErr, setSandboxPickerErr] = useState<string | null>(null);
   const [planTasks, setPlanTasks] = useState<EditPlanTask[]>([]);
-  const [initPlanRepo, setInitPlanRepo] = useState<InitPlanRepoDraft>(emptyInitPlanRepo);
-  const [initPlanBusy, setInitPlanBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmHalt, setConfirmHalt] = useState(false);
@@ -663,8 +568,6 @@ export function DetailDrawer({
     setConfirmArchive(false);
     setConfirmHalt(false);
     setPlanTasks([]);
-    setInitPlanRepo(emptyInitPlanRepo());
-    setInitPlanBusy(false);
     setSandboxPickerErr(null);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1218,8 +1121,8 @@ export function DetailDrawer({
           <Section title="Project prompt">
             <p className="dim" style={{ marginBottom: 8 }}>
               Standing instructions every Task agent sees (with the Plan from
-              Initial plan). Quality gates and policy — not the clone target
-              (remotes are Task-scoped via init_plan).
+              Initial plan). Quality gates and policy — name clone targets in
+              each Task&apos;s intent/DoD, not here.
             </p>
             <textarea
               className="search-input"
@@ -1229,33 +1132,6 @@ export function DetailDrawer({
               placeholder="Standing agent instructions for this Project…"
             />
           </Section>
-
-          {(!d.children || d.children.length === 0) && (
-            <Section title="Start planning">
-              <InitPlanForm
-                draft={initPlanRepo}
-                setDraft={setInitPlanRepo}
-                busy={initPlanBusy}
-                onSubmit={() => {
-                  const upstream = initPlanRepo.upstream.trim();
-                  if (!upstream.includes("/")) return;
-                  setInitPlanBusy(true);
-                  const repo: {
-                    upstream: string;
-                    fork?: string;
-                    base?: string;
-                  } = { upstream };
-                  const fork = initPlanRepo.fork.trim();
-                  if (fork) repo.fork = fork;
-                  const base = initPlanRepo.base.trim() || "main";
-                  repo.base = base;
-                  act(api.initPlan(d.id, repo)).finally(() =>
-                    setInitPlanBusy(false),
-                  );
-                }}
-              />
-            </Section>
-          )}
         </>
       )}
 

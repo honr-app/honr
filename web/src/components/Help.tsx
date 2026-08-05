@@ -1,5 +1,5 @@
 /**
- * Lightweight operator guide — MCP connect + first Project loop with init_plan.
+ * Lightweight operator guide — MCP connect + first Project loop.
  * Not the full empty-state onboarding chrome (#279); just a reachable Help surface.
  */
 export function Help() {
@@ -8,8 +8,9 @@ export function Help() {
       <header className="board-hero">
         <h1>Operator help</h1>
         <p className="board-lede">
-          Drive the board from chat via MCP, or use the UI. Product remotes are
-          Task-scoped — Projects are containers only.
+          Drive the board from chat via MCP, or use the UI. Name the repo to
+          clone in each Task&apos;s intent/DoD. After a report, card{" "}
+          <code>pull_request</code> drives resume remotes.
         </p>
       </header>
 
@@ -26,21 +27,16 @@ export function Help() {
         <h2>First Project loop</h2>
         <ol className="help-steps">
           <li>
-            <code>create_project</code> — container only (no child Tasks).
-          </li>
-          <li>
-            <code>init_plan</code> — requires{" "}
-            <code>repo.upstream</code> (<code>owner/name</code>); optional{" "}
-            <code>fork</code>, <code>base</code> (default <code>main</code>).
-            Seeds the Initial plan Task with that binding.
+            <code>create_project</code> — auto-seeds a claimable Initial plan
+            Task.
           </li>
           <li>
             <code>dispatch</code> the Initial plan — agent writes{" "}
-            <code>plan.json</code> + a plan/docs PR.
+            <code>plan.json</code> only (no docs PR). Each proposed task names
+            its clone target in intent/DoD.
           </li>
           <li>
-            <strong>Approve</strong> — sibling Tasks inherit the Initial plan
-            Task repo unless a child overrides (multi-repo under one Project).
+            <strong>Approve</strong> — creates sibling Tasks under the Project.
           </li>
           <li>
             <code>dispatch</code> each Backlog Task (or turn on Project auto
@@ -48,9 +44,7 @@ export function Help() {
           </li>
         </ol>
         <p className="dim" style={{ marginTop: 12 }}>
-          In the UI: open a Project with no Initial plan → <strong>Start
-          planning</strong> with the same repo fields. Empty board copy points
-          here when there are no Projects yet.
+          Empty board copy points here when there are no Projects yet.
         </p>
       </section>
     </div>

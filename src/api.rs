@@ -97,6 +97,7 @@ pub fn routes() -> Router<SharedBoard> {
             get(list_openshell_provider_profiles),
         )
         .route("/github-app", get(get_github_app).put(put_github_app))
+        .route("/github-app/sync-token", post(sync_github_app_token))
         .nest("/auth", crate::auth::api_settings_routes())
 }
 
@@ -199,22 +200,8 @@ async fn create_item(
     AxState(b): AxState<SharedBoard>,
     Json(req): Json<CreateItem>,
 ) -> ApiResult<WorkItem> {
-    let _ = req.product_repo; // task-scoped remotes only
-    // Claimable Tasks must carry a complete repo at creation. Projects stay
-    // containers (no product-repo). Internal Board::create may still seed
-    // unbound then set_task_repo (init_plan / materialize).
-    if req.parent.is_some() {
-        let Some(repo) = req.repo.as_ref() else {
-            return Err(ApiError(
-                "creating a Task requires a complete repo (upstream owner/name)".into(),
-            ));
-        };
-        if !repo.clone().normalized().is_complete() {
-            return Err(ApiError(
-                "creating a Task requires a complete repo (upstream owner/name)".into(),
-            ));
-        }
-    }
+    let _ = req.product_repo;
+    let _ = req.repo; // Task.repo binding retired — name clone target in intent/DoD.
     let item = b
         .create(
             req.parent,
@@ -228,17 +215,6 @@ async fn create_item(
         .map_err(ApiError)?;
     // A project dropped in plain language starts shaping immediately.
     let item = b.transition(item.id, State::Shaping, "human", None).unwrap_or(item);
-    if let Some(repo) = req.repo {
-        if !item.is_project() {
-            let item = b.set_task_repo(item.id, Some(repo)).map_err(ApiError)?;
-            b.schedule_beads_mirror(item.id);
-            for cid in b.children_of(item.id) {
-                b.schedule_beads_mirror(cid);
-            }
-            return Ok(Json(item));
-        }
-        // Accidental repo/product_repo on a Project — ignore.
-    }
     b.schedule_beads_mirror(item.id);
     for cid in b.children_of(item.id) {
         b.schedule_beads_mirror(cid);
@@ -258,20 +234,21 @@ async fn approve_plan(
     Ok(Json(published))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct InitPlanReq {
-    /// Product remotes for the Initial plan Task (`upstream` required).
-    repo: crate::schema::RepoConfig,
+    /// Ignored — Task.repo binding retired. Body may be empty `{}`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    repo: Option<crate::schema::RepoConfig>,
 }
 
-/// Seed Initial plan Task with Task-scoped remotes (id = Project).
-/// Same contract as MCP `init_plan`.
+/// Ensure Initial plan Task exists (id = Project). Usually already auto-seeded.
 async fn init_plan(
     AxState(b): AxState<SharedBoard>,
     Path(id): Path<ItemId>,
-    Json(req): Json<InitPlanReq>,
+    Json(_req): Json<InitPlanReq>,
 ) -> ApiResult<WorkItem> {
-    let seed = b.init_plan(id, req.repo).map_err(ApiError)?;
+    let seed = b.init_plan(id).map_err(ApiError)?;
     b.schedule_beads_mirror(seed.id);
     Ok(Json(seed))
 }
@@ -320,7 +297,7 @@ pub struct PlanTaskBody {
     blocked_by_keys: Vec<String>,
     #[serde(default)]
     capability: Option<String>,
-    /// Optional per-task remotes; Approve defaults from Initial plan Task repo.
+    /// Ignored — clone targets live in intent/DoD prose.
     #[serde(default)]
     repo: Option<crate::schema::RepoConfig>,
 }
@@ -398,9 +375,7 @@ async fn update_item(
             req.project_prompt,
         )
         .map_err(ApiError)?;
-    if let Some(repo) = req.repo {
-        return Ok(Json(b.set_task_repo(id, Some(repo)).map_err(ApiError)?));
-    }
+    let _ = req.repo; // Task.repo binding retired
     Ok(Json(item))
 }
 
@@ -742,16 +717,53 @@ pub struct GitHubAppSettings {
     pub webhook_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
+    /// Installation that mints sandbox tokens. Cleared with `null` / omit to keep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<u64>,
+    /// When true on PUT, clear `installation_id`.
+    #[serde(default)]
+    pub clear_installation_id: bool,
     /// When true on PUT, wipe sealed GitHub App material.
     #[serde(default)]
     pub clear: bool,
     /// Read-only presence flags (GET / after PUT).
     #[serde(default)]
     pub status: crate::secrets::GitHubAppStatus,
+    /// Installations visible to the App (GET only; best-effort).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub installations: Vec<crate::github_app::InstallationInfo>,
+    /// Last token sync status (GET only).
+    #[serde(default)]
+    pub token_status: GitHubAppTokenStatus,
 }
 
-fn github_app_settings_view(b: &SharedBoard) -> GitHubAppSettings {
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubAppTokenStatus {
+    pub configured: bool,
+    pub provider_attached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+async fn github_app_settings_view(b: &SharedBoard) -> GitHubAppSettings {
     let bundle = b.github_app_bundle();
+    let cache = b.github_app_token_cache();
+    let provider_attached = b
+        .openshell_providers()
+        .iter()
+        .any(|p| p.name == crate::github_app::PROVIDER_NAME && p.attach_to_sandboxes);
+    let mut installations = Vec::new();
+    if let Some(ref bundle) = bundle {
+        if !bundle.app_id.trim().is_empty() && !bundle.private_key_pem.trim().is_empty() {
+            if let Ok(jwt) = crate::github_app::make_app_jwt(bundle, chrono::Utc::now()) {
+                if let Ok(list) = crate::github_app::list_installations(&jwt).await {
+                    installations = list;
+                }
+            }
+        }
+    }
     GitHubAppSettings {
         app_id: bundle
             .as_ref()
@@ -764,13 +776,22 @@ fn github_app_settings_view(b: &SharedBoard) -> GitHubAppSettings {
         private_key_pem: None,
         webhook_secret: None,
         client_secret: None,
+        installation_id: b.github_app_installation_id(),
+        clear_installation_id: false,
         clear: false,
         status: b.github_app_status(),
+        installations,
+        token_status: GitHubAppTokenStatus {
+            configured: crate::github_app::configured_for_tokens(b),
+            provider_attached,
+            expires_at: cache.expires_at.map(|t| t.to_rfc3339()),
+            error: cache.last_error,
+        },
     }
 }
 
 async fn get_github_app(AxState(b): AxState<SharedBoard>) -> Json<GitHubAppSettings> {
-    Json(github_app_settings_view(&b))
+    Json(github_app_settings_view(&b).await)
 }
 
 async fn put_github_app(
@@ -779,7 +800,14 @@ async fn put_github_app(
 ) -> Result<Json<GitHubAppSettings>, (axum::http::StatusCode, String)> {
     if req.clear {
         b.set_github_app_sealed(None);
-        return Ok(Json(github_app_settings_view(&b)));
+        b.set_github_app_installation_id(None);
+        return Ok(Json(github_app_settings_view(&b).await));
+    }
+
+    if req.clear_installation_id {
+        b.set_github_app_installation_id(None);
+    } else if let Some(id) = req.installation_id {
+        b.set_github_app_installation_id(Some(id));
     }
 
     let touching = req.app_id.as_ref().is_some_and(|s| !s.trim().is_empty())
@@ -818,7 +846,28 @@ async fn put_github_app(
         b.set_github_app_sealed(Some(sealed));
     }
 
-    Ok(Json(github_app_settings_view(&b)))
+    Ok(Json(github_app_settings_view(&b).await))
+}
+
+async fn sync_github_app_token(
+    AxState(b): AxState<SharedBoard>,
+) -> Result<Json<GitHubAppSettings>, (axum::http::StatusCode, String)> {
+    // Force remint even if cache looks fresh.
+    b.set_github_app_token_cache(crate::github_app::TokenCache {
+        expires_at: None,
+        last_error: None,
+    });
+    match crate::github_app::ensure_github_provider(&b).await {
+        Ok(true) => Ok(Json(github_app_settings_view(&b).await)),
+        Ok(false) => Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "GitHub App incomplete or installation not selected".into(),
+        )),
+        Err(e) => Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("sync token: {e}"),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------- OpenShell providers
@@ -1560,7 +1609,7 @@ mod tests {
         assert!(created.is_project());
         assert!(created.repo.is_none());
 
-        // update Project with product_repo — ignored; repo refused.
+        // update Project with product_repo / repo — both ignored.
         let Ok(Json(updated)) = update_item(
             AxState(b.clone()),
             Path(project.id),
@@ -1570,7 +1619,11 @@ mod tests {
                 definition_of_done: None,
                 engine: None,
                 project_prompt: None,
-                repo: None,
+                repo: Some(crate::schema::RepoConfig {
+                    upstream: "acme/nope".into(),
+                    fork: String::new(),
+                    base: "main".into(),
+                }),
                 product_repo: Some(serde_json::json!("acme/nope")),
             }),
         )
@@ -1579,55 +1632,24 @@ mod tests {
             panic!("update ignore product_repo");
         };
         assert!(updated.repo.is_none());
-        assert!(
-            update_item(
-                AxState(b.clone()),
-                Path(project.id),
-                Json(UpdateItemReq {
-                    title: None,
-                    intent: None,
-                    definition_of_done: None,
-                    engine: None,
-                    project_prompt: None,
-                    repo: Some(crate::schema::RepoConfig {
-                        upstream: "acme/nope".into(),
-                        fork: String::new(),
-                        base: "main".into(),
-                    }),
-                    product_repo: None,
-                }),
-            )
-            .await
-            .is_err(),
-            "setting repo on a Project must fail"
-        );
 
-        // REST init_plan on a container Project seeds Initial plan with Task repo.
+        // REST init_plan is idempotent; create_project already auto-seeded.
         let Ok(Json(seed)) = init_plan(
             AxState(b.clone()),
             Path(created.id),
-            Json(InitPlanReq {
-                repo: crate::schema::RepoConfig {
-                    upstream: "acme/widgets".into(),
-                    fork: String::new(),
-                    base: "main".into(),
-                },
-            }),
+            Json(InitPlanReq { repo: None }),
         )
         .await
         else {
             panic!("init_plan");
         };
         assert!(seed.is_initial_plan_task());
-        assert_eq!(
-            seed.repo.as_ref().map(|r| r.upstream.as_str()),
-            Some("acme/widgets")
-        );
+        assert!(seed.repo.is_none(), "no structured Task.repo");
         assert!(b.children_of(created.id).contains(&seed.id));
     }
 
     #[tokio::test]
-    async fn create_task_api_refuses_missing_repo() {
+    async fn create_task_api_allows_missing_repo() {
         let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
             crate::schema::Schema::default(),
             std::env::temp_dir().join(format!(
@@ -1643,47 +1665,32 @@ mod tests {
             .create(None, "P", "why", None, crate::model::Origin::Human, true, None)
             .expect("project");
 
-        let missing = create_item(
+        let Ok(Json(created)) = create_item(
             AxState(b.clone()),
             Json(CreateItem {
                 parent: Some(project.id),
-                title: "No repo".into(),
-                intent: "must refuse".into(),
-                definition_of_done: Some("n/a".into()),
+                title: "Prose clone target".into(),
+                intent: "Clone acme/widgets and ship".into(),
+                definition_of_done: Some("done in acme/widgets".into()),
                 capability: None,
                 above_line: false,
                 repo: None,
                 product_repo: None,
             }),
         )
-        .await;
-        assert!(missing.is_err(), "Task create without repo must fail");
+        .await
+        else {
+            panic!("Task create without repo must succeed");
+        };
+        assert!(created.repo.is_none());
+        assert!(b.resolve_card_repo(created.id).unwrap().is_none());
 
-        let empty = create_item(
+        // Accidental repo body is ignored (binding retired).
+        let Ok(Json(ignored)) = create_item(
             AxState(b.clone()),
             Json(CreateItem {
                 parent: Some(project.id),
-                title: "Empty upstream".into(),
-                intent: "must refuse".into(),
-                definition_of_done: Some("n/a".into()),
-                capability: None,
-                above_line: false,
-                repo: Some(crate::schema::RepoConfig {
-                    upstream: "  ".into(),
-                    fork: String::new(),
-                    base: "main".into(),
-                }),
-                product_repo: None,
-            }),
-        )
-        .await;
-        assert!(empty.is_err(), "Task create with empty upstream must fail");
-
-        let Ok(Json(created)) = create_item(
-            AxState(b.clone()),
-            Json(CreateItem {
-                parent: Some(project.id),
-                title: "Bound Task".into(),
+                title: "Ignored repo body".into(),
                 intent: "ok".into(),
                 definition_of_done: Some("done".into()),
                 capability: None,
@@ -1698,12 +1705,9 @@ mod tests {
         )
         .await
         else {
-            panic!("Task create with complete repo must succeed");
+            panic!("Task create with repo body must still succeed");
         };
-        assert_eq!(
-            created.repo.as_ref().map(|r| r.upstream.as_str()),
-            Some("acme/widgets")
-        );
+        assert!(ignored.repo.is_none());
     }
 
     /// Where a card ran and what it produced have to survive the trip to the
@@ -2695,6 +2699,7 @@ mod tests {
                 ),
                 webhook_secret: Some("whsec_never_echo".into()),
                 client_secret: Some("cs_never_echo".into()),
+                installation_id: Some(7777),
                 ..Default::default()
             }),
         )
@@ -2702,17 +2707,32 @@ mod tests {
         .expect("put github app");
         assert_eq!(saved.app_id.as_deref(), Some("424242"));
         assert_eq!(saved.client_id.as_deref(), Some("Iv1.test"));
+        assert_eq!(saved.installation_id, Some(7777));
         assert!(saved.status.complete);
         assert!(saved.status.webhook_secret);
         assert!(saved.private_key_pem.is_none());
         assert!(saved.webhook_secret.is_none());
         assert!(saved.client_secret.is_none());
+        assert_eq!(b.github_app_installation_id(), Some(7777));
         let sealed = b.github_app_sealed().expect("sealed stored");
         assert!(!sealed.contains("BEGIN"));
         assert!(!sealed.contains("whsec_never_echo"));
         let Json(got) = get_github_app(AxState(b.clone())).await;
         assert_eq!(got.app_id.as_deref(), Some("424242"));
+        assert_eq!(got.installation_id, Some(7777));
         assert!(got.private_key_pem.is_none());
+
+        let Json(cleared_inst) = put_github_app(
+            AxState(b.clone()),
+            Json(GitHubAppSettings {
+                clear_installation_id: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("clear installation");
+        assert!(cleared_inst.installation_id.is_none());
+        assert!(b.github_app_installation_id().is_none());
 
         let Json(cleared) = put_github_app(
             AxState(b.clone()),

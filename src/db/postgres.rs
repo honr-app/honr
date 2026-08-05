@@ -4,8 +4,8 @@ use super::codec::{
     item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME, META_DEFAULT_SANDBOX_PROFILE_ID,
     META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_BIN, META_OPENSHELL_GATEWAY_ENDPOINT,
     META_AUTH_ALLOWED_TEAMS, META_AUTH_ALLOWED_USERS, META_AUTH_SEALED,
-    META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS,
-    META_SANDBOX_PROFILES, META_WORKSPACE_BINDING,
+    META_GITHUB_APP_INSTALLATION_ID, META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED,
+    META_OPENSHELL_PROVIDERS, META_SANDBOX_PROFILES, META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
@@ -63,6 +63,7 @@ impl PostgresBoardStore {
         let openshell_gateway_endpoint = self.load_openshell_gateway_endpoint().await?;
         let openshell_mtls_sealed = self.load_openshell_mtls_sealed().await?;
         let github_app_sealed = self.load_github_app_sealed().await?;
+        let github_app_installation_id = self.load_github_app_installation_id().await?;
         let auth_sealed = self.load_auth_sealed().await?;
         let auth_allowed_users = self.load_auth_allowed_users().await?;
         let auth_allowed_teams = self.load_auth_allowed_teams().await?;
@@ -79,6 +80,7 @@ impl PostgresBoardStore {
             openshell_gateway_endpoint,
             openshell_mtls_sealed,
             github_app_sealed,
+            github_app_installation_id,
             auth_sealed,
             auth_allowed_users,
             auth_allowed_teams,
@@ -177,6 +179,15 @@ impl PostgresBoardStore {
             &mut tx,
             META_GITHUB_APP_SEALED,
             state.github_app_sealed.as_deref().unwrap_or(""),
+        )
+        .await?;
+        set_meta_tx(
+            &mut tx,
+            META_GITHUB_APP_INSTALLATION_ID,
+            &state
+                .github_app_installation_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
         )
         .await?;
         set_meta_tx(
@@ -289,6 +300,18 @@ impl PostgresBoardStore {
             .await?
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_github_app_installation_id(&self) -> Result<Option<u64>, StoreError> {
+        match self.meta_get(META_GITHUB_APP_INSTALLATION_ID).await? {
+            None => Ok(None),
+            Some(raw) if raw.trim().is_empty() => Ok(None),
+            Some(raw) => raw
+                .trim()
+                .parse()
+                .map(Some)
+                .map_err(|e| StoreError::Query(format!("decode github_app_installation_id: {e}"))),
+        }
     }
 
     async fn load_auth_sealed(&self) -> Result<Option<String>, StoreError> {

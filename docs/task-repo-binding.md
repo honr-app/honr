@@ -1,9 +1,9 @@
-# Task repo binding
+# Clone targets (task prose)
 
-Every agent-claimable Task carries durable product remotes so the agent can
-clone without first-run guessing. The supervisor does **not** pre-clone — it
-leaves `/sandbox/repo` empty. Remotes are **Task-scoped** — not a Project
-field, and not Settings → Forge (beads-only).
+Agents clone from the repository named in the card's **intent**, **definition
+of done**, and/or **notes** — not from a structured `Task.repo` field. The
+supervisor does **not** pre-clone; `/sandbox/repo` starts empty. Settings →
+Forge stays beads-only.
 
 Related empty-state onboarding: [#279](https://github.com/shanemcd/honr/issues/279)
 (Help chrome is separate; this page is the remotes contract).
@@ -11,73 +11,43 @@ Related empty-state onboarding: [#279](https://github.com/shanemcd/honr/issues/2
 ## Happy path
 
 ```text
-create_project(title, intent, …)     → Project container (no Task seed)
-init_plan(project, repo, …)          → Initial plan Task with Task.repo set
-dispatch Initial plan                → empty workdir; agent clones from Task.repo
-plan.json + docs PR → Review
-Approve                              → sibling Tasks; each gets repo
-                                       (explicit in ChildSpec / or default
-                                        from Initial plan Task.repo)
+create_project(title, intent, …)  → Project + auto-seeded Initial plan Task
+dispatch Initial plan             → write plan.json only (no docs PR);
+                                    each proposed task names clone target in intent/DoD
+Approve                           → sibling Tasks (prose carries clone targets)
+dispatch impl Task                → agent clones from card text; opens PR
+report.json                       → card.pull_request set → resume remotes
 ```
 
-MCP tools: `create_project`, then `init_plan` with
-`{ project, repo: { upstream, fork?, base? } }` (`upstream` required;
-`base` defaults to `main`). REST: `POST /api/items/{project_id}/init-plan`
-with the same `repo` body. The board UI offers **Start planning** on a Project
-that has no Initial plan yet (upstream / optional fork / base).
+MCP: `create_project` seeds Initial plan. `init_plan` remains as an idempotent
+re-seed if a Project somehow has none. REST: `POST /api/items/{project_id}/init-plan`
+with `{}` is the same.
 
 ## Resolution order
 
 ```text
 card.pull_request (base/head or URL stub)
-  → else Task.repo → RepoConfig
-  → else Ok(None)  # legacy / misconfig → empty workdir + escalate
+  → else Ok(None)  # unbound → briefing: clone from card prose or escalate
 ```
 
-No `Project.product_repo` step. Settings → Forge / `WorkspaceBinding` stay
-beads-only.
-
-When `RepoConfig` is complete, the Remotes briefing names `origin` /
-`upstream` / base (same structured path as a card that already reported a PR).
-Unbound cards (neither Task repo nor `pull_request`) keep the escalate
+No `Task.repo` step and no `Project.product_repo`. When `RepoConfig` is
+complete (after a PR exists), the Remotes briefing names `origin` /
+`upstream` / base for resume and rebase. Unbound cards keep the escalate
 contract — never invent an `owner/name`.
 
-## Task repo shape
+## After report
 
-Same facts as `RepoConfig`:
+`pull_request` on the card is the durable remotes handle for later claims
+(rebase, request-changes, park/unpark). Approving in honr surfaces the PR; it
+never merges.
 
-| Field | Role |
-|---|---|
-| `upstream` | PR target `owner/name` (required) |
-| `fork` | Optional distinct push remote; omit / empty → same-repo |
-| `base` | Branch; default `main` |
+## Sibling Tasks
 
-Stored on claimable Tasks (Initial plan and impl cards). After `report.json`,
-card `pull_request` wins for resume / rebase.
-
-## Sibling defaulting
-
-When Approve / split materializes children:
-
-1. Prefer per-child `repo` in `plan.json` / `ChildSpec` when complete (multi-repo).
-2. Else copy the **Initial plan Task’s** (or splitting parent Task’s) repo.
-3. Refuse materialization if neither yields a complete binding.
-
-Never inherit from a Project product-repo field (there isn’t one). Different
-Tasks under one Project may carry different upstreams — multi-repo is
-supported on purpose.
+Approve / split materialize children from `plan.json` / `ChildSpec` titles and
+prose. There is no per-child structured repo field and no defaulting from an
+Initial plan Task repo. Each child's intent/DoD should name the clone target.
 
 ## Direct create-task
 
-Any path that creates a claimable Task must set Task repo (MCP / REST create
-with parent). Projects remain containers: accidental `repo` / `product_repo`
-on Project create/update is ignored or refused.
-
-## Migration notes
-
-| Population | Behavior |
-|---|---|
-| **New Projects** | `create_project` creates no Initial plan; call `init_plan` when ready. |
-| **Existing cards with `pull_request`** | Unchanged — card facts win over Task repo. |
-| **Existing Tasks with no repo and no PR** | Legacy: `Ok(None)` → escalate until Task repo is set or a Decision answers. |
-| **Empty Settings Forge** | Unchanged — beads sync independent. |
+Creating a claimable Task does not require a repo body. Name the clone target
+in intent/DoD. Projects remain containers (plus the auto-seeded Initial plan).

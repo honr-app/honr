@@ -94,8 +94,6 @@ pub struct CreateProjectArg {
 pub struct InitPlanArg {
     /// Project id (`#167` is `167`). Container must already exist.
     pub project: ItemId,
-    /// Product remotes for the Initial plan Task (`upstream` required).
-    pub repo: crate::schema::RepoConfig,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -113,8 +111,9 @@ pub struct UpdateArg {
     /// Standing instructions — Project cards only.
     #[serde(default)]
     pub project_prompt: Option<String>,
-    /// Task product remotes (`upstream` required). Refused on Projects.
+    /// Ignored — Task.repo binding retired; name the clone target in intent/DoD.
     #[serde(default)]
+    #[schemars(skip)]
     pub repo: Option<crate::schema::RepoConfig>,
     /// Ignored — Projects have no product-repo field.
     #[serde(default)]
@@ -144,8 +143,9 @@ pub struct ChildSpec {
     /// Legacy: board item ids. Prefer `blocked_by_keys` for new Plans.
     #[serde(default)]
     pub blocked_by: Vec<ItemId>,
-    /// Optional per-task remotes. Omit to inherit from Initial plan / parent Task on Approve.
+    /// Ignored — name the repository to clone in `intent` / `definition_of_done`.
     #[serde(default)]
+    #[schemars(skip)]
     pub repo: Option<crate::schema::RepoConfig>,
 }
 
@@ -511,9 +511,10 @@ impl Operator {
 
     #[tool(
         name = "create_project",
-        description = "Create a Project (top-level container only — no child Tasks). Call \
-                       init_plan with a repo next to seed the Initial plan Task. Optional \
-                       project_prompt overrides the default standing instructions."
+        description = "Create a Project container. Auto-seeds one Backlog Initial plan Task \
+                       (no product-repo field — clone targets are named in task text). Optional \
+                       project_prompt overrides default standing instructions. Dispatch the \
+                       Initial plan when ready; the planner writes plan.json (no PR)."
     )]
     fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
         if a.parent.is_some() {
@@ -538,26 +539,28 @@ impl Operator {
         }
         let _ = self.board.transition(item.id, State::Shaping, "operator", None);
         self.board.schedule_beads_mirror(item.id);
+        for cid in self.board.children_of(item.id) {
+            self.board.schedule_beads_mirror(cid);
+        }
         self.ack(
             item.id,
-            "Project created in shaping — call init_plan with a repo to seed Initial plan",
+            "Project created in shaping with auto-seeded Initial plan — dispatch that Task to plan",
         )
     }
 
     #[tool(
         name = "init_plan",
-        description = "Seed a Project's Initial plan Task with durable product remotes \
-                       (upstream owner/name required; optional fork; base defaults to main). \
-                       Creates exactly one Backlog Initial plan bound to that Task repo so \
-                       the agent knows what to clone. Refuses empty upstream and refuses if an \
-                       Initial plan already exists. create_project must come first."
+        description = "Ensure a Project has an Initial plan Task (usually already auto-seeded \
+                       by create_project). Idempotent. No repo argument — each proposed task \
+                       must name the repository to clone in its intent/DoD. Dispatch the \
+                       Initial plan to write plan.json (no docs PR)."
     )]
     fn init_plan(&self, Parameters(a): Parameters<InitPlanArg>) -> Out<Ack> {
-        let seed = self.board.init_plan(a.project, a.repo).map_err(bad)?;
+        let seed = self.board.init_plan(a.project).map_err(bad)?;
         self.board.schedule_beads_mirror(seed.id);
         self.ack(
             seed.id,
-            "Initial plan Task created in Backlog with Task repo — dispatch to start planning",
+            "Initial plan Task ready in Backlog — dispatch to start planning (plan.json, no PR)",
         )
     }
 
@@ -566,7 +569,8 @@ impl Operator {
         description = "Write a Task proposal on the Project's Initial plan card (flat Tasks + \
                        deps by plan key). Does not create board cards — Approve on that card \
                        (or approve_plan) materializes them. Every task needs a definition of \
-                       done a verifier can mechanically check. Parent may be the Project or \
+                       done a verifier can mechanically check, and must name which repository \
+                       to clone (`owner/name`) in intent and/or DoD. Parent may be the Project or \
                        the Initial plan Task id."
     )]
     fn propose_breakdown(&self, Parameters(a): Parameters<BreakdownArg>) -> Out<BreakdownOut> {
@@ -621,6 +625,7 @@ impl Operator {
                     }
                 }
             }
+            let _ = c.repo; // structured per-task repo retired — name clone in intent/DoD
             specs.push(PlanTaskSpec {
                 key,
                 title: c.title,
@@ -628,7 +633,7 @@ impl Operator {
                 definition_of_done: c.definition_of_done,
                 blocked_by_keys,
                 capability: c.capability,
-                repo: c.repo,
+                repo: None,
                 item_id: None,
             });
         }
@@ -682,16 +687,16 @@ impl Operator {
 
     #[tool(
         name = "update",
-        description = "Edit fields on a card. Agent engine is chosen on the sandbox profile \
-                       (Settings → OpenShell → Profiles), not via `engine` on the card — that \
-                       field is ignored. `project_prompt` only applies to Project cards."
+        description = "Edit fields on a card. When changing intent/DoD on a Task, name the \
+                       repository to clone explicitly (`owner/name`) if the worker will need \
+                       git. Agent engine is on the sandbox profile, not via `engine` on the \
+                       card. `project_prompt` only applies to Project cards."
     )]
     fn update(&self, Parameters(a): Parameters<UpdateArg>) -> Out<Ack> {
         if a.title.is_none()
             && a.intent.is_none()
             && a.definition_of_done.is_none()
             && a.project_prompt.is_none()
-            && a.repo.is_none()
         {
             if a.engine.is_some() {
                 return Err(bad(
@@ -700,9 +705,8 @@ impl Operator {
             }
             return Err(bad("update needs at least one field"));
         }
-        // product_repo is intentionally ignored (task-scoped remotes only).
         let _ = a.product_repo;
-        // Engine lives on SandboxProfile; ignore stale card-level writes.
+        let _ = a.repo; // Task.repo binding retired
         let _ = a.engine;
         let _item = self
             .board
@@ -715,9 +719,6 @@ impl Operator {
                 a.project_prompt,
             )
             .map_err(bad)?;
-        if let Some(repo) = a.repo {
-            self.board.set_task_repo(a.id, Some(repo)).map_err(bad)?;
-        }
         self.ack(a.id, "updated")
     }
 
@@ -1297,14 +1298,7 @@ mod tests {
         let (board, goal_id) = test_board();
         let operator = Operator::new(board.clone());
         let _ = board
-            .init_plan(
-                goal_id,
-                crate::schema::RepoConfig {
-                    upstream: "acme/widgets".into(),
-                    fork: String::new(),
-                    base: "main".into(),
-                },
-            )
+            .init_plan(goal_id)
             .expect("init_plan");
 
         let breakdown_arg = BreakdownArg {
