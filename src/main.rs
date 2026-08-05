@@ -11,6 +11,7 @@ mod mcp;
 mod mcp_oauth;
 mod model;
 mod openshell;
+mod ops_chat;
 mod secrets;
 mod schema;
 mod sse;
