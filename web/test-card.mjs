@@ -5,7 +5,13 @@ import { Card } from "./dist-test/components/Card.js";
 import { Board, isBlocked, sortFor } from "./dist-test/components/Board.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
-import { Cockpit, CockpitSessionView } from "./dist-test/components/Cockpit.js";
+import {
+  Cockpit,
+  CockpitChatView,
+  CockpitSessionView,
+  cockpitChatGate,
+  opsChatLineText,
+} from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
@@ -498,11 +504,23 @@ assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should exp
 const cockpitHtml = renderToString(React.createElement(Cockpit));
 assert(cockpitHtml.includes("data-testid=\"cockpit-page\""), "Cockpit view should render");
 assert(cockpitHtml.includes("Cockpit"), "Cockpit page should title the surface");
+assert(cockpitHtml.includes("data-testid=\"cockpit-chat\""), "Cockpit should show ops chat surface");
+assert(cockpitHtml.includes("data-testid=\"cockpit-chat-composer\""), "Cockpit should show chat composer");
 assert(cockpitHtml.includes("data-testid=\"cockpit-session\""), "Cockpit should show ops-session face");
 assert(cockpitHtml.includes("data-testid=\"cockpit-session-start\""), "Cockpit should expose Start");
 assert(cockpitHtml.includes("data-testid=\"cockpit-session-park\""), "Cockpit should expose Park");
 assert(cockpitHtml.includes("data-testid=\"cockpit-session-resume\""), "Cockpit should expose Resume");
 assert(cockpitHtml.includes("data-testid=\"cockpit-session-stop\""), "Cockpit should expose Stop");
+assert(
+  (cockpitHtml.match(/data-testid="nav-cockpit"/g) || []).length === 0,
+  "Cockpit page itself must not add a second Cockpit nav entry",
+);
+assert(cockpitHtml.includes("/api/ops-chat"), "Cockpit lede names the chat bridge");
+assert(
+  cockpitHtml.indexOf("data-testid=\"cockpit-chat\"") <
+    cockpitHtml.indexOf("data-testid=\"cockpit-session\""),
+  "Chat is the primary Cockpit composition above session controls",
+);
 
 // CockpitSessionView — thin face enablement mirrors Board presence/status only
 const noop = () => {};
@@ -581,6 +599,108 @@ assert(!parkedHtml.includes("data-testid=\"cockpit-session-conversation\""), "Hi
 assert(isDisabled(parkedHtml, "cockpit-session-park"), "Park disabled when Parked");
 assert(!isDisabled(parkedHtml, "cockpit-session-resume"), "Resume enabled when Parked");
 assert(!isDisabled(parkedHtml, "cockpit-session-stop"), "Stop enabled when Parked");
+
+// Cockpit chat — gated by Board session; composer disabled when absent/Parked
+const chatNoop = {
+  draft: "",
+  onDraftChange: noop,
+  onSend: noop,
+};
+const chatAbsent = renderToString(
+  React.createElement(CockpitChatView, {
+    ...chatNoop,
+    messages: [],
+    canSend: false,
+    disabledReason: "Start an ops session to chat with the seat.",
+  }),
+);
+assert(chatAbsent.includes("data-testid=\"cockpit-chat\""), "Chat root");
+assert(chatAbsent.includes("data-testid=\"cockpit-chat-empty\""), "Empty state when no messages");
+assert(chatAbsent.includes("data-testid=\"cockpit-chat-gate\""), "Gate copy when disabled");
+assert(chatAbsent.includes("Start an ops session"), "Absent gate explains Start");
+assert(isDisabled(chatAbsent, "cockpit-chat-send"), "Send disabled when session absent");
+assert(
+  /\bdisabled\b/.test(
+    (chatAbsent.match(/<textarea\b[^>]*>/g) || []).find((t) =>
+      t.includes('data-testid="cockpit-chat-input"'),
+    ) || "",
+  ),
+  "Composer input disabled when session absent",
+);
+
+const chatParked = renderToString(
+  React.createElement(CockpitChatView, {
+    ...chatNoop,
+    messages: [],
+    canSend: false,
+    disabledReason: "Resume the ops session to continue chatting.",
+  }),
+);
+assert(chatParked.includes("Resume the ops session"), "Parked gate explains Resume");
+assert(isDisabled(chatParked, "cockpit-chat-send"), "Send disabled when Parked");
+
+const chatRunning = renderToString(
+  React.createElement(CockpitChatView, {
+    ...chatNoop,
+    draft: "triage Needs You",
+    messages: [
+      { id: "1", role: "user", text: "hello" },
+      { id: "2", role: "assistant", text: "board is quiet", streaming: false },
+    ],
+    canSend: true,
+    disabledReason: null,
+  }),
+);
+assert(chatRunning.includes("data-testid=\"cockpit-chat-messages\""), "Message list present");
+assert(chatRunning.includes("data-testid=\"cockpit-chat-msg-user\""), "User bubble");
+assert(chatRunning.includes("data-testid=\"cockpit-chat-msg-assistant\""), "Assistant bubble");
+assert(chatRunning.includes("board is quiet"), "Renders streamed assistant reply text");
+assert(chatRunning.includes("triage Needs You"), "Draft shown in composer");
+assert(!isDisabled(chatRunning, "cockpit-chat-send"), "Send enabled when Running + draft");
+assert(!chatRunning.includes("data-testid=\"cockpit-chat-gate\""), "No gate banner when canSend");
+
+const chatStreaming = renderToString(
+  React.createElement(CockpitChatView, {
+    ...chatNoop,
+    draft: "next",
+    messages: [{ id: "3", role: "assistant", text: "partial", streaming: true }],
+    canSend: true,
+    streaming: true,
+  }),
+);
+assert(isDisabled(chatStreaming, "cockpit-chat-send"), "Send disabled while streaming");
+assert(chatStreaming.includes("Streaming"), "Streaming label on send button");
+
+// Gate helper + stream-json line extractor (no Board lifecycle invented)
+assert.deepEqual(cockpitChatGate(null), {
+  canSend: false,
+  reason: "Start an ops session to chat with the seat.",
+});
+assert.equal(cockpitChatGate(parkedSession).canSend, false);
+assert.match(cockpitChatGate(parkedSession).reason, /Resume/);
+assert.equal(cockpitChatGate(runningSession).canSend, true);
+assert.equal(cockpitChatGate(runningSession).reason, null);
+assert.equal(
+  cockpitChatGate({ ...runningSession, environment: null }).canSend,
+  false,
+);
+assert.equal(
+  opsChatLineText('{"type":"assistant","message":{"content":[{"type":"text","text":"hi ops"}]}}'),
+  "hi ops",
+);
+assert.equal(
+  opsChatLineText('{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}'),
+  "world",
+);
+assert.equal(opsChatLineText('{"type":"thinking","subtype":"delta","text":"hmm"}'), null);
+assert.equal(opsChatLineText("plain reply line"), "plain reply line");
+
+// Exactly one Cockpit nav entry in the primary sidebar (reuse, do not invent a second)
+assert.equal(
+  (sidebarHtml.match(/data-testid="nav-cockpit"/g) || []).length,
+  1,
+  "Primary sidebar has a single Cockpit nav entry",
+);
 
 const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");

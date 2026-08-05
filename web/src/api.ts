@@ -231,7 +231,126 @@ export const api = {
   parkOpsSession: (): Promise<OpsSession> => post("/ops-session/park"),
   resumeOpsSession: (): Promise<OpsSession> => post("/ops-session/resume"),
   stopOpsSession: (): Promise<null> => del("/ops-session"),
+
+  /**
+   * Host-mediated ops chat — POST /api/ops-chat, SSE agent lines.
+   * Bridge reads environment/conversation_id from Board; no local lifecycle.
+   */
+  streamOpsChat,
 };
+
+/** Ready payload from the ops-chat bridge `ready` SSE event. */
+export type OpsChatReady = {
+  environment: string;
+  conversation_id?: string | null;
+  engine: string;
+};
+
+export type OpsChatHandlers = {
+  onReady?: (info: OpsChatReady) => void;
+  onAgentLine?: (line: string) => void;
+  onError?: (message: string) => void;
+  signal?: AbortSignal;
+};
+
+/**
+ * Authenticated prompt into the Running ops seat; streams SSE
+ * (`ready` / `agent` / `error` / `done`). Refuses with HTTP error when the
+ * Board session is absent, parked, or missing environment.
+ */
+export async function streamOpsChat(
+  prompt: string,
+  handlers: OpsChatHandlers = {},
+): Promise<void> {
+  const r = await fetch("/api/ops-chat", {
+    ...fetchOpts,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify({ prompt }),
+    signal: handlers.signal,
+  });
+
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 401) {
+      throw new AuthRequiredError(
+        body?.error ?? "authentication required",
+        !!body?.bootstrap,
+      );
+    }
+    throw new Error(body?.error ?? `${r.status} ${r.statusText}`);
+  }
+
+  if (!r.body) {
+    throw new Error("ops chat response had no body");
+  }
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName = "message";
+  let dataLines: string[] = [];
+
+  const dispatch = () => {
+    if (dataLines.length === 0) {
+      eventName = "message";
+      return;
+    }
+    const data = dataLines.join("\n");
+    dataLines = [];
+    const name = eventName;
+    eventName = "message";
+
+    if (name === "ready") {
+      try {
+        handlers.onReady?.(JSON.parse(data) as OpsChatReady);
+      } catch {
+        /* ignore malformed ready */
+      }
+      return;
+    }
+    if (name === "agent") {
+      handlers.onAgentLine?.(data);
+      return;
+    }
+    if (name === "error") {
+      handlers.onError?.(data);
+      return;
+    }
+    // `done` and keep-alives: no-op for the UI transcript
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      let line = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 1);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+
+      if (line === "") {
+        dispatch();
+        continue;
+      }
+      if (line.startsWith(":")) continue; // SSE comment / keep-alive
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+        continue;
+      }
+      if (line.startsWith("data:")) {
+        const v = line.slice(5);
+        dataLines.push(v.startsWith(" ") ? v.slice(1) : v);
+        continue;
+      }
+    }
+  }
+  dispatch();
+}
 
 /** `4s`, `12m`, `3h 5m` — matches the server's own formatting. */
 export function since(iso: string, now: number): string {
