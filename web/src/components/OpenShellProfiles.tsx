@@ -69,15 +69,20 @@ export function SandboxesPanelView({
   const isEditing = editingId !== null;
 
   return (
-    <div className="openshell-profiles" data-testid="openshell-profiles">
+    <div
+      className="openshell-band openshell-profiles"
+      data-testid="openshell-profiles"
+    >
     <section aria-labelledby="openshell-profiles-title" data-testid="sandboxes-panel">
-      <h3 id="openshell-profiles-title">Profiles</h3>
-      <p className="dim">
-        Named create-specs (image, policy, CPU, memory). The global default is
-        used when a Project has no override. Cockpit Start builds its seat from
-        the Cockpit profile. Live card environments are managed on the board,
-        not here.
-      </p>
+      <div className="openshell-band-head">
+        <h3 id="openshell-profiles-title">Profiles</h3>
+        <p className="dim">
+          Catalog of create-specs (image, policy, CPU, memory, engine). Set the
+          global default (used when a Project has no override) and which profile
+          Cockpit Start builds from. Live card sandboxes are managed on the
+          board, not here.
+        </p>
+      </div>
 
       {error && <div className="err">{error}</div>}
 
@@ -337,10 +342,15 @@ export function SandboxesPanel() {
 
   if (loading && profiles.length === 0 && !error) {
     return (
-      <div className="openshell-profiles" data-testid="openshell-profiles">
+      <div
+        className="openshell-band openshell-profiles"
+        data-testid="openshell-profiles"
+      >
         <section aria-labelledby="openshell-profiles-title" data-testid="sandboxes-panel">
-          <h3 id="openshell-profiles-title">Profiles</h3>
-          <p className="dim">loading…</p>
+          <div className="openshell-band-head">
+            <h3 id="openshell-profiles-title">Profiles</h3>
+            <p className="dim">loading…</p>
+          </div>
         </section>
       </div>
     );
