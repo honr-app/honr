@@ -860,6 +860,20 @@ async fn put_github_app(
         b.set_github_app_sealed(Some(sealed));
     }
 
+    // Persist succeeded — mint/push immediately when App + installation are ready
+    // (changing installation must not wait for Mint / sync or the sweeper).
+    if crate::github_app::configured_for_tokens(&b) {
+        b.set_github_app_token_cache(crate::github_app::TokenCache {
+            expires_at: None,
+            last_error: None,
+        });
+        if let Err(e) = crate::github_app::ensure_github_provider(&b).await {
+            // Credentials/installation are already saved; surface mint failure
+            // on token_status rather than failing the PUT.
+            tracing::warn!(error = %e, "GitHub App save: installation token sync failed");
+        }
+    }
+
     Ok(Json(github_app_settings_view(&b).await))
 }
 

@@ -18,7 +18,7 @@ you ──chat──> operator agent (Cursor / Claude Code)
             └────────────────────┘
                     ▲
               supervisor ──> worker agent in an OpenShell sandbox
-                                 └─> cross-fork PR ──> you merge
+                                 └─> same-repo PR ──> you merge
 ```
 
 ## Board as control plane
@@ -64,9 +64,10 @@ evidence.
 
 **Merging is human.** Approving in honr surfaces the PR. It never merges.
 
-**The bot has no write access to upstream.** Containment lives in GitHub
-permissions. The fork is disposable; rebase onto upstream, not the fork's
-frozen base.
+**The bot may push feature branches, not main.** Containment is the
+repository ruleset (owner-only default branch) plus human merge. Agents push
+`honr/card-*` on `shanemcd/honr` with the App installation on that account and
+open PRs into `main`; they never merge.
 
 ## Where to go next
 

@@ -1074,7 +1074,10 @@ function GitHubAppPanel() {
         } else {
           body.clear_installation_id = true;
         }
-        put(body, "Saved. GitHub App credentials are sealed in the board database.");
+        put(
+          body,
+          "Saved. Sealed credentials and synced installation token to OpenShell when ready.",
+        );
       }}
       onSyncToken={() => {
         setBusy(true);
