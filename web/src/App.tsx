@@ -155,6 +155,7 @@ function AuthedApp({
               width={44}
               height={44}
             />
+            <span className="brand-word">honr</span>
           </button>
           {totalNeedsYou > 0 && <span className="pip">{totalNeedsYou}</span>}
         </div>

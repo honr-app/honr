@@ -6,11 +6,12 @@ Day-to-day operation once the board is up. For enabling sandboxed agents, see
 
 ## Happy path
 
-1. **Create a Project** (`create_project` or UI): auto-seeds a claimable
-   Initial plan Task.
-2. **Dispatch** Initial plan (`dispatch` / UI **Start**): agent writes
-   `plan.json` with proposed sibling Tasks (each names its clone target in
-   intent/DoD). The card moves to **Review**.
+1. **Create a Project** (`create_project` or UI) with required `clone_repo`
+   (`owner/name` — the repo Initial plan clones for planning). Auto-seeds a
+   claimable Initial plan Task with that target stamped in.
+2. **Dispatch** Initial plan (`dispatch` / UI **Start**): agent clones
+   `clone_repo`, writes `plan.json` with proposed sibling Tasks (each names
+   its clone target in intent/DoD). The card moves to **Review**.
 3. **Approve** that card: creates sibling Tasks under the Project. Approve
    does not auto-dispatch unless Project auto mode is already on.
 4. **Dispatch** each Ready / Backlog Task (or turn on Project auto mode).

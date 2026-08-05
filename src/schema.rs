@@ -58,6 +58,67 @@ impl Default for ExecutionConfig {
     }
 }
 
+/// Validate a GitHub-style `owner/name` (no URL, no trailing `.git`).
+pub fn parse_owner_name(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("clone_repo is required (`owner/name`)".into());
+    }
+    if s.contains("://") || s.starts_with("git@") {
+        return Err(format!(
+            "clone_repo must be `owner/name`, not a URL ({s})"
+        ));
+    }
+    let s = s.strip_suffix(".git").unwrap_or(s);
+    let mut parts = s.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(format!(
+            "clone_repo must be exactly `owner/name` (got {s:?})"
+        ));
+    };
+    if owner.is_empty()
+        || name.is_empty()
+        || !owner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(format!(
+            "clone_repo must be a valid `owner/name` (got {s:?})"
+        ));
+    }
+    Ok(format!("{owner}/{name}"))
+}
+
+/// Standing line stamped into Project intent / Initial plan prose.
+pub fn clone_repo_prose_line(owner_name: &str) -> String {
+    format!(
+        "Clone repository: {owner_name} into /sandbox/repo for planning and as the default Task clone target."
+    )
+}
+
+/// Pull `owner/name` out of stamped prose (`Clone repository: owner/name …`).
+pub fn clone_repo_from_prose(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let t = line.trim();
+        let Some(rest) = t
+            .strip_prefix("Clone repository:")
+            .or_else(|| t.strip_prefix("clone repository:"))
+        else {
+            continue;
+        };
+        let Some(token) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if let Ok(name) = parse_owner_name(token) {
+            return Some(name);
+        }
+    }
+    None
+}
+
 /// Resolved remotes for one card run (from card `pull_request` base/head).
 ///
 /// Before a PR exists, `resolve_card_repo` returns `None` and the agent clones
@@ -403,5 +464,25 @@ board:
         let s: Schema = serde_yaml::from_str(raw).expect("yaml");
         let db = s.board.database.parsed().expect("postgres url");
         assert_eq!(db.backend(), crate::db::DatabaseBackend::Postgres);
+    }
+
+    #[test]
+    fn parse_owner_name_accepts_github_style() {
+        assert_eq!(parse_owner_name(" shanemcd/honr ").unwrap(), "shanemcd/honr");
+        assert_eq!(parse_owner_name("acme/widgets.git").unwrap(), "acme/widgets");
+        assert!(parse_owner_name("").is_err());
+        assert!(parse_owner_name("noslash").is_err());
+        assert!(parse_owner_name("https://github.com/a/b").is_err());
+        assert!(parse_owner_name("a/b/c").is_err());
+    }
+
+    #[test]
+    fn clone_repo_from_prose_reads_stamped_line() {
+        let text = "Rework settings.\n\nClone repository: shanemcd/honr into /sandbox/repo for planning and as the default Task clone target.\n";
+        assert_eq!(
+            clone_repo_from_prose(text).as_deref(),
+            Some("shanemcd/honr")
+        );
+        assert!(clone_repo_from_prose("no stamp here").is_none());
     }
 }

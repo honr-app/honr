@@ -1063,8 +1063,60 @@ impl Board {
         Ok(self.get(item.id).unwrap_or(item))
     }
 
+    /// Create a Project with a required planning clone target (`owner/name`).
+    ///
+    /// Stamps the repo into Project intent / `project_prompt` and into the
+    /// auto-seeded Initial plan so Remotes can clone without inventing a name.
+    pub fn create_project(
+        &self,
+        title: impl Into<String>,
+        intent: impl Into<String>,
+        clone_repo: &str,
+        above_line: bool,
+        project_prompt: Option<String>,
+    ) -> Result<WorkItem, String> {
+        let clone = crate::schema::parse_owner_name(clone_repo)?;
+        let stamp = crate::schema::clone_repo_prose_line(&clone);
+        let intent = intent.into();
+        let intent = {
+            let trimmed = intent.trim();
+            if crate::schema::clone_repo_from_prose(trimmed).is_some() {
+                trimmed.to_string()
+            } else if trimmed.is_empty() {
+                stamp.clone()
+            } else {
+                format!("{trimmed}\n\n{stamp}")
+            }
+        };
+        let prompt = {
+            let base = project_prompt
+                .filter(|p| !p.trim().is_empty())
+                .unwrap_or_else(|| crate::model::DEFAULT_PROJECT_PROMPT.to_string());
+            if base.contains(&clone) {
+                base
+            } else {
+                format!("{}\nDefault clone repository: {clone}.\n", base.trim_end())
+            }
+        };
+        let item = self.create(
+            None,
+            title,
+            intent,
+            None,
+            Origin::Human,
+            above_line,
+            None,
+        )?;
+        let _ = self.update_item(item.id, None, None, None, None, Some(prompt));
+        // Re-stamp Initial plan if create's auto-seed ran before prompt update —
+        // seed reads clone from Project intent (already stamped).
+        let _ = self.seed_initial_plan(item.id);
+        Ok(self.get(item.id).unwrap_or(item))
+    }
+
     /// Seed the Project's claimable Initial plan Task (idempotent).
     ///
+    /// Clone target comes from Project intent prose (`Clone repository: …`).
     /// The planner names clone targets in each proposed task's intent/DoD and
     /// finishes with `plan.json` → Review → Approve.
     pub fn seed_initial_plan(&self, project_id: ItemId) -> Result<WorkItem, String> {
@@ -1082,9 +1134,12 @@ impl Board {
 
         let project_title = project.title.clone();
         let title = crate::model::initial_plan_title(&project_title);
-        let seed = self.create(
-            Some(project_id),
-            title.clone(),
+        let clone = crate::schema::clone_repo_from_prose(&project.intent);
+        let clone_line = clone
+            .as_deref()
+            .map(crate::schema::clone_repo_prose_line)
+            .unwrap_or_default();
+        let intent = if clone_line.is_empty() {
             format!(
                 "Propose sibling Tasks for «{project_title}»: write /sandbox/.honr/plan.json \
                  (summary + tasks with key, title, intent, definition_of_done, \
@@ -1092,8 +1147,33 @@ impl Board {
                  exact repository to clone (`owner/name`, and fork if cross-fork). \
                  Do **not** open a PR. Do not write split.json. Card goes to Review — \
                  human Approve creates those Tasks."
-            ),
-            Some("Write plan.json with proposed Tasks (each names clone target). Approve creates them.".into()),
+            )
+        } else {
+            format!(
+                "{clone_line} Propose sibling Tasks for «{project_title}»: write \
+                 /sandbox/.honr/plan.json (summary + tasks with key, title, intent, \
+                 definition_of_done, optional blocked_by_keys). In each task's intent \
+                 and/or DoD, name the exact repository to clone (default `{clone}` \
+                 unless a task targets another repo). Do **not** open a PR. Do not \
+                 write split.json. Card goes to Review — human Approve creates those Tasks.",
+                clone = clone.as_deref().unwrap_or("")
+            )
+        };
+        let dod = if let Some(ref c) = clone {
+            Some(format!(
+                "Write plan.json with proposed Tasks (each names clone target; default {c}). Approve creates them."
+            ))
+        } else {
+            Some(
+                "Write plan.json with proposed Tasks (each names clone target). Approve creates them."
+                    .into(),
+            )
+        };
+        let seed = self.create(
+            Some(project_id),
+            title.clone(),
+            intent,
+            dod,
             Origin::Planner,
             false,
             None,
@@ -1109,7 +1189,7 @@ impl Board {
         Ok(seed)
     }
 
-    /// Compatibility alias — same as [`Self::seed_initial_plan`] (no repo arg).
+    /// Compatibility alias — same as [`Self::seed_initial_plan`].
     pub fn init_plan(&self, project_id: ItemId) -> Result<WorkItem, String> {
         self.seed_initial_plan(project_id)
     }
@@ -5864,6 +5944,53 @@ mod tests {
         assert!(seed.repo.is_none(), "Initial plan remotes come from prose until PR");
         assert!(b.resolve_card_repo(seed.id).unwrap().is_none());
         assert_ne!(b.get(project.id).unwrap().state, State::Backlog);
+    }
+
+    #[test]
+    fn create_project_requires_clone_repo_and_stamps_initial_plan() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-create-project-clone.json"),
+        );
+        let err = b
+            .create_project("No Repo", "why", "", true, None)
+            .expect_err("empty clone_repo");
+        assert!(err.contains("clone_repo"), "{err}");
+
+        let project = b
+            .create_project(
+                "OpenShell settings",
+                "Rework the OpenShell settings surface",
+                "shanemcd/honr",
+                true,
+                None,
+            )
+            .expect("create_project");
+        assert!(
+            project.intent.contains("Clone repository: shanemcd/honr"),
+            "{}",
+            project.intent
+        );
+        let prompt = project.project_prompt.as_deref().unwrap_or("");
+        assert!(
+            prompt.contains("Default clone repository: shanemcd/honr"),
+            "{prompt}"
+        );
+        let seed = b.initial_plan_of(project.id).expect("seeded");
+        assert!(
+            seed.intent.contains("Clone repository: shanemcd/honr"),
+            "Initial plan must stamp planning clone: {}",
+            seed.intent
+        );
+        assert!(
+            seed
+                .definition_of_done
+                .as_deref()
+                .unwrap_or("")
+                .contains("shanemcd/honr"),
+            "{:?}",
+            seed.definition_of_done
+        );
     }
 
     #[test]

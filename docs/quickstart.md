@@ -103,8 +103,9 @@ Complete the OAuth browser flow when Claude prompts for authorization.
 ## Empty board
 
 The board starts empty. Nothing claims cards until you enable agents. See
-[Agents](agents.md). You can still create Projects (`create_project` auto-seeds
-Initial plan), dispatch that card, inspect columns in the UI, and exercise MCP
-tools that do not need a sandbox. Help in the sidebar documents the same loop.
+[Agents](agents.md). You can still create Projects (`create_project` requires
+`clone_repo` and auto-seeds Initial plan), dispatch that card, inspect columns
+in the UI, and exercise MCP tools that do not need a sandbox. Help in the
+sidebar documents the same loop.
 
 Next: [Workflow](workflow.md) for the day-to-day loop.
