@@ -4,7 +4,7 @@
 //! [`DurableBoardStore`] and flushes row updates. `honr.json` is a one-shot
 //! import source when the DB is empty. Hot list/snapshot/lease paths use
 //! denormalized columns and indexed SQL (`query_*` on [`BoardStore`]); agent
-//! engines and beads dual-write stay unchanged.
+//! engines stay unchanged.
 
 #![allow(dead_code)]
 

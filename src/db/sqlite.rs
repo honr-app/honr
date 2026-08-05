@@ -950,7 +950,6 @@ mod tests {
         parent.level = Some("Project".into());
         parent.state = State::Backlog;
         parent.project_prompt = Some("standing".into());
-        parent.beads_id = Some("honr-abc".into());
         parent.sandbox_profile_id = Some("default".into());
 
         let mut child = WorkItem::new(2, "Task", "do it");
@@ -992,7 +991,6 @@ mod tests {
         let p = store.get_item(1).await.expect("get p").expect("p");
         assert_eq!(p.project_prompt.as_deref(), Some("standing"));
         assert!(p.repo.is_none(), "Project must not persist a product-repo");
-        assert_eq!(p.beads_id.as_deref(), Some("honr-abc"));
         assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
 
         let stories = store.load_stories(1).await.expect("stories");
@@ -1019,7 +1017,6 @@ mod tests {
         state.default_sandbox_profile_id = Some("default".into());
         state.workspace = Some(crate::model::WorkspaceBinding {
             forge: "github".into(),
-            beads_sync_repo: Some("acme/beads-mirror".into()),
         });
         store.save_board_state(&state).await.expect("save");
         let again = store.load_board_state().await.expect("reload");
@@ -1042,7 +1039,7 @@ mod tests {
         );
         let ws = again.workspace.as_ref().expect("workspace round-trip");
         assert_eq!(ws.forge, "github");
-        assert_eq!(ws.beads_sync_repo.as_deref(), Some("acme/beads-mirror"));
+        assert_eq!(ws.forge, "github");
 
         // Round-trip Agent runtime meta.
         let mut with_rt = again;

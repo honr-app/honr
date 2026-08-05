@@ -39,7 +39,6 @@ function item(o) {
     release_target: null,
     environment: null,
     pull_request: null,
-    beads_id: null,
     created_at: iso(o.age ?? 3600),
     entered_state_at: iso(o.since ?? 600),
     history: [],
@@ -69,7 +68,6 @@ const project = item({
   state: "shaping",
   level: "Project",
   above_line: true,
-  beads_id: "honr-proj1",
   pinned: [
     "Merging is a human action. Approving in honr surfaces the PR; it never merges it.",
     "Everything in the sandbox stack fails as a hang, not an error.",
@@ -92,35 +90,28 @@ const task = (title, intent, extra = {}) =>
 
 const taskA = task("Surface PR checks on the Review card", "CI is the mechanical gate; the board should show it.", {
   since: 2400,
-  beads_id: "honr-t10",
 });
 const taskB = task("Fail closed when CI is red", "A Review card with failing checks should be obvious.", {
   blocked_by: [taskA],
   since: 2100,
-  beads_id: "honr-t11",
 });
 const taskC = task("Report the real diffstat", "Review sorts by a blast radius it does not actually know.", {
   blocked_by: [taskA],
   since: 1500,
-  beads_id: "honr-t17",
 });
 const taskD = task("Observe cost during the run", "Spend only arrives in the final message, so no cap can interrupt.", {
   blocked_by: [taskB, taskC],
   since: 900,
-  beads_id: "honr-t18",
 });
 task("Re-adopt live sandboxes on restart", "A rebuilt honr should resume watching a run, not kill it.", {
   since: 600,
-  beads_id: "honr-t9",
 });
 task("Split from inside the sandbox", "Work bigger than its card should become sibling tasks, not nest.", {
   since: 300,
-  beads_id: "honr-t13",
 });
 task("Receipt copy for the digest", "Plain-language wording for the phone view.", {
   capability: "writer",
   since: 120,
-  beads_id: "honr-t15",
 });
 
 // ---- Running --------------------------------------------------------------
@@ -137,7 +128,6 @@ item({
   model: "claude-opus-5",
   progress: 0.62,
   environment: "honr-card-12-a1",
-  beads_id: "honr-t12",
   since: 840,
 });
 
@@ -153,7 +143,6 @@ item({
   model: "claude-opus-5",
   progress: 0.18,
   environment: "honr-card-13-a1",
-  beads_id: "honr-t14",
   since: 200,
 });
 
@@ -170,7 +159,6 @@ item({
   progress: 0.91,
   environment: "honr-card-14-a2",
   run_failures: 1,
-  beads_id: "honr-t11b",
   since: 1500,
 });
 
@@ -187,7 +175,6 @@ item({
   lease: lease("sandbox-15", 30),
   model: "claude-opus-5",
   progress: 0.4,
-  beads_id: "honr-t19",
   since: 1080,
   escalation: {
     question:
@@ -222,7 +209,6 @@ item({
   diff_added: 34,
   diff_removed: 8,
   pull_request: { url: "https://github.com/example/honr/pull/20" },
-  beads_id: "honr-t20",
   since: 45,
 });
 
@@ -240,7 +226,6 @@ item({
   pull_request: { url: "https://github.com/shanemcd/honr/pull/1" },
   environment: "honr-card-8-a1",
   gates: [{ name: "agent-reported", status: "passed", detail: "3 gates passed" }],
-  beads_id: "honr-t8",
   since: 300,
 });
 
@@ -259,17 +244,16 @@ item({
   pull_request: { url: "https://github.com/shanemcd/honr/pull/4" },
   environment: "honr-card-17-a3",
   gates: [{ name: "agent-reported", status: "passed", detail: "3 gates passed" }],
-  beads_id: "honr-t21",
   since: 5400,
 });
 
 // ---- Done -----------------------------------------------------------------
 
-for (const [title, added, removed, bid] of [
-  ["Open the sandbox policy for the toolchain", 6, 2, "honr-t7"],
-  ["Cap run retries so a failing card stops looping", 148, 12, "honr-t22"],
-  ["Let the agent publish; the supervisor verifies", 97, 113, "honr-t23"],
-  ["Add openshell.rs: typed CLI wrapper", 402, 0, "honr-t24"],
+for (const [title, added, removed] of [
+  ["Open the sandbox policy for the toolchain", 6, 2],
+  ["Cap run retries so a failing card stops looping", 148, 12],
+  ["Let the agent publish; the supervisor verifies", 97, 113],
+  ["Add openshell.rs: typed CLI wrapper", 402, 0],
 ]) {
   item({
     parent: project,
@@ -283,7 +267,6 @@ for (const [title, added, removed, bid] of [
     diff_added: added,
     diff_removed: removed,
     gates: [{ name: "agent-reported", status: "passed", detail: "gates passed" }],
-    beads_id: bid,
     since: 7200,
   });
 }

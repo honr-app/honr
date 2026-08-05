@@ -3445,11 +3445,6 @@ mod tests {
             !g.intent.is_empty(),
             "ClaimGrant must carry card intent from WorkItem"
         );
-        assert!(
-            g.beads_id.is_some(),
-            "test fixture keeps beads_id so we assert it is not briefed"
-        );
-
         let cold = briefing(&g, BranchState::Fresh, "honr/card-7", &cross_fork_repo());
         assert!(
             cold.contains("Intent: why the card exists"),
@@ -3792,7 +3787,6 @@ mod tests {
             title: "t".into(),
             intent: "why the card exists".into(),
             definition_of_done: None,
-            beads_id: Some("honr-test7".into()),
             project_title: Some("Test Project".into()),
             project_prompt: Some("Follow the Plan.".into()),
             plan_summary: Some("Do the thing.".into()),

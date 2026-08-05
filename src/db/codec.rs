@@ -178,8 +178,8 @@ impl ItemExtras {
             release_target: item.release_target.clone(),
             environment: item.environment.clone(),
             conversation_id: item.conversation_id.clone(),
-            beads_id: item.beads_id.clone(),
-            github_issue_url: item.github_issue_url.clone(),
+            beads_id: None,
+            github_issue_url: None,
             pull_request: item.pull_request.clone(),
             pr_url: None,
             repo: item.repo.clone(),
@@ -202,8 +202,8 @@ impl ItemExtras {
         item.release_target = self.release_target;
         item.environment = self.environment;
         item.conversation_id = self.conversation_id;
-        item.beads_id = self.beads_id;
-        item.github_issue_url = self.github_issue_url;
+        // Legacy beads_id / github_issue_url in extras_json are ignored.
+        let _ = (self.beads_id, self.github_issue_url);
         item.pull_request = self.pull_request;
         item.legacy_pr_url = self.pr_url;
         item.migrate_legacy_pr_url();
@@ -461,8 +461,6 @@ where
         parked: parked != 0,
         awaiting_dispatch: awaiting_dispatch != 0,
         rebase_requested: rebase_requested != 0,
-        beads_id: None,
-        github_issue_url: None,
         pull_request: None,
         legacy_pr_url: None,
         repo: None,

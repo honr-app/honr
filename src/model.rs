@@ -625,17 +625,17 @@ impl WebhookPollConfig {
     }
 }
 
-/// Per-install forge identity + beads Issue sync (Settings → Forge).
+/// Per-install forge identity (Settings → Forge).
 /// Work remotes live on each card's [`PullRequest`] after the agent reports.
 /// See `docs/architecture.md`.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+///
+/// Legacy wire keys (`beads_sync_repo`, `upstream`, `branching_prompt`) are
+/// ignored on deserialize so old Settings payloads still load.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceBinding {
     /// Forge provider. Only `github` is implemented; `gitlab` is a future seam.
     #[serde(default = "default_forge")]
     pub forge: String,
-    /// Beads ↔ GitHub Issues sync target (`owner/name`).
-    #[serde(default)]
-    pub beads_sync_repo: Option<String>,
 }
 
 fn default_forge() -> String {
@@ -646,67 +646,7 @@ impl Default for WorkspaceBinding {
     fn default() -> Self {
         Self {
             forge: default_forge(),
-            beads_sync_repo: None,
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for WorkspaceBinding {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Raw {
-            #[serde(default = "default_forge")]
-            forge: String,
-            #[serde(default)]
-            beads_sync_repo: Option<String>,
-            /// Older wire name for beads sync target when `beads_sync_repo` is absent.
-            #[serde(default)]
-            upstream: Option<String>,
-            /// Accepted and discarded for forward-compatible Settings payloads.
-            #[serde(default)]
-            #[allow(dead_code)]
-            branching_prompt: Option<String>,
-        }
-        let raw = Raw::deserialize(deserializer)?;
-        let beads = raw
-            .beads_sync_repo
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                raw.upstream
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            });
-        let forge = {
-            let f = raw.forge.trim();
-            if f.is_empty() {
-                default_forge()
-            } else {
-                f.to_string()
-            }
-        };
-        Ok(Self {
-            forge,
-            beads_sync_repo: beads,
-        })
-    }
-}
-
-impl WorkspaceBinding {
-    /// True when beads sync repo is set (Settings has something useful).
-    pub fn has_beads_sync(&self) -> bool {
-        self.beads_sync_repo
-            .as_deref()
-            .is_some_and(|s| !s.trim().is_empty())
-    }
-
-    /// Repo used for beads Issue URL construction / `bd github` env.
-    pub fn beads_repo(&self) -> Option<String> {
-        self.beads_sync_repo
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
     }
 }
 
@@ -1019,12 +959,6 @@ pub struct WorkItem {
     /// Indicates that main advanced and this card's PR branch needs a rebase.
     #[serde(default)]
     pub rebase_requested: bool,
-    /// Beads issue hash ID (e.g. `bd-a1b2`).
-    #[serde(default)]
-    pub beads_id: Option<String>,
-    /// Associated GitHub Issue URL (e.g. `https://github.com/owner/repo/issues/8`).
-    #[serde(default)]
-    pub github_issue_url: Option<String>,
     /// Pull request the agent opened (url + base/head). Approving surfaces it;
     /// merging stays a human action. Legacy top-level `pr_url` migrates here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1094,8 +1028,6 @@ impl WorkItem {
             parked: false,
             awaiting_dispatch: false,
             rebase_requested: false,
-            beads_id: None,
-            github_issue_url: None,
             pull_request: None,
             legacy_pr_url: None,
             repo: None,

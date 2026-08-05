@@ -216,10 +216,6 @@ async fn create_item(
         .map_err(ApiError)?;
     // A project dropped in plain language starts shaping immediately.
     let item = b.transition(item.id, State::Shaping, "human", None).unwrap_or(item);
-    b.schedule_beads_mirror(item.id);
-    for cid in b.children_of(item.id) {
-        b.schedule_beads_mirror(cid);
-    }
 
     Ok(Json(item))
 }
@@ -231,7 +227,6 @@ async fn approve_plan(
     Path(id): Path<ItemId>,
 ) -> ApiResult<Vec<ItemId>> {
     let published = b.approve_plan(id).map_err(ApiError)?;
-    b.schedule_beads_mirror_batch(&published);
     Ok(Json(published))
 }
 
@@ -250,7 +245,6 @@ async fn init_plan(
     Json(_req): Json<InitPlanReq>,
 ) -> ApiResult<WorkItem> {
     let seed = b.init_plan(id).map_err(ApiError)?;
-    b.schedule_beads_mirror(seed.id);
     Ok(Json(seed))
 }
 
@@ -449,7 +443,6 @@ async fn materialize_proposal_heal(
                 new_ids.push(cid);
             }
         }
-        b.schedule_beads_mirror_batch(&new_ids);
     }
     Ok(Json(made.into_iter().map(|i| i.id).collect()))
 }
@@ -486,7 +479,6 @@ async fn approve(
                 new_ids.push(cid);
             }
         }
-        b.schedule_beads_mirror_batch(&new_ids);
     }
     Ok(Json(item))
 }
@@ -1485,18 +1477,6 @@ async fn github_webhook(
                 .and_then(|pr| pr.number);
             if let Some(id) = b.complete_for_merged_pr(&pr_url, number) {
                 completed_item_ids.push(id);
-                // Done materializes Initial plan / split proposals — push new cards.
-                if let Some(parent) = b.get(id).and_then(|i| i.parent) {
-                    let mut new_ids = Vec::new();
-                    for cid in b.children_of(parent) {
-                        if b.get(cid).is_some_and(|c| {
-                            !c.is_initial_plan_task() && c.github_issue_url.is_none()
-                        }) {
-                            new_ids.push(cid);
-                        }
-                    }
-                    b.schedule_beads_mirror_batch(&new_ids);
-                }
             }
         }
     }
@@ -2548,7 +2528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_get_put_persists_forge_and_beads_only() {
+    async fn workspace_get_put_persists_forge_only() {
         let path = std::env::temp_dir().join(format!(
             "honr-test-api-ws-{}.json",
             std::time::SystemTime::now()
@@ -2556,49 +2536,34 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        // Empty yaml repo — Settings PUT must be enough (no yaml required).
-        let mut schema = crate::schema::Schema::default();
-        schema.execution.agents.repo.upstream.clear();
-        schema.execution.agents.repo.fork.clear();
+        let schema = crate::schema::Schema::default();
         let b = std::sync::Arc::new(crate::store::Board::new(schema, path));
 
         let Json(empty) = get_workspace(AxState(b.clone())).await;
         assert_eq!(empty.forge, "github");
-        assert!(empty.beads_sync_repo.is_none());
 
         let Ok(Json(saved)) = put_workspace(
             AxState(b.clone()),
             Json(WorkspaceBinding {
                 forge: "github".into(),
-                beads_sync_repo: Some("acme/widget-beads".into()),
             }),
         )
         .await
         else {
             panic!("put workspace");
         };
-        assert_eq!(
-            saved.beads_sync_repo.as_deref(),
-            Some("acme/widget-beads")
-        );
+        assert_eq!(saved.forge, "github");
         let Json(got) = get_workspace(AxState(b.clone())).await;
         assert_eq!(got, saved);
 
         // Work remotes are yaml-only; Settings forge does not supply them.
         assert!(b.yaml_work_repo().is_none());
-        assert_eq!(
-            b.workspace_binding()
-                .and_then(|w| w.beads_repo())
-                .as_deref(),
-            Some("acme/widget-beads")
-        );
         // Unsupported forge is refused.
         assert!(
             put_workspace(
                 AxState(b.clone()),
                 Json(WorkspaceBinding {
                     forge: "gitlab".into(),
-                    beads_sync_repo: None,
                 }),
             )
             .await

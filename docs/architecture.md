@@ -15,8 +15,7 @@ UI / MCP / supervisor
       Board (store.rs) ── persistence (SQLx) ── event bus (SSE)
          │
          ├── machine.rs   legal transitions
-         ├── model.rs     Project + Task node type
-         └── beads.rs     identity / parent / deps mirror
+         └── model.rs     Project + Task node type
 ```
 
 ## Layout
@@ -26,7 +25,6 @@ UI / MCP / supervisor
 | `src/model.rs` | One node type. Project (container) + Task (claimable leaf). |
 | `src/machine.rs` | Legal transitions + lifecycle invariants. |
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
-| `src/beads.rs` | `bd` CLI wrapper: identity, Project→Task parent, deps. |
 | `src/api.rs` `src/sse.rs` | The human face (REST + SSE). |
 | `src/mcp.rs` | Operator tools and worker verbs. |
 | `src/openshell.rs` | Typed async wrapper over the `openshell` CLI; every call has a deadline. |
@@ -62,16 +60,6 @@ worker verbs on the live path.
 
 Steer, pin, park, halt, and cut scope want a reason. They live in MCP. What
 stays one-tap in the UI is answering an escalation and approving a review.
-
-## Beads mirror
-
-Beads (`bd`) holds issue identity and the dependency graph. honr dual-writes
-board mutations into beads so Projects / Tasks stay addressable outside the
-board DB. That mirror is **host/operator only** — agent sandboxes do not get
-a `bd` binary, beads DB, or `BEADS_DIR`. Card context reaches the agent via
-the supervisor briefing (and `/sandbox/.honr` contracts), not tracker CLI.
-Beads sync (`refs/dolt/data`) is separate from git code refs. See the beads
-docs linked from `AGENTS.md`.
 
 ## Persistence
 

@@ -11,11 +11,9 @@ web/tsconfig.tsbuildinfo
 web/shots
 .honr
 
-# Beads / Dolt files (added by bd init)
+# Local Dolt / sqlite artifacts (not board state under .honr/)
 .dolt/
 *.db
-.beads-credential-key
-.beads/proxieddb/
 
 # Local sandbox vendor blobs (install via Containerfile / CLI)
 sandbox/agy.tar.gz

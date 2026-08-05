@@ -747,7 +747,6 @@ const workspaceHtml = renderToString(
   React.createElement(WorkspacePanelView, {
     draft: {
       forge: "github",
-      beads_sync_repo: "",
     },
     poll: {
       enabled: false,
@@ -760,7 +759,6 @@ const workspaceHtml = renderToString(
 );
 assert(workspaceHtml.includes("data-testid=\"workspace-panel\""), "Forge panel should render");
 assert(workspaceHtml.includes("data-testid=\"workspace-form\""), "Forge form should render");
-assert(workspaceHtml.includes("data-testid=\"workspace-field-beads\""), "Beads sync field");
 assert(workspaceHtml.includes("data-testid=\"workspace-field-forge\""), "Provider field");
 assert(workspaceHtml.includes("data-testid=\"workspace-poll\""), "Poll fallback controls");
 assert(workspaceHtml.includes("data-testid=\"workspace-poll-enabled\""), "Poll enabled checkbox");

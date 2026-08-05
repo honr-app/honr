@@ -23,9 +23,7 @@ export interface BoardProps {
 
 type BoardFilter = "all" | "running" | "needs_you" | "review";
 
-function labelOfItem(items: Map<number, WorkItem>, id: number): string {
-  const it = items.get(id);
-  if (it?.beads_id && !it.beads_id.startsWith("bd-honr-")) return it.beads_id;
+function labelOfItem(_items: Map<number, WorkItem>, id: number): string {
   return `#${id}`;
 }
 
@@ -67,9 +65,7 @@ export function Board(props: BoardProps) {
       if (projectFilter !== "all" && t.parent !== projectFilter) return false;
       if (
         q &&
-        !t.title.toLowerCase().includes(q) &&
-        !`#${t.id}`.includes(q) &&
-        !(t.beads_id ?? "").toLowerCase().includes(q)
+        !t.title.toLowerCase().includes(q) && !`#${t.id}`.includes(q)
       )
         return false;
       return true;
@@ -396,9 +392,7 @@ function Swimlane({
     if (i.level === "Project") return false;
     if (
       q &&
-      !i.title.toLowerCase().includes(q) &&
-      !`#${i.id}`.includes(q) &&
-      !(i.beads_id ?? "").toLowerCase().includes(q)
+      !i.title.toLowerCase().includes(q) && !`#${i.id}`.includes(q)
     )
       return false;
     if (!archived && filterState !== "all") {

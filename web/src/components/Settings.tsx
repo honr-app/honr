@@ -64,7 +64,6 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
 
 const emptyWorkspace = (): WorkspaceBinding => ({
   forge: "github",
-  beads_sync_repo: "",
 });
 
 const emptyWebhookPoll = (): WebhookPollConfig => ({
@@ -92,12 +91,12 @@ export function Settings() {
       <header className="settings-hero">
         <h1>Settings</h1>
         <p className="settings-lede">
-          Control-plane preferences. Forge holds beads Issue sync. Each card’s
-          <code>pull_request</code> (after report) holds work remotes. OpenShell
-          holds gateway connectivity, providers, and sandbox profiles (including
-          which agent engine a profile runs). GitHub App holds sealed App
-          credentials for installation tokens. Agent runtime holds concurrency,
-          timeouts, and the fallback engine.
+          Control-plane preferences. Forge holds provider and webhook poll. Each
+          card’s <code>pull_request</code> (after report) holds work remotes.
+          OpenShell holds gateway connectivity, providers, and sandbox profiles
+          (including which agent engine a profile runs). GitHub App holds sealed
+          App credentials for installation tokens. Agent runtime holds
+          concurrency, timeouts, and the fallback engine.
         </p>
       </header>
 
@@ -1129,7 +1128,7 @@ export function WorkspacePanelView({
     <section aria-labelledby="workspace-title" data-testid="workspace-panel">
       <h2 id="workspace-title">Forge</h2>
       <p className="dim">
-        Beads Issue sync and forge provider. Work remotes live on each card’s
+        Forge provider and webhook poll. Work remotes live on each card’s{" "}
         <code>pull_request</code> (url / base / head) after the agent reports.
       </p>
 
@@ -1163,23 +1162,6 @@ export function WorkspacePanelView({
             </option>
           </select>
         </label>
-        <label>
-          Beads sync repo
-          <input
-            className="search-input"
-            value={draft.beads_sync_repo ?? ""}
-            disabled={busy}
-            placeholder="owner/name — where Issues are mirrored"
-            onChange={(e) =>
-              onDraftChange({ ...draft, beads_sync_repo: e.target.value })
-            }
-            data-testid="workspace-field-beads"
-          />
-          <span className="dim sandbox-field-hint">
-            Beads ↔ GitHub Issues mirror repository (`owner/name`).
-          </span>
-        </label>
-
         <fieldset className="workspace-poll-fieldset" data-testid="workspace-poll">
           <legend>Webhook polling fallback</legend>
           <label className="workspace-poll-enabled">
@@ -1242,7 +1224,6 @@ function WorkspacePanel() {
       .then(([ws, wp]) => {
         setDraft({
           forge: ws.forge || "github",
-          beads_sync_repo: ws.beads_sync_repo ?? "",
         });
         setPoll({
           enabled: !!wp.enabled,
@@ -1288,7 +1269,6 @@ function WorkspacePanel() {
         setSavedHint(null);
         const body: WorkspaceBinding = {
           forge: draft.forge.trim() || "github",
-          beads_sync_repo: (draft.beads_sync_repo ?? "").trim() || null,
         };
         const pollBody: WebhookPollConfig = {
           enabled: poll.enabled,
@@ -1298,13 +1278,12 @@ function WorkspacePanel() {
           .then(([saved, savedPoll]) => {
             setDraft({
               forge: saved.forge,
-              beads_sync_repo: saved.beads_sync_repo ?? "",
             });
             setPoll({
               enabled: !!savedPoll.enabled,
               interval_secs: savedPoll.interval_secs || 60,
             });
-            setSavedHint("Saved. Forge, beads sync, and poll settings update board state.");
+            setSavedHint("Saved. Forge and poll settings update board state.");
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));
