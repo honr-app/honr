@@ -713,6 +713,8 @@ assert(settingsHtml.includes("data-testid=\"settings-nav-openshell\""), "Setting
 assert(settingsHtml.includes("data-testid=\"openshell-panel\""), "Default section is OpenShell");
 assert(settingsHtml.includes("data-testid=\"openshell-profiles\""), "OpenShell hosts Profiles band");
 assert(settingsHtml.includes("data-testid=\"sandboxes-panel\""), "Profiles band keeps sandboxes panel testid");
+assert(settingsHtml.includes("data-testid=\"openshell-connectivity\""), "OpenShell hosts Connectivity band");
+assert(settingsHtml.includes("Connectivity"), "Settings OpenShell names Connectivity");
 assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Forge (workspace id)");
 assert(settingsHtml.includes("OpenShell"), "Settings should include OpenShell section");
@@ -770,13 +772,25 @@ const openshellHtml = renderToString(
   }),
 );
 assert(openshellHtml.includes("data-testid=\"openshell-panel\""), "OpenShell panel should render");
+assert(openshellHtml.includes("data-testid=\"openshell-connectivity\""), "Connectivity band wrapper");
+assert(
+  openshellHtml.includes(">Connectivity<") || openshellHtml.includes("Connectivity</h3>"),
+  "Connectivity heading",
+);
 assert(openshellHtml.includes("data-testid=\"openshell-health\""), "OpenShell health block");
 assert(openshellHtml.includes("Healthy"), "OpenShell healthy label");
 assert(openshellHtml.includes("data-testid=\"openshell-health-summary\""), "OpenShell status summary");
 assert(openshellHtml.includes("data-testid=\"openshell-field-endpoint\""), "OpenShell gateway endpoint field");
 assert(openshellHtml.includes("data-testid=\"openshell-field-ca\""), "OpenShell CA PEM field");
 assert(!openshellHtml.includes("data-testid=\"openshell-field-binary\""), "OpenShell must not expose CLI binary path");
+assert(!openshellHtml.includes("openshell-health-bin"), "Legacy binary health CSS class removed");
 assert(openshellHtml.includes("data-testid=\"openshell-cockpit-hint\""), "OpenShell host setup hint");
+assert(
+  openshellHtml.includes("Connectivity") &&
+    openshellHtml.includes("Providers") &&
+    openshellHtml.includes("Profiles"),
+  "OpenShell intro names Connectivity / Providers / Profiles",
+);
 
 const openshellUnhealthyHtml = renderToString(
   React.createElement(OpenShellPanelView, {
@@ -826,6 +840,10 @@ const openshellProvidersHtml = renderToString(
   }),
 );
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers\""), "Providers band renders");
+assert(
+  openshellProvidersHtml.includes(">Providers<") || openshellProvidersHtml.includes("Providers</h3>"),
+  "Providers heading",
+);
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-provider-gh-clankr\""), "Provider row renders");
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers-sync\""), "Sync all control");
 assert(!openshellProvidersHtml.includes("openshell-providers-import-adc"), "Import ADC control removed");
@@ -834,6 +852,10 @@ assert(!openshellProvidersHtml.includes("sk-"), "Providers view must not echo se
 assert(
   openshellProvidersHtml.includes("Settings → GitHub App"),
   "Providers intro points at GitHub App for tokens",
+);
+assert(
+  openshellProvidersHtml.includes("Attach on create"),
+  "Providers use Attach on create copy (not Sandboxes leftover)",
 );
 
 const openshellManagedGithubHtml = renderToString(
@@ -921,7 +943,11 @@ const openshellWithBandsHtml = renderToString(
 );
 assert(openshellWithBandsHtml.includes("data-testid=\"openshell-providers-slot\""), "OpenShell panel hosts providers band");
 assert(openshellWithBandsHtml.includes("data-testid=\"openshell-profiles-slot\""), "OpenShell panel hosts profiles band");
-assert(openshellWithBandsHtml.includes("providers → profiles"), "OpenShell hint mentions providers then profiles");
+assert(openshellWithBandsHtml.includes("data-testid=\"openshell-connectivity\""), "OpenShell panel hosts connectivity band");
+assert(
+  openshellWithBandsHtml.includes("Providers → Profiles"),
+  "OpenShell hint mentions Providers then Profiles",
+);
 
 const workspaceHtml = renderToString(
   React.createElement(WorkspacePanelView, {

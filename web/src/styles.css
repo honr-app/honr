@@ -692,6 +692,24 @@ main.with-side-panes {
   white-space: pre-wrap;
 }
 
+.openshell-band {
+  margin: 20px 0 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.openshell-connectivity {
+  margin-top: 12px;
+  padding-top: 0;
+  border-top: none;
+}
+.openshell-band-head {
+  margin-bottom: 10px;
+}
+.openshell-band-head h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
 .openshell-health {
   margin-bottom: 16px;
   padding: 12px 14px;
@@ -709,7 +727,6 @@ main.with-side-panes {
 .openshell-health-ok { color: var(--ok, #2a7a4b); }
 .openshell-health-bad { color: var(--err, #b33); }
 .openshell-health-missing { color: var(--warn, #a67c00); }
-.openshell-health-bin { margin: 0 0 8px; font-size: 12px; }
 .openshell-health-summary {
   margin: 0 0 12px;
   padding: 8px 10px;
@@ -725,14 +742,6 @@ main.with-side-panes {
   background: var(--panel);
 }
 
-.openshell-providers {
-  margin: 20px 0 8px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
-}
-.openshell-providers-head {
-  margin-bottom: 10px;
-}
 .openshell-providers-head h3 {
   margin: 0 0 4px;
   font-size: 15px;
@@ -770,11 +779,6 @@ main.with-side-panes {
   margin-top: 8px;
 }
 
-.openshell-profiles {
-  margin: 20px 0 8px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
-}
 .openshell-profiles h3 {
   margin: 0 0 4px;
   font-size: 15px;
