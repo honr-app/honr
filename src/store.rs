@@ -298,9 +298,6 @@ pub struct ClaimGrant {
     /// so sandboxed agents never need `bd show` for description context.
     pub intent: String,
     pub definition_of_done: Option<String>,
-    /// Canonical beads hash id when mirrored (e.g. `honr-a1b2`).
-    /// Host/MCP only — not emitted in sandbox briefings.
-    pub beads_id: Option<String>,
     /// Containing Project title (when this card is a Task).
     pub project_title: Option<String>,
     /// Project standing instructions (`project_prompt`).
@@ -374,18 +371,13 @@ pub struct Board {
     buffer_capacity: usize,
     dirty: AtomicBool,
     pub schema: Schema,
-    /// Legacy JSON path: import source when the DB is empty; also beads co-locate.
+    /// Legacy JSON path: import source when the DB is empty.
     /// When [`Self::store`] is set, flush no longer rewrites this file.
     path: PathBuf,
     /// SQLite or Postgres row store. `None` in unit tests that stay in-memory/JSON.
     store: Option<Arc<DurableBoardStore>>,
     started_at: DateTime<Utc>,
-    pub beads: Option<crate::beads::BeadsClient>,
     pub openshell: Option<crate::openshell::OpenShell>,
-    in_flight_github_pushes: Mutex<
-        std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>,
-    >,
-    pushed_beads_ids: RwLock<std::collections::HashSet<String>>,
     /// Last minted installation-token expiry (in-process; not durable).
     github_app_token_cache: Mutex<crate::github_app::TokenCache>,
 }
@@ -443,32 +435,6 @@ pub fn parse_github_pr_url(url: &str) -> Option<(String, u64)> {
 impl Board {
     pub fn new(schema: Schema, path: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(1024);
-        // Co-locate beads with the board file when possible. Prefer an absolute
-        // beads dir so `bd`'s current_dir is never the empty relative parent of
-        // `.beads` (that used to make every `bd` spawn fail with ENOENT).
-        // Production always co-locates beads with the board file. Under `cargo test`
-        // leave beads detached by default — attaching a shared beads dir across
-        // parallel Board::new callers races heal/mirror. Beads-focused tests
-        // attach an isolated client explicitly.
-        let beads = if cfg!(test) {
-            None
-        } else {
-            let beads_dir = {
-                let raw = path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .map(|p| p.join(".beads"))
-                    .unwrap_or_else(|| PathBuf::from(".beads"));
-                if raw.is_absolute() {
-                    raw
-                } else {
-                    std::env::current_dir()
-                        .map(|cwd| cwd.join(&raw))
-                        .unwrap_or(raw)
-                }
-            };
-            Some(crate::beads::BeadsClient::new(beads_dir))
-        };
         Self {
             state: RwLock::new(BoardState { next_id: 1, ..Default::default() }),
             tx,
@@ -480,11 +446,8 @@ impl Board {
             path,
             store: None,
             started_at: Utc::now(),
-            beads,
             // None → build from Settings (endpoint + sealed mTLS). Tests inject mocks.
             openshell: None,
-            in_flight_github_pushes: Mutex::new(std::collections::HashMap::new()),
-            pushed_beads_ids: RwLock::new(std::collections::HashSet::new()),
             github_app_token_cache: Mutex::new(crate::github_app::TokenCache::default()),
         }
     }
@@ -495,7 +458,7 @@ impl Board {
         self
     }
 
-    /// Apply legacy renames / beads placeholders. Returns whether the state was mutated.
+    /// Apply legacy renames on load. Returns whether the state was mutated.
     fn heal_loaded_state(state: &mut BoardState) -> (usize, usize) {
         let mut healed = 0usize;
         let mut renamed = 0usize;
@@ -515,11 +478,8 @@ impl Board {
                 renamed += 1;
             }
         }
-        for (id, item) in state.items.iter_mut() {
+        for item in state.items.values_mut() {
             item.migrate_legacy_pr_url();
-            if item.beads_id.is_none() {
-                item.beads_id = Some(format!("bd-honr-{id}"));
-            }
             // A brief experiment left Initial plan in Shaping; restore
             // them to Backlog so dedicated planning agents can claim.
             if item.is_initial_plan_task() && item.state == State::Shaping {
@@ -577,7 +537,6 @@ impl Board {
             tracing::info!("seeded agent runtime from execution.agents");
             board.flush();
         }
-        board.sync_beads_github_repository();
         board
     }
 
@@ -634,7 +593,6 @@ impl Board {
             tracing::info!("seeded agent runtime from execution.agents");
             board.flush();
         }
-        board.sync_beads_github_repository();
         Ok(board)
     }
 
@@ -1011,63 +969,6 @@ impl Board {
             }
         }
 
-        if to == State::Done || to == State::Retired {
-            let beads = self.beads.clone();
-            let beads_id = item.beads_id.clone();
-            let is_initial = item.is_initial_plan_task();
-            let has_gh_url = item.github_issue_url.is_some();
-            let reason_str = item
-                .history
-                .last()
-                .and_then(|h| h.reason.clone())
-                .unwrap_or_else(|| format!("Marked {to:?}"));
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    if let (Some(ref b), Some(ref bid)) = (&beads, &beads_id) {
-                        if crate::beads::BeadsClient::is_real_id(bid) {
-                            let _ = b.close(bid, Some(&reason_str)).await;
-                            let has_beads_gh_url = if is_initial && !has_gh_url {
-                                b.show(bid).await.ok().and_then(|s| s.github_issue_url()).is_some()
-                            } else {
-                                false
-                            };
-                            if !is_initial || has_gh_url || has_beads_gh_url {
-                                let _ = b.github_push(std::slice::from_ref(bid)).await;
-                            }
-                            b.schedule_dolt_push();
-                        }
-                    }
-                    if let Some(ref b) = beads {
-                        let _ = b.close_completed_epics().await;
-                    }
-                });
-            }
-        } else if to == State::Backlog {
-            // Only reopen when leaving an agent-held state. Shaping→Backlog (seed /
-            // approve) must not race a later Done→close with a late `open`.
-            let from = item.history.last().map(|h| h.from);
-            if matches!(
-                from,
-                Some(State::Claimed | State::Running | State::NeedsHuman)
-            ) {
-                if let (Some(beads), Some(bid)) = (self.beads.clone(), item.beads_id.clone()) {
-                    if crate::beads::BeadsClient::is_real_id(&bid) {
-                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                            handle.spawn(async move {
-                                if let Err(e) = beads.set_status(&bid, "open").await {
-                                    tracing::warn!(
-                                        %bid,
-                                        error = %e,
-                                        "beads reopen on Backlog failed"
-                                    );
-                                }
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
         // Re-read after Done-side materialize so callers see stamped item_ids.
         Ok(self.get(id).unwrap_or(item))
     }
@@ -1075,10 +976,6 @@ impl Board {
     /// Create a Project (root) or a Task under a Project. Tasks are flat —
     /// nesting under another Task is refused.
     ///
-    /// Beads dual-write is **asynchronous**: cards keep a `bd-honr-*`
-    /// placeholder until [`Self::schedule_beads_mirror`] /
-    /// [`Self::heal_placeholder_beads_ids`] bind a real id. Approve/materialize
-    /// must not wait on `bd create` or an in-flight `bd dolt push`.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -1116,8 +1013,6 @@ impl Board {
             item.origin = origin;
             item.above_line = above_line;
             item.capability = capability;
-            // Placeholder until async mirror / heal binds a real beads hash.
-            item.beads_id = Some(format!("bd-honr-{id}"));
             item.level = if parent.is_none() {
                 self.schema
                     .project_level()
@@ -1387,428 +1282,10 @@ impl Board {
         Ok(published)
     }
 
-    pub fn is_beads_id_pushed(&self, beads_id: &str) -> bool {
-        self.pushed_beads_ids.read().contains(beads_id)
-    }
-
-    pub fn mark_beads_id_pushed(&self, beads_id: &str) {
-        self.pushed_beads_ids
-            .write()
-            .insert(beads_id.to_string());
-    }
-
-    fn cleanup_in_flight_lock(&self, beads_id: &str, lock: &Arc<tokio::sync::Mutex<()>>) {
-        let mut map = self.in_flight_github_pushes.lock();
-        if Arc::strong_count(lock) <= 2 {
-            map.remove(beads_id);
-        }
-    }
-
-    /// Push a single beads item to GitHub, single-flighted per `beads_id`.
-    /// Concurrent callers for the same `beads_id` await the in-flight push,
-    /// and no-op once the push has completed or `github_issue_url` exists.
-    pub async fn push_beads_item_single_flight(self: &Arc<Self>, id: ItemId, beads_id: &str) {
-        if !crate::beads::BeadsClient::is_real_id(beads_id) {
-            return;
-        }
-        if let Some(item) = self.get(id) {
-            if item.is_initial_plan_task() {
-                return;
-            }
-        }
-        let Some(beads) = self.beads.clone() else {
-            return;
-        };
-
-        if self.is_beads_id_pushed(beads_id) {
-            return;
-        }
-        if self.get(id).and_then(|i| i.github_issue_url.clone()).is_some() {
-            self.mark_beads_id_pushed(beads_id);
-            return;
-        }
-        if self.refresh_github_issue_url(id, beads_id).await {
-            self.mark_beads_id_pushed(beads_id);
-            return;
-        }
-
-        let lock = {
-            let mut map = self.in_flight_github_pushes.lock();
-            map.entry(beads_id.to_string()).or_default().clone()
-        };
-
-        let _guard = lock.lock().await;
-
-        if self.is_beads_id_pushed(beads_id) {
-            self.cleanup_in_flight_lock(beads_id, &lock);
-            return;
-        }
-        if self.get(id).and_then(|i| i.github_issue_url.clone()).is_some() {
-            self.mark_beads_id_pushed(beads_id);
-            self.cleanup_in_flight_lock(beads_id, &lock);
-            return;
-        }
-        if self.refresh_github_issue_url(id, beads_id).await {
-            self.mark_beads_id_pushed(beads_id);
-            self.cleanup_in_flight_lock(beads_id, &lock);
-            return;
-        }
-
-        match beads.github_push(std::slice::from_ref(&beads_id.to_string())).await {
-            Ok(()) => {
-                self.mark_beads_id_pushed(beads_id);
-                beads.schedule_dolt_push();
-                self.refresh_github_issue_url(id, beads_id).await;
-            }
-            Err(e) => {
-                tracing::warn!(id, beads_id, error = %e, "beads github push failed in single_flight");
-            }
-        }
-
-        self.cleanup_in_flight_lock(beads_id, &lock);
-    }
-
-    /// Dual-write a single board item into beads (Project→epic, Task→task with `--parent`).
-    /// If successful, stores the real hash id, then pushes **that** bead to GitHub
-    /// (`bd github push <id>`) without blocking other mirrors on the push.
-    ///
-    /// Tasks push their Project epic first so GitHub can attach child Issues.
-    pub async fn mirror_beads_item(self: &Arc<Self>, id: ItemId) {
-        let Some(beads_id) = self.mirror_beads_item_local(id).await else {
-            return;
-        };
-        let parent = self.get(id).and_then(|i| i.parent);
-        // Epic before Task — GH sub-issues need the parent Issue to exist.
-        if let Some(pid) = parent {
-            if let Some(p) = self.get(pid) {
-                if let Some(pbid) = p
-                    .beads_id
-                    .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-                {
-                    self.push_beads_item_single_flight(pid, &pbid).await;
-                }
-            }
-        }
-        self.push_beads_item_single_flight(id, &beads_id).await;
-    }
-
-    /// Create/link the beads issue and store `beads_id`, without talking to GitHub.
-    /// No-ops (returns existing id) when the card already has a real beads id.
-    async fn mirror_beads_item_local(self: &Arc<Self>, id: ItemId) -> Option<String> {
-        let item = self.get(id)?;
-        if item.state == State::Retired {
-            return None;
-        }
-        if let Some(bid) = item
-            .beads_id
-            .as_deref()
-            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-        {
-            return Some(bid.to_string());
-        }
-        let beads = self.beads.clone()?;
-        let title = item.title.clone();
-        let intent = item.intent.clone();
-        let is_project = item.parent.is_none();
-        let parent_beads = item
-            .parent
-            .and_then(|pid| self.get(pid).and_then(|p| p.beads_id))
-            .filter(|bid| crate::beads::BeadsClient::is_real_id(bid));
-        let blockers: Vec<String> = item
-            .blocked_by
-            .iter()
-            .filter_map(|bid| self.get(*bid).and_then(|b| b.beads_id))
-            .filter(|bid| crate::beads::BeadsClient::is_real_id(bid))
-            .collect();
-
-        let issue_type = if is_project { "epic" } else { "task" };
-        let parent = parent_beads.as_deref();
-        let meta = crate::beads::BeadsClient::honr_metadata(id, item.pr_url());
-
-        match beads
-            .create_linked(
-                &title,
-                2,
-                issue_type,
-                Some(&intent),
-                parent,
-                &blockers,
-                Some(&meta),
-            )
-            .await
-        {
-            Ok(issue) => {
-                self.set_beads_id(id, &issue.id);
-                if crate::beads::BeadsClient::is_real_id(&issue.id) {
-                    Some(issue.id)
-                } else {
-                    None
-                }
-            }
-            Err(e) => {
-                tracing::warn!(id, error = %e, "beads mirror create failed");
-                None
-            }
-        }
-    }
-
-    /// Copy `external_ref` / issue URL from beads onto the board card.
-    /// Returns true when `github_issue_url` was set.
-    async fn refresh_github_issue_url(self: &Arc<Self>, id: ItemId, beads_id: &str) -> bool {
-        let Some(beads) = self.beads.clone() else {
-            return false;
-        };
-        match beads.show(beads_id).await {
-            Ok(show_issue) => {
-                let repo = self.beads_github_repository();
-                if let Some(url) = show_issue.github_issue_url_for_repo(repo.as_deref()) {
-                    self.set_github_issue_url(id, &url);
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    id,
-                    beads_id,
-                    error = %e,
-                    "beads show for github_issue_url failed"
-                );
-                false
-            }
-        }
-    }
-
-    /// Dual-write a board item into beads (Project→epic, Task→task with `--parent`).
-    /// Call after `create` when you hold a `SharedBoard` so the real hash id can be stored.
-    pub fn schedule_beads_mirror(self: &Arc<Self>, id: ItemId) {
-        let board = Arc::clone(self);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                board.mirror_beads_item(id).await;
-            });
-        }
-    }
-
-    /// Mirror many cards after Approve/materialize: suppress dolt push for the
-    /// storm, bind real beads ids (parents before children), then write deps.
-    /// Returns immediately — work runs on the runtime; operator must not wait.
-    pub fn schedule_beads_mirror_batch(self: &Arc<Self>, ids: &[ItemId]) {
-        if ids.is_empty() {
-            return;
-        }
-        let board = Arc::clone(self);
-        let mut ids = ids.to_vec();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                if let Some(beads) = board.beads.clone() {
-                    beads.begin_create_storm();
-                }
-                // Projects / lower ids first so `--parent` and blocker deps resolve.
-                ids.sort_by_key(|id| {
-                    let is_task = board.get(*id).is_some_and(|i| i.parent.is_some());
-                    (is_task, *id)
-                });
-                for id in &ids {
-                    if let Some(pid) = board.get(*id).and_then(|i| i.parent) {
-                        board.mirror_beads_item(pid).await;
-                    }
-                    board.mirror_beads_item(*id).await;
-                }
-                for id in &ids {
-                    board.sync_beads_blocked_by(*id).await;
-                }
-                if let Some(beads) = board.beads.clone() {
-                    beads.end_create_storm();
-                }
-            });
-        }
-    }
-
-    /// Write board `blocked_by` edges into beads once both sides have real ids.
-    async fn sync_beads_blocked_by(self: &Arc<Self>, id: ItemId) {
-        let Some(beads) = self.beads.clone() else {
-            return;
-        };
-        let Some(item) = self.get(id) else {
-            return;
-        };
-        let Some(bid) = item
-            .beads_id
-            .as_deref()
-            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-            .map(str::to_string)
-        else {
-            return;
-        };
-        let deps: Vec<String> = item
-            .blocked_by
-            .iter()
-            .filter_map(|b| self.get(*b).and_then(|w| w.beads_id))
-            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-            .collect();
-        for dep in deps {
-            if let Err(e) = beads.dep_add(&bid, &dep, "blocks").await {
-                tracing::warn!(%bid, %dep, error = %e, "beads dep sync failed");
-            }
-        }
-    }
-
-    /// For non-retired cards that already have a real beads id but no
-    /// `github_issue_url`, copy the URL from beads (push first if needed).
-    ///
-    /// Covers the gap heal used to leave: beads_id assigned without URL, then
-    /// skipped forever because it was no longer a placeholder.
-    pub async fn backfill_missing_github_issue_urls(self: &Arc<Self>) -> usize {
-        let missing: Vec<(ItemId, String)> = {
-            let s = self.state.read();
-            let mut missing = Vec::new();
-            for (id, item) in s.items.iter() {
-                if item.state == State::Retired || item.is_initial_plan_task() {
-                    continue;
-                }
-                if item.github_issue_url.is_some() {
-                    continue;
-                }
-                if let Some(bid) = item
-                    .beads_id
-                    .as_deref()
-                    .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-                {
-                    missing.push((*id, bid.to_string()));
-                }
-            }
-            missing.sort_by_key(|(id, _)| *id);
-            missing
-        };
-        if missing.is_empty() {
-            return 0;
-        }
-        if self.beads.is_none() {
-            return 0;
-        }
-
-        let mut need_push: Vec<(ItemId, String)> = Vec::new();
-        let mut filled = 0usize;
-        for (id, beads_id) in &missing {
-            if self.refresh_github_issue_url(*id, beads_id).await {
-                filled += 1;
-            } else {
-                need_push.push((*id, beads_id.clone()));
-            }
-        }
-        if !need_push.is_empty() {
-            for (id, beads_id) in &need_push {
-                self.push_beads_item_single_flight(*id, beads_id).await;
-                if self.get(*id).and_then(|i| i.github_issue_url).is_some() {
-                    filled += 1;
-                }
-            }
-        }
-        if filled > 0 {
-            tracing::info!("backfilled {filled} missing github_issue_url(s)");
-        }
-        filled
-    }
-
-    /// Re-run the create+sync mirror for open (non-retired) cards carrying placeholder beads_ids.
-    /// Projects are mirrored before Tasks so children receive real parent beads_ids.
-    /// Also backfills missing `github_issue_url` on cards that already have real beads ids.
-    pub async fn heal_placeholder_beads_ids(self: &Arc<Self>) -> usize {
-        let (projects, tasks) = {
-            let s = self.state.read();
-            let mut projects = Vec::new();
-            let mut tasks = Vec::new();
-            for (id, item) in s.items.iter() {
-                if item.state == State::Retired {
-                    continue;
-                }
-                let is_placeholder = item
-                    .beads_id
-                    .as_deref()
-                    .is_none_or(|bid| !crate::beads::BeadsClient::is_real_id(bid));
-                if is_placeholder {
-                    if item.parent.is_none() {
-                        projects.push(*id);
-                    } else {
-                        tasks.push(*id);
-                    }
-                }
-            }
-            projects.sort();
-            tasks.sort();
-            (projects, tasks)
-        };
-
-        // Local creates first (projects before tasks), then single-flight GitHub push per card
-        let mut created: Vec<(ItemId, String)> = Vec::new();
-        for id in projects.into_iter().chain(tasks) {
-            if let Some(beads_id) = self.mirror_beads_item_local(id).await {
-                created.push((id, beads_id));
-            }
-        }
-        if !created.is_empty() {
-            for (id, beads_id) in &created {
-                self.push_beads_item_single_flight(*id, beads_id).await;
-            }
-            // Deps may have been set on the board while ids were still placeholders.
-            for (id, _) in &created {
-                self.sync_beads_blocked_by(*id).await;
-            }
-            let healed = created.len();
-            tracing::info!("healed {healed} placeholder beads_id(s) with real beads IDs");
-        }
-
-        // Always run: real beads_id + missing URL is a separate failure mode from placeholders.
-        self.backfill_missing_github_issue_urls().await;
-        let healed_epics = self.heal_completed_epics().await;
-        if healed_epics > 0 {
-            tracing::info!("healed {healed_epics} completed epic(s)");
-        }
-        created.len()
-    }
-
-    /// Close open epics in beads whose children are all completed or superseded,
-    /// and transition matching board Project cards to Done.
+    /// Transition board Project cards to Done when all child tasks are completed or superseded.
     pub async fn heal_completed_epics(self: &Arc<Self>) -> usize {
         let mut healed = 0usize;
 
-        // 1. Heal beads graph
-        if let Some(ref beads) = self.beads {
-            if let Ok(closed_bids) = beads.close_completed_epics().await {
-                healed += closed_bids.len();
-                // Mark matching board Project cards as Done
-                for bid in &closed_bids {
-                    let matching_ids: Vec<(ItemId, State)> = {
-                        let s = self.state.read();
-                        s.items
-                            .values()
-                            .filter(|i| {
-                                i.parent.is_none()
-                                    && i.state != State::Done
-                                    && i.state != State::Retired
-                                    && i.beads_id.as_deref() == Some(bid.as_str())
-                            })
-                            .map(|i| (i.id, i.state))
-                            .collect()
-                    };
-                    for (pid, state) in matching_ids {
-                        if state == State::Draft {
-                            let _ = self.transition(pid, State::Shaping, "beads-epic-hygiene", None);
-                        }
-                        let _ = self.transition(
-                            pid,
-                            State::Done,
-                            "beads-epic-hygiene",
-                            Some("All children completed or superseded".into()),
-                        );
-                    }
-                }
-            }
-        }
-
-        // 2. Heal board projects whose child tasks on the board are all Done or Retired
         let project_ids: Vec<(ItemId, State)> = {
             let s = self.state.read();
             s.items
@@ -1848,32 +1325,6 @@ impl Board {
         healed
     }
 
-    pub fn set_beads_id(&self, id: ItemId, beads_id: &str) {
-        let item = {
-            let mut s = self.state.write();
-            let Some(it) = s.items.get_mut(&id) else { return };
-            it.beads_id = Some(beads_id.to_string());
-            it.clone()
-        };
-        self.emit(&item);
-    }
-
-    pub fn set_github_issue_url(&self, id: ItemId, url: &str) {
-        let item = {
-            let mut s = self.state.write();
-            let Some(it) = s.items.get_mut(&id) else { return };
-            it.github_issue_url = Some(url.to_string());
-            it.clone()
-        };
-        self.emit(&item);
-    }
-
-    /// A run died without producing work. Requeue while there are attempts left,
-    /// then hand it to a human.
-    ///
-    /// Early failures (sandbox won't start, clone rejected) otherwise requeue
-    /// every lease period forever. Same idea as a CI retry budget: fail a few
-    /// times, then escalate.
     pub fn record_run_failure(
         &self,
         id: ItemId,
@@ -2031,22 +1482,6 @@ impl Board {
             it.clone()
         };
         self.emit(&item);
-
-        if let (Some(beads), Some(bid)) = (self.beads.clone(), item.beads_id.clone()) {
-            if crate::beads::BeadsClient::is_real_id(&bid) {
-                let meta = crate::beads::BeadsClient::honr_metadata(id, item.pr_url());
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(async move {
-                        if let Err(e) = beads
-                            .update_fields(&bid, None, None, Some(&meta))
-                            .await
-                        {
-                            tracing::warn!(%bid, error = %e, "beads pull_request metadata sync failed");
-                        }
-                    });
-                }
-            }
-        }
     }
 
     /// Test helper: write the unused `WorkItem.repo` field for DB round-trips.
@@ -2112,27 +1547,6 @@ impl Board {
             it.clone()
         };
         self.emit(&item);
-
-        // Mirror blocks edges into beads when both sides have real hash ids.
-        if let (Some(beads), Some(bid)) = (self.beads.clone(), item.beads_id.clone()) {
-            let deps: Vec<String> = item
-                .blocked_by
-                .iter()
-                .filter_map(|b| self.get(*b).and_then(|w| w.beads_id))
-                .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-                .collect();
-            if crate::beads::BeadsClient::is_real_id(&bid) && !deps.is_empty() {
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(async move {
-                        for dep in deps {
-                            if let Err(e) = beads.dep_add(&bid, &dep, "blocks").await {
-                                tracing::warn!(%bid, %dep, error = %e, "beads dep sync failed");
-                            }
-                        }
-                    });
-                }
-            }
-        }
     }
 
     /// Tweak an item's title, intent, definition of done, engine, or project prompt.
@@ -2184,23 +1598,6 @@ impl Board {
             it.clone()
         };
         self.emit(&item);
-
-        if let (Some(beads), Some(bid)) = (self.beads.clone(), item.beads_id.clone()) {
-            if crate::beads::BeadsClient::is_real_id(&bid) {
-                let title = item.title.clone();
-                let intent = item.intent.clone();
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(async move {
-                        if let Err(e) = beads
-                            .update_fields(&bid, Some(&title), Some(&intent), None)
-                            .await
-                        {
-                            tracing::warn!(%bid, error = %e, "beads title/intent sync failed");
-                        }
-                    });
-                }
-            }
-        }
         Ok(item)
     }
 
@@ -2253,34 +1650,20 @@ impl Board {
 
     // ------------------------------------------------ workspace binding (board state)
 
-    /// Seed Forge binding (beads sync) from env / yaml when unbound.
+    /// Seed Forge binding when unbound.
     /// Work remotes come from yaml `execution.agents.repo` and card `pull_request`.
     pub fn seed_workspace_binding_if_empty(&self) -> bool {
         self.seed_workspace_binding_from(&self.schema.execution.agents)
     }
 
     /// Same as [`Self::seed_workspace_binding_if_empty`] with an explicit AgentConfig.
-    pub fn seed_workspace_binding_from(&self, agents: &AgentConfig) -> bool {
+    pub fn seed_workspace_binding_from(&self, _agents: &AgentConfig) -> bool {
         let mut s = self.state.write();
-        if s.workspace.as_ref().is_some_and(|w| w.has_beads_sync()) {
+        if s.workspace.is_some() {
             return false;
         }
-        let mut beads = std::env::var("GITHUB_REPOSITORY")
-            .ok()
-            .map(|r| r.trim().to_string())
-            .filter(|r| !r.is_empty());
-        if beads.is_none() {
-            let up = agents.repo.upstream.trim();
-            if !up.is_empty() {
-                beads = Some(up.to_string());
-            }
-        }
-        let Some(beads_sync_repo) = beads else {
-            return false;
-        };
         s.workspace = Some(WorkspaceBinding {
             forge: "github".into(),
-            beads_sync_repo: Some(beads_sync_repo),
         });
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
@@ -2291,8 +1674,7 @@ impl Board {
         self.state.read().workspace.clone()
     }
 
-    /// Replace the durable Forge binding (provider + beads sync). REST:
-    /// `GET`/`PUT /api/workspace` (Settings → Forge).
+    /// Replace the durable Forge binding. REST: `GET`/`PUT /api/workspace` (Settings → Forge).
     pub fn set_workspace_binding(&self, binding: WorkspaceBinding) -> Result<WorkspaceBinding, String> {
         let forge = binding.forge.trim();
         if forge.is_empty() {
@@ -2305,17 +1687,12 @@ impl Board {
         }
         let stored = WorkspaceBinding {
             forge: forge.to_string(),
-            beads_sync_repo: binding
-                .beads_sync_repo
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
         };
         {
             let mut s = self.state.write();
             s.workspace = Some(stored.clone());
         }
         self.dirty.store(true, Ordering::Relaxed);
-        self.sync_beads_github_repository();
         Ok(stored)
     }
 
@@ -2651,32 +2028,11 @@ impl Board {
         self.agents_with_workspace(&self.schema.execution.agents)
     }
 
-    /// Push the beads sync repo into the attached BeadsClient (if any).
-    pub fn sync_beads_github_repository(&self) {
-        let repo = self.beads_github_repository();
-        if let Some(beads) = &self.beads {
-            beads.set_github_repository(repo);
-        }
-    }
-
-    /// Effective beads Issue repo: `GITHUB_REPOSITORY` env → Settings beads
-    /// sync → yaml upstream. Never invents a default.
-    pub fn beads_github_repository(&self) -> Option<String> {
-        crate::beads::resolve_github_repository(self.configured_beads_repo().as_deref())
-    }
-
-    fn configured_beads_repo(&self) -> Option<String> {
-        if let Some(ws) = self.workspace_binding() {
-            if let Some(r) = ws.beads_repo() {
-                return Some(r);
-            }
-        }
-        // Fallback beads repo from yaml `execution.agents.repo.upstream`.
-        self.yaml_work_repo().map(|r| r.upstream)
-    }
-
-    /// Yaml `execution.agents.repo` when upstream is set (seed / beads fallback).
+    /// Yaml `execution.agents.repo` when upstream is set.
     /// Card work remotes come from [`crate::model::PullRequest`] when present.
+    /// Kept as a board read API (tests + future status overlays); not on the
+    /// live supervisor path today.
+    #[allow(dead_code)]
     pub fn yaml_work_repo(&self) -> Option<RepoConfig> {
         let yaml = &self.schema.execution.agents.repo;
         if yaml.is_complete() {
@@ -3201,25 +2557,6 @@ impl Board {
         }
     }
 
-    /// Beads "ready" tasks (`issue_type=task` only), mapped back to board items when present.
-    pub async fn list_ready_beads(&self, parent: Option<&str>) -> Result<Vec<crate::beads::BeadsIssue>, String> {
-        if let Some(b) = &self.beads {
-            b.list_ready_focused(parent).await
-        } else {
-            Err("beads client not initialized".into())
-        }
-    }
-
-    /// `sync_beads_remote` — pushes beads database state to GitHub remote (refs/dolt/data).
-    #[allow(dead_code)]
-    pub async fn sync_beads_remote(&self) -> Result<(), String> {
-        if let Some(b) = &self.beads {
-            b.sync_remote(Some("origin")).await
-        } else {
-            Err("beads client not initialized".into())
-        }
-    }
-
     /// `claim` — assigns the card and a fixed run deadline (`timeout_secs`).
     /// The deadline is not extended by heartbeats.
     pub fn claim(
@@ -3256,16 +2593,6 @@ impl Board {
         };
         self.emit(&item);
 
-        if let (Some(beads), Some(bid)) = (self.beads.clone(), item.beads_id.clone()) {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    if let Err(e) = beads.claim(&bid).await {
-                        tracing::warn!(%bid, error = %e, "beads claim sync failed");
-                    }
-                });
-            }
-        }
-
         let ctx = self.claim_plan_context(id, &item);
         let engine = Some(self.resolve_engine_for_card(id));
 
@@ -3274,7 +2601,6 @@ impl Board {
             title: item.title.clone(),
             intent: item.intent.clone(),
             definition_of_done: item.definition_of_done.clone(),
-            beads_id: item.beads_id.clone(),
             project_title: ctx.project_title,
             project_prompt: ctx.project_prompt,
             plan_summary: ctx.plan_summary,
@@ -4245,30 +3571,12 @@ facts are pasted, then unpark";
 
         for del_id in &to_delete {
             if let Some(it) = s.remove_item(*del_id) {
-                let beads = self.beads.clone();
-                let beads_id = it.beads_id.clone();
-                let is_initial = it.is_initial_plan_task();
-                let has_gh_url = it.github_issue_url.is_some();
                 let env = it.environment.clone();
                 let os = os.clone();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
                         if let Some(env_name) = env {
                             let _ = os.delete(&env_name).await;
-                        }
-                        if let (Some(b), Some(bid)) = (beads, beads_id) {
-                            if crate::beads::BeadsClient::is_real_id(&bid) {
-                                let _ = b.close(&bid, Some("Deleted from honr board")).await;
-                                let has_beads_gh_url = if is_initial && !has_gh_url {
-                                    b.show(&bid).await.ok().and_then(|s| s.github_issue_url()).is_some()
-                                } else {
-                                    false
-                                };
-                                if !is_initial || has_gh_url || has_beads_gh_url {
-                                    let _ = b.github_push(&[bid]).await;
-                                }
-                                b.schedule_dolt_push();
-                            }
                         }
                     });
                 }
@@ -4745,7 +4053,7 @@ facts are pasted, then unpark";
     }
 
     /// When a PR merges on GitHub, complete the matching Review/NeedsHuman card.
-    /// Done triggers the usual beads close + github_push (linked Issue close).
+    /// Done may materialize sibling Tasks from a frozen proposal.
     /// Returns the completed item id, or `None` if no eligible card matched.
     ///
     /// History `by` is `github-webhook` (webhook ingress). Polling uses
@@ -4993,10 +4301,7 @@ facts are pasted, then unpark";
                         .into_iter()
                         .map(|bid| {
                             if let Some(b_item) = s.items.get(&bid) {
-                                let label = match &b_item.beads_id {
-                                    Some(b) if !b.starts_with("bd-honr-") => b.clone(),
-                                    _ => format!("#{bid}"),
-                                };
+                                let label = format!("#{bid}");
                                 let title = b_item.title.trim();
                                 if title.is_empty() {
                                     label
@@ -5158,8 +4463,7 @@ mod tests {
     use super::*;
     use crate::model::{AgentRuntimeConfig, Origin};
 
-    /// Poll until `pred` succeeds. Prefer this over multi-second sleep loops —
-    /// memory beads + Capture remotes usually settle within a few yields.
+    /// Poll until `pred` succeeds. Prefer this over multi-second sleep loops.
     async fn eventually(mut pred: impl FnMut() -> bool) {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline {
@@ -5171,26 +4475,7 @@ mod tests {
         }
     }
 
-    async fn eventually_async<F, Fut>(mut pred: F)
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = bool>,
-    {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
-            if pred().await {
-                return;
-            }
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-    }
 
-    /// Capture remotes invent Issue URLs only when a repo is configured
-    /// (env / Workspace / client) — never via a Shane hardcode.
-    fn bind_test_github_repo(client: &crate::beads::BeadsClient) {
-        client.set_github_repository(Some("test-owner/test-repo".into()));
-    }
 
     /// Complete Task repo used by tests that need an Initial plan after create.
     fn test_task_repo() -> RepoConfig {
@@ -6389,137 +5674,7 @@ mod tests {
         assert!(prop.tasks.iter().all(|t| t.item_id.is_some()));
     }
 
-    #[tokio::test]
-    async fn approve_plan_materialize_skips_sync_bd_create_and_heals_async() {
-        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-materialize-async-beads-{}-{}",
-            std::process::id(),
-            tid
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
 
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::with_remotes(
-            &beads_dir,
-            crate::beads::Remotes::Capture(crate::beads::RemoteCapture::new()),
-        );
-        beads_client.init_stealth().await.expect("stealth init");
-        bind_test_github_repo(&beads_client);
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        let project = board
-            .create(
-                None,
-                "Async Materialize Project",
-                "why",
-                None,
-                Origin::Human,
-                true,
-                None,
-            )
-            .expect("project");
-        let _ = board.init_plan(project.id).expect("init_plan");
-        let _ = board.transition(project.id, State::Shaping, "t", None);
-
-        // Simulate an in-flight dolt push / create storm — request path must not wait.
-        beads_client.begin_create_storm();
-        beads_client.schedule_dolt_push();
-
-        let before_creates = beads_client.create_sync_call_count();
-        assert_eq!(
-            before_creates, 0,
-            "Board::create must not call create_linked_sync"
-        );
-
-        board
-            .propose_plan(
-                project.id,
-                "three tasks",
-                vec![
-                    PlanTaskSpec {
-                        key: "a".into(),
-                        title: "Task A".into(),
-                        intent: "ia".into(),
-                        definition_of_done: "da".into(),
-                        blocked_by_keys: vec![],
-                        capability: None,
-                        repo: None,
-                        item_id: None,
-                    },
-                    PlanTaskSpec {
-                        key: "b".into(),
-                        title: "Task B".into(),
-                        intent: "ib".into(),
-                        definition_of_done: "db".into(),
-                        blocked_by_keys: vec!["a".into()],
-                        capability: None,
-                        repo: None,
-                        item_id: None,
-                    },
-                    PlanTaskSpec {
-                        key: "c".into(),
-                        title: "Task C".into(),
-                        intent: "ic".into(),
-                        definition_of_done: "dc".into(),
-                        blocked_by_keys: vec!["b".into()],
-                        capability: None,
-                        repo: None,
-                        item_id: None,
-                    },
-                ],
-                vec![],
-            )
-            .expect("propose");
-
-        let started = std::time::Instant::now();
-        let published = board.approve_plan(project.id).expect("approve");
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(500),
-            "approve/materialize must return quickly even with dolt storm open; took {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            beads_client.create_sync_call_count(),
-            before_creates,
-            "materialize must not call create_linked_sync on the request path"
-        );
-        assert_eq!(published.len(), 3);
-
-        for &id in &published {
-            let item = board.get(id).expect("sibling");
-            assert_eq!(item.state, State::Backlog, "siblings land in Backlog, not draft");
-            assert!(
-                item.beads_id
-                    .as_deref()
-                    .is_some_and(|b| b.starts_with("bd-honr-")),
-                "siblings keep placeholders until heal/mirror, got {:?}",
-                item.beads_id
-            );
-        }
-
-        beads_client.end_create_storm();
-
-        let healed = board.heal_placeholder_beads_ids().await;
-        assert!(
-            healed >= 3,
-            "heal should bind real beads ids for materialized siblings (and project/seed); got {healed}"
-        );
-        for &id in &published {
-            let bid = board.get(id).and_then(|i| i.beads_id).expect("beads_id");
-            assert!(
-                crate::beads::BeadsClient::is_real_id(&bid),
-                "sibling #{id} should have real beads_id after heal, got {bid}"
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
 
     #[test]
     fn approve_plan_closes_initial_plan_in_review() {
@@ -7068,937 +6223,24 @@ mod tests {
         assert!((goal.progress - 1.0).abs() < f32::EPSILON);
     }
 
-    #[tokio::test]
-    async fn test_schedule_beads_mirror_invokes_github_push_on_create_and_split() {
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-store-beads-mirror-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
 
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let remote_cap = crate::beads::RemoteCapture::new();
-        let beads_client = crate::beads::BeadsClient::with_remotes(
-            &beads_dir,
-            crate::beads::Remotes::Capture(remote_cap.clone()),
-        );
-        beads_client.init_stealth().await.expect("stealth init");
-        bind_test_github_repo(&beads_client);
 
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client);
-        let board = Arc::new(board_raw);
 
-        // Create leaves placeholders; mirror binds real beads ids.
-        let project = board
-            .create(None, "Test Mirror Project", "intent", None, Origin::Human, true, None)
-            .expect("create project");
-        assert!(
-            project
-                .beads_id
-                .as_deref()
-                .is_some_and(|b| b.starts_with("bd-honr-")),
-            "create must leave a placeholder, got {:?}",
-            project.beads_id
-        );
-        board.mirror_beads_item(project.id).await;
-        assert!(
-            crate::beads::BeadsClient::is_real_id(
-                board
-                    .get(project.id)
-                    .and_then(|p| p.beads_id)
-                    .as_deref()
-                    .unwrap_or("")
-            ),
-            "mirror should assign a real beads id"
-        );
 
-        // Schedule github push / URL refresh for the epic.
-        board.schedule_beads_mirror(project.id);
 
-        let task = board
-            .create(
-                Some(project.id),
-                "Task to split",
-                "intent",
-                Some("dod".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .expect("create task");
-        board
-            .set_task_repo(task.id, Some(test_task_repo()))
-            .expect("bind task repo");
-        assert!(
-            task.beads_id
-                .as_deref()
-                .is_some_and(|b| b.starts_with("bd-honr-")),
-            "task create must leave placeholder"
-        );
-        board.mirror_beads_item(task.id).await;
-        assert!(
-            crate::beads::BeadsClient::is_real_id(
-                board
-                    .get(task.id)
-                    .and_then(|t| t.beads_id)
-                    .as_deref()
-                    .unwrap_or("")
-            ),
-            "task should have real beads id after mirror"
-        );
-        board.schedule_beads_mirror(task.id);
 
-        // Propose split → Approve creates siblings (placeholders; mirror binds).
-        let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Backlog, "test", None);
-        let _ = board.claim(task.id, "agent", None, 45);
 
-        let children = vec![
-            SplitChildSpec::new("Sibling One", "intent 1", "dod 1"),
-            SplitChildSpec::new("Sibling Two", "intent 2", "dod 2"),
-        ];
-        board
-            .propose_split(task.id, "agent", children, 5)
-            .expect("propose_split");
-        board.approve_review(task.id).expect("approve");
-        let made: Vec<_> = board
-            .children_of(project.id)
-            .into_iter()
-            .filter_map(|cid| board.get(cid))
-            .filter(|i| !i.is_initial_plan_task() && i.id != task.id)
-            .collect();
-        assert_eq!(made.len(), 2);
 
-        for m in &made {
-            assert!(
-                m.beads_id
-                    .as_deref()
-                    .is_some_and(|b| b.starts_with("bd-honr-")),
-                "split sibling #{} should start as placeholder",
-                m.id
-            );
-            board.mirror_beads_item(m.id).await;
-            assert!(
-                crate::beads::BeadsClient::is_real_id(
-                    board
-                        .get(m.id)
-                        .and_then(|i| i.beads_id)
-                        .as_deref()
-                        .unwrap_or("")
-                ),
-                "split sibling #{} should get a real beads id after mirror",
-                m.id
-            );
-            board.schedule_beads_mirror(m.id);
-        }
 
-        remote_cap
-            .wait_until(|ops| {
-                ops.iter()
-                    .any(|op| matches!(op, crate::beads::RemoteOp::GithubPush(ids) if !ids.is_empty()))
-            })
-            .await;
-        assert!(
-            remote_cap.ops().iter().any(
-                |op| matches!(op, crate::beads::RemoteOp::GithubPush(ids) if !ids.is_empty())
-            ),
-            "expected captured github_push after create/split mirrors, got {:?}",
-            remote_cap.ops()
-        );
 
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
 
-    #[tokio::test]
-    async fn done_and_retired_transitions_call_beads_close_and_sync_for_real_ids() {
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-test-beads-done-retired-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        let board_path = test_dir.join("board.json");
 
-        let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
-        beads_client.init_stealth().await.expect("init stealth");
 
-        let mut board_raw = Board::new(Schema::default(), board_path);
-        board_raw.beads = Some(beads_client.clone());
-        let b = board_raw;
 
-        let project = beads_client
-            .create_linked("Test Project", 0, "epic", None, None, &[], None)
-            .await
-            .expect("create project");
-        let task_done = beads_client
-            .create_linked("Task Done", 1, "task", None, Some(&project.id), &[], None)
-            .await
-            .expect("create task done");
-        let task_retired = beads_client
-            .create_linked("Task Retired", 1, "task", None, Some(&project.id), &[], None)
-            .await
-            .expect("create task retired");
 
-        // Create without sync (beads attached after… no — beads is attached).
-        // Overwrite with the pre-created ids so close targets are known.
-        let item1 = b
-            .create(None, "Item Done", "why", None, Origin::Human, true, None)
-            .expect("create item1");
-        let item2 = b
-            .create(None, "Item Retired", "why", None, Origin::Human, true, None)
-            .expect("create item2");
 
-        b.set_beads_id(item1.id, &task_done.id);
-        b.set_beads_id(item2.id, &task_retired.id);
 
-        let _ = b.transition(item1.id, State::Shaping, "t", None);
-        let _ = b.transition(item1.id, State::Backlog, "t", None);
-        let _ = b.transition(item1.id, State::Done, "human", Some("done".into()));
 
-        let _ = b.transition(item2.id, State::Shaping, "t", None);
-        let _ = b.transition(item2.id, State::Backlog, "t", None);
-        let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
-
-        eventually_async(|| async {
-            let done_closed = beads_client
-                .show(&task_done.id)
-                .await
-                .map(|s| s.status == "closed")
-                .unwrap_or(false);
-            let retired_closed = beads_client
-                .show(&task_retired.id)
-                .await
-                .map(|s| s.status == "closed")
-                .unwrap_or(false);
-            done_closed && retired_closed
-        })
-        .await;
-        assert_eq!(
-            beads_client.show(&task_done.id).await.unwrap().status,
-            "closed",
-            "task_done status should be closed in beads"
-        );
-        assert_eq!(
-            beads_client.show(&task_retired.id).await.unwrap().status,
-            "closed",
-            "task_retired status should be closed in beads"
-        );
-    }
-
-    #[tokio::test]
-    async fn done_and_retired_transitions_noop_for_placeholders() {
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-test-beads-placeholder-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        let board_path = test_dir.join("board.json");
-
-        let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
-        beads_client.init_stealth().await.expect("init stealth");
-
-        let mut board_raw = Board::new(Schema::default(), board_path);
-        // Attach after the cards exist so create keeps placeholders.
-        let item1 = board_raw
-            .create(None, "Placeholder Item 1", "why", None, Origin::Human, true, None)
-            .expect("create item1");
-        let item2 = board_raw
-            .create(None, "Placeholder Item 2", "why", None, Origin::Human, true, None)
-            .expect("create item2");
-        board_raw.beads = Some(beads_client.clone());
-        let b = board_raw;
-
-        let real_issue = beads_client
-            .create_linked("Real Task", 1, "task", None, None, &[], None)
-            .await
-            .expect("create real task");
-
-        assert!(item1.beads_id.as_ref().unwrap().starts_with("bd-honr-"));
-        assert!(item2.beads_id.as_ref().unwrap().starts_with("bd-honr-"));
-
-        let _ = b.transition(item1.id, State::Shaping, "t", None);
-        let _ = b.transition(item1.id, State::Backlog, "t", None);
-        let _ = b.transition(item1.id, State::Done, "human", Some("done".into()));
-
-        let _ = b.transition(item2.id, State::Shaping, "t", None);
-        let _ = b.transition(item2.id, State::Backlog, "t", None);
-        let _ = b.transition(item2.id, State::Retired, "human", Some("retired".into()));
-
-        // Placeholders must not close unrelated real beads — give the Done/Retired
-        // spawn a moment to misbehave if it would.
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        let shown_real = beads_client
-            .show(&real_issue.id)
-            .await
-            .expect("show real task");
-        assert_eq!(shown_real.status, "open");
-    }
-
-    #[tokio::test]
-    async fn test_schedule_beads_mirror_persists_github_issue_url() {
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-store-github-url-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
-
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
-        beads_client.init_stealth().await.expect("stealth init");
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        let project = board
-            .create(None, "Test URL Project", "intent", None, Origin::Human, true, None)
-            .expect("create project");
-
-        // Mirror binds a real beads id; push fills the URL.
-        board.mirror_beads_item(project.id).await;
-        board.schedule_beads_mirror(project.id);
-        let project_beads_id = board
-            .get(project.id)
-            .and_then(|p| p.beads_id)
-            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-            .expect("expected real beads_id after mirror");
-
-        for _ in 0..200 {
-            if board
-                .get(project.id)
-                .and_then(|p| p.github_issue_url)
-                .is_some()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-
-        // Override with a stable URL and refresh (exercises show → board write-through).
-        let expected_url = "https://github.com/shanemcd/honr/issues/777";
-        beads_client
-            .set_external_ref(&project_beads_id, expected_url)
-            .await
-            .expect("update external ref");
-        board
-            .refresh_github_issue_url(project.id, &project_beads_id)
-            .await;
-
-        let found_url = board.get(project.id).and_then(|p| p.github_issue_url);
-
-        assert_eq!(
-            found_url,
-            Some(expected_url.to_string()),
-            "github_issue_url should be persisted after sync/reading linked issue"
-        );
-
-        // Verify exposed on snapshot item
-        let snap = board.snapshot();
-        let item = snap.items.iter().find(|i| i.id == project.id).expect("item in snapshot");
-        assert_eq!(item.github_issue_url.as_deref(), Some(expected_url));
-    }
-
-    static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-    #[tokio::test]
-    async fn test_single_flight_github_push_prevents_duplicate_pushes() {
-        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-single-flight-test-{}-{}",
-            std::process::id(),
-            tid
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
-
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let remote_cap = crate::beads::RemoteCapture::new();
-        let beads_client = crate::beads::BeadsClient::with_remotes(
-            &beads_dir,
-            crate::beads::Remotes::Capture(remote_cap.clone()),
-        );
-        beads_client.init_stealth().await.expect("stealth init");
-        bind_test_github_repo(&beads_client);
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        let project = board
-            .create(None, "Single Flight Project", "intent", None, Origin::Human, true, None)
-            .expect("create project");
-
-        let _ = remote_cap.take();
-
-        // Concurrent mirrors: first binds + pushes; the rest single-flight / no-op.
-        let mut handles = Vec::new();
-        for _ in 0..10 {
-            let b = Arc::clone(&board);
-            let p_id = project.id;
-            handles.push(tokio::spawn(async move {
-                b.mirror_beads_item(p_id).await;
-            }));
-        }
-
-        for h in handles {
-            h.await.expect("join task");
-        }
-
-        let project_beads_id = board
-            .get(project.id)
-            .and_then(|p| p.beads_id)
-            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-            .expect("real beads_id after mirror");
-
-        let ops = remote_cap.ops();
-        let push_ops: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&project_beads_id) => {
-                    Some(ids.clone())
-                }
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            push_ops.len(),
-            1,
-            "expected exactly one GitHub push for {project_beads_id}, got {:?}",
-            push_ops
-        );
-
-        let project_item = board.get(project.id).unwrap();
-        assert!(
-            project_item.github_issue_url.is_some(),
-            "github_issue_url should be set on board"
-        );
-        let show_issue = beads_client.show(&project_beads_id).await.unwrap();
-        assert_eq!(
-            project_item.github_issue_url,
-            show_issue.github_issue_url(),
-            "board github_issue_url should match beads external_ref"
-        );
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
-
-    #[tokio::test]
-    async fn test_create_project_with_seeded_initial_plan_results_in_at_most_one_github_issue_per_beads_id() {
-        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-project-seed-single-flight-test-{}-{}",
-            std::process::id(),
-            tid
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
-
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let remote_cap = crate::beads::RemoteCapture::new();
-        let beads_client = crate::beads::BeadsClient::with_remotes(
-            &beads_dir,
-            crate::beads::Remotes::Capture(remote_cap.clone()),
-        );
-        beads_client.init_stealth().await.expect("stealth init");
-        bind_test_github_repo(&beads_client);
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        let _ = remote_cap.take();
-
-        let project = board
-            .create(None, "Seeded Project", "intent", None, Origin::Human, true, None)
-            .expect("create project");
-        let seed = board
-            .init_plan(project.id)
-            .expect("init_plan");
-        let seed_id = seed.id;
-
-        let _ = remote_cap.take();
-
-        let b1 = Arc::clone(&board);
-        let b2 = Arc::clone(&board);
-        let p_id = project.id;
-        let s_id = seed_id;
-
-        let t1 = tokio::spawn(async move {
-            b1.mirror_beads_item(p_id).await;
-        });
-        let t2 = tokio::spawn(async move {
-            b2.mirror_beads_item(s_id).await;
-        });
-
-        t1.await.unwrap();
-        t2.await.unwrap();
-
-        let project_beads_id = board
-            .get(project.id)
-            .and_then(|p| p.beads_id)
-            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-            .expect("project beads_id");
-        let seed_beads_id = board
-            .get(seed_id)
-            .and_then(|s| s.beads_id)
-            .expect("seed beads_id");
-
-        let ops = remote_cap.ops();
-
-        let project_pushes: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&project_beads_id) => {
-                    Some(ids.clone())
-                }
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            project_pushes.len(),
-            1,
-            "expected at most 1 push for project epic {project_beads_id}, got {:?}",
-            project_pushes
-        );
-
-        let seed_pushes: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&seed_beads_id) => {
-                    Some(ids.clone())
-                }
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            seed_pushes.len(),
-            0,
-            "expected 0 pushes for seed task {seed_beads_id}, got {:?}",
-            seed_pushes
-        );
-
-        let proj_item = board.get(project.id).unwrap();
-        let proj_show = beads_client.show(&project_beads_id).await.unwrap();
-        assert_eq!(
-            proj_item.github_issue_url,
-            proj_show.github_issue_url(),
-            "project board github_issue_url matches beads external_ref"
-        );
-
-        let seed_item = board.get(seed_id).unwrap();
-        assert_eq!(
-            seed_item.github_issue_url, None,
-            "seed board github_issue_url should be None"
-        );
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
-
-    #[tokio::test]
-    async fn test_skip_initial_plan_github_push() {
-        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-skip-initial-plan-gh-test-{}-{}",
-            std::process::id(),
-            tid
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
-
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let remote_cap = crate::beads::RemoteCapture::new();
-        let beads_client = crate::beads::BeadsClient::with_remotes(
-            &beads_dir,
-            crate::beads::Remotes::Capture(remote_cap.clone()),
-        );
-        beads_client.init_stealth().await.expect("stealth init");
-        bind_test_github_repo(&beads_client);
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        // 1. Create Project + init_plan (Task-scoped repo)
-        let project = board
-            .create(None, "New Project", "intent", None, Origin::Human, true, None)
-            .expect("create project");
-        let seed = board
-            .init_plan(project.id)
-            .expect("init_plan");
-        let seed_id = seed.id;
-
-        board.mirror_beads_item(project.id).await;
-        board.mirror_beads_item(seed_id).await;
-
-        let seed_item = board.get(seed_id).unwrap();
-        assert!(
-            seed_item.beads_id.is_some(),
-            "Initial plan should have beads_id"
-        );
-        assert_eq!(
-            seed_item.github_issue_url, None,
-            "Initial plan github_issue_url should be None"
-        );
-
-        let seed_beads_id = seed_item.beads_id.unwrap();
-        let ops = remote_cap.ops();
-        let seed_pushes: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&seed_beads_id) => {
-                    Some(ids.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            seed_pushes.len(),
-            0,
-            "no GH issue created/pushed for Initial plan seed"
-        );
-
-        // 2. Materialized / subsequent non-Initial plan task gets an Issue
-        let task = board
-            .create(
-                Some(project.id),
-                "Real Feature Task",
-                "intent",
-                Some("dod".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .expect("create task");
-        board.mirror_beads_item(task.id).await;
-
-        let task_item = board.get(task.id).unwrap();
-        assert!(
-            task_item.beads_id.is_some(),
-            "Feature task should have beads_id"
-        );
-        assert!(
-            task_item.github_issue_url.is_some(),
-            "Feature task should get github_issue_url"
-        );
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
-
-    #[tokio::test]
-    async fn test_heal_placeholder_beads_ids_replaces_placeholders_and_syncs() {
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-store-heal-placeholders-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
-
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
-        beads_client.init_stealth().await.expect("stealth init");
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        // 1. Create open project and task, plus a retired item
-        let project = board
-            .create(None, "Project to Heal", "intent", None, Origin::Human, true, None)
-            .expect("create project");
-        let task = board
-            .create(
-                Some(project.id),
-                "Task to Heal",
-                "intent",
-                Some("dod".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .expect("create task");
-        let retired = board
-            .create(
-                Some(project.id),
-                "Retired Card",
-                "intent",
-                Some("dod".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .expect("create retired");
-        let _ = board.transition(retired.id, State::Retired, "test", None);
-
-        // Force placeholders on open cards (+ keep retired as placeholder) so heal
-        // has work — create already leaves placeholders; overwrite for stable ids.
-        // Auto-seeded Initial plan is also open and healable.
-        let seed = board
-            .initial_plan_of(project.id)
-            .expect("auto-seeded Initial plan");
-        board.set_beads_id(project.id, "bd-honr-heal-project");
-        board.set_beads_id(task.id, "bd-honr-heal-task");
-        board.set_beads_id(seed.id, "bd-honr-heal-seed");
-        board.set_beads_id(retired.id, "bd-honr-heal-retired");
-
-        // 2. Execute heal
-        let healed_count = board.heal_placeholder_beads_ids().await;
-        assert_eq!(
-            healed_count, 3,
-            "should heal project, Initial plan, and task (not retired)"
-        );
-
-        // 3. Assert open cards have real beads IDs
-        let project_after = board.get(project.id).unwrap();
-        let task_after = board.get(task.id).unwrap();
-        let retired_after = board.get(retired.id).unwrap();
-
-        assert!(
-            crate::beads::BeadsClient::is_real_id(project_after.beads_id.as_deref().unwrap_or("")),
-            "project should have real beads ID"
-        );
-        assert!(
-            crate::beads::BeadsClient::is_real_id(task_after.beads_id.as_deref().unwrap_or("")),
-            "task should have real beads ID"
-        );
-        assert!(
-            retired_after.beads_id.as_deref().unwrap().starts_with("bd-honr-"),
-            "retired card should remain unhealed with placeholder ID"
-        );
-
-        // 4. Verify task exists in beads with open status
-        let task_beads_issue = beads_client
-            .show(task_after.beads_id.as_deref().unwrap())
-            .await
-            .expect("task in beads");
-        assert_eq!(task_beads_issue.id, task_after.beads_id.unwrap());
-        assert_eq!(task_beads_issue.status, "open");
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
-
-    #[tokio::test]
-    async fn test_heal_backfills_github_issue_url_for_real_beads_id() {
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-store-url-backfill-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
-
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::new(&beads_dir);
-        beads_client.init_stealth().await.expect("stealth init");
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        let project = board
-            .create(
-                None,
-                "URL Backfill Project",
-                "intent",
-                None,
-                Origin::Human,
-                true,
-                None,
-            )
-            .expect("create project");
-
-        // Simulate the #59 gap: real beads_id on the card, no github_issue_url.
-        let issue = beads_client
-            .create_linked(
-                "URL Backfill Project",
-                2,
-                "epic",
-                Some("intent"),
-                None,
-                &[],
-                None,
-            )
-            .await
-            .expect("create bead");
-        board.set_beads_id(project.id, &issue.id);
-        assert!(board.get(project.id).unwrap().github_issue_url.is_none());
-
-        let expected_url = "https://github.com/shanemcd/honr/issues/759";
-        beads_client
-            .set_external_ref(&issue.id, expected_url)
-            .await
-            .expect("update external ref");
-
-        // Project already has a real beads_id (the #59 gap). Heal may still
-        // create beads for the seeded Initial Plan task; the important part is
-        // backfilling this project's missing github_issue_url.
-        let _ = board.heal_placeholder_beads_ids().await;
-
-        let after = board.get(project.id).unwrap();
-        assert_eq!(after.beads_id.as_deref(), Some(issue.id.as_str()));
-        assert_eq!(after.github_issue_url.as_deref(), Some(expected_url));
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_live_e2e_beads_github_auto_sync() {
-        // SAFETY: Live remotes create real issues — point github.owner/repo at a throwaway.
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-e2e-live-sync-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
-
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let beads_client = crate::beads::BeadsClient::with_remotes(
-            &beads_dir,
-            crate::beads::Remotes::Live,
-        );
-        beads_client.init_stealth().await.expect("stealth init");
-
-        let _ = beads_client
-            .cmd()
-            .args(["rename-prefix", "honr-"])
-            .output()
-            .await;
-        let _ = beads_client
-            .cmd()
-            .args(["config", "set", "github.owner", "clankrshq"])
-            .output()
-            .await;
-        let _ = beads_client
-            .cmd()
-            .args(["config", "set", "github.repo", "honr"])
-            .output()
-            .await;
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        // 1. Create a Project
-        let project = board
-            .create(
-                None,
-                "E2E: prove beads ↔ GitHub Issues auto-sync",
-                "Project intent: Prove end-to-end auto-sync",
-                None,
-                Origin::Human,
-                true,
-                None,
-            )
-            .expect("create project");
-        board.mirror_beads_item(project.id).await;
-
-        let sync_p = beads_client
-            .cmd()
-            .args(["github", "sync", "--push-only", "-v"])
-            .output()
-            .await
-            .unwrap();
-        println!(
-            "Project sync stdout = {}",
-            String::from_utf8_lossy(&sync_p.stdout)
-        );
-        println!(
-            "Project sync stderr = {}",
-            String::from_utf8_lossy(&sync_p.stderr)
-        );
-
-        let project_bid = board.get(project.id).unwrap().beads_id.unwrap();
-        println!("Project real beads_id = {project_bid}");
-        let project_show = beads_client.show(&project_bid).await.expect("project show");
-        println!("Project show = {project_show:?}");
-        println!(
-            "Project github_issue_url() = {:?}",
-            project_show.github_issue_url()
-        );
-
-        // 2. Create a child Task under the Project
-        let task = board
-            .create(
-                Some(project.id),
-                "Verify create/close dual-writes beads + GitHub Issue",
-                "Exercise live auto-sync path",
-                Some("DOD".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .expect("create task");
-
-        board.mirror_beads_item(task.id).await;
-
-        let sync_t = beads_client
-            .cmd()
-            .args(["github", "sync", "--push-only", "-v"])
-            .output()
-            .await
-            .unwrap();
-        println!(
-            "Task sync stdout = {}",
-            String::from_utf8_lossy(&sync_t.stdout)
-        );
-        println!(
-            "Task sync stderr = {}",
-            String::from_utf8_lossy(&sync_t.stderr)
-        );
-
-        let task_item_before = board.get(task.id).expect("task item");
-        let child_beads_id = task_item_before.beads_id.expect("task beads id");
-        println!("Task beads_id = {child_beads_id}");
-
-        let sync_task = beads_client.github_sync().await;
-        println!("github_sync after task create = {sync_task:?}");
-
-        let task_show = beads_client.show(&child_beads_id).await.expect("task show");
-        println!("Task show = {task_show:?}");
-        println!(
-            "Task github_issue_url() = {:?}",
-            task_show.github_issue_url()
-        );
-
-        let task_item = board.get(task.id).expect("task item");
-        let child_github_url = task_item.github_issue_url.expect("task github issue url");
-
-        println!("E2E EVIDENCE 1: child card beads_id = {child_beads_id}");
-        println!("E2E EVIDENCE 2: github_issue_url = {child_github_url}");
-
-        // 3. Mark Task as Done
-        let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Backlog, "test", None);
-        let _ = board.claim(task.id, "agent", None, 45);
-        let _ = board.transition(task.id, State::Done, "E2E verification completed", None);
-
-        // Await beads close + github_sync directly to ensure sync finishes before checking
-        let _ = beads_client
-            .close(&child_beads_id, Some("E2E verification completed"))
-            .await;
-        let sync_res = beads_client.github_sync().await;
-        println!("E2E EVIDENCE 3: github_sync after Done result: {sync_res:?}");
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
 
     #[test]
     fn ready_column_summary_mentions_blockers_in_plain_language() {
@@ -8193,250 +6435,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn test_close_linked_github_issue_on_done_and_retired() {
-        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-close-gh-on-done-test-{}-{}",
-            std::process::id(),
-            tid
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
 
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let remote_cap = crate::beads::RemoteCapture::new();
-        let beads_client = crate::beads::BeadsClient::with_remotes(
-            &beads_dir,
-            crate::beads::Remotes::Capture(remote_cap.clone()),
-        );
-        beads_client.init_stealth().await.expect("stealth init");
-        bind_test_github_repo(&beads_client);
 
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
 
-        let project = board
-            .create(None, "Close GH Project", "intent", None, Origin::Human, true, None)
-            .expect("create project");
-        let task = board
-            .create(
-                Some(project.id),
-                "Task to Close",
-                "intent",
-                Some("dod".into()),
-                Origin::Human,
-                false,
-                None,
-            )
-            .expect("create task");
-
-        board.mirror_beads_item(project.id).await;
-        board.mirror_beads_item(task.id).await;
-
-        let task_item = board.get(task.id).unwrap();
-        let task_beads_id = task_item.beads_id.clone().unwrap();
-        assert!(task_item.github_issue_url.is_some(), "task should have github_issue_url");
-
-        let _ = remote_cap.take();
-
-        let _ = board.transition(task.id, State::Shaping, "test", None);
-        let _ = board.transition(task.id, State::Backlog, "test", None);
-        let _ = board.transition(task.id, State::Done, "human", Some("completed".into()));
-
-        remote_cap
-            .wait_until(|ops| {
-                ops.iter().any(|op| match op {
-                    crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&task_beads_id),
-                    _ => false,
-                })
-            })
-            .await;
-        eventually_async(|| async {
-            beads_client
-                .show(&task_beads_id)
-                .await
-                .map(|s| s.status == "closed")
-                .unwrap_or(false)
-        })
-        .await;
-        assert_eq!(
-            beads_client.show(&task_beads_id).await.unwrap().status,
-            "closed",
-            "expected beads task closed on Done for {task_beads_id}"
-        );
-        assert!(
-            remote_cap.ops().iter().any(|op| match op {
-                crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&task_beads_id),
-                _ => false,
-            }),
-            "expected GithubPush recorded on Done transition for task {task_beads_id}"
-        );
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
-
-    #[tokio::test]
-    async fn test_initial_plan_approve_and_done_does_not_leave_orphan_open_issues() {
-        let tid = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let test_dir = std::env::temp_dir().join(format!(
-            "honr-initial-plan-no-orphan-gh-test-{}-{}",
-            std::process::id(),
-            tid
-        ));
-        let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).unwrap();
-
-        let board_file = test_dir.join("honr.json");
-        let beads_dir = test_dir.join(".beads");
-        let remote_cap = crate::beads::RemoteCapture::new();
-        let beads_client = crate::beads::BeadsClient::with_remotes(
-            &beads_dir,
-            crate::beads::Remotes::Capture(remote_cap.clone()),
-        );
-        beads_client.init_stealth().await.expect("stealth init");
-        bind_test_github_repo(&beads_client);
-
-        let mut board_raw = Board::new(Schema::default(), board_file);
-        board_raw.beads = Some(beads_client.clone());
-        let board = Arc::new(board_raw);
-
-        let project = board
-            .create(None, "No Orphan GH Project", "intent", None, Origin::Human, true, None)
-            .expect("create project");
-        let seed = board
-            .init_plan(project.id)
-            .expect("init_plan");
-        let seed_id = seed.id;
-
-        board.mirror_beads_item(project.id).await;
-        board.mirror_beads_item(seed_id).await;
-
-        let seed_item = board.get(seed_id).unwrap();
-        let seed_beads_id = seed_item.beads_id.clone().unwrap();
-        assert_eq!(seed_item.github_issue_url, None, "seed task should have no github_issue_url");
-
-        let _ = remote_cap.take();
-
-        board
-            .propose_plan(
-                seed_id,
-                "Plan breakdown",
-                vec![
-                    PlanTaskSpec {
-                        key: "f1".into(),
-                        title: "Feature One".into(),
-                        intent: "intent 1".into(),
-                        definition_of_done: "dod 1".into(),
-                        blocked_by_keys: vec![],
-                        capability: None,
-                        repo: None,
-                        item_id: None,
-                    },
-                    PlanTaskSpec {
-                        key: "f2".into(),
-                        title: "Feature Two".into(),
-                        intent: "intent 2".into(),
-                        definition_of_done: "dod 2".into(),
-                        blocked_by_keys: vec![],
-                        capability: None,
-                        repo: None,
-                        item_id: None,
-                    },
-                ],
-                vec![],
-            )
-            .expect("propose plan on seed");
-        let done_seed = board.approve_review(seed_id).expect("approve seed review");
-        assert_eq!(done_seed.state, State::Done);
-
-        eventually_async(|| async {
-            beads_client
-                .show(&seed_beads_id)
-                .await
-                .map(|s| s.status == "closed")
-                .unwrap_or(false)
-        })
-        .await;
-        assert_eq!(
-            beads_client.show(&seed_beads_id).await.unwrap().status,
-            "closed",
-            "seed task in beads should be closed"
-        );
-
-        let ops = remote_cap.ops();
-        let seed_pushes: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                crate::beads::RemoteOp::GithubPush(ids) if ids.contains(&seed_beads_id) => {
-                    Some(ids.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(seed_pushes.len(), 0, "no GithubPush should be sent for Initial plan seed card");
-
-        let made: Vec<_> = board
-            .children_of(project.id)
-            .into_iter()
-            .filter_map(|cid| board.get(cid))
-            .filter(|i| !i.is_initial_plan_task())
-            .collect();
-        assert_eq!(made.len(), 2, "expected 2 materialized tasks");
-
-        for m in &made {
-            board.mirror_beads_item(m.id).await;
-            assert!(
-                board.get(m.id).unwrap().github_issue_url.is_some(),
-                "materialized task should get github_issue_url"
-            );
-        }
-
-        let mat_task_id = made[0].id;
-        let mat_beads_id = board
-            .get(mat_task_id)
-            .and_then(|t| t.beads_id)
-            .filter(|b| crate::beads::BeadsClient::is_real_id(b))
-            .expect("materialized task real beads_id");
-
-        let _ = remote_cap.take();
-        let _ = board.transition(mat_task_id, State::Shaping, "test", None);
-        let _ = board.transition(mat_task_id, State::Backlog, "test", None);
-        let _ = board.transition(mat_task_id, State::Done, "human", Some("done".into()));
-
-        remote_cap
-            .wait_until(|ops| {
-                ops.iter().any(|op| match op {
-                    crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&mat_beads_id),
-                    _ => false,
-                })
-            })
-            .await;
-        eventually_async(|| async {
-            beads_client
-                .show(&mat_beads_id)
-                .await
-                .map(|s| s.status == "closed")
-                .unwrap_or(false)
-        })
-        .await;
-        assert_eq!(
-            beads_client.show(&mat_beads_id).await.unwrap().status,
-            "closed",
-            "materialized task should close bead on Done"
-        );
-        assert!(
-            remote_cap.ops().iter().any(|op| match op {
-                crate::beads::RemoteOp::GithubPush(ids) => ids.contains(&mat_beads_id),
-                _ => false,
-            }),
-            "materialized task should push to GitHub on Done"
-        );
-
-        let _ = std::fs::remove_dir_all(&test_dir);
-    }
 
     #[test]
     fn approve_review_with_pr_moves_to_done() {
@@ -9246,7 +7247,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_binding_seeds_beads_from_yaml_when_unbound() {
+    fn workspace_binding_seeds_forge_from_yaml_when_unbound() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -9257,10 +7258,8 @@ mod tests {
         assert!(b.workspace_binding().is_none());
         assert!(b.seed_workspace_binding_from(&agents_with_repo()));
         let ws = b.workspace_binding().expect("seeded");
-        assert!(ws.has_beads_sync());
         assert_eq!(ws.forge, "github");
-        assert_eq!(ws.beads_repo().as_deref(), Some("acme/widgets"));
-        // Second seed is a no-op once beads sync is set.
+        // Second seed is a no-op once forge is set.
         assert!(!b.seed_workspace_binding_from(&agents_with_repo()));
         // Work remotes still come from yaml, not Settings.
         let mut schema = Schema::default();
@@ -9290,10 +7289,9 @@ mod tests {
 
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
-            beads_sync_repo: Some("acme/beads".into()),
         })
         .expect("forge binding");
-        // Settings beads does not invent work remotes.
+        // Forge binding does not invent work remotes.
         assert!(b.yaml_work_repo().is_none());
 
         let agents = AgentConfig {
@@ -9361,7 +7359,6 @@ mod tests {
         );
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
-            beads_sync_repo: Some("acme/beads".into()),
         })
         .unwrap();
 
@@ -9691,7 +7688,6 @@ mod tests {
         );
         b.set_workspace_binding(WorkspaceBinding {
             forge: "github".into(),
-            beads_sync_repo: Some("workspace/beads".into()),
         })
         .unwrap();
 
@@ -9733,50 +7729,12 @@ mod tests {
             Some(c)
         );
         assert_eq!(b.get(c).unwrap().state, State::Done);
-        // Settings beads sync was never consulted for PR completion.
-        assert_eq!(
-            b.workspace_binding().unwrap().beads_sync_repo.as_deref(),
-            Some("workspace/beads")
-        );
+        // Forge binding is independent of PR completion.
+        assert_eq!(b.workspace_binding().unwrap().forge, "github");
     }
 
-    #[test]
-    fn workspace_binding_beads_url_uses_configured_repo_not_shane_default() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-ws-beads-url-{}.json",
-                std::process::id()
-            )),
-        );
-        b.seed_workspace_binding_from(&agents_with_repo());
-        let issue = crate::beads::BeadsIssue {
-            id: "bd-1".into(),
-            title: "t".into(),
-            description: None,
-            status: "open".into(),
-            priority: 2,
-            issue_type: "task".into(),
-            owner: None,
-            created_at: None,
-            updated_at: None,
-            external_ref: Some("42".into()),
-            external_id: None,
-            issue_url: None,
-            url: None,
-            parent: None,
-        };
-        // Explicit repo argument — never invents shanemcd/honr.
-        assert_eq!(
-            issue.github_issue_url_for_repo(Some("acme/widgets")).as_deref(),
-            Some("https://github.com/acme/widgets/issues/42")
-        );
-        assert_eq!(issue.github_issue_url_for_repo(None), None);
-        // Board beads helper resolves Settings beads (seeded from yaml upstream).
-        if std::env::var("GITHUB_REPOSITORY").is_err() {
-            assert_eq!(b.beads_github_repository().as_deref(), Some("acme/widgets"));
-        }
-    }
+    
+
 
     #[test]
     fn workspace_binding_persists_in_json_roundtrip() {
@@ -9797,18 +7755,21 @@ mod tests {
         }
         let restored = Board::load_or_new(Schema::default(), path);
         let ws = restored.workspace_binding().expect("restored workspace");
-        assert_eq!(ws.beads_sync_repo.as_deref(), Some("acme/widgets"));
+        assert_eq!(ws.forge, "github");
         assert!(!restored.seed_workspace_binding_if_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn workspace_binding_legacy_json_migrates_upstream_to_beads() {
-        let raw = r#"{"forge":"github","upstream":"old/work","fork":"bot/work","base":"main"}"#;
-        let ws: WorkspaceBinding = serde_json::from_str(raw).expect("legacy");
-        assert_eq!(ws.beads_sync_repo.as_deref(), Some("old/work"));
-        assert!(serde_json::to_string(&ws).unwrap().contains("beads_sync_repo"));
-        assert!(!serde_json::to_string(&ws).unwrap().contains("\"upstream\""));
+    fn workspace_binding_legacy_json_ignores_upstream_and_beads_keys() {
+        let ws: WorkspaceBinding = serde_json::from_str(
+            r#"{"forge":"github","upstream":"old/work","beads_sync_repo":"x/y"}"#,
+        )
+        .unwrap();
+        assert_eq!(ws.forge, "github");
+        let wire = serde_json::to_value(&ws).unwrap();
+        assert!(wire.get("beads_sync_repo").is_none());
+        assert!(wire.get("upstream").is_none());
     }
 
     #[test]
@@ -9918,16 +7879,15 @@ mod tests {
         );
         assert!(b.get(project.id).unwrap().repo.is_none());
 
-        // WorkspaceBinding carries forge + beads sync.
+        // WorkspaceBinding carries forge only.
         let ws = WorkspaceBinding {
             forge: "github".into(),
-            beads_sync_repo: Some("acme/beads".into()),
         };
         let ws_wire = serde_json::to_value(&ws).unwrap();
         assert!(ws_wire.get("upstream").is_none());
         assert!(ws_wire.get("fork").is_none());
         assert!(ws_wire.get("base").is_none());
-        assert_eq!(ws_wire["beads_sync_repo"], "acme/beads");
+        assert!(ws_wire.get("beads_sync_repo").is_none());
     }
 
     #[test]

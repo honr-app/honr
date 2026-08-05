@@ -2,7 +2,6 @@
 
 mod api;
 mod auth;
-mod beads;
 mod db;
 mod events;
 mod github_app;
@@ -90,21 +89,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let exec_cfg = schema.execution.clone();
-
-    // Ensure the beads graph DB exists beside the board (identity + deps) and heal placeholders.
-    if let Some(beads) = board.beads.clone() {
-        let b = board.clone();
-        tokio::spawn(async move {
-            if let Err(e) = beads.init_stealth().await {
-                tracing::warn!("beads init: {e}");
-            }
-            b.heal_placeholder_beads_ids().await;
-            // Publish refs/dolt/data even when heal was a no-op (debounced).
-            if let Some(beads) = b.beads.clone() {
-                beads.schedule_dolt_push();
-            }
-        });
-    }
 
     // Persist on an interval rather than per mutation, so heartbeating agents
     // don't turn into a write storm. Paired with a flush on shutdown, or the

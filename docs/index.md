@@ -10,8 +10,7 @@ slugs: ready to map to a docs site later.
 | [Workflow](workflow.md) | Day-to-day: Project → plan → Approve → dispatch; Needs You / Review; park / steer / halt |
 | [Agents](agents.md) | Enabling real agents: compute driver, OpenShell, `honr.yaml` / Settings |
 | [Sandbox](sandbox.md) | How a sandboxed run works and the gotchas that matter |
-| [Architecture](architecture.md) | One page: Board / store, supervisor, MCP / REST, beads, persistence |
+| [Architecture](architecture.md) | One page: Board / store, supervisor, MCP / REST, persistence |
 | [Clone targets](task-repo-binding.md) | Clone from task prose; `pull_request` after report; Initial plan via `plan.json` |
-| [Sandbox agent surface](sandbox-without-beads.md) | Sandbox agents get briefing-only context (no host beads tooling) |
 
 Machine contracts (not prose): [`schemas/report.schema.json`](schemas/report.schema.json).

@@ -40,8 +40,8 @@ One node type, two roles:
 | **Project** | Container. Holds the Plan, optional `project_prompt`, sandbox profile override, auto-dispatch. Never sits in Backlog as claimable work. |
 | **Task** | Claimable leaf. Initial plan, implementation cards, and follow-ups are Tasks under a Project. |
 
-Task↔task links are dependency edges (via beads). The product schema is
-Project + Task.
+Task↔task links are board `blocked_by` edges. The product schema is Project +
+Task.
 
 ## Operator vs worker
 

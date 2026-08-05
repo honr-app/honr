@@ -74,8 +74,6 @@ export interface SandboxProfilesOut {
  */
 export interface WorkspaceBinding {
   forge: string;
-  /** Beads ↔ GitHub Issues sync target. */
-  beads_sync_repo?: string | null;
 }
 
 /** Settings → Forge: poll GitHub in addition to webhooks. */
@@ -322,8 +320,6 @@ export interface WorkItem {
   /** Board UI asked supervisor to start this Backlog card. */
   awaiting_dispatch?: boolean;
   engine?: string | null;
-  beads_id?: string | null;
-  github_issue_url?: string | null;
   pull_request?: PullRequest | null;
   /** @deprecated legacy wire — prefer pull_request.url */
   pr_url?: string | null;

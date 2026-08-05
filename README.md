@@ -62,7 +62,6 @@ you ──chat──> operator agent (Cursor / Claude Code)
 | **MCP-native operator** | Create, dispatch, park, steer, halt, and triage from Cursor or Claude Code. |
 | **Sandboxed execution** | OpenShell sandboxes, policy-enforced egress, Vertex (or your stack) for inference. |
 | **Board-only mode** | Run with agents off. No Docker, no gateway, no credentials required. |
-| **Beads identity** | Optional dual-write into `bd` for durable issue graphs. |
 | **Webhook catch-up** | Push to `main` advances Done and steers live runs to rebase. |
 
 ## Quick start
@@ -129,7 +128,7 @@ Start at **[`docs/index.md`](docs/index.md)**.
 | [Workflow](docs/workflow.md) | Project → plan → Approve → dispatch; triage; park / steer / halt |
 | [Agents](docs/agents.md) | OpenShell, Settings / `honr.yaml` |
 | [Sandbox](docs/sandbox.md) | How a sandboxed run works and the gotchas that matter |
-| [Architecture](docs/architecture.md) | Board / store, supervisor, MCP / REST, beads, persistence |
+| [Architecture](docs/architecture.md) | Board / store, supervisor, MCP / REST, persistence |
 
 Operator orientation for agents working *on* this repo:
 [`AGENTS.md`](AGENTS.md) (`CLAUDE.md` is a symlink),

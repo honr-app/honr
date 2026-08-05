@@ -753,27 +753,6 @@ export function DetailDrawer({
           {/* Engine only — same as the card face. Model falls back into the
               label when no engine is configured; never a second claude-opus-5 chip. */}
           <span className="pill">{resolvedEngine || resolvedModel || "?"}</span>
-          {d.beads_id && (
-            <span
-              className="pill beads"
-              style={{ color: "var(--accent)", background: "var(--accent-fill)", border: "1px solid var(--accent)" }}
-              title={`Beads Task ID: ${d.beads_id} (Dolt version-controlled issue store on refs/dolt/data)`}
-            >
-              🔗 {d.beads_id}
-            </span>
-          )}
-          {d.github_issue_url && (
-            <a
-              className="pill beads"
-              href={d.github_issue_url}
-              target="_blank"
-              rel="noreferrer"
-              style={{ textDecoration: "none", color: "var(--accent)", background: "var(--accent-fill)", border: "1px solid var(--accent)" }}
-              title={`View on GitHub Issues: ${d.github_issue_url}`}
-            >
-              🐙 GitHub Issue
-            </a>
-          )}
           {d.origin.kind !== "human" && <span className="pill machine">{d.origin.kind}-born</span>}
         </div>
 

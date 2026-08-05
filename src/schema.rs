@@ -2,7 +2,7 @@
 //!
 //! Project is the container; Tasks are flat claimable leaves under it. The
 //! engine still reads the tree (parent edges) for containment; task↔task
-//! ordering lives in dependency edges (blocks / relates-to), usually via beads.
+//! ordering lives in board dependency edges (`blocked_by`).
 
 use crate::db::BoardDatabaseConfig;
 use serde::{Deserialize, Serialize};

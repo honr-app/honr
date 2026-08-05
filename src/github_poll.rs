@@ -103,18 +103,6 @@ pub async fn tick(board: &SharedBoard) -> Result<(), String> {
                     board.complete_for_merged_pr_by(&url, Some(pr.number), POLL_BY)
                 {
                     tracing::info!(id, pr = %pr.owner_repo, number = pr.number, "poll: PR merged → Done");
-                    // Same beads nudge as the webhook path when Done materializes siblings.
-                    if let Some(parent) = board.get(id).and_then(|i| i.parent) {
-                        let mut new_ids = Vec::new();
-                        for cid in board.children_of(parent) {
-                            if board.get(cid).is_some_and(|c| {
-                                !c.is_initial_plan_task() && c.github_issue_url.is_none()
-                            }) {
-                                new_ids.push(cid);
-                            }
-                        }
-                        board.schedule_beads_mirror_batch(&new_ids);
-                    }
                 }
             }
             Ok(_) => {}

@@ -46,21 +46,19 @@ that same channel — no `openshell` CLI spawn. Upstream `openshell-sdk` still
 omits mTLS; we build the channel ourselves and use `openshell-core` /
 `openshell-policy` for protos and YAML policy.
 
-## No beads in the agent image
+## Agent surface
 
-The agent sandbox has **no `bd` binary**, no beads database, and no
-`BEADS_DIR`. Card intent and protocol paths come from the supervisor briefing
-(and files under `/sandbox/.honr`). Agents must not run beads CLI or mutate
-tracker state; they finish via `plan.json` / `report.json` / `escalate.json` /
-`split.json`. Host dual-write to beads stays outside the sandbox — see
-[Architecture](architecture.md).
+Card intent and protocol paths come from the supervisor briefing (and files
+under `/sandbox/.honr`). Agents finish via `plan.json` / `report.json` /
+`escalate.json` / `split.json`. The board is the only tracker — sandboxes do
+not carry a separate issue-store CLI or database.
 
 ## Image and offline gates
 
 The community base image has no Rust toolchain and the `sandbox` user has no
 sudo. For honr itself, [`sandbox/Containerfile`](../sandbox/Containerfile) bakes
 `cargo` / `clippy` and pre-warms cargo and npm caches so crates.io never needs
-to be reachable from an agent sandbox. It does **not** install `bd`.
+to be reachable from an agent sandbox.
 
 ```bash
 # from the repo root; Cargo.lock and web/package-lock.json must be in context

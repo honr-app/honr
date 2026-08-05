@@ -1,4 +1,4 @@
-# Level schema — Project + flat Tasks (beads Plan A).
+# Level schema — Project + flat Tasks.
 #
 # Project is the only container. Tasks are flat siblings under a Project,
 # related by dependency edges (blocks / relates-to), not nested hierarchy.

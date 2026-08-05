@@ -12,7 +12,6 @@ interface Props {
   defaultEngine?: string;
   defaultModel?: string;
   breadcrumb?: string;
-  /** Prefer beads hash ids for blocker chips when available. */
   labelOf?: (id: number) => string;
   onOpen: (id: number) => void;
 }
@@ -62,12 +61,7 @@ export function Card({ item, column, now, agentTimeout, defaultEngine, defaultMo
       }
     >
       <div className="card-title">
-        <span className="id">
-          {item.beads_id && !item.beads_id.startsWith("bd-honr-")
-            ? item.beads_id
-            : `#${item.id}`}
-        </span>{" "}
-        {item.title}
+        <span className="id">#{item.id}</span> {item.title}
       </div>
 
       {blockersList.length > 0 && (
