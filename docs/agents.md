@@ -31,9 +31,9 @@ budget, but it cannot prevent the outage.
 openshell status       # expect Connected + Authenticated (mTLS transport)
 ```
 
-Confirm in **Settings → OpenShell** (healthy / unhealthy, or an explicit error
-if the CLI is missing). Optional binary path override lives there when
-`openshell` is not on `PATH`.
+Confirm in **Settings → OpenShell** (healthy / unhealthy, or an explicit
+connectivity error). Gateway talk is in-process gRPC with sealed mTLS — Settings
+does not offer an OpenShell CLI binary path override.
 
 Default local gateway port is often `17670`: deliberately not honr’s `8080`.
 Your install may differ; trust `openshell status`, not a hardcoded URL.
