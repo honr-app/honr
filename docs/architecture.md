@@ -85,4 +85,5 @@ Optional one-shot import from legacy `honr.json` when the DB is empty. See
 
 - [Concepts](concepts.md): product model and invariants
 - [Agents](agents.md): enabling the execution path
+- [Ops seat](ops-seat.md): start / TTY attach / stop over Board ops session
 - [Sandbox](sandbox.md): sandbox stack and gotchas
