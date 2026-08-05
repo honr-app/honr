@@ -6,6 +6,7 @@ import { Board, isBlocked, sortFor } from "./dist-test/components/Board.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
 import { Help } from "./dist-test/components/Help.js";
+import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import { readFileSync } from "node:fs";
@@ -497,6 +498,30 @@ assert(helpHtml.includes("create_project"), "Help should document create_project
 assert(helpHtml.includes("plan.json"), "Help should document plan.json");
 assert(helpHtml.includes("dispatch"), "Help should document dispatch");
 assert(helpHtml.includes("8080/mcp"), "Help should show MCP URL");
+
+// OperatorGuide — reusable MCP connect + first Project loop (Board empty / Help embed later)
+const guideHtml = renderToString(React.createElement(OperatorGuide));
+assert(guideHtml.includes("data-testid=\"operator-guide\""), "OperatorGuide root testid");
+assert(guideHtml.includes("data-testid=\"operator-guide-mcp\""), "OperatorGuide MCP section");
+assert(guideHtml.includes("data-testid=\"operator-guide-loop\""), "OperatorGuide Project loop section");
+assert(guideHtml.includes("data-testid=\"operator-guide-client-examples\""), "OperatorGuide client examples are secondary");
+assert(guideHtml.includes("data-testid=\"operator-guide-mcp-url\""), "OperatorGuide copyable MCP URL");
+assert(guideHtml.includes("data-testid=\"operator-guide-cursor-snippet\""), "OperatorGuide Cursor snippet");
+assert(guideHtml.includes("data-testid=\"operator-guide-claude-snippet\""), "OperatorGuide Claude snippet");
+assert(guideHtml.includes("http://127.0.0.1:8080/mcp"), "OperatorGuide shows MCP endpoint");
+assert(guideHtml.includes("Streamable HTTP"), "OperatorGuide names Streamable HTTP transport");
+assert(guideHtml.includes("create_project"), "OperatorGuide documents create_project");
+assert(guideHtml.includes("plan.json"), "OperatorGuide documents plan.json");
+assert(guideHtml.includes("Approve"), "OperatorGuide documents Approve");
+assert(guideHtml.includes("idle"), "OperatorGuide notes agents stay idle until enable+dispatch");
+assert(guideHtml.includes("claude mcp add"), "OperatorGuide has Claude mcp add example");
+assert(guideHtml.includes("mcp.json"), "OperatorGuide has Cursor mcp.json example");
+// MCP section must appear before the Project loop (lead with connect).
+const mcpIdx = guideHtml.indexOf("data-testid=\"operator-guide-mcp\"");
+const loopIdx = guideHtml.indexOf("data-testid=\"operator-guide-loop\"");
+const examplesIdx = guideHtml.indexOf("data-testid=\"operator-guide-client-examples\"");
+assert(mcpIdx >= 0 && loopIdx > mcpIdx, "OperatorGuide leads with MCP before Project loop");
+assert(examplesIdx > mcpIdx && examplesIdx < loopIdx, "Client examples sit under MCP, before the loop");
 
 const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
