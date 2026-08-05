@@ -28,7 +28,7 @@ UI / MCP / supervisor
 | `src/api.rs` `src/sse.rs` | The human face (REST + SSE). |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs. |
 | `src/openshell.rs` | Typed async wrapper over the `openshell` CLI; every call has a deadline. |
-| `src/supervisor.rs` | Dispatch, per-card sandbox lifecycle, briefing, lease sweeping. |
+| `src/supervisor.rs` | Card dispatch + durable ops seat start/reconcile/stop; briefing; lease sweeping. |
 | `honr.yaml` | Level schema (Project + Task) and execution config. |
 | `sandbox/` | Container image, network policy, metadata shim. |
 | `web/` | React UI + Playwright screenshot harness. |
@@ -48,8 +48,16 @@ When agents are enabled, the supervisor:
 6. Sweeps expired leases; on startup, reconciles live sandboxes so a honr
    restart does not orphan a running agent.
 
-The agent has no network path to honr. The supervisor is the only caller of
-worker verbs on the live path (`Board` in `store.rs`).
+Separately, when a Board **ops session** exists, the supervisor materializes the
+durable ops seat: create or reuse the `ops` profile sandbox (`honr.ops` label),
+start the ops agent detached, reconcile across honr restart (keep sandbox +
+conversation like park), and stop cleanly when the session is cleared. That
+path never uses claim / heartbeat / report / split or the card-dispatch queue —
+Board `ops_session` fields stay authoritative.
+
+The card worker has no network path to honr. The supervisor is the only caller of
+worker verbs on the live path (`Board` in `store.rs`). The ops seat reaches host
+MCP with operator tools only.
 
 ## MCP and REST
 

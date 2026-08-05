@@ -17,13 +17,13 @@
 //!   detached and writes to a log, so watching is a thing a *different* honr
 //!   process can pick up after a restart. See `reconcile`.
 
-use crate::model::{ItemId, State, WorkItem};
-use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_ITEM};
+use crate::model::{ItemId, OpsSession, OpsSessionStatus, State, WorkItem};
+use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_ITEM, LABEL_OPS};
 use crate::schema::{AgentConfig, ExecutionConfig};
 use crate::store::{ClaimGrant, SharedBoard};
 
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,7 +78,10 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     // finished. A card that was mid-run when honr died has not been
     // heartbeaten since, so a sweep that lands first requeues a run that is
     // still going — and then dispatch starts a second agent on the same branch.
-    tokio::spawn(dispatch_loop(board, cfg));
+    tokio::spawn(dispatch_loop(board.clone(), cfg.clone()));
+    // Ops seat is independent of the card-dispatch queue: Board `ops_session`
+    // is authoritative; this loop materializes sandbox + detached agent only.
+    tokio::spawn(ops_seat_loop(board, cfg));
 }
 
 /// Requeue cards past `run_deadline_at`. The matching supervise task notices on
@@ -2822,6 +2825,447 @@ those instructions name it.\n",
     b
 }
 
+// ----------------------------------------------------- durable ops seat
+//
+// Board `ops_session` is the only lifecycle. This loop materializes the ops
+// sandbox + detached agent and reconciles across honr restart. It must not
+// call claim / heartbeat / report / split or touch the card-dispatch queue.
+
+const OPS_CANCEL_PARKED: &str = "ops seat parked";
+const OPS_CANCEL_STOPPED: &str = "ops seat stopped";
+
+fn is_ops_parked(err: &str) -> bool {
+    err.contains(OPS_CANCEL_PARKED)
+}
+
+fn is_ops_stopped(err: &str) -> bool {
+    err.contains(OPS_CANCEL_STOPPED)
+}
+
+/// Should reconcile keep this ops sandbox?
+///
+/// Running and Parked keep the Board-named environment (and the stable
+/// `{prefix}-ops` singleton). No session → reap.
+fn should_keep_ops_sandbox(session: Option<&OpsSession>, sandbox: &str, branch_prefix: &str) -> bool {
+    let Some(s) = session else {
+        return false;
+    };
+    let stem = crate::schema::ops_sandbox_name(branch_prefix);
+    if let Some(env) = s.environment.as_deref() {
+        if env == sandbox {
+            return true;
+        }
+    }
+    sandbox == stem
+}
+
+fn sandbox_spec_for_ops(
+    name: &str,
+    resolved: &crate::model::ResolvedSandboxCreate,
+    attach_providers: &[String],
+) -> SandboxSpec {
+    let mut env = agent_env();
+    // Ops policy allow-lists host.docker.internal:8080 for MCP.
+    env.push((
+        "HONR_MCP_URL".into(),
+        "http://host.docker.internal:8080/mcp".into(),
+    ));
+    SandboxSpec {
+        name: name.to_string(),
+        from: resolved.image.clone(),
+        providers: attach_providers.to_vec(),
+        policy: Some(resolved.policy.clone()),
+        env,
+        labels: vec![(LABEL_OPS.to_string(), "1".to_string())],
+        cpu: resolved.cpu.clone(),
+        memory: resolved.memory.clone(),
+    }
+}
+
+/// Inference providers only — ops policy has no GitHub egress; do not attach
+/// the card-worker GitHub App identity.
+fn ops_attach_providers(board: &SharedBoard) -> Vec<String> {
+    board
+        .sandbox_attach_provider_names()
+        .into_iter()
+        .filter(|n| n != crate::github_app::PROVIDER_NAME)
+        .collect()
+}
+
+fn ops_engine(board: &SharedBoard, resolved: &crate::model::ResolvedSandboxCreate) -> String {
+    if let Some(e) = resolved
+        .engine
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return e.to_string();
+    }
+    let fallback = board.effective_agents().engine;
+    let t = fallback.trim();
+    if t.is_empty() {
+        "cursor".into()
+    } else {
+        t.to_string()
+    }
+}
+
+fn ensure_ops_running(board: &SharedBoard) -> anyhow::Result<()> {
+    match board.ops_session() {
+        Some(s) if s.status == OpsSessionStatus::Running => Ok(()),
+        Some(s) if s.status == OpsSessionStatus::Parked => {
+            anyhow::bail!("{OPS_CANCEL_PARKED}")
+        }
+        _ => anyhow::bail!("{OPS_CANCEL_STOPPED}"),
+    }
+}
+
+async fn with_ops_cancel<F, T>(board: &SharedBoard, fut: F) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    tokio::pin!(fut);
+    let mut poll = tokio::time::interval(watch_board_poll());
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    poll.tick().await;
+    loop {
+        tokio::select! {
+            res = &mut fut => return res,
+            _ = poll.tick() => ensure_ops_running(board)?,
+        }
+    }
+}
+
+/// Reap or keep ops sandboxes from inventory. Does not start/adopt agents.
+async fn reconcile_ops_inventory(os: &OpenShell, board: &SharedBoard) {
+    let Ok(ops) = os.list_ops().await else {
+        tracing::warn!("could not list ops sandboxes; skipping ops inventory");
+        return;
+    };
+    let session = board.ops_session();
+    let branch_prefix = board.effective_agents().branch_prefix.clone();
+    for sb in ops {
+        if !should_keep_ops_sandbox(session.as_ref(), &sb.name, &branch_prefix) {
+            tracing::info!(
+                "reaping unneeded ops sandbox {} (session={:?})",
+                sb.name,
+                session.as_ref().map(|s| s.status),
+            );
+            let _ = os.delete(&sb.name).await;
+        }
+    }
+}
+
+/// Materialize / adopt the ops seat when Board says Running.
+async fn run_ops_seat(board: SharedBoard) -> anyhow::Result<()> {
+    let os = board.openshell_client();
+    ensure_ops_running(&board)?;
+
+    let agents = board.effective_agents();
+    let resolved = board.resolve_ops_sandbox_create();
+    let attach = ops_attach_providers(&board);
+    let engine = ops_engine(&board, &resolved);
+
+    let session = board
+        .ops_session()
+        .ok_or_else(|| anyhow::anyhow!("{OPS_CANCEL_STOPPED}"))?;
+    let existing = session.environment.clone();
+    let default_name = crate::schema::ops_sandbox_name(&agents.branch_prefix);
+
+    let (name, is_reused) = match existing {
+        Some(ref env_name)
+            if with_ops_cancel(&board, async { Ok(is_sandbox_live(&os, env_name).await) })
+                .await? =>
+        {
+            (env_name.clone(), true)
+        }
+        other => {
+            let new_name = other
+                .as_ref()
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or(default_name);
+            if let Some(prev) = other {
+                if prev != new_name {
+                    let _ = with_ops_cancel(&board, async {
+                        let _ = os.delete(&prev).await;
+                        Ok(())
+                    })
+                    .await;
+                }
+            }
+            ensure_ops_running(&board)?;
+            let live = with_ops_cancel(&board, async {
+                Ok(is_sandbox_live(&os, &new_name).await)
+            })
+            .await?;
+            if live {
+                board
+                    .update_ops_session(Some(new_name.clone()), None)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                (new_name, true)
+            } else {
+                // Fresh sandbox ⇒ fresh conversation (resume needs the old box).
+                board
+                    .update_ops_session(Some(new_name.clone()), Some(String::new()))
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                (new_name, false)
+            }
+        }
+    };
+
+    let spec = sandbox_spec_for_ops(&name, &resolved, &attach);
+    let result = run_ops_inside(&board, &os, &agents, &name, &spec, &engine, is_reused).await;
+    finalize_ops(&os, &board, &name, &result).await;
+    result
+}
+
+async fn run_ops_inside(
+    board: &SharedBoard,
+    os: &OpenShell,
+    cfg: &AgentConfig,
+    name: &str,
+    spec: &SandboxSpec,
+    engine: &str,
+    is_reused: bool,
+) -> anyhow::Result<()> {
+    let short = Duration::from_secs(180);
+
+    if !is_reused {
+        let _ = with_ops_cancel(board, async {
+            let _ = os.delete(&spec.name).await;
+            Ok(())
+        })
+        .await;
+        with_ops_cancel(board, async { os.create(spec).await.map_err(Into::into) }).await?;
+        with_ops_cancel(board, wait_until_sandbox_ready(os, name)).await?;
+        with_ops_cancel(board, ensure_shim_up(os, name, short)).await?;
+        let _ = with_ops_cancel(
+            board,
+            exec_with_infra_retry(os, name, &empty_workdir_script(), short, "ops workdir"),
+        )
+        .await?;
+    } else {
+        with_ops_cancel(board, ensure_shim_up(os, name, short)).await?;
+    }
+
+    // Adopt a live detached agent after honr restart.
+    let probe = with_ops_cancel(board, async {
+        os.exec(name, &probe_script(), Duration::from_secs(30))
+            .await
+            .map_err(Into::into)
+    })
+    .await;
+    if let Ok(out) = &probe {
+        if out.ok() {
+            if let Some(from_line) = probe_of(&out.stdout) {
+                tracing::info!("ops seat: re-attached to {name} from line {from_line}");
+                return watch_ops_agent(board, os, cfg, name, from_line).await.map(|_| ());
+            }
+        }
+    }
+
+    let conversation_id = board.ops_session().and_then(|s| s.conversation_id);
+    let resume = is_reused && matches!(engine, "agy" | "cursor") && conversation_id.is_some();
+    let briefing_text = if resume {
+        ops_resume_briefing()
+    } else {
+        ops_briefing()
+    };
+    if engine == "agy" {
+        with_ops_cancel(board, setup_agy_auth(os, name)).await?;
+    }
+    let start = with_ops_cancel(board, async {
+        os.exec(
+            name,
+            &start_script(
+                cfg,
+                &briefing_text,
+                engine,
+                conversation_id.as_deref().filter(|_| resume),
+            ),
+            short,
+        )
+        .await
+        .map_err(Into::into)
+    })
+    .await?;
+    anyhow::ensure!(start.ok(), "ops agent did not start: {}", outerr(&start));
+
+    watch_ops_agent(board, os, cfg, name, 1).await.map(|_| ())
+}
+
+/// Watch the ops agent. Updates conversation on the Board; never heartbeats
+/// or claims — those are worker verbs.
+async fn watch_ops_agent(
+    board: &SharedBoard,
+    os: &OpenShell,
+    cfg: &AgentConfig,
+    name: &str,
+    from_line: u64,
+) -> anyhow::Result<Output> {
+    let timeout = Duration::from_secs(cfg.agent_timeout_secs) + Duration::from_secs(120);
+    let board2 = board.clone();
+    let follow = follow_script(from_line);
+    let stream = os.exec_streaming(name, &follow, timeout, move |line| {
+        if let Some(cid) = parse_conversation_id(line) {
+            let _ = board2.update_ops_session(None, Some(cid));
+        }
+    });
+    tokio::pin!(stream);
+
+    let mut poll = tokio::time::interval(watch_board_poll());
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    poll.tick().await;
+
+    loop {
+        tokio::select! {
+            res = &mut stream => return res.map_err(Into::into),
+            _ = poll.tick() => ensure_ops_running(board)?,
+        }
+    }
+}
+
+async fn finalize_ops(
+    os: &OpenShell,
+    board: &SharedBoard,
+    name: &str,
+    result: &anyhow::Result<()>,
+) {
+    match result {
+        Ok(_) => {
+            stop_agent(os, name).await;
+            tracing::info!("ops seat: agent finished in {name}; sandbox kept");
+        }
+        Err(e) if is_supervisor_detach(&e.to_string()) => {
+            tracing::info!("ops seat: detaching from {name} without stopping the agent: {e}");
+        }
+        Err(e) if is_ops_parked(&e.to_string()) => {
+            stop_agent(os, name).await;
+            tracing::info!("ops seat: parked; stopped agent in {name}, sandbox kept");
+        }
+        Err(e) if is_ops_stopped(&e.to_string()) => {
+            stop_agent(os, name).await;
+            let _ = os.delete(name).await;
+            reconcile_ops_inventory(os, board).await;
+            tracing::info!("ops seat: stopped; deleted sandbox {name}");
+        }
+        Err(e) => {
+            stop_agent(os, name).await;
+            tracing::error!("ops seat: keeping sandbox {name} for inspection: {e}");
+        }
+    }
+}
+
+fn ops_briefing() -> String {
+    let mut b = String::new();
+    b.push_str(
+        "You are the privileged control-plane ops seat for honr — the human's liaison \
+         over operator MCP tools. You are not a card worker.\n\n",
+    );
+    b.push_str(
+        "Connect to the host honr MCP at `$HONR_MCP_URL` (default \
+         http://host.docker.internal:8080/mcp). That endpoint is operator tools only: \
+         board_snapshot, dispatch, park, steer, approve_*, answer_escalation, and related \
+         triage tools. Do not call worker verbs (claim, heartbeat, report, split, escalate, \
+         release, list_ready) — they are denied on this seat.\n\n",
+    );
+    b.push_str(
+        "Every mutation goes through the Board. Chat is a face; do not invent a second \
+         lifecycle. Prefer escalating ambiguous irreversibles; approving merges stays human.\n\n",
+    );
+    b.push_str(
+        "Start with board_snapshot. Triage Needs You first, then Review. Interrupt the \
+         human only for irreversible actions, ambiguity blocking several items, or repeated \
+         failure on the same card.\n",
+    );
+    b
+}
+
+fn ops_resume_briefing() -> String {
+    "You were parked mid-session. The agent process was stopped; the sandbox and \
+     conversation were kept. Continue as the ops seat over host honr MCP \
+     (`$HONR_MCP_URL`) — operator tools only, no worker verbs. Start with board_snapshot.\n"
+        .into()
+}
+
+/// Durable ops seat loop: start / reconcile / park-stop. Independent of
+/// `dispatch_loop` and the card claim queue.
+async fn ops_seat_loop(board: SharedBoard, _cfg: ExecutionConfig) {
+    let supervising = Arc::new(AtomicBool::new(false));
+
+    // Bounded wait for the gateway — same grace as card reconcile.
+    let deadline = std::time::Instant::now() + GATEWAY_GRACE;
+    let mut announced = false;
+    while !board.openshell_client().healthy().await {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            tracing::error!(
+                "ops seat: gateway unreachable after {}s; continuing without startup adopt",
+                GATEWAY_GRACE.as_secs()
+            );
+            break;
+        }
+        if !announced {
+            tracing::warn!("ops seat: gateway unreachable; holding until it answers");
+            announced = true;
+        }
+        tokio::time::sleep(GATEWAY_POLL.min(left)).await;
+    }
+
+    {
+        let os = board.openshell_client();
+        reconcile_ops_inventory(&os, &board).await;
+    }
+
+    let mut tick = tokio::time::interval(Duration::from_secs(3));
+    loop {
+        tick.tick().await;
+        let os = board.openshell_client();
+        reconcile_ops_inventory(&os, &board).await;
+
+        let Some(session) = board.ops_session() else {
+            continue;
+        };
+        if session.status != OpsSessionStatus::Running {
+            // Parked: ensure agent is stopped when we are not mid-watch.
+            if !supervising.load(Ordering::Relaxed) {
+                if let Some(env) = session.environment.as_deref() {
+                    stop_agent(&os, env).await;
+                }
+            }
+            continue;
+        }
+        if supervising.load(Ordering::Relaxed) {
+            continue;
+        }
+        if !os.healthy().await {
+            tracing::warn!("ops seat: gateway unhealthy; not starting");
+            continue;
+        }
+
+        supervising.store(true, Ordering::Relaxed);
+        let board2 = board.clone();
+        let flag = supervising.clone();
+        tokio::spawn(async move {
+            match run_ops_seat(board2).await {
+                Ok(()) => tracing::info!("ops seat: run completed"),
+                Err(e) if is_ops_parked(&e.to_string()) || is_ops_stopped(&e.to_string()) => {
+                    tracing::info!("ops seat: {e}");
+                }
+                Err(e) if is_supervisor_detach(&e.to_string()) => {
+                    tracing::info!("ops seat: supervisor detached ({e})");
+                }
+                Err(e) if is_infrastructure(&e.to_string()) => {
+                    tracing::warn!("ops seat: infrastructure failure: {e}");
+                }
+                Err(e) => tracing::error!("ops seat failed: {e}"),
+            }
+            flag.store(false, Ordering::Relaxed);
+        });
+    }
+}
+
 // ----------------------------------------------------------------- helpers
 
 /// Single-quote for `bash -lc`. A briefing is untrusted text as far as the
@@ -3613,6 +4057,136 @@ mod tests {
         item.environment = Some("widgets-card-9-a2".into());
         assert!(should_keep_sandbox(Some(&item), "widgets-card-9-a1", "widgets"));
         assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1", "widgets"));
+    }
+
+    #[test]
+    fn should_keep_ops_sandbox_follows_board_session() {
+        let mut session = OpsSession::new(Some("honr-ops".into()), Some("conv-1".into()));
+        assert!(should_keep_ops_sandbox(Some(&session), "honr-ops", "honr"));
+        // Stable singleton name kept even before Board records environment.
+        let bare = OpsSession::new(None, None);
+        assert!(should_keep_ops_sandbox(Some(&bare), "honr-ops", "honr"));
+        assert!(!should_keep_ops_sandbox(Some(&bare), "honr-card-1-a1", "honr"));
+
+        session.status = OpsSessionStatus::Parked;
+        assert!(
+            should_keep_ops_sandbox(Some(&session), "honr-ops", "honr"),
+            "park keeps sandbox"
+        );
+
+        assert!(
+            !should_keep_ops_sandbox(None, "honr-ops", "honr"),
+            "stop/absent session reaps"
+        );
+    }
+
+    #[test]
+    fn ops_sandbox_spec_uses_ops_label_not_card_item() {
+        let resolved = crate::model::ResolvedSandboxCreate {
+            image: "honr-sandbox:latest".into(),
+            policy: "version: 1\n".into(),
+            cpu: Some("1".into()),
+            memory: Some("2Gi".into()),
+            engine: Some("agy".into()),
+            profile_id: Some("ops".into()),
+        };
+        let spec = sandbox_spec_for_ops("honr-ops", &resolved, &[]);
+        assert_eq!(spec.name, "honr-ops");
+        assert_eq!(spec.cpu.as_deref(), Some("1"));
+        assert_eq!(spec.memory.as_deref(), Some("2Gi"));
+        assert!(
+            spec.labels.iter().any(|(k, v)| k == LABEL_OPS && v == "1"),
+            "ops label required: {:?}",
+            spec.labels
+        );
+        assert!(
+            !spec.labels.iter().any(|(k, _)| k == LABEL_ITEM),
+            "must not use card honr.item label: {:?}",
+            spec.labels
+        );
+        assert!(
+            spec.env
+                .iter()
+                .any(|(k, v)| k == "HONR_MCP_URL" && v.contains("/mcp")),
+            "ops env must point at host MCP: {:?}",
+            spec.env
+        );
+        assert!(spec.providers.is_empty(), "test passes empty providers");
+    }
+
+    #[test]
+    fn ops_briefing_is_operator_seat_not_worker() {
+        let cold = ops_briefing();
+        assert!(cold.contains("ops seat"), "{cold}");
+        assert!(cold.contains("operator"), "{cold}");
+        assert!(cold.contains("board_snapshot"), "{cold}");
+        for verb in [
+            "claim",
+            "heartbeat",
+            "report",
+            "split",
+            "escalate",
+            "release",
+            "list_ready",
+        ] {
+            assert!(
+                cold.contains(verb),
+                "briefing must name denied worker verb {verb}"
+            );
+        }
+        assert!(
+            !cold.contains("/sandbox/.honr/report.json"),
+            "ops seat must not use card report path"
+        );
+        assert!(
+            !cold.contains("Do exactly this card"),
+            "ops seat is not a card worker briefing"
+        );
+
+        let resume = ops_resume_briefing();
+        assert!(resume.contains("parked"), "{resume}");
+        assert!(resume.contains("ops seat"), "{resume}");
+        assert!(resume.contains("worker verbs"), "{resume}");
+    }
+
+    #[test]
+    fn ops_seat_helpers_do_not_encode_worker_verbs() {
+        // Production ops path must not call Board worker verbs — grep the
+        // ops-seat section for claim/heartbeat/report as call sites.
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/supervisor.rs"),
+        )
+        .expect("supervisor.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("supervisor has a test module");
+        let ops = prod
+            .split("// ----------------------------------------------------- durable ops seat")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("// ----------------------------------------------------------------- helpers")
+                    .next()
+            })
+            .expect("ops seat section");
+        for needle in [
+            "board.claim(",
+            "board.heartbeat(",
+            "board.report(",
+            "board.split(",
+            "list_awaiting_dispatch",
+            ".list_ready(",
+        ] {
+            assert!(
+                !ops.contains(needle),
+                "ops seat must not call worker path {needle}"
+            );
+        }
+        assert!(
+            ops.contains("update_ops_session"),
+            "ops seat must persist conversation on the Board"
+        );
+        assert!(ops.contains("LABEL_OPS"), "ops seat must label sandboxes");
     }
 
     #[test]
