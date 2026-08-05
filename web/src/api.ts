@@ -8,6 +8,8 @@ import type {
   OpenShellProvidersOut,
   OpenShellSettings,
   OpenShellStatus,
+  OpsSession,
+  OpsSessionOut,
   ProviderTypeProfile,
   SandboxProfile,
   SandboxProfilesOut,
@@ -218,6 +220,17 @@ export const api = {
     post("/openshell/providers/sync"),
   listOpenShellProviderProfiles: (): Promise<ProviderTypeProfile[]> =>
     fetch("/api/openshell/provider-profiles", fetchOpts).then(jsonOrThrow),
+
+  /** Board ops-session singleton — Cockpit polls this; no local lifecycle. */
+  getOpsSession: (): Promise<OpsSessionOut> =>
+    fetch("/api/ops-session", fetchOpts).then(jsonOrThrow),
+  startOpsSession: (body?: {
+    environment?: string | null;
+    conversation_id?: string | null;
+  }): Promise<OpsSession> => post("/ops-session", body ?? {}),
+  parkOpsSession: (): Promise<OpsSession> => post("/ops-session/park"),
+  resumeOpsSession: (): Promise<OpsSession> => post("/ops-session/resume"),
+  stopOpsSession: (): Promise<null> => del("/ops-session"),
 };
 
 /** `4s`, `12m`, `3h 5m` — matches the server's own formatting. */
