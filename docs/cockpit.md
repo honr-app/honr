@@ -3,7 +3,7 @@
 The durable control-plane cockpit: a privileged OpenShell sandbox with narrow
 egress to host honr MCP (operator tools only). Create knobs (image, policy,
 CPU, memory, engine) come from the Board **Cockpit sandbox profile** — pick it
-in Settings → Sandboxes (`POST /api/sandbox-profiles/{id}/cockpit`). Seeded
+in Settings → OpenShell → Profiles (`POST /api/sandbox-profiles/{id}/cockpit`). Seeded
 catalog includes a `cockpit` profile and sets it as Cockpit’s preference; you can
 point Cockpit at any other profile. The live seat name stays
 `{branch_prefix}-cockpit` (label `honr.cockpit`), independent of which profile built it.
