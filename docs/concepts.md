@@ -84,4 +84,5 @@ humans merge.
 - New to the board → [Quickstart](quickstart.md)
 - Day-to-day operation → [Workflow](workflow.md)
 - Turn on sandboxed agents → [Agents](agents.md)
+- Ops seat start / TTY attach / stop → [Ops seat](ops-seat.md)
 - How the pieces fit → [Architecture](architecture.md)
