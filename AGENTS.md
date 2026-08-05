@@ -17,7 +17,7 @@ Start with [`docs/index.md`](docs/index.md) and
 An agent orchestrator that dispatches work against **its own source**. The
 board is a control plane: moving a card *is* an action. honr claims a card,
 runs a Claude Code agent in an OpenShell sandbox, and the agent opens a
-cross-fork PR that a human merges.
+same-repo PR (`honr/card-*` → `main`) that a human merges.
 
 ## The invariants worth protecting
 
@@ -36,8 +36,9 @@ without evidence and throw away the property that makes the signal trustworthy.
 
 **Merging is human.** Approving in honr surfaces the PR. It never merges.
 
-**The bot has no write access to upstream.** Containment lives in GitHub
-permissions, not in our scripts. The fork is disposable.
+**The bot may push feature branches, not main.** Containment is the GitHub
+ruleset on the default branch (owner-only) plus human merge — not “no write on
+the repo.” Use the App installation on `shanemcd`, same-repo fork=upstream.
 
 ## Conventions
 
@@ -76,7 +77,8 @@ already exist.
 **The podman machine stops on its own.** Classify that as infrastructure, not
 as the card failing — see `is_infrastructure`.
 
-**The fork's base freezes** the moment it is created. Rebase onto upstream.
+**Rebase onto upstream `main`.** Same-repo still fetches/rebases onto the
+default branch tip; do not treat a stale local main as truth.
 
 ## Where things are
 

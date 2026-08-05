@@ -45,7 +45,9 @@ execution:
     # pull_request (report.json url/base/head). Not required for first clone.
     repo:
       upstream: shanemcd/honr
-      fork: clankrshq/honr
+      # Same-repo: GitHub App install on shanemcd pushes honr/card-* and opens PRs.
+      # main stays owner-only via ruleset; bot must not merge.
+      fork: shanemcd/honr
       base: main
 
     # Branch / sandbox name stem (default honr → honr/card-N / honr-card-N-a1).
