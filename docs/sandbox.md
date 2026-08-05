@@ -105,6 +105,19 @@ Set it at create time; `policy set --wait` is expensive.
 **Binary paths are matched literally** in the policy. Lists are deliberately
 generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 
+## Ops vs worker containment
+
+Two network policies ship under [`sandbox/`](../sandbox/):
+
+| Asset | Catalog id | Egress |
+|---|---|---|
+| [`policy.yaml`](../sandbox/policy.yaml) | `default` (worker) | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
+| [`ops-policy.yaml`](../sandbox/ops-policy.yaml) | `ops` | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference. **No** GitHub or package-registry allow-list. |
+
+Settings → OpenShell → Profiles can select either. The ops profile seeds with
+distinct cpu/memory (`1` / `2Gi`) from the worker default. Card dispatch keeps
+using the worker default unless a Project overrides the profile id.
+
 ## Failure signatures
 
 | Symptom | Cause |
@@ -119,4 +132,4 @@ generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 ## Assets
 
 See [`sandbox/README.md`](../sandbox/README.md) for `policy.yaml`,
-`Containerfile`, and `metadata-shim.py` in short form.
+`ops-policy.yaml`, `Containerfile`, and `metadata-shim.py` in short form.
