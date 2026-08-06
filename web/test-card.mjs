@@ -19,6 +19,12 @@ import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
+import {
+  chromeLocationsEqual,
+  formatChromePath,
+  parseChromeLocation,
+  writeChromeLocation,
+} from "./dist-test/location.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1241,6 +1247,55 @@ assert(!Object.keys(pkg.dependencies || {}).some((d) => /patternfly/i.test(d)),
   "Must not add a PatternFly dependency");
 assert(!Object.keys(pkg.devDependencies || {}).some((d) => /patternfly/i.test(d)),
   "Must not add a PatternFly devDependency");
+
+// Chrome URL location contract (History API — no router dependency)
+assert.deepStrictEqual(parseChromeLocation("/"), { view: "board", cardId: null });
+assert.deepStrictEqual(parseChromeLocation("/help"), { view: "help", cardId: null });
+assert.deepStrictEqual(parseChromeLocation("/help/"), { view: "help", cardId: null });
+assert.deepStrictEqual(parseChromeLocation("/settings"), { view: "settings", cardId: null });
+assert.deepStrictEqual(parseChromeLocation("/settings/openshell"), {
+  view: "settings",
+  cardId: null,
+});
+assert.deepStrictEqual(parseChromeLocation("/card/42"), { view: "board", cardId: 42 });
+assert.deepStrictEqual(parseChromeLocation("/card/0"), { view: "board", cardId: null });
+assert.deepStrictEqual(parseChromeLocation("/card/nope"), { view: "board", cardId: null });
+assert.deepStrictEqual(parseChromeLocation("/unknown"), { view: "board", cardId: null });
+assert.strictEqual(formatChromePath({ view: "board", cardId: null }), "/");
+assert.strictEqual(formatChromePath({ view: "help", cardId: null }), "/help");
+assert.strictEqual(formatChromePath({ view: "settings", cardId: 99 }), "/settings");
+assert.strictEqual(formatChromePath({ view: "board", cardId: 7 }), "/card/7");
+assert(
+  chromeLocationsEqual(
+    { view: "board", cardId: 1 },
+    { view: "board", cardId: 1 },
+  ),
+  "equal chrome locations",
+);
+assert(
+  !chromeLocationsEqual(
+    { view: "board", cardId: 1 },
+    { view: "help", cardId: null },
+  ),
+  "distinct chrome locations",
+);
+{
+  const pushes = [];
+  const replaces = [];
+  const hist = {
+    pushState: (_s, _t, url) => pushes.push(url),
+    replaceState: (_s, _t, url) => replaces.push(url),
+  };
+  writeChromeLocation({ view: "help", cardId: null }, "push", hist, { pathname: "/" });
+  writeChromeLocation({ view: "help", cardId: null }, "push", hist, { pathname: "/help" });
+  writeChromeLocation({ view: "board", cardId: 3 }, "replace", hist, { pathname: "/help" });
+  assert.deepStrictEqual(pushes, ["/help"], "pushState only when path changes");
+  assert.deepStrictEqual(replaces, ["/card/3"], "replaceState for card deep link");
+}
+assert(
+  !Object.keys(pkg.dependencies || {}).some((d) => /react-router|@tanstack\/react-router|wouter/i.test(d)),
+  "Must not add a client router dependency for chrome URL sync",
+);
 
 console.log("\n✅ All Card, Board, Detail, Settings chrome, and useBoard sequence guard assertions passed!");
 
