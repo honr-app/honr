@@ -755,7 +755,7 @@ pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) 
 pub const ANTIGRAVITY_PROVIDER: &str = "antigravity";
 
 /// Shipped OpenShell provider type YAML (endpoints + Bearer credential schema).
-pub const ANTIGRAVITY_PROVIDER_TYPE_PATH: &str = "sandbox/openshell/antigravity.yaml";
+pub const ANTIGRAVITY_PROVIDER_TYPE_NAME: &str = "antigravity.yaml";
 
 /// Stable id slug from a display name. Lowercase ASCII alphanumerics; runs of
 /// whitespace/`_`/`-` become a single hyphen. Empty/punctuation-only names

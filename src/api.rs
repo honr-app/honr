@@ -625,12 +625,6 @@ pub struct OpenShellSettings {
     /// When true on PUT, wipe sealed mTLS material.
     #[serde(default)]
     pub clear_mtls: bool,
-    /// When true on PUT, import PEMs from `~/.config/openshell/gateways/<name>/mtls/`.
-    #[serde(default)]
-    pub import_openshell_cli_mtls: bool,
-    /// Gateway name for import (default `openshell`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub import_gateway_name: Option<String>,
     /// Read-only presence flags (GET / after PUT).
     #[serde(default)]
     pub mtls: crate::secrets::OpenShellMtlsStatus,
@@ -656,8 +650,6 @@ fn openshell_settings_view(b: &SharedBoard) -> OpenShellSettings {
         client_cert_pem: None,
         client_key_pem: None,
         clear_mtls: false,
-        import_openshell_cli_mtls: false,
-        import_gateway_name: None,
         mtls: b.openshell_mtls_status(),
     }
 }
@@ -674,21 +666,6 @@ async fn put_openshell(
 
     if req.clear_mtls {
         b.set_openshell_mtls_sealed(None);
-    } else if req.import_openshell_cli_mtls {
-        let name = req.import_gateway_name.as_deref().unwrap_or("openshell");
-        let bundle = crate::secrets::import_openshell_cli_mtls(name).map_err(|e| {
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                format!("import OpenShell CLI mTLS: {e}"),
-            )
-        })?;
-        let sealed = crate::secrets::seal_mtls(&bundle).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("seal mTLS: {e}"),
-            )
-        })?;
-        b.set_openshell_mtls_sealed(Some(sealed));
     } else {
         let any_pem = req.ca_pem.as_ref().is_some_and(|s| !s.trim().is_empty())
             || req
@@ -1256,14 +1233,6 @@ async fn sync_openshell_providers(AxState(b): AxState<SharedBoard>) -> Json<Sync
     if let Err(e) = crate::antigravity::ensure_provider_type_imported(&os).await {
         tracing::warn!(error = %e, "antigravity provider type import skipped");
     }
-    // Best-effort: refresh sealed access token from host keychain when the
-    // Board already has an antigravity provider (no refresh_token in the seat).
-    match crate::antigravity::refresh_board_credentials_from_keychain(&b) {
-        Ok(true) => tracing::info!("refreshed antigravity credentials from host keychain"),
-        Ok(false) => {}
-        Err(e) => tracing::debug!(error = %e, "antigravity keychain refresh skipped"),
-    }
-
     let desired = b.openshell_providers();
     let mut applied = Vec::new();
     let mut errors = Vec::new();
@@ -3455,12 +3424,17 @@ mod tests {
         );
     }
 
-    /// Operator helper (not a unit test): seal host gcloud ADC into board `vertex`
-    /// and apply to the gateway. Stop the running honr process first so flush is
-    /// not overwritten by in-memory state.
+    /// Operator helper (not a unit test): seal a Vertex credential into board
+    /// `vertex` and apply to the gateway. Stop the running honr process first so
+    /// flush is not overwritten by in-memory state.
+    ///
+    /// The credential file is named explicitly. honr does not guess at host
+    /// config locations, and a helper that reaches into `~/.config` teaches the
+    /// habit back into the product.
     ///
     /// ```bash
-    /// cargo test --offline upsert_live_vertex_provider -- --ignored --nocapture
+    /// HONR_TEST_VERTEX_ADC=~/.config/gcloud/application_default_credentials.json \
+    ///   cargo test --offline upsert_live_vertex_provider -- --ignored --nocapture
     /// ```
     #[tokio::test]
     #[ignore = "writes the live board DB + gateway"]
@@ -3471,9 +3445,8 @@ mod tests {
         use crate::store::Board;
         use std::sync::Arc;
 
-        let adc_path = dirs::home_dir()
-            .expect("home")
-            .join(".config/gcloud/application_default_credentials.json");
+        let adc_path = std::env::var("HONR_TEST_VERTEX_ADC")
+            .expect("set HONR_TEST_VERTEX_ADC to a credential JSON path");
         let adc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&adc_path).expect("read ADC"))
                 .expect("parse ADC");
@@ -3542,58 +3515,4 @@ mod tests {
         );
     }
 
-    /// Operator helper: seal Antigravity access token from macOS keychain into
-    /// board `antigravity` and apply. Stop the running honr process first.
-    ///
-    /// ```bash
-    /// cargo test --offline upsert_live_antigravity_provider -- --ignored --nocapture
-    /// ```
-    #[tokio::test]
-    #[ignore = "writes the live board DB + gateway"]
-    async fn upsert_live_antigravity_provider() {
-        use crate::db::DurableBoardStore;
-        use crate::store::Board;
-        use std::sync::Arc;
-
-        let token = crate::antigravity::read_access_token_from_keychain().expect("keychain");
-        let mut config = BTreeMap::new();
-        config.insert(
-            crate::antigravity::CONFIG_PROJECT.into(),
-            std::env::var("ANTIGRAVITY_GCP_PROJECT").expect(
-                "set ANTIGRAVITY_GCP_PROJECT (do not hardcode a personal project id in source)",
-            ),
-        );
-        config.insert(
-            crate::antigravity::CONFIG_LOCATION.into(),
-            std::env::var("ANTIGRAVITY_GCP_LOCATION").unwrap_or_else(|_| "global".into()),
-        );
-        let desired =
-            crate::antigravity::desired_from_access_token(&token, config).expect("desired");
-
-        let mut schema = crate::schema::Schema::load("honr.yaml").unwrap_or_default();
-        crate::db::apply_database_url_override(&mut schema.board.database);
-        let url = schema.board.database.parsed().expect("database url");
-        let store = Arc::new(
-            DurableBoardStore::connect(url.as_str())
-                .await
-                .expect("open board db"),
-        );
-        let board: SharedBoard = Arc::new(
-            Board::load_with_store(schema, std::path::PathBuf::from("honr.json"), store)
-                .await
-                .expect("load board"),
-        );
-
-        let os = board.openshell_client();
-        crate::antigravity::ensure_provider_type_imported(&os)
-            .await
-            .expect("import provider type");
-        let stored = board.upsert_openshell_provider(desired);
-        apply_desired_to_gateway(&board, &stored)
-            .await
-            .expect("gateway apply");
-        let _ = crate::antigravity::attach_to_running_cockpit(&board).await;
-        board.flush();
-        eprintln!("upserted board+gateway provider antigravity");
-    }
 }

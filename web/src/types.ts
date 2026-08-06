@@ -102,8 +102,6 @@ export interface OpenShellSettings {
   client_cert_pem?: string | null;
   client_key_pem?: string | null;
   clear_mtls?: boolean;
-  import_openshell_cli_mtls?: boolean;
-  import_gateway_name?: string | null;
   mtls?: OpenShellMtlsStatus;
 }
 
