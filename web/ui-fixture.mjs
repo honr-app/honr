@@ -62,8 +62,10 @@ const lease = (agent, hbAgo) => ({
 
 // ---- Project root ---------------------------------------------------------
 
+const PROJECT_TITLE = "Phase 2 — real agents";
+
 const project = item({
-  title: "Phase 2 — real agents",
+  title: PROJECT_TITLE,
   intent: "Replace the simulated fleet with agents in OpenShell sandboxes that open real PRs.",
   state: "shaping",
   level: "Project",
@@ -192,6 +194,62 @@ item({
     recommended: 1,
     blocked_since: iso(1080),
     answer: null,
+  },
+});
+
+// ---- Review: Initial plan awaiting Approve --------------------------------
+//
+// The Approve → Tasks moment is the central mechanic and the one the docs tour
+// has to show. Detail.tsx gates the Proposed Tasks section on this exact title.
+
+// Canonical seeded form (`initial_plan_title` in src/model.rs). The bare
+// "Initial plan" is the legacy title and boot renames it; use the real one so
+// the capture does not depend on a heal step running.
+item({
+  parent: project,
+  title: `Initial Plan for ${PROJECT_TITLE}`,
+  intent: "Read the repo and propose the Tasks that finish Phase 2.",
+  definition_of_done: "plan.json lists sibling Tasks, each naming its clone target.",
+  state: "review",
+  level: "Task",
+  capability: "any",
+  progress: 1,
+  environment: "honr-card-10-a1",
+  since: 180,
+  proposal: {
+    summary:
+      "Four Tasks. The verifier has to land before anything depends on its result, " +
+      "so the other three hang off it.",
+    tasks: [
+      {
+        key: "verifier",
+        title: "Clean-checkout verifier",
+        intent: "Gates should run where the agent cannot reach them.",
+        definition_of_done: "Gates run in a sandbox created from the pushed branch (honr-app/honr).",
+        blocked_by_keys: [],
+      },
+      {
+        key: "checks",
+        title: "Surface PR checks on the Review card",
+        intent: "CI is the mechanical gate; the board should show it.",
+        definition_of_done: "A Review card renders its PR check state (honr-app/honr).",
+        blocked_by_keys: ["verifier"],
+      },
+      {
+        key: "diffstat",
+        title: "Report the real diffstat",
+        intent: "Review sorts by a blast radius it does not actually know.",
+        definition_of_done: "report.json carries added/removed and the card renders it (honr-app/honr).",
+        blocked_by_keys: ["verifier"],
+      },
+      {
+        key: "cost",
+        title: "Observe cost during the run",
+        intent: "Spend only arrives in the final message, so no cap can interrupt.",
+        definition_of_done: "Running cards show spend before the agent finishes (honr-app/honr).",
+        blocked_by_keys: ["checks", "diffstat"],
+      },
+    ],
   },
 });
 
