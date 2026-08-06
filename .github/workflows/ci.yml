@@ -1,0 +1,51 @@
+name: CI
+
+# AGENTS.md has required `cargo test` and `cargo clippy -D warnings` to be clean
+# for a long time, but nothing enforced it — a test that read the developer's
+# keychain sat failing on one machine and passing everywhere else, because no
+# machine but a developer's ever ran it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # SQLite is the offline default; nothing here should need a gateway, a
+      # container runtime, or anything else on the host.
+      - name: Test
+        run: cargo test
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - run: npm run --prefix web test
+      - run: npm run --prefix web build
