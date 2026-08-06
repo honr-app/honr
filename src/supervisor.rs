@@ -713,6 +713,11 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
 
     let cfg = &agents;
 
+    // Fail loud at claim/start before sandbox create/reuse — unknown engine ids
+    // must never fall through to a silent claude default.
+    let engine = grant.engine.as_deref().unwrap_or(&cfg.engine);
+    crate::engine::lookup(engine).map_err(|e| anyhow::anyhow!("{e}"))?;
+
     let existing_env = board.get(id).and_then(|i| i.environment);
     let (name, is_reused) = match existing_env {
         Some(ref env_name)
@@ -1062,11 +1067,13 @@ async fn run_inside(
     // ---- the agent -------------------------------------------------------
 
     let engine = grant.engine.as_deref().unwrap_or(&cfg.engine);
+    // Fail loud before sandbox launch work compounds a misconfigured profile.
+    crate::engine::lookup(engine)?;
     let conversation_id = board.get(id).and_then(|i| i.conversation_id.clone());
     // Conversation resume flag is independent of briefing shape: a conflicted
-    // branch still needs the cold CONFLICTS briefing even when agy/cursor can
-    // `--conversation` continue the same session.
-    let resume = is_reused && matches!(engine, "agy" | "cursor") && conversation_id.is_some();
+    // branch still needs the cold CONFLICTS briefing even when a resumable
+    // engine can continue the same session.
+    let resume = is_reused && crate::engine::supports_resume(engine) && conversation_id.is_some();
     let briefing_text = choose_briefing(grant, branch_state, branch, &cfg.repo, resume);
     if resume {
         board.story(
@@ -1077,22 +1084,17 @@ async fn run_inside(
             ),
         );
     }
-    if engine == "agy" {
+    if crate::engine::pre_start_auth(engine)? == crate::engine::PreStartAuth::Agy {
         with_board_cancel(board, id, setup_agy_auth(os, name)).await?;
     }
+    let script = start_script(
+        cfg,
+        &briefing_text,
+        engine,
+        conversation_id.as_deref().filter(|_| resume),
+    )?;
     let start = with_board_cancel(board, id, async {
-        os.exec(
-            name,
-            &start_script(
-                cfg,
-                &briefing_text,
-                engine,
-                conversation_id.as_deref().filter(|_| resume),
-            ),
-            short,
-        )
-        .await
-        .map_err(Into::into)
+        os.exec(name, &script, short).await.map_err(Into::into)
     })
     .await?;
     anyhow::ensure!(start.ok(), "agent did not start: {}", outerr(&start));
@@ -1880,35 +1882,20 @@ fn start_script(
     briefing: &str,
     engine: &str,
     conversation_id: Option<&str>,
-) -> String {
+) -> Result<String, crate::engine::UnknownEngine> {
     let secs = cfg.agent_timeout_secs;
-    // Cursor Agent CLI: --print for headless; --force/--trust so tool calls do
-    // not stall on approval; --sandbox disabled because OpenShell already
-    // contains the process (Cursor's nested sandbox fights landlock/egress).
-    let cmd = match (engine, conversation_id) {
-        ("agy", Some(_)) => {
-            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json --conversation \"$HONR_CONVERSATION\" -p \"$HONR_BRIEFING\""
-                .to_string()
-        }
-        ("agy", None) => {
-            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\""
-                .to_string()
-        }
-        ("cursor", Some(_)) => {
-            "agent -p --force --trust --sandbox disabled --output-format stream-json --resume \"$HONR_CONVERSATION\" \"$HONR_BRIEFING\""
-                .to_string()
-        }
-        ("cursor", None) => {
-            "agent -p --force --trust --sandbox disabled --output-format stream-json \"$HONR_BRIEFING\""
-                .to_string()
-        }
-        _ => "claude -p \"$HONR_BRIEFING\" --output-format stream-json --verbose --permission-mode bypassPermissions"
-            .to_string(),
-    };
+    // Engine argv (including Cursor --force/--trust/--sandbox disabled) lives
+    // in `crate::engine` — unknown ids fail here instead of falling through to
+    // claude.
+    let cmd = crate::engine::command_line(
+        engine,
+        crate::engine::PromptEnv::Briefing,
+        conversation_id,
+    )?;
     let conv_export = conversation_id
         .map(|c| format!("export HONR_CONVERSATION={}\n", shell_quote(c)))
         .unwrap_or_default();
-    format!(
+    Ok(format!(
         r#"set -e
 rm -f {AGENT_PID} {AGENT_STATUS}
 : > {AGENT_LOG}
@@ -1920,7 +1907,7 @@ for i in $(seq 1 40); do
 done
 echo agent-did-not-start >&2; exit 1"#,
         brief = shell_quote(briefing)
-    )
+    ))
 }
 
 /// Follow the agent's output from `from_line`, then exit with the agent's own
@@ -3204,20 +3191,12 @@ pub(crate) fn shell_quote(s: &str) -> String {
 
 /// Pull a resume handle out of a stream-json line, if present.
 ///
-/// agy uses `conversation_id`; Cursor Agent CLI uses `session_id`. Tolerant:
-/// walk a few known shapes and ignore the rest. Shared with the cockpit chat
-/// bridge so resume handles stay one parser.
+/// Pointer keys come from the engine registry (agy `conversation_id`, Cursor
+/// `session_id`, …). Tolerant across engines so one parser serves supervisor
+/// and cockpit chat.
 pub(crate) fn parse_conversation_id(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    const KEYS: &[&str] = &[
-        "/conversation_id",
-        "/step_update/conversation_id",
-        "/result/conversation_id",
-        "/message/conversation_id",
-        "/session_id",
-        "/result/session_id",
-    ];
-    for key in KEYS {
+    for key in crate::engine::conversation_id_pointers() {
         if let Some(s) = v.pointer(key).and_then(|x| x.as_str()) {
             let t = s.trim();
             if !t.is_empty() {
@@ -3759,7 +3738,7 @@ mod tests {
     /// and left deleting the sandbox as the only honest option.
     #[test]
     fn the_agent_outlives_the_exec_that_starts_it() {
-        let s = start_script(&repo_cfg(), "do the thing", "claude", None);
+        let s = start_script(&repo_cfg(), "do the thing", "claude", None).unwrap();
         assert!(s.contains("setsid nohup"), "must be detached: {s}");
         assert!(
             s.trim_end().contains("&\n") || s.contains("2>&1 &"),
@@ -3788,7 +3767,7 @@ mod tests {
     fn the_agent_carries_its_own_deadline() {
         let mut cfg = repo_cfg();
         cfg.agent_timeout_secs = 900;
-        let s = start_script(&cfg, "b", "claude", None);
+        let s = start_script(&cfg, "b", "claude", None).unwrap();
         assert!(s.contains("timeout --foreground 900 claude"), "{s}");
     }
 
@@ -3798,7 +3777,7 @@ mod tests {
     /// apostrophe in it — which is most of them.
     #[test]
     fn the_briefing_crosses_the_inner_shell_intact() {
-        let s = start_script(&repo_cfg(), "it's a card; rm -rf /", "claude", None);
+        let s = start_script(&repo_cfg(), "it's a card; rm -rf /", "claude", None).unwrap();
         assert!(
             s.contains(r"it'\''s a card; rm -rf /"),
             "must be escaped once: {s}"
@@ -3816,13 +3795,14 @@ mod tests {
             "continue",
             "agy",
             Some("8f9c6cee-964a-44ce-8698-c92a4ea473ef"),
-        );
+        )
+        .unwrap();
         assert!(s.contains("--conversation \"$HONR_CONVERSATION\""), "{s}");
         assert!(
             s.contains("HONR_CONVERSATION='8f9c6cee-964a-44ce-8698-c92a4ea473ef'"),
             "{s}"
         );
-        let fresh = start_script(&repo_cfg(), "start", "agy", None);
+        let fresh = start_script(&repo_cfg(), "start", "agy", None).unwrap();
         assert!(!fresh.contains("--conversation"), "{fresh}");
         assert!(!fresh.contains("HONR_CONVERSATION="), "{fresh}");
     }
@@ -3853,7 +3833,7 @@ mod tests {
 
     #[test]
     fn cursor_engine_uses_agent_cli_flags() {
-        let s = start_script(&repo_cfg(), "do the thing", "cursor", None);
+        let s = start_script(&repo_cfg(), "do the thing", "cursor", None).unwrap();
         assert!(s.contains("timeout --foreground"), "{s}");
         assert!(
             s.contains("agent -p --force --trust --sandbox disabled"),
@@ -3866,7 +3846,8 @@ mod tests {
             "continue",
             "cursor",
             Some("c6b62c6f-7ead-4fd6-9922-e952131177ff"),
-        );
+        )
+        .unwrap();
         assert!(
             resume.contains("--resume \"$HONR_CONVERSATION\""),
             "{resume}"
@@ -3875,6 +3856,17 @@ mod tests {
             resume.contains("HONR_CONVERSATION='c6b62c6f-7ead-4fd6-9922-e952131177ff'"),
             "{resume}"
         );
+    }
+
+    #[test]
+    fn start_script_rejects_unknown_engine() {
+        let err = start_script(&repo_cfg(), "x", "opencode", None).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown agent engine"),
+            "{err}"
+        );
+        // Must not silently emit a claude command.
+        assert!(!err.to_string().contains("claude -p"), "{err}");
     }
 
     #[test]
@@ -3985,7 +3977,7 @@ mod tests {
             env.iter().all(|(k, _)| k != "BEADS_DIR"),
             "agent_env must not export BEADS_DIR: {env:?}"
         );
-        let script = start_script(&repo_cfg(), "briefing", "claude", None);
+        let script = start_script(&repo_cfg(), "briefing", "claude", None).unwrap();
         assert!(
             !script.contains("BEADS_DIR"),
             "start script must not export BEADS_DIR: {script}"
