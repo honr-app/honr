@@ -42,6 +42,12 @@ function cockpitAttachWsUrl(): string {
   return `${proto}//${window.location.host}/api/cockpit-attach`;
 }
 
+/** Exponential backoff for attach reconnect after honr/proxy drops the socket. */
+export function cockpitAttachRetryDelayMs(attempt: number): number {
+  const n = Math.max(0, Math.min(attempt, 5));
+  return Math.min(1000 * 2 ** n, 15_000);
+}
+
 /**
  * Start / Stop only — exported so tests render without fetch.
  * Session metadata stays on the Board; Cockpit does not dump it.
@@ -117,6 +123,9 @@ export function CockpitAttachView({
   const titleId = useId();
   const [attachError, setAttachError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  /** Internal remount counter — bumped on unexpected socket close for backoff retry. */
+  const [attachGen, setAttachGen] = useState(0);
+  const retryAttemptRef = useRef(0);
   const titleEnv = environment?.trim() || "cockpit";
   const titleStatus =
     sessionStatus === "parked"
@@ -124,8 +133,17 @@ export function CockpitAttachView({
       : sessionStatus === "running"
         ? connected
           ? "attached"
-          : "connecting…"
+          : attachError
+            ? "reconnecting…"
+            : "connecting…"
         : "offline";
+
+  // Parent Start/Stop (or env change) should not inherit a prior backoff streak.
+  useEffect(() => {
+    retryAttemptRef.current = 0;
+    setAttachGen(0);
+    setAttachError(null);
+  }, [reconnectKey, environment, canAttach]);
 
   useEffect(() => {
     if (!canAttach || !hostRef.current) {
@@ -136,8 +154,30 @@ export function CockpitAttachView({
     // Dynamic import keeps SSR / node tests free of xterm's CJS surface.
     let disposed = false;
     let cleanup: (() => void) | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectScheduled = false;
     setAttachError(null);
     setConnected(false);
+
+    const scheduleReconnect = (hint?: string) => {
+      if (disposed || reconnectScheduled) return;
+      reconnectScheduled = true;
+      const attempt = retryAttemptRef.current;
+      retryAttemptRef.current = attempt + 1;
+      const delay = cockpitAttachRetryDelayMs(attempt);
+      const secs = Math.max(1, Math.round(delay / 1000));
+      setAttachError(
+        hint
+          ? `${hint} — retrying in ${secs}s…`
+          : `attach disconnected — retrying in ${secs}s…`,
+      );
+      setConnected(false);
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        if (disposed) return;
+        setAttachGen((g) => g + 1);
+      }, delay);
+    };
 
     void (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -170,7 +210,7 @@ export function CockpitAttachView({
         ws = new WebSocket(cockpitAttachWsUrl());
         ws.binaryType = "arraybuffer";
       } catch (e) {
-        setAttachError(e instanceof Error ? e.message : String(e));
+        scheduleReconnect(e instanceof Error ? e.message : String(e));
         term.dispose();
         return;
       }
@@ -261,6 +301,8 @@ export function CockpitAttachView({
               code?: number;
             };
             if (msg.type === "ready") {
+              retryAttemptRef.current = 0;
+              setAttachError(null);
               setConnected(true);
               sendResize();
               startAgentSpinner();
@@ -274,6 +316,7 @@ export function CockpitAttachView({
                 `\r\n\x1b[90m[shell exited${msg.code != null ? ` ${msg.code}` : ""}]\x1b[0m`,
               );
               setConnected(false);
+              // Socket close follows; onclose schedules reconnect once.
             }
           } catch {
             /* ignore non-JSON control */
@@ -287,12 +330,14 @@ export function CockpitAttachView({
             : new Uint8Array(ev.data as ArrayBuffer);
         term.write(bytes);
       };
-      ws.onerror = () => {
-        if (!disposed) setAttachError("attach WebSocket error");
-      };
+      // onerror is usually followed by onclose; reconnect there so we do not
+      // stick a permanent "attach WebSocket error" after a honr restart.
+      ws.onerror = () => {};
       ws.onclose = () => {
         stopAgentSpinner(true);
-        if (!disposed) setConnected(false);
+        if (disposed) return;
+        setConnected(false);
+        scheduleReconnect("attach WebSocket closed");
       };
 
       const dataSub = term.onData((data) => {
@@ -316,7 +361,12 @@ export function CockpitAttachView({
         window.removeEventListener("resize", onWinResize);
         ro?.disconnect();
         dataSub.dispose();
-        ws?.close();
+        // Prevent onclose from scheduling another retry while we tear down.
+        if (ws) {
+          ws.onclose = null;
+          ws.onerror = null;
+          ws.close();
+        }
         term.dispose();
         setConnected(false);
       };
@@ -324,9 +374,10 @@ export function CockpitAttachView({
 
     return () => {
       disposed = true;
+      if (retryTimer != null) clearTimeout(retryTimer);
       cleanup?.();
     };
-  }, [canAttach, environment, reconnectKey]);
+  }, [canAttach, environment, reconnectKey, attachGen]);
 
   // Collapse only hides the drop — keep the WebSocket. Refit when shown again.
   useEffect(() => {

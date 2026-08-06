@@ -13,6 +13,7 @@ import {
   CockpitSessionView,
   CockpitToggle,
   cockpitAttachGate,
+  cockpitAttachRetryDelayMs,
   cockpitChatGate,
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
@@ -368,7 +369,9 @@ s = reduce(s, {
 assert.strictEqual(s.lastSeenSeq, 11, "BoardEvent seq 11 should update lastSeenSeq to 11");
 assert.strictEqual(s.items.get(8).title, "Updated Live by Event", "Upsert event should update item in state");
 
-// Test 11: Stale REST snapshot race protection
+// Test 11: Stale REST snapshot race protection (only while connected + small gap)
+s = reduce(s, { type: "connected", ok: true });
+const beforeStaleLoadAt = s.lastLoadedAt;
 const staleSnap = {
   items: [{ ...unblockedItem, title: "Stale REST Snapshot Title" }],
   levels: [],
@@ -385,6 +388,33 @@ assert.strictEqual(
   "Updated Live by Event",
   "Stale REST snapshot (seq 9 < 11) must not overwrite newer live event state"
 );
+assert.ok(
+  sAfterStaleSnap.lastLoadedAt != null &&
+    (beforeStaleLoadAt == null || sAfterStaleSnap.lastLoadedAt >= beforeStaleLoadAt),
+  "Successful REST during a tiny race must still refresh lastLoadedAt (retry / NOT LIVE)"
+);
+
+// Test 11b: After disconnect (or honr restart seq rewind), REST snapshot wins
+const sDisconnected = reduce(sAfterStaleSnap, { type: "connected", ok: false });
+const rewoundSnap = {
+  items: [{ ...unblockedItem, title: "Post-restart Snapshot" }],
+  levels: [],
+  goals: [],
+  server_time: new Date().toISOString(),
+  agent_timeout_secs: 1800,
+  seq: 2,
+};
+const sAfterRewind = reduce(sDisconnected, { type: "snapshot", snap: rewoundSnap });
+assert.strictEqual(sAfterRewind.lastSeenSeq, 2, "Disconnected retry must accept rewound server seq");
+assert.strictEqual(
+  sAfterRewind.items.get(8).title,
+  "Post-restart Snapshot",
+  "Disconnected retry must apply REST after honr restart"
+);
+
+// Test 11c: reset event rewinds high-water mark so later events apply
+const sAfterReset = reduce(sAfterStaleSnap, { type: "event", ev: { type: "reset", seq: 3 } });
+assert.strictEqual(sAfterReset.lastSeenSeq, 3, "reset event must rewind lastSeenSeq");
 
 // Test 12: Stale/duplicate BoardEvent ignored
 const staleEvent = {
@@ -683,6 +713,12 @@ const attachRunning = renderToString(
 assert(attachRunning.includes("data-testid=\"cockpit-xterm\""), "xterm host present");
 assert(attachRunning.includes("honr-cockpit"), "Title bar shows environment");
 assert(!attachRunning.includes("data-testid=\"cockpit-attach-gate\""), "No gate when attachable");
+
+// Attach reconnect backoff (honr restart must not stick on a dead socket)
+assert.equal(cockpitAttachRetryDelayMs(0), 1000);
+assert.equal(cockpitAttachRetryDelayMs(1), 2000);
+assert.equal(cockpitAttachRetryDelayMs(5), 15_000);
+assert.equal(cockpitAttachRetryDelayMs(9), 15_000, "backoff caps at 15s");
 
 // Gate helpers
 assert.deepEqual(cockpitAttachGate(null), {

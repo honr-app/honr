@@ -66,18 +66,30 @@ export const initial: BoardState = {
 };
 
 /**
+ * Live events can beat a concurrent REST snapshot by a handful of seqs.
+ * A gap larger than this after a successful `/api/board` means the server
+ * restarted (seq counter reset) — take the snapshot as authoritative.
+ */
+const STALE_SNAPSHOT_RACE_MAX_GAP = 32;
+
+/**
  * Pure reducer for board state updates.
  * Guards against stale REST snapshots with older sequence numbers overwriting
- * newer live event state.
+ * newer live event state — unless the stream is down or seq clearly rewound
+ * (honr restart), in which case REST wins.
  */
 export function reduce(s: BoardState, a: Action): BoardState {
   switch (a.type) {
     case "snapshot": {
       const snapSeq = a.snap.seq ?? 0;
-      // REST race guard: do not allow older snapshot updates to overwrite state
-      // that has already advanced to a higher sequence number via live events.
       if (s.lastSeenSeq > 0 && snapSeq < s.lastSeenSeq) {
-        return s;
+        const gap = s.lastSeenSeq - snapSeq;
+        // Connected + tiny gap: keep live state; still mark reachable so the
+        // NOT LIVE banner clears when retry/poll succeeds.
+        if (s.connected && gap <= STALE_SNAPSHOT_RACE_MAX_GAP) {
+          return { ...s, lastLoadedAt: Date.now() };
+        }
+        // Disconnected retry, or seq rewound past a race → apply below.
       }
 
       const items = new Map(a.snap.items.map((i) => [i.id, i]));
@@ -93,10 +105,16 @@ export function reduce(s: BoardState, a: Action): BoardState {
         defaultModel: a.snap.default_model ?? "",
         loaded: true,
         lastLoadedAt: Date.now(),
-        lastSeenSeq: Math.max(s.lastSeenSeq, snapSeq),
+        // After a rewind, snapSeq is the truth — do not keep the old high-water.
+        lastSeenSeq: snapSeq,
       };
     }
     case "event": {
+      // Server tells us our last_seq is ahead of its counter (restart).
+      if (a.ev.type === "reset") {
+        return { ...s, lastSeenSeq: a.ev.seq ?? 0 };
+      }
+
       const evSeq = a.ev.seq ?? (s.lastSeenSeq + 1);
       // Ignore duplicate or out-of-order events with older/equal sequence numbers
       if (s.lastSeenSeq > 0 && evSeq <= s.lastSeenSeq) {
@@ -147,6 +165,8 @@ export const STALE_AFTER_MS = 12_000;
 export function useBoard() {
   const [state, dispatch] = useReducer(reduce, initial);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped by `refresh` so the stream effect tears down and reconnects. */
+  const [streamGen, setStreamGen] = useState(0);
   const wsRef = useRef<WebSocket | EventSource | null>(null);
   const lastSeenSeqRef = useRef<number>(0);
   const wasConnectedRef = useRef<boolean>(false);
@@ -297,9 +317,11 @@ export function useBoard() {
       alive = false;
       window.clearTimeout(startTimer);
       clearInterval(poll);
+      dispatch({ type: "connected", ok: false });
       if (!socket) return;
       if (socket instanceof WebSocket) {
         // Never close() while CONNECTING — Safari treats that as an error.
+        // Mark dead via `alive` so onopen closes immediately if it wins the race.
         if (socket.readyState === WebSocket.OPEN) {
           socket.close();
         }
@@ -307,12 +329,17 @@ export function useBoard() {
       }
       socket.close();
     };
-  }, []);
+  }, [streamGen]);
 
   return {
     ...state,
     error,
-    refresh: () => api.board().then((snap) => dispatch({ type: "snapshot", snap })),
+    refresh: () => {
+      // Mark disconnected first so a seq-rewound snapshot (honr restart) is
+      // applied instead of discarded; then remount the WS/SSE effect.
+      dispatch({ type: "connected", ok: false });
+      setStreamGen((g) => g + 1);
+    },
   };
 }
 
