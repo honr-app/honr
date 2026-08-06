@@ -52,7 +52,14 @@ jobs:
           npm run --prefix web build
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # Read the cache CI's `rust` job owns; do not write a second copy. Two
+      # ~650MB caches of the same dependency tree evict each other out of the
+      # repo's 10GB budget, which shows up later as a surprise cold build.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust
+          save-if: false
 
       # The harness serves the fixture from a real honr. Its fallback mock
       # server answers a snapshot shape the board no longer emits, so strict

@@ -27,7 +27,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # Owns the shared Rust cache. `--all-targets` below builds dev-deps and
+      # test harnesses too, so what this job saves is a superset of what the
+      # docs `shots` job needs — that job reads this cache and never writes one.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
