@@ -52,6 +52,8 @@ jobs:
           external_repository: honr-app/honr-app.github.io
           publish_branch: main
           publish_dir: ./target/mdbook
+          # Orphan commits keep the pages repo = HTML only (legacy branch Pages).
           force_orphan: true
+          enable_jekyll: false
           user_name: github-actions[bot]
           user_email: 41898282+github-actions[bot]@users.noreply.github.com
