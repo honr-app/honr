@@ -77,7 +77,7 @@ evidence.
 
 **Feature branches are writable; `main` is human-gated.** The repository
 ruleset keeps the default branch owner-only. Agents push `honr/card-*` on
-`shanemcd/honr` (App installation on that account) and open PRs into `main`;
+`honr-app/honr` (App installation on that account) and open PRs into `main`;
 humans merge.
 
 ## Where to go next

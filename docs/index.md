@@ -1,7 +1,6 @@
 # honr docs
 
-Operator-first docs for running and understanding honr. Flat pages with stable
-slugs: ready to map to a docs site later.
+Operator-first docs for running and understanding honr.
 
 | Page | What |
 |---|---|
@@ -15,3 +14,13 @@ slugs: ready to map to a docs site later.
 | [Clone targets](task-repo-binding.md) | Clone from task prose; `pull_request` after report; Initial plan via `plan.json` |
 
 Machine contracts (not prose): [`schemas/report.schema.json`](schemas/report.schema.json).
+
+## Building this book
+
+```bash
+mdbook serve             # http://localhost:3000  (book.toml at repo root)
+mdbook build             # writes to target/mdbook/
+# or: make docs / make docs-serve
+```
+
+CI publishes `target/mdbook` to [`honr-app/honr-app.github.io`](https://github.com/honr-app/honr-app.github.io) → [honr-app.github.io](https://honr-app.github.io/) via a write **deploy key** (`PAGES_DEPLOY_KEY` on `honr-app/honr`). Org setting **Deploy keys** must stay enabled.

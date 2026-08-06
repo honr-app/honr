@@ -39,7 +39,7 @@ without evidence and throw away the property that makes the signal trustworthy.
 
 **Feature branches are writable; `main` is human-gated.** The GitHub ruleset
 keeps the default branch owner-only. Agents use the App installation on
-`shanemcd` with `fork` = `upstream` = `shanemcd/honr`, push `honr/card-*`, and
+`shanemcd` with `fork` = `upstream` = `honr-app/honr`, push `honr/card-*`, and
 open PRs; humans merge.
 
 ## Conventions

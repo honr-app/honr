@@ -6138,7 +6138,7 @@ mod tests {
         let (b, id) = claimed_leaf();
         b.set_pr_url(
             id,
-            Some("https://github.com/shanemcd/honr/pull/42".to_string()),
+            Some("https://github.com/honr-app/honr/pull/42".to_string()),
         );
         let children = vec![
             SplitChildSpec::new("Part 1", "Do part 1", "Part 1 done"),
@@ -6450,24 +6450,24 @@ mod tests {
             .create_project(
                 "OpenShell settings",
                 "Rework the OpenShell settings surface",
-                "shanemcd/honr",
+                "honr-app/honr",
                 true,
                 None,
             )
             .expect("create_project");
         assert!(
-            project.intent.contains("Clone repository: shanemcd/honr"),
+            project.intent.contains("Clone repository: honr-app/honr"),
             "{}",
             project.intent
         );
         let prompt = project.project_prompt.as_deref().unwrap_or("");
         assert!(
-            prompt.contains("Default clone repository: shanemcd/honr"),
+            prompt.contains("Default clone repository: honr-app/honr"),
             "{prompt}"
         );
         let seed = b.initial_plan_of(project.id).expect("seeded");
         assert!(
-            seed.intent.contains("Clone repository: shanemcd/honr"),
+            seed.intent.contains("Clone repository: honr-app/honr"),
             "Initial plan must stamp planning clone: {}",
             seed.intent
         );
@@ -6475,7 +6475,7 @@ mod tests {
             seed.definition_of_done
                 .as_deref()
                 .unwrap_or("")
-                .contains("shanemcd/honr"),
+                .contains("honr-app/honr"),
             "{:?}",
             seed.definition_of_done
         );
@@ -7494,7 +7494,7 @@ mod tests {
         let _ = b.transition(t.id, State::Review, "agent", None);
         b.set_pr_url(
             t.id,
-            Some("https://github.com/shanemcd/honr/pull/99".into()),
+            Some("https://github.com/honr-app/honr/pull/99".into()),
         );
 
         let item = b.approve_review(t.id).expect("approve");
@@ -7505,7 +7505,7 @@ mod tests {
         );
         // Webhook after Approve is a no-op (idempotent).
         assert!(b
-            .complete_for_merged_pr("https://github.com/shanemcd/honr/pull/99", Some(99))
+            .complete_for_merged_pr("https://github.com/honr-app/honr/pull/99", Some(99))
             .is_none());
         assert_eq!(b.get(t.id).unwrap().state, State::Done);
     }
@@ -7548,27 +7548,27 @@ mod tests {
         let _ = b.transition(t.id, State::Review, "agent", None);
         b.set_pr_url(
             t.id,
-            Some("https://github.com/shanemcd/honr/pull/55/".into()),
+            Some("https://github.com/honr-app/honr/pull/55/".into()),
         );
 
         assert_eq!(
-            Board::normalize_pr_url("https://GitHub.com/shanemcd/honr/pull/55/"),
-            "https://github.com/shanemcd/honr/pull/55"
+            Board::normalize_pr_url("https://GitHub.com/honr-app/honr/pull/55/"),
+            "https://github.com/honr-app/honr/pull/55"
         );
 
         let done_id = b
-            .complete_for_merged_pr("https://GitHub.com/shanemcd/honr/pull/55", Some(55))
+            .complete_for_merged_pr("https://GitHub.com/honr-app/honr/pull/55", Some(55))
             .expect("should complete Review card");
         assert_eq!(done_id, t.id);
         assert_eq!(b.get(t.id).unwrap().state, State::Done);
 
         assert!(
-            b.complete_for_merged_pr("https://github.com/shanemcd/honr/pull/55", Some(55))
+            b.complete_for_merged_pr("https://github.com/honr-app/honr/pull/55", Some(55))
                 .is_none(),
             "idempotent: already Done"
         );
         assert!(
-            b.complete_for_merged_pr("https://github.com/shanemcd/honr/pull/56", Some(56))
+            b.complete_for_merged_pr("https://github.com/honr-app/honr/pull/56", Some(56))
                 .is_none(),
             "no match"
         );
@@ -7870,7 +7870,7 @@ mod tests {
         b.transition(t1.id, State::Review, "agent", None).unwrap();
         b.set_pr_url(
             t1.id,
-            Some("https://github.com/shanemcd/honr/pull/101".into()),
+            Some("https://github.com/honr-app/honr/pull/101".into()),
         );
 
         b.transition(t2.id, State::Shaping, "test", None).unwrap();
@@ -7879,7 +7879,7 @@ mod tests {
         b.transition(t2.id, State::Review, "agent", None).unwrap();
         b.set_pr_url(
             t2.id,
-            Some("https://github.com/shanemcd/honr/pull/102".into()),
+            Some("https://github.com/honr-app/honr/pull/102".into()),
         );
 
         let behind = b.identify_behind_sibling_prs(t1.id);
@@ -7887,7 +7887,7 @@ mod tests {
         assert_eq!(behind[0].id, t2.id);
 
         let completed_id = b
-            .complete_for_merged_pr("https://github.com/shanemcd/honr/pull/101", Some(101))
+            .complete_for_merged_pr("https://github.com/honr-app/honr/pull/101", Some(101))
             .expect("t1 completed");
         assert_eq!(completed_id, t1.id);
 
@@ -7958,7 +7958,7 @@ mod tests {
         b.transition(t2.id, State::Review, "agent", None).unwrap();
         b.set_pr_url(
             t2.id,
-            Some("https://github.com/shanemcd/honr/pull/202".into()),
+            Some("https://github.com/honr-app/honr/pull/202".into()),
         );
 
         b.notify_main_advanced("refs/heads/main", Some("sha123".into()));
@@ -8023,7 +8023,7 @@ mod tests {
             .unwrap();
         b.set_pr_url(
             review.id,
-            Some("https://github.com/shanemcd/honr/pull/404".into()),
+            Some("https://github.com/honr-app/honr/pull/404".into()),
         );
 
         // No Done sibling on the board — tip-driven MainAdvanced only.
@@ -8115,7 +8115,7 @@ mod tests {
             .unwrap();
         b.set_pr_url(
             review.id,
-            Some("https://github.com/shanemcd/honr/pull/505".into()),
+            Some("https://github.com/honr-app/honr/pull/505".into()),
         );
 
         b.transition(running.id, State::Shaping, "test", None)
@@ -8204,8 +8204,8 @@ mod tests {
                 .unwrap();
 
             for (id, url) in [
-                (merged.id, "https://github.com/shanemcd/honr/pull/601"),
-                (sibling.id, "https://github.com/shanemcd/honr/pull/602"),
+                (merged.id, "https://github.com/honr-app/honr/pull/601"),
+                (sibling.id, "https://github.com/honr-app/honr/pull/602"),
             ] {
                 b.transition(id, State::Shaping, "test", None).unwrap();
                 b.transition(id, State::Backlog, "test", None).unwrap();
@@ -8216,7 +8216,7 @@ mod tests {
 
             let completed = b
                 .complete_for_merged_pr_by(
-                    "https://github.com/shanemcd/honr/pull/601",
+                    "https://github.com/honr-app/honr/pull/601",
                     Some(601),
                     by,
                 )
@@ -8460,7 +8460,7 @@ mod tests {
         b.transition(t1.id, State::Review, "agent", None).unwrap();
         b.set_pr_url(
             t1.id,
-            Some("https://github.com/shanemcd/honr/pull/301".into()),
+            Some("https://github.com/honr-app/honr/pull/301".into()),
         );
 
         b.dispatch_rebase(t1.id).unwrap();
@@ -8520,7 +8520,7 @@ mod tests {
         b.transition(t1.id, State::Review, "agent", None).unwrap();
         b.set_pr_url(
             t1.id,
-            Some("https://github.com/shanemcd/honr/pull/302".into()),
+            Some("https://github.com/honr-app/honr/pull/302".into()),
         );
 
         b.dispatch_rebase(t1.id).unwrap();
@@ -8648,7 +8648,7 @@ mod tests {
         b.transition(t1.id, State::Review, "agent", None).unwrap();
         b.set_pr_url(
             t1.id,
-            Some("https://github.com/shanemcd/honr/pull/303".into()),
+            Some("https://github.com/honr-app/honr/pull/303".into()),
         );
 
         // First conflict -> Backlog
@@ -8722,7 +8722,7 @@ mod tests {
         b.transition(t1.id, State::Review, "agent", None).unwrap();
         b.set_pr_url(
             t1.id,
-            Some("https://github.com/shanemcd/honr/pull/304".into()),
+            Some("https://github.com/honr-app/honr/pull/304".into()),
         );
 
         // First conflict -> Backlog

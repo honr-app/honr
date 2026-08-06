@@ -3456,7 +3456,7 @@ mod tests {
     fn refresh_base_comes_from_upstream_not_the_fork() {
         let s = refresh_script(&repo_cfg(), "honr/card-8");
         assert!(
-            s.contains("git remote add upstream https://github.com/shanemcd/honr.git"),
+            s.contains("git remote add upstream https://github.com/honr-app/honr.git"),
             "{s}"
         );
         assert!(s.contains("fetch -q upstream main"), "{s}");
@@ -3519,7 +3519,7 @@ mod tests {
             &cross_fork_repo(),
         );
         assert!(b.contains("honr/card-7"), "must name the branch: {b}");
-        assert!(b.contains("shanemcd/honr"), "must name the PR target: {b}");
+        assert!(b.contains("honr-app/honr"), "must name the PR target: {b}");
         assert!(b.to_lowercase().contains("push"), "{b}");
         assert!(b.to_lowercase().contains("pull request"), "{b}");
     }
@@ -4436,7 +4436,7 @@ mod tests {
     /// the branch on upstream and fails.
     fn cross_fork_repo() -> crate::schema::RepoConfig {
         crate::schema::RepoConfig {
-            upstream: "shanemcd/honr".into(),
+            upstream: "honr-app/honr".into(),
             fork: "clankrshq/honr".into(),
             base: "main".into(),
         }
@@ -4444,7 +4444,7 @@ mod tests {
 
     fn repo_cfg() -> AgentConfig {
         let mut cfg = AgentConfig::default();
-        cfg.repo.upstream = "shanemcd/honr".into();
+        cfg.repo.upstream = "honr-app/honr".into();
         cfg.repo.fork = "clankrshq/honr".into();
         cfg.repo.base = "main".into();
         cfg
@@ -4698,7 +4698,7 @@ mod tests {
     }
 
     /// Unbound first runs used to say "clone per the Project prompt" with no
-    /// guard — agents invented shanemcd/honr from ambient context. Needs You.
+    /// guard — agents invented honr-app/honr from ambient context. Needs You.
     #[test]
     fn unbound_briefing_forbids_guessing_the_repo() {
         let unbound = crate::schema::RepoConfig::default();
@@ -4781,11 +4781,11 @@ mod tests {
         let unbound = crate::schema::RepoConfig::default();
         let mut g = grant();
         g.notes = vec![
-            "Decision: Clone shanemcd/honr (suggested by beads External https://github.com/shanemcd/honr/issues/204)"
+            "Decision: Clone honr-app/honr (suggested by beads External https://github.com/honr-app/honr/issues/204)"
                 .into(),
         ];
         let b = briefing(&g, BranchState::Fresh, "honr/card-146", &unbound);
-        assert!(b.contains("shanemcd/honr"), "{b}");
+        assert!(b.contains("honr-app/honr"), "{b}");
         assert!(
             b.contains("already decided") || b.contains("human-decided"),
             "must treat Decision as the clone target: {b}"
@@ -4800,7 +4800,7 @@ mod tests {
         );
 
         let resume = resume_briefing(&g, &unbound);
-        assert!(resume.contains("shanemcd/honr"), "{resume}");
+        assert!(resume.contains("honr-app/honr"), "{resume}");
         assert!(
             resume.contains("already decided"),
             "resume must carry the decided clone too: {resume}"
@@ -4994,25 +4994,25 @@ mod tests {
             "added": 10,
             "removed": 2,
             "gates": ["agent-reported"],
-            "url": "https://github.com/shanemcd/honr/pull/42",
-            "base": { "repo": "shanemcd/honr", "ref": "main" },
+            "url": "https://github.com/honr-app/honr/pull/42",
+            "base": { "repo": "honr-app/honr", "ref": "main" },
             "head": { "repo": "clankrshq/honr", "ref": "honr/card-7" }
         }"#;
         let rep: ReportFile = serde_json::from_str(json).unwrap();
         assert_eq!(rep.added, 10);
         let pr = report_to_pull_request(&rep).expect("pull_request");
-        assert_eq!(pr.url, "https://github.com/shanemcd/honr/pull/42");
+        assert_eq!(pr.url, "https://github.com/honr-app/honr/pull/42");
         assert!(pr.has_forge_ends());
         assert_eq!(pr.head.as_ref().unwrap().repo, "clankrshq/honr");
 
         // Legacy pr_url alias still loads into url.
         let legacy: ReportFile = serde_json::from_str(
-            r#"{"added":5,"removed":0,"pr_url":"https://github.com/shanemcd/honr/pull/9"}"#,
+            r#"{"added":5,"removed":0,"pr_url":"https://github.com/honr-app/honr/pull/9"}"#,
         )
         .unwrap();
         assert_eq!(
             legacy.url.as_deref(),
-            Some("https://github.com/shanemcd/honr/pull/9")
+            Some("https://github.com/honr-app/honr/pull/9")
         );
 
         let json_empty_url = r#"{
@@ -5046,7 +5046,7 @@ mod tests {
         let _ = board.claim(task.id, "agent-1", None, 60).unwrap();
         let _ = board.transition(task.id, State::Running, "agent-1", None);
 
-        let pr_url = "https://github.com/shanemcd/honr/pull/50";
+        let pr_url = "https://github.com/honr-app/honr/pull/50";
         board.set_pr_url(task.id, Some(pr_url.to_string()));
 
         let dir = std::env::temp_dir().join(format!(
@@ -5132,7 +5132,7 @@ mod tests {
         let os = verdict_openshell(
             "split",
             &split_json_path,
-            Some("https://github.com/shanemcd/honr/pull/99"),
+            Some("https://github.com/honr-app/honr/pull/99"),
             None,
         );
         let cfg = repo_cfg();
@@ -5154,7 +5154,7 @@ mod tests {
         assert_eq!(item.state, State::NeedsHuman);
         assert_eq!(
             item.pr_url(),
-            Some("https://github.com/shanemcd/honr/pull/99")
+            Some("https://github.com/honr-app/honr/pull/99")
         );
         let esc = item.escalation.expect("escalation set");
         assert!(esc.question.contains("a PR already exists"));
@@ -5252,7 +5252,7 @@ mod tests {
         let report_path = dir.join("report.json");
         std::fs::write(
             &report_path,
-            r#"{"added":3,"removed":0,"pr_url":"https://github.com/shanemcd/honr/pull/99"}"#,
+            r#"{"added":3,"removed":0,"pr_url":"https://github.com/honr-app/honr/pull/99"}"#,
         )
         .unwrap();
         std::fs::write(
@@ -5287,7 +5287,7 @@ mod tests {
         assert_eq!(seed.state, State::Review);
         assert_eq!(
             seed.pr_url(),
-            Some("https://github.com/shanemcd/honr/pull/99")
+            Some("https://github.com/honr-app/honr/pull/99")
         );
         let prop = seed.proposal.expect("proposal on Initial plan card");
         assert_eq!(prop.tasks.len(), 2);
@@ -5316,7 +5316,7 @@ mod tests {
         let report_path = dir.join("report.json");
         std::fs::write(
             &report_path,
-            r#"{"added":1,"removed":0,"pr_url":"https://github.com/shanemcd/honr/pull/98"}"#,
+            r#"{"added":1,"removed":0,"pr_url":"https://github.com/honr-app/honr/pull/98"}"#,
         )
         .unwrap();
 
@@ -5378,7 +5378,7 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let report_path = dir.join("report.json");
-        let pr_url = "https://github.com/shanemcd/honr/pull/166";
+        let pr_url = "https://github.com/honr-app/honr/pull/166";
         std::fs::write(
             &report_path,
             format!(r#"{{"added":2,"removed":1,"pr_url":"{pr_url}"}}"#),
@@ -5458,7 +5458,7 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let report_path = dir.join("report.json");
-        let pr_url = "https://github.com/shanemcd/honr/pull/167";
+        let pr_url = "https://github.com/honr-app/honr/pull/167";
         std::fs::write(
             &report_path,
             format!(r#"{{"added":1,"removed":0,"pr_url":"{pr_url}"}}"#),
@@ -5772,10 +5772,10 @@ mod tests {
         board.set_pull_request(
             task.id,
             Some(crate::model::PullRequest {
-                url: format!("https://github.com/shanemcd/honr/pull/{}", task.id),
-                base: Some(crate::model::PullRequestEnd::new("shanemcd/honr", "main")),
+                url: format!("https://github.com/honr-app/honr/pull/{}", task.id),
+                base: Some(crate::model::PullRequestEnd::new("honr-app/honr", "main")),
                 head: Some(crate::model::PullRequestEnd::new(
-                    "shanemcd/honr",
+                    "honr-app/honr",
                     crate::schema::card_branch_name("honr", task.id),
                 )),
             }),
@@ -5952,10 +5952,10 @@ mod tests {
         board.set_pull_request(
             review.id,
             Some(crate::model::PullRequest {
-                url: format!("https://github.com/shanemcd/honr/pull/{}", review.id),
-                base: Some(crate::model::PullRequestEnd::new("shanemcd/honr", "main")),
+                url: format!("https://github.com/honr-app/honr/pull/{}", review.id),
+                base: Some(crate::model::PullRequestEnd::new("honr-app/honr", "main")),
                 head: Some(crate::model::PullRequestEnd::new(
-                    "shanemcd/honr",
+                    "honr-app/honr",
                     crate::schema::card_branch_name("honr", review.id),
                 )),
             }),

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="docs/index.md"><img alt="Docs" src="https://img.shields.io/badge/docs-operator%20guide-3d7ea6?style=flat-square" /></a>
+  <a href="https://honr-app.github.io/"><img alt="Docs" src="https://img.shields.io/badge/docs-operator%20guide-3d7ea6?style=flat-square" /></a>
   <a href="Cargo.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.88+-dea584?style=flat-square&logo=rust&logoColor=white" /></a>
   <a href="#status"><img alt="Status" src="https://img.shields.io/badge/status-active-2ea44f?style=flat-square" /></a>
 </p>
@@ -70,7 +70,7 @@ you ──chat──> operator agent (Cursor / Claude Code)
 you only need the API).
 
 ```bash
-git clone https://github.com/shanemcd/honr.git
+git clone https://github.com/honr-app/honr.git
 cd honr
 cargo run                 # http://127.0.0.1:8080  (API, SSE, MCP, UI)
 ```
@@ -120,7 +120,13 @@ Full walkthrough: [`docs/quickstart.md`](docs/quickstart.md).
 
 ## Documentation
 
-Start at **[`docs/index.md`](docs/index.md)**.
+Published site: **[honr-app.github.io](https://honr-app.github.io/)** (mdBook from [`docs/`](docs/), deployed to [`honr-app.github.io`](https://github.com/honr-app/honr-app.github.io)).
+
+```bash
+mdbook serve docs         # local preview at http://localhost:3000
+```
+
+Source pages (also readable on GitHub):
 
 | Guide | |
 |---|---|

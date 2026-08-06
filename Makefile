@@ -6,7 +6,7 @@
 #   make dev-ui   Vite hot-reload on :5173 (proxies API to :8080)
 #   make test     cargo + web unit tests
 
-.PHONY: all build api release ui install-ui run dev dev-ui test test-api test-ui clippy sandbox clean help
+.PHONY: all build api release ui install-ui run dev dev-ui docs docs-serve test test-api test-ui clippy sandbox clean help
 
 all: build
 
@@ -19,6 +19,8 @@ help:
 	@echo "  make run            Build both, then cargo run (debug)"
 	@echo "  make dev            cargo watch -x run (API hot-reload on :8080)"
 	@echo "  make dev-ui         Vite dev server (:5173 → :8080)"
+	@echo "  make docs           mdbook build → target/mdbook"
+	@echo "  make docs-serve     mdbook serve (http://localhost:3000)"
 	@echo "  make sandbox        Rebuild honr-sandbox:latest (warm crates/npm caches)"
 	@echo "  make test           cargo nextest/test + web tests"
 	@echo "  make clippy         cargo clippy -D warnings"
@@ -77,6 +79,20 @@ test-ui: install-ui
 
 clippy:
 	cargo clippy --all-targets --offline -- -D warnings
+
+docs:
+	@command -v mdbook >/dev/null 2>&1 || { \
+		echo "mdbook not found. Install: brew install mdbook   # or: cargo install mdbook"; \
+		exit 1; \
+	}
+	mdbook build
+
+docs-serve:
+	@command -v mdbook >/dev/null 2>&1 || { \
+		echo "mdbook not found. Install: brew install mdbook   # or: cargo install mdbook"; \
+		exit 1; \
+	}
+	mdbook serve
 
 # Rebuild when Cargo.lock / web/package-lock.json change. New sandboxes pick
 # this up via --from; existing ones keep the create-time image.

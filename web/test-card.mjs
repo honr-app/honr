@@ -454,7 +454,7 @@ const upsertEv = {
     id: 7,
     title: "Updated Card Title Live",
     state: "review",
-    pull_request: { url: "https://github.com/shanemcd/honr/pull/186" },
+    pull_request: { url: "https://github.com/honr-app/honr/pull/186" },
     notes: [
       { author: "human", text: "initial note" },
       { author: "agent", text: "PR opened" },
@@ -465,7 +465,7 @@ const upsertEv = {
 const updatedDetail = reduceDetail(detailInitial, upsertEv, 7);
 assert.strictEqual(updatedDetail.title, "Updated Card Title Live", "Upsert event for id 7 must update detail title live");
 assert.strictEqual(updatedDetail.state, "review", "Upsert event for id 7 must update detail state live");
-assert.strictEqual(updatedDetail.pull_request?.url, "https://github.com/shanemcd/honr/pull/186", "Upsert event for id 7 must update pull_request.url live");
+assert.strictEqual(updatedDetail.pull_request?.url, "https://github.com/honr-app/honr/pull/186", "Upsert event for id 7 must update pull_request.url live");
 assert.strictEqual(updatedDetail.notes.length, 2, "Upsert event for id 7 must update notes live");
 assert.strictEqual(updatedDetail.ancestry.length, 1, "reduceDetail must preserve existing detail ancestry");
 
@@ -1046,7 +1046,7 @@ assert(!workspaceHtml.includes("data-testid=\"workspace-field-base\""), "no base
 assert(workspaceHtml.includes("GitLab (future)"), "GitLab listed as future/disabled");
 assert(!workspaceHtml.includes("data-testid=\"workspace-webhook-hint\""), "no gh webhook forward hint");
 assert(!workspaceHtml.includes("gh webhook forward"), "no gh webhook forward copy");
-assert(!workspaceHtml.includes("shanemcd/honr"), "Forge panel must not hardcode Shane repo");
+assert(!workspaceHtml.includes("honr-app/honr"), "Forge panel must not hardcode Shane repo");
 assert(
   workspaceHtml.includes("pull_request") || workspaceHtml.includes("Work remotes"),
   "Forge copy must mention card pull_request / work remotes",

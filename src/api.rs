@@ -1994,13 +1994,13 @@ mod tests {
             .expect("create")
             .id;
         b.set_environment(id, Some("honr-card-8-a1".into()));
-        b.set_pr_url(id, Some("https://github.com/shanemcd/honr/pull/1".into()));
+        b.set_pr_url(id, Some("https://github.com/honr-app/honr/pull/1".into()));
 
         let Json(snap) = board(AxState(b.clone())).await;
         let on_the_card = serde_json::to_value(&snap).unwrap();
         assert_eq!(
             on_the_card["items"][0]["pull_request"]["url"],
-            "https://github.com/shanemcd/honr/pull/1"
+            "https://github.com/honr-app/honr/pull/1"
         );
         assert_eq!(on_the_card["items"][0]["environment"], "honr-card-8-a1");
 
@@ -2010,7 +2010,7 @@ mod tests {
         let in_the_drawer = serde_json::to_value(&detail).unwrap();
         assert_eq!(
             in_the_drawer["pull_request"]["url"],
-            "https://github.com/shanemcd/honr/pull/1"
+            "https://github.com/honr-app/honr/pull/1"
         );
         assert_eq!(in_the_drawer["environment"], "honr-card-8-a1");
     }
@@ -2341,7 +2341,7 @@ mod tests {
         ));
         let mut rx = b.subscribe();
 
-        let pr_url = "https://github.com/shanemcd/honr/pull/4242";
+        let pr_url = "https://github.com/honr-app/honr/pull/4242";
         let id = review_card_with_pr(&b, pr_url);
         // Drain create/transition noise.
         while rx.try_recv().is_ok() {}
@@ -2357,7 +2357,7 @@ mod tests {
             },
             "repository": {
                 "default_branch": "main",
-                "full_name": "shanemcd/honr"
+                "full_name": "honr-app/honr"
             }
         });
 
@@ -2397,7 +2397,7 @@ mod tests {
                 std::process::id()
             )),
         ));
-        let pr_url = "https://github.com/shanemcd/honr/pull/4243";
+        let pr_url = "https://github.com/honr-app/honr/pull/4243";
         let id = review_card_with_pr(&b, pr_url);
 
         let pr_payload = serde_json::json!({
@@ -2410,7 +2410,7 @@ mod tests {
             },
             "repository": {
                 "default_branch": "main",
-                "full_name": "shanemcd/honr"
+                "full_name": "honr-app/honr"
             }
         });
 
@@ -2446,14 +2446,14 @@ mod tests {
             "action": "closed",
             "pull_request": {
                 "merged": true,
-                "html_url": "https://github.com/shanemcd/honr/pull/99999",
+                "html_url": "https://github.com/honr-app/honr/pull/99999",
                 "number": 99999,
                 "merge_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "base": { "ref": "main" }
             },
             "repository": {
                 "default_branch": "main",
-                "full_name": "shanemcd/honr"
+                "full_name": "honr-app/honr"
             }
         });
 
@@ -2488,7 +2488,7 @@ mod tests {
                 std::process::id()
             )),
         ));
-        let pr_url = "https://github.com/shanemcd/honr/pull/4244";
+        let pr_url = "https://github.com/honr-app/honr/pull/4244";
         let id = review_card_with_pr(&b, pr_url);
 
         let pr_payload = serde_json::json!({
@@ -2501,7 +2501,7 @@ mod tests {
             },
             "repository": {
                 "default_branch": "main",
-                "full_name": "shanemcd/honr"
+                "full_name": "honr-app/honr"
             }
         });
 
@@ -2580,8 +2580,8 @@ mod tests {
             )
             .unwrap();
 
-        let pr1_url = "https://github.com/shanemcd/honr/pull/5001";
-        let pr2_url = "https://github.com/shanemcd/honr/pull/5002";
+        let pr1_url = "https://github.com/honr-app/honr/pull/5001";
+        let pr2_url = "https://github.com/honr-app/honr/pull/5002";
 
         for (id, url) in [(t1.id, pr1_url), (t2.id, pr2_url)] {
             let _ = b.transition(id, State::Shaping, "human", None);
@@ -2602,7 +2602,7 @@ mod tests {
             },
             "repository": {
                 "default_branch": "main",
-                "full_name": "shanemcd/honr"
+                "full_name": "honr-app/honr"
             }
         });
 

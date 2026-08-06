@@ -4,7 +4,7 @@ Agents clone from the repository named in the card's **intent**, **definition
 of done**, and/or **notes**. The supervisor leaves `/sandbox/repo` empty so the
 agent clones. Settings → Forge configures the forge provider and webhook poll.
 
-Related empty-state onboarding: [#279](https://github.com/shanemcd/honr/issues/279)
+Related empty-state onboarding: [#279](https://github.com/honr-app/honr/issues/279)
 (Help chrome is separate; this page is the remotes contract).
 
 ## Happy path

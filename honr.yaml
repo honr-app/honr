@@ -48,10 +48,10 @@ execution:
     # Default remotes when a card already has pull_request facts; first clone
     # still follows intent/DoD prose until report sets pull_request.
     repo:
-      upstream: shanemcd/honr
+      upstream: honr-app/honr
       # App install on shanemcd; push honr/card-* and open PRs into main.
       # Default branch is owner-only (ruleset); humans merge.
-      fork: shanemcd/honr
+      fork: honr-app/honr
       base: main
 
     # Branch / sandbox name stem (default honr → honr/card-N / honr-card-N-a1).

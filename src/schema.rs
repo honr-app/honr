@@ -391,7 +391,7 @@ mod tests {
         AgentConfig {
             enabled: true,
             repo: RepoConfig {
-                upstream: "shanemcd/honr".into(),
+                upstream: "honr-app/honr".into(),
                 fork: "clankrshq/honr".into(),
                 base: "main".into(),
             },
@@ -468,7 +468,7 @@ board:
 
     #[test]
     fn parse_owner_name_accepts_github_style() {
-        assert_eq!(parse_owner_name(" shanemcd/honr ").unwrap(), "shanemcd/honr");
+        assert_eq!(parse_owner_name(" honr-app/honr ").unwrap(), "honr-app/honr");
         assert_eq!(parse_owner_name("acme/widgets.git").unwrap(), "acme/widgets");
         assert!(parse_owner_name("").is_err());
         assert!(parse_owner_name("noslash").is_err());
@@ -478,10 +478,10 @@ board:
 
     #[test]
     fn clone_repo_from_prose_reads_stamped_line() {
-        let text = "Rework settings.\n\nClone repository: shanemcd/honr into /sandbox/repo for planning and as the default Task clone target.\n";
+        let text = "Rework settings.\n\nClone repository: honr-app/honr into /sandbox/repo for planning and as the default Task clone target.\n";
         assert_eq!(
             clone_repo_from_prose(text).as_deref(),
-            Some("shanemcd/honr")
+            Some("honr-app/honr")
         );
         assert!(clone_repo_from_prose("no stamp here").is_none());
     }

@@ -1,0 +1,19 @@
+[book]
+title = "honr"
+description = "Operator docs for running and understanding honr"
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/mdbook"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/honr-app/honr"
+edit-url-template = "https://github.com/honr-app/honr/edit/main/docs/{path}"
+# Org root site: https://honr-app.github.io/ (published to honr-app/honr-app.github.io)
+site-url = "/"
+no-section-label = true
+
+[output.html.search]
+enable = true

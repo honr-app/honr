@@ -1,0 +1,57 @@
+name: Docs
+
+# Build mdBook here; publish HTML to honr-app/honr-app.github.io
+# → https://honr-app.github.io/
+#
+# Secret PAGES_DEPLOY_KEY: private half of a write deploy key on
+# honr-app/honr-app.github.io (org deploy keys must be enabled).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.5.4"
+
+      - name: Build book
+        env:
+          MDBOOK_OUTPUT__HTML__SITE_URL: /
+        run: mdbook build
+
+      - name: Publish to honr-app.github.io
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.PAGES_DEPLOY_KEY }}
+          external_repository: honr-app/honr-app.github.io
+          publish_branch: main
+          publish_dir: ./target/mdbook
+          force_orphan: true
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
