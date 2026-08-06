@@ -3,6 +3,7 @@
 mod api;
 mod auth;
 mod db;
+mod engine;
 mod events;
 mod github_app;
 mod github_poll;
