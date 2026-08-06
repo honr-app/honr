@@ -30,7 +30,6 @@ export function OpenShellPanelView({
   onClientKeyPemChange,
   onRefresh,
   onSave,
-  onImportCliMtls,
   onClearMtls,
   providers,
   profiles,
@@ -53,7 +52,6 @@ export function OpenShellPanelView({
   onClientKeyPemChange: (next: string) => void;
   onRefresh: () => void;
   onSave: () => void;
-  onImportCliMtls: () => void;
   onClearMtls: () => void;
   providers?: ReactNode;
   profiles?: ReactNode;
@@ -244,14 +242,6 @@ export function OpenShellPanelView({
               </button>
               <button
                 type="button"
-                disabled={busy}
-                onClick={onImportCliMtls}
-                data-testid="openshell-import-cli-mtls"
-              >
-                Import from local config
-              </button>
-              <button
-                type="button"
                 disabled={busy || !mtls?.complete}
                 onClick={onClearMtls}
                 data-testid="openshell-clear-mtls"
@@ -384,15 +374,6 @@ export function OpenShellPanel({
         if (clientCertPem.trim()) body.client_cert_pem = clientCertPem;
         if (clientKeyPem.trim()) body.client_key_pem = clientKeyPem;
         put(body, "Saved. mTLS PEMs are sealed in the board database.");
-      }}
-      onImportCliMtls={() => {
-        put(
-          {
-            gateway_endpoint: gatewayEndpoint.trim() || null,
-            import_openshell_cli_mtls: true,
-          },
-          "Imported mTLS from local OpenShell config and sealed it.",
-        );
       }}
       onClearMtls={() => {
         put(

@@ -2156,14 +2156,24 @@ mod tests {
         assert!(validate_ssh_session_response(&bad).is_err());
     }
 
-    // ---- gateway-backed. `cargo test -- --ignored` with gateway + Settings mTLS.
+    // ---- gateway-backed. `cargo test -- --ignored` against a real gateway.
+    //
+    // PEM paths come from the environment rather than a guessed location under
+    // $HOME: honr does not read host config, and neither should its tests.
     #[tokio::test]
-    #[ignore = "needs a running OpenShell gateway with Settings mTLS configured"]
+    #[ignore = "needs a running OpenShell gateway and HONR_TEST_MTLS_* pointing at PEMs"]
     async fn real_gateway_health_and_list() {
         let endpoint = std::env::var("HONR_OPENSHELL_ENDPOINT")
             .unwrap_or_else(|_| "https://127.0.0.1:17670".into());
-        let bundle = crate::secrets::import_openshell_cli_mtls("openshell")
-            .expect("import local OpenShell mTLS bundle");
+        let read = |var: &str| {
+            let path = std::env::var(var).unwrap_or_else(|_| panic!("set {var} to a PEM path"));
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+        };
+        let bundle = crate::secrets::OpenShellMtlsBundle {
+            ca_pem: read("HONR_TEST_MTLS_CA"),
+            client_cert_pem: read("HONR_TEST_MTLS_CERT"),
+            client_key_pem: read("HONR_TEST_MTLS_KEY"),
+        };
         let os = OpenShell::new(Some(endpoint), Some(bundle), Duration::from_secs(30));
         assert!(os.healthy().await);
         os.list().await.expect("sandbox list");

@@ -66,10 +66,11 @@ Then tell honr how to reach it, in **Settings → OpenShell**:
 
 - **Gateway endpoint** — often `https://127.0.0.1:17670`. Deliberately not
   honr's `8080`; your install may differ.
-- **mTLS PEMs** — CA, client cert, client key. Paste them, or use **Import from
-  local config** to read `~/.config/openshell/gateways/<name>/mtls/`. They are
-  sealed into the board database with `~/.config/honr/master.key`, and the API
-  never hands private key material back.
+- **mTLS PEMs** — CA, client cert, client key. Paste them in. They are sealed
+  into the board database with `~/.config/honr/master.key`, and the API never
+  hands private key material back. honr will not go looking for them on disk:
+  it assumes nothing about what is on the host, so configuration is uploaded
+  rather than discovered.
 
 **Check:** hit **Refresh status** in Settings. You want **Healthy**.
 

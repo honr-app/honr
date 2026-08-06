@@ -410,48 +410,6 @@ pub fn auth_from_sealed(sealed: Option<&str>) -> Option<AuthBundle> {
         .filter(|b| b.is_configured())
 }
 
-/// OpenShell CLI config root (`$XDG_CONFIG_HOME/openshell` or `~/.config/openshell`).
-///
-/// Deliberately not `dirs::config_dir()` — on macOS that is Application Support,
-/// while the OpenShell CLI always writes under the XDG `~/.config` layout.
-fn openshell_cli_config_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        let t = xdg.trim();
-        if !t.is_empty() {
-            return PathBuf::from(t).join("openshell");
-        }
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config")
-        .join("openshell")
-}
-
-/// Copy PEMs from a local OpenShell CLI gateway mtls directory into a bundle.
-pub fn import_openshell_cli_mtls(gateway_name: &str) -> Result<OpenShellMtlsBundle, SecretsError> {
-    let name = gateway_name.trim();
-    let name = if name.is_empty() { "openshell" } else { name };
-    let dir = openshell_cli_config_dir()
-        .join("gateways")
-        .join(name)
-        .join("mtls");
-    let ca = fs::read_to_string(dir.join("ca.crt")).map_err(|e| {
-        SecretsError::Io(std::io::Error::new(
-            e.kind(),
-            format!("{} ({})", e, dir.join("ca.crt").display()),
-        ))
-    })?;
-    let cert = fs::read_to_string(dir.join("tls.crt"))?;
-    let key = fs::read_to_string(dir.join("tls.key"))?;
-    let bundle = OpenShellMtlsBundle {
-        ca_pem: ca,
-        client_cert_pem: cert,
-        client_key_pem: key,
-    };
-    bundle.validate_pem_shape()?;
-    Ok(bundle)
-}
-
 /// Serialize + restore `HONR_MASTER_KEY*` across tests (process-global env).
 #[cfg(test)]
 pub(crate) mod master_key_env {

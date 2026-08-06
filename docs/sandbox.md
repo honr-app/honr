@@ -132,13 +132,17 @@ Bare OpenShell `generic` providers do **not** resolve
 `openshell:resolve:…` placeholders — the egress proxy only substitutes on
 endpoints declared by a **provider type**. Honr ships
 [`sandbox/openshell/antigravity.yaml`](https://github.com/honr-app/honr/blob/main/sandbox/openshell/antigravity.yaml)
-(`auth_style: bearer`, Cloud Code / Google API hosts) and imports it on
-provider Sync when missing.
+(`auth_style: bearer`, Cloud Code / Google API hosts), compiled into the binary
+and imported on provider Sync when missing.
+
+Create the provider yourself under **Settings → OpenShell → Providers** with an
+`ANTIGRAVITY_ACCESS_TOKEN` credential. honr does not read the host keychain —
+it makes no assumptions about credentials sitting on the machine it runs on, and
+configuration arrives over the API like everything else.
 
 | Layer | Holds |
 |---|---|
-| Host keychain (`gemini` / `antigravity`) | Live OAuth access token (refresh stays on host) |
-| Board provider `antigravity` | Sealed `ANTIGRAVITY_ACCESS_TOKEN` (refreshed from keychain on Sync) |
+| Board provider `antigravity` | Sealed `ANTIGRAVITY_ACCESS_TOKEN`, supplied via the API |
 | Gateway | Real credential; injects placeholder env into attached sandboxes |
 | Seat token file | Placeholder only + far-future expiry; **no** `refresh_token` |
 | Seat `settings.json` | `enableTelemetry: false`, `gcp.project` / `gcp.location` from Board provider config `ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION` (Settings → Providers — not host files, not Vertex/`GOOGLE_CLOUD_PROJECT`) |
