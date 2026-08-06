@@ -154,6 +154,22 @@ fn agent_exit_code(err: &str) -> Option<i32> {
 }
 
 /// Bail if Halt / deadline sweep / cut already moved the card off Claimed|Running.
+/// Scratch directory for a file pulled out of a sandbox.
+///
+/// The card id plus a timestamp is not unique enough: `Utc::now()` is not
+/// guaranteed to advance between two calls on the same tick, and a retried card
+/// keeps its id. Two downloads then share a directory and the first one to
+/// finish deletes the other's file mid-read — which is exactly how the
+/// `process_verdict` tests flake under a parallel test runner.
+fn scratch_dir(prefix: &str, id: ItemId) -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "honr-{prefix}-{id}-{}-{seq}",
+        std::process::id()
+    ))
+}
+
 fn ensure_board_owns_run(board: &SharedBoard, id: ItemId) -> anyhow::Result<()> {
     let Some(item) = board.get(id) else {
         anyhow::bail!("run cancelled: card #{id} gone from the board");
@@ -1312,11 +1328,7 @@ async fn apply_initial_plan_sidecar(
         Ok(true)
     };
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "honr-plan-{}-{}",
-        id,
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-    ));
+    let tmp_dir = scratch_dir("plan", id);
     let _ = std::fs::create_dir_all(&tmp_dir);
     let local_plan = tmp_dir.join("plan.json");
     let local_plan_str = local_plan.to_string_lossy().to_string();
@@ -1412,10 +1424,7 @@ async fn process_verdict(
         return Ok(false);
     };
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "honr-verdict-{id}-{}",
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-    ));
+    let tmp_dir = scratch_dir("verdict", id);
     let _ = std::fs::create_dir_all(&tmp_dir);
     let local_dest = tmp_dir.join(format!("{vtype}.json"));
     let local_dest_str = local_dest.to_string_lossy().to_string();
