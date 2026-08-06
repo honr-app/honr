@@ -111,40 +111,27 @@ fn resolve_cockpit_engine(board: &SharedBoard) -> String {
 }
 
 /// Foreground (not detached) agent turn — stdout is what we stream to the browser.
-fn turn_script(engine: &str, prompt: &str, conversation_id: Option<&str>) -> String {
+fn turn_script(
+    engine: &str,
+    prompt: &str,
+    conversation_id: Option<&str>,
+) -> Result<String, crate::engine::UnknownEngine> {
     let secs = 3600u64;
-    let cmd = match (engine, conversation_id) {
-        ("agy", Some(_)) => {
-            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json --conversation \"$HONR_CONVERSATION\" -p \"$HONR_PROMPT\""
-                .to_string()
-        }
-        ("agy", None) => {
-            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json -p \"$HONR_PROMPT\""
-                .to_string()
-        }
-        ("cursor", Some(_)) => {
-            "agent -p --force --trust --sandbox disabled --output-format stream-json --resume \"$HONR_CONVERSATION\" \"$HONR_PROMPT\""
-                .to_string()
-        }
-        ("cursor", None) => {
-            "agent -p --force --trust --sandbox disabled --output-format stream-json \"$HONR_PROMPT\""
-                .to_string()
-        }
-        _ => {
-            "claude -p \"$HONR_PROMPT\" --output-format stream-json --verbose --permission-mode bypassPermissions"
-                .to_string()
-        }
-    };
-    let conv_export = conversation_id
+    // Resume only when the registry says this engine supports it — same gate as
+    // the supervisor (claude never gets `--conversation` / `--resume`).
+    let resume_id = conversation_id.filter(|_| crate::engine::supports_resume(engine));
+    let cmd =
+        crate::engine::command_line(engine, crate::engine::PromptEnv::Prompt, resume_id)?;
+    let conv_export = resume_id
         .map(|c| format!("export HONR_CONVERSATION={}\n", shell_quote(c)))
         .unwrap_or_default();
-    format!(
+    Ok(format!(
         r#"set -e
 export HONR_PROMPT={prompt}
 {conv_export}cd {WORKDIR} 2>/dev/null || cd /
 timeout --foreground {secs} {cmd}"#,
         prompt = shell_quote(prompt),
-    )
+    ))
 }
 
 fn stop_live_agent_script() -> String {
@@ -255,11 +242,13 @@ async fn run_turn(
         )
         .await;
 
-    if engine == "agy" {
+    if crate::engine::pre_start_auth(engine).map_err(|e| e.to_string())?
+        == crate::engine::PreStartAuth::Agy
+    {
         let _ = setup_agy_auth(&os, environment).await;
     }
 
-    let script = turn_script(engine, prompt, conversation_id);
+    let script = turn_script(engine, prompt, conversation_id).map_err(|e| e.to_string())?;
     let board_lines = board.clone();
     let tx_lines = tx.clone();
     let result = os
@@ -320,7 +309,7 @@ mod tests {
 
     #[test]
     fn turn_script_resumes_cursor_conversation() {
-        let s = turn_script("cursor", "triage Needs You", Some("conv-abc"));
+        let s = turn_script("cursor", "triage Needs You", Some("conv-abc")).unwrap();
         assert!(s.contains("--resume \"$HONR_CONVERSATION\""), "{s}");
         assert!(s.contains("HONR_CONVERSATION='conv-abc'"), "{s}");
         assert!(s.contains("HONR_PROMPT='triage Needs You'"), "{s}");
@@ -330,14 +319,14 @@ mod tests {
 
     #[test]
     fn turn_script_resumes_agy_conversation() {
-        let s = turn_script("agy", "hello", Some("cid-1"));
+        let s = turn_script("agy", "hello", Some("cid-1")).unwrap();
         assert!(s.contains("--conversation \"$HONR_CONVERSATION\""), "{s}");
         assert!(s.contains("-p \"$HONR_PROMPT\""), "{s}");
     }
 
     #[test]
     fn turn_script_without_conversation_starts_fresh_in_seat() {
-        let s = turn_script("cursor", "first prompt", None);
+        let s = turn_script("cursor", "first prompt", None).unwrap();
         assert!(!s.contains("--resume"), "{s}");
         assert!(!s.contains("HONR_CONVERSATION="), "{s}");
         assert!(s.contains("HONR_PROMPT='first prompt'"), "{s}");
@@ -345,8 +334,23 @@ mod tests {
 
     #[test]
     fn turn_script_shell_quotes_prompt_apostrophes() {
-        let s = turn_script("cursor", "it's a test", None);
+        let s = turn_script("cursor", "it's a test", None).unwrap();
         assert!(s.contains(r"it'\''s a test"), "{s}");
+    }
+
+    #[test]
+    fn turn_script_rejects_unknown_engine() {
+        let err = turn_script("opencode", "hi", None).unwrap_err();
+        assert!(err.to_string().contains("unknown agent engine"), "{err}");
+    }
+
+    #[test]
+    fn turn_script_claude_ignores_conversation_id() {
+        let s = turn_script("claude", "hello", Some("cid")).unwrap();
+        assert!(!s.contains("--conversation"), "{s}");
+        assert!(!s.contains("--resume"), "{s}");
+        assert!(!s.contains("HONR_CONVERSATION="), "{s}");
+        assert!(s.contains("claude -p \"$HONR_PROMPT\""), "{s}");
     }
 
     #[test]
