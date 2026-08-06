@@ -1330,9 +1330,17 @@ main.with-side-panes {
   overflow-y: auto !important;
 }
 
-/* OperatorGuide — reusable MCP + first-loop onboarding (Board empty / Help). */
+/* OperatorGuide — MCP + OpenShell/sandbox + first-loop (Board empty / Help). */
 .operator-guide {
   max-width: 640px;
+}
+.operator-guide-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.operator-guide-link:hover {
+  border-bottom-style: solid;
 }
 .operator-guide-section {
   margin-top: 0;

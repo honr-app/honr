@@ -740,16 +740,19 @@ const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
 assert(helpHtml.includes("data-testid=\"operator-guide\""), "Help embeds OperatorGuide");
 assert(helpHtml.includes("data-testid=\"operator-guide-mcp\""), "Help shows OperatorGuide MCP section");
+assert(helpHtml.includes("data-testid=\"operator-guide-openshell\""), "Help shows OperatorGuide OpenShell section");
 assert(helpHtml.includes("data-testid=\"operator-guide-loop\""), "Help shows OperatorGuide Project loop");
 assert(helpHtml.includes("create_project"), "Help should document create_project");
 assert(helpHtml.includes("plan.json"), "Help should document plan.json");
 assert(helpHtml.includes("dispatch"), "Help should document dispatch");
 assert(helpHtml.includes("8080/mcp"), "Help should show MCP URL");
+assert(helpHtml.includes("OpenShell and sandbox"), "Help hero mentions OpenShell/sandbox onboarding");
 
-// OperatorGuide — reusable MCP connect + first Project loop (Board empty / Help)
+// OperatorGuide — MCP → OpenShell/sandbox → first Project loop (Board empty / Help)
 const guideHtml = renderToString(React.createElement(OperatorGuide));
 assert(guideHtml.includes("data-testid=\"operator-guide\""), "OperatorGuide root testid");
 assert(guideHtml.includes("data-testid=\"operator-guide-mcp\""), "OperatorGuide MCP section");
+assert(guideHtml.includes("data-testid=\"operator-guide-openshell\""), "OperatorGuide OpenShell/sandbox section");
 assert(guideHtml.includes("data-testid=\"operator-guide-loop\""), "OperatorGuide Project loop section");
 assert(guideHtml.includes("data-testid=\"operator-guide-client-examples\""), "OperatorGuide client examples are secondary");
 assert(guideHtml.includes("data-testid=\"operator-guide-mcp-url\""), "OperatorGuide copyable MCP URL");
@@ -763,12 +766,27 @@ assert(guideHtml.includes("Approve"), "OperatorGuide documents Approve");
 assert(guideHtml.includes("idle"), "OperatorGuide notes agents stay idle until enable+dispatch");
 assert(guideHtml.includes("claude mcp add"), "OperatorGuide has Claude mcp add example");
 assert(guideHtml.includes("mcp.json"), "OperatorGuide has Cursor mcp.json example");
-// MCP section must appear before the Project loop (lead with connect).
+assert(guideHtml.includes("OpenShell + sandbox"), "OperatorGuide OpenShell section title");
+assert(guideHtml.includes("/settings/openshell/connectivity"), "OpenShell deep link: Connectivity");
+assert(guideHtml.includes("/settings/openshell/providers"), "OpenShell deep link: Providers");
+assert(guideHtml.includes("/settings/openshell/profiles"), "OpenShell deep link: Sandbox specs");
+assert(guideHtml.includes("/settings/agent-runtime"), "OpenShell deep link: Agent runtime");
+assert(guideHtml.includes("/settings/github-app"), "OpenShell deep link: GitHub App for GH_TOKEN");
+assert(guideHtml.includes("GH_TOKEN"), "OperatorGuide mentions GH_TOKEN via GitHub App");
+assert(guideHtml.includes("Sandbox specs"), "OperatorGuide names Sandbox specs tab");
+assert(guideHtml.includes("mTLS"), "OperatorGuide mentions mTLS on Connectivity");
+assert(guideHtml.includes("honr.yaml"), "OperatorGuide mentions honr.yaml for agents enabled");
+// Order: MCP (with examples) → OpenShell/sandbox → Project loop.
 const mcpIdx = guideHtml.indexOf("data-testid=\"operator-guide-mcp\"");
+const openshellIdx = guideHtml.indexOf("data-testid=\"operator-guide-openshell\"");
 const loopIdx = guideHtml.indexOf("data-testid=\"operator-guide-loop\"");
 const examplesIdx = guideHtml.indexOf("data-testid=\"operator-guide-client-examples\"");
 assert(mcpIdx >= 0 && loopIdx > mcpIdx, "OperatorGuide leads with MCP before Project loop");
-assert(examplesIdx > mcpIdx && examplesIdx < loopIdx, "Client examples sit under MCP, before the loop");
+assert(
+  openshellIdx > mcpIdx && openshellIdx < loopIdx,
+  "OpenShell/sandbox sits between MCP and Project loop",
+);
+assert(examplesIdx > mcpIdx && examplesIdx < openshellIdx, "Client examples sit under MCP, before OpenShell");
 
 const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
@@ -1236,7 +1254,11 @@ assert(emptyBoardHtml.includes("Welcome to honr"), "Board empty keeps Welcome he
 assert(emptyBoardHtml.includes("data-testid=\"board-empty\""), "Board empty shell testid");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide\""), "Board empty embeds OperatorGuide");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-mcp\""), "Board empty shows MCP section");
+assert(emptyBoardHtml.includes("data-testid=\"operator-guide-openshell\""), "Board empty shows OpenShell section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-loop\""), "Board empty shows Project loop");
+assert(emptyBoardHtml.includes("OpenShell and sandbox"), "Board Welcome lede mentions OpenShell/sandbox");
+assert(emptyBoardHtml.includes("/settings/openshell/connectivity"), "Board empty deep-links Connectivity");
+assert(emptyBoardHtml.includes("/settings/agent-runtime"), "Board empty deep-links Agent runtime");
 
 // Archived toggle on empty board when only retired projects exist.
 const archivedEmptyBoardHtml = renderToString(

@@ -13,8 +13,8 @@ const CURSOR_MCP_JSON = `{
 const CLAUDE_MCP_ADD = `claude mcp add --transport http honr ${MCP_URL}`;
 
 /**
- * Reusable operator onboarding — client-agnostic MCP connect, then the first
- * Project loop. Cursor / Claude snippets are secondary examples only.
+ * Reusable operator onboarding — MCP connect, OpenShell + sandbox setup,
+ * then the first Project loop. Cursor / Claude snippets are secondary examples.
  * Embed from Board empty state or Help; keep chrome (hero, nav) outside.
  */
 export function OperatorGuide() {
@@ -84,6 +84,70 @@ export function OperatorGuide() {
             {CLAUDE_MCP_ADD}
           </pre>
         </aside>
+      </section>
+
+      <section
+        className="operator-guide-section"
+        aria-labelledby="operator-guide-openshell-title"
+        data-testid="operator-guide-openshell"
+      >
+        <h2 id="operator-guide-openshell-title">OpenShell + sandbox</h2>
+        <p className="dim">
+          Before the first Project loop, configure the OpenShell gateway,
+          providers, a sandbox spec, and enable agents. honr does not discover
+          host credentials — paste them in Settings.
+        </p>
+        <ol
+          className="operator-guide-steps"
+          data-testid="operator-guide-openshell-steps"
+        >
+          <li>
+            <a
+              className="operator-guide-link"
+              href="/settings/openshell/connectivity"
+            >
+              Settings → OpenShell → Connectivity
+            </a>
+            {" "}
+            — gateway endpoint and mTLS PEMs (CA, client cert, client key).
+            Refresh status until Healthy.
+          </li>
+          <li>
+            <a
+              className="operator-guide-link"
+              href="/settings/openshell/providers"
+            >
+              Settings → OpenShell → Providers
+            </a>
+            {" "}
+            — model providers; Sync applies them to the gateway. For GitHub{" "}
+            <code>GH_TOKEN</code>, use{" "}
+            <a className="operator-guide-link" href="/settings/github-app">
+              Settings → GitHub App
+            </a>
+            , not the providers band.
+          </li>
+          <li>
+            <a
+              className="operator-guide-link"
+              href="/settings/openshell/profiles"
+            >
+              Settings → OpenShell → Sandbox specs
+            </a>
+            {" "}
+            — default profile / sandbox image runs will use.
+          </li>
+          <li>
+            Enable agents via{" "}
+            <a className="operator-guide-link" href="/settings/agent-runtime">
+              Settings → Agent runtime
+            </a>
+            {" "}
+            or <code>honr.yaml</code> (
+            <code>execution.agents.enabled</code>), then restart if you changed
+            the file.
+          </li>
+        </ol>
       </section>
 
       <section
