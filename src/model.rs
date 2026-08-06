@@ -302,6 +302,7 @@ pub const DEFAULT_PROJECT_PROMPT: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
 Do not weaken machine.rs invariants, supervisor budget enforcement, or the board sandbox-profile policy; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
+Network / egress denials: escalate; do not invent workarounds. Humans decide policy changes.\n\
 Name the repository to clone in each Task's intent and/or definition of done \
 (`owner/name`, and push remote when it differs). Do not invent an owner/name from context; \
 if the card text is silent or ambiguous, escalate.\n\

@@ -2716,6 +2716,14 @@ names an exact product repo; otherwise escalate (see Remotes) — do not guess.\
 
     b.push_str(&remotes_briefing_lines(repo, &grant.notes));
 
+    b.push_str(
+        "\nIf you hit network connectivity problems (denied egress, hangs on fetch/clone/API, \
+         blocked hosts), do **not** hack around them — no alternate mirrors, proxy tricks, \
+         bundling deps from unexpected hosts, or rewriting URLs to dodge the allow-list. \
+         Escalate via `/sandbox/.honr/escalate.json` and stop; a human decides whether the \
+         sandbox network policy should change.\n",
+    );
+
     let is_initial_plan = crate::model::title_is_initial_plan(&grant.title);
 
     if is_initial_plan {
@@ -4668,6 +4676,24 @@ mod tests {
         assert!(
             !b.contains("`.honr/escalate.json`"),
             "briefing must omit WORKDIR .honr/escalate.json: {b}"
+        );
+    }
+
+    #[test]
+    fn briefing_forbids_hacking_around_network_policy() {
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "honr/card-12",
+            &cross_fork_repo(),
+        );
+        assert!(
+            b.contains("do **not** hack around") || b.contains("do not hack around"),
+            "briefing must forbid network workarounds: {b}"
+        );
+        assert!(
+            b.contains("sandbox network policy") || b.contains("network policy"),
+            "briefing must defer policy changes to humans: {b}"
         );
     }
 
