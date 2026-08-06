@@ -91,7 +91,7 @@ Turning on real sandboxed agents:
 
 ```bash
 make run                  # debug API + web/dist, then serve
-make dev                  # cargo-watch rebuild/restart on Rust changes
+make dev                  # watchexec rebuild/restart on Rust changes
 make dev-ui               # Vite on :5173 (proxies to :8080)
 make docs-serve           # this book, at :3000
 ```

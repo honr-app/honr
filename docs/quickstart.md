@@ -93,11 +93,12 @@ If the tools list stays empty, reload the client.
 ## Developing on it
 
 ```bash
-make dev                  # cargo-watch rebuilds and restarts on Rust changes
+make dev                  # watchexec rebuilds and restarts on Rust changes
 make dev-ui               # Vite on :5173, proxying to :8080
 ```
 
-`make dev` needs [`cargo-watch`](https://crates.io/crates/cargo-watch).
+`make dev` needs [`watchexec`](https://crates.io/crates/watchexec-cli)
+(`brew install watchexec` or `cargo install watchexec-cli`).
 
 ## Next
 

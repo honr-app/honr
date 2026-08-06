@@ -2,7 +2,7 @@
 #
 #   make          build both (cargo binary + web/dist for :8080)
 #   make run      build both, then serve on :8080
-#   make dev      cargo-watch → cargo run (API hot-reload on :8080)
+#   make dev      watchexec → cargo run (API hot-reload on :8080)
 #   make dev-ui   Vite hot-reload on :5173 (proxies API to :8080)
 #   make test     cargo + web unit tests
 
@@ -17,7 +17,7 @@ help:
 	@echo "  make release        cargo build --release"
 	@echo "  make ui             npm build → web/dist (served by the API)"
 	@echo "  make run            Build both, then cargo run (debug)"
-	@echo "  make dev            cargo watch -x run (API hot-reload on :8080)"
+	@echo "  make dev            watchexec → cargo run (API hot-reload on :8080)"
 	@echo "  make dev-ui         Vite dev server (:5173 → :8080)"
 	@echo "  make docs           mdbook build → target/mdbook"
 	@echo "  make docs-serve     mdbook serve (http://localhost:3000)"
@@ -44,14 +44,15 @@ run: build
 	cargo run
 
 # Rebuild + restart the API when Rust/config/migration sources change.
-# Pair with `make dev-ui` for Vite on :5173. Requires `cargo install cargo-watch`
-# (or `brew install cargo-watch`).
+# Pair with `make dev-ui` for Vite on :5173. Requires `brew install watchexec`
+# (or `cargo install watchexec-cli`).
 dev:
-	@command -v cargo-watch >/dev/null 2>&1 || { \
-		echo "cargo-watch not found. Install: cargo install cargo-watch   # or: brew install cargo-watch"; \
+	@command -v watchexec >/dev/null 2>&1 || { \
+		echo "watchexec not found. Install: brew install watchexec   # or: cargo install watchexec-cli"; \
 		exit 1; \
 	}
-	cargo watch \
+	watchexec \
+		-r \
 		-w src \
 		-w Cargo.toml \
 		-w Cargo.lock \
@@ -60,7 +61,7 @@ dev:
 		-w sandbox \
 		-i target \
 		-i web \
-		-x run
+		-- cargo run
 
 dev-ui: install-ui
 	npm --prefix web run dev
