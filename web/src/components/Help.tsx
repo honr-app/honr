@@ -2,7 +2,8 @@ import { OperatorGuide } from "./OperatorGuide.js";
 
 /**
  * Help surface — same OperatorGuide content as empty-state onboarding.
- * Hero chrome stays here; MCP + first-loop copy lives in OperatorGuide.
+ * Hero chrome stays here; MCP + OpenShell/sandbox + first-loop copy lives in
+ * OperatorGuide.
  */
 export function Help() {
   return (
@@ -10,8 +11,9 @@ export function Help() {
       <header className="board-hero">
         <h1>Operator help</h1>
         <p className="board-lede">
-          Connect an MCP client, then run the first Project loop. Name the
-          clone target in each Task&apos;s intent/DoD.
+          Connect an MCP client, set up OpenShell and sandbox prerequisites,
+          then run the first Project loop. Name the clone target in each
+          Task&apos;s intent/DoD.
         </p>
       </header>
 

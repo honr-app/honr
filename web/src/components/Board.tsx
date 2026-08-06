@@ -123,9 +123,10 @@ export function Board(props: BoardProps) {
         <header className="board-hero">
           <h1>Welcome to honr</h1>
           <p className="board-lede">
-            This is the control plane for agent work. Create a Project
+            This is the control plane for agent work. Connect MCP, set up
+            OpenShell and sandbox prerequisites, then create a Project
             (auto-seeds Initial plan), dispatch that card, Approve the plan,
-            then dispatch Tasks. Agents stay idle until you dispatch.
+            and dispatch Tasks. Agents stay idle until you enable and dispatch.
           </p>
         </header>
         <div className="board-empty" data-testid="board-empty">
