@@ -18,6 +18,9 @@ import {
 import {
   type ChromeLocation,
   chromeLocationsEqual,
+  DEFAULT_OPENSHELL_TAB,
+  DEFAULT_SETTINGS_SECTION,
+  normalizeChromeLocation,
   readChromeLocation,
   writeChromeLocation,
 } from "./location";
@@ -109,11 +112,13 @@ function AuthedApp({
   );
 
   const navigateChrome = useCallback(
-    (next: ChromeLocation, mode: "push" | "replace" = "push") => {
-      const loc: ChromeLocation =
-        next.view === "board"
-          ? next
-          : { view: next.view, cardId: null };
+    (next: Partial<ChromeLocation> & Pick<ChromeLocation, "view">, mode: "push" | "replace" = "push") => {
+      const loc = normalizeChromeLocation({
+        view: next.view,
+        cardId: next.cardId ?? null,
+        settingsSection: next.settingsSection ?? DEFAULT_SETTINGS_SECTION,
+        openShellTab: next.openShellTab ?? DEFAULT_OPENSHELL_TAB,
+      });
       setChrome((prev) => (chromeLocationsEqual(prev, loc) ? prev : loc));
       writeChromeLocation(loc, mode);
     },
@@ -204,9 +209,7 @@ function AuthedApp({
             isAdmin={auth.user?.kind === "admin"}
             themePref={themePref}
             onThemeChange={setThemePref}
-            onOpenSettings={() =>
-              navigateChrome({ view: "settings", cardId: null })
-            }
+            onOpenSettings={() => navigateChrome({ view: "settings" })}
             onLogout={onLogout}
           />
         </div>
@@ -272,7 +275,27 @@ function AuthedApp({
           ) : view === "help" ? (
             <Help />
           ) : (
-            <Settings />
+            <Settings
+              section={chrome.settingsSection}
+              openShellTab={chrome.openShellTab}
+              onSectionChange={(settingsSection) =>
+                navigateChrome({
+                  view: "settings",
+                  settingsSection,
+                  openShellTab:
+                    settingsSection === "openshell"
+                      ? chrome.openShellTab
+                      : DEFAULT_OPENSHELL_TAB,
+                })
+              }
+              onOpenShellTabChange={(openShellTab) =>
+                navigateChrome({
+                  view: "settings",
+                  settingsSection: "openshell",
+                  openShellTab,
+                })
+              }
+            />
           )}
         </main>
       </div>
