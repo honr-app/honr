@@ -12,12 +12,14 @@ on:
     paths:
       - "docs/**"
       - "book.toml"
+      - "web/**"
       - ".github/workflows/docs.yml"
   pull_request:
     branches: [main]
     paths:
       - "docs/**"
       - "book.toml"
+      - "web/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -29,10 +31,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # The book's images are captured from a real board, not committed. `web/**`
+  # is in the path filter so a UI change reshoots them; `src/**` deliberately is
+  # not, or every backend commit would republish the site. Reach for
+  # workflow_dispatch when a board change needs to show up in the docs.
+  shots:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build UI
+        run: |
+          npm ci --prefix web
+          npm run --prefix web build
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The harness serves the fixture from a real honr. Its fallback mock
+      # server answers a snapshot shape the board no longer emits, so strict
+      # mode below refuses to run without this binary.
+      - name: Build honr
+        run: cargo build --bin honr
+
+      - name: Install Playwright chromium
+        run: npx --prefix web playwright install --with-deps chromium
+
+      - name: Capture board screenshots
+        env:
+          HONR_SHOTS_STRICT: "1"
+        run: npm run --prefix web shots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-images
+          path: web/shots/
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    needs: shots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # mdBook copies non-markdown files out of `src`, so images land at
+      # /images/* in the built book and in the deployed site.
+      - uses: actions/download-artifact@v4
+        with:
+          name: docs-images
+          path: docs/images
 
       - name: Install mdBook
         uses: peaceiris/actions-mdbook@v2

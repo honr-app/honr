@@ -7,8 +7,10 @@ web/dist
 .DS_Store
 web/tsconfig.tsbuildinfo
 
-# UI screenshots, regenerated on demand
+# UI screenshots, regenerated on demand. docs/images is where CI drops them
+# for mdBook; the published book is the only place they are meant to live.
 web/shots
+docs/images
 .honr
 
 # Local Dolt / sqlite artifacts (not board state under .honr/)

@@ -8,6 +8,13 @@
  *   cd web && npm run shots
  *
  * PNGs land in web/shots/ (gitignored).
+ *
+ * `HONR_SHOTS_STRICT=1` is for CI, where these PNGs become the docs site's
+ * images. Both fallbacks below are correct on a laptop and wrong in a pipeline:
+ * skipping on a missing browser publishes a book of broken <img>, and the
+ * hand-written mock server serves a snapshot shape that has already drifted
+ * from the real one. Under strict mode either is a hard failure — silence is
+ * not a passing build.
  */
 import { chromium } from "playwright";
 import { spawn, execSync } from "node:child_process";
@@ -20,9 +27,19 @@ const SCRATCH = "/tmp/honr-ui";
 const OUT = `${ROOT}web/shots`;
 const PORT = 8081;
 const BASE = `http://127.0.0.1:${PORT}`;
+const STRICT = process.env.HONR_SHOTS_STRICT === "1";
+
+function fatal(why) {
+  console.error(`\n[shots] ${why}`);
+  process.exit(1);
+}
 
 rmSync(SCRATCH, { recursive: true, force: true });
 mkdirSync(SCRATCH, { recursive: true });
+// Clear OUT too: captures that were renamed away otherwise linger here and get
+// swept into the book as if they were current. That is how web/shots ended up
+// holding `desktop-overview` and `desktop-tree` long after both were dropped.
+rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 
 // A scratch honr: same level schema, no agents, its own state file.
@@ -32,6 +49,9 @@ writeFileSync(`${SCRATCH}/honr.json`, execSync(`node ${ROOT}web/ui-fixture.mjs`)
 mkdirSync(`${SCRATCH}/web`, { recursive: true });
 execSync(`cp -R ${ROOT}web/dist ${SCRATCH}/web/dist`);
 let honr;
+if (STRICT && !existsSync(`${ROOT}target/debug/honr`)) {
+  fatal("target/debug/honr is missing — run `cargo build --bin honr` first.\nThe mock fallback would publish screenshots of a snapshot shape honr no longer serves.");
+}
 if (existsSync(`${ROOT}target/debug/honr`)) {
   honr = spawn(`${ROOT}target/debug/honr`, [], {
     cwd: SCRATCH,
@@ -117,24 +137,55 @@ for (let i = 0; i < 40; i++) {
   await sleep(250);
 }
 
+// A board with no admin serves the bootstrap screen, not the app: `/api/*`
+// answers `{"bootstrap":true,"error":"authentication required"}` and every
+// capture times out waiting for `.app`. Create a throwaway admin and hand
+// Playwright the session cookie. SCRATCH is wiped each run, so this admin
+// never outlives the shoot.
+const ADMIN = { username: "shots", password: "shots-fixture-only" };
+let sessionCookie = null;
+try {
+  const res = await fetch(`${BASE}/auth/bootstrap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(ADMIN),
+  });
+  const setCookie = res.headers.get("set-cookie");
+  if (setCookie) {
+    const [name, ...rest] = setCookie.split(";")[0].split("=");
+    sessionCookie = { name, value: rest.join("="), url: BASE };
+  }
+} catch {}
+if (!sessionCookie) {
+  const why = "could not bootstrap a board session; the UI will render its login screen";
+  if (STRICT) fatal(why);
+  console.log(`[shots] ${why}`);
+}
+
 let browser;
 try {
   browser = await chromium.launch();
 } catch (err) {
-  console.log(`\n[Playwright] Skipping browser screenshots: ${err.message.split("\n")[0]}`);
   honr.kill();
+  const why = err.message.split("\n")[0];
+  if (STRICT) {
+    fatal(`Playwright could not launch chromium: ${why}\nRun \`npx playwright install --with-deps chromium\`.`);
+  }
+  console.log(`\n[Playwright] Skipping browser screenshots: ${why}`);
   process.exit(0);
 }
 
 async function shoot(name, { width, height }, prepare) {
-  const page = await browser.newPage({ viewport: { width, height } });
+  const context = await browser.newContext({ viewport: { width, height } });
+  if (sessionCookie) await context.addCookies([sessionCookie]);
+  const page = await context.newPage();
   await page.goto(BASE, { waitUntil: "networkidle" });
   await page.waitForSelector(".app", { timeout: 10_000 });
   await sleep(600);
   if (prepare) await prepare(page);
   await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
   console.log(`  ${name}.png`);
-  await page.close();
+  await context.close();
 }
 
 const DESKTOP = { width: 1600, height: 1000 };
@@ -153,19 +204,32 @@ await shoot("desktop-board", DESKTOP, async (page) => {
     console.log(`  [Playwright Assertion] Needs you block visible`);
   }
 
-  // Expand a lane if needed, then assert blocker chips on Backlog cards.
   const toggleGraphBtn = page.locator('[data-testid="toggle-graph-view"]');
   if ((await toggleGraphBtn.count()) === 0) {
     await page.locator(".lane-head").first().click();
     await sleep(300);
   }
 
+  // Backlog shows VISIBLE (4) cards and `sortFor("backlog")` sorts blocked ones
+  // last, so the dependency chips live behind the "N more" button. Expand it —
+  // the chips are the only place the board renders a blocked_by edge, which is
+  // worth having in the hero shot.
+  const more = page.locator(".column-backlog .chunk").first();
+  if ((await more.count()) > 0) {
+    await more.click();
+    await sleep(300);
+  }
+
   const blockerChips = page.locator(".blocker-chips");
   await blockerChips.first().waitFor({ state: "visible", timeout: 5000 });
-  const text = await blockerChips.first().textContent();
-  console.log(`  [Playwright Assertion] Blocker chips content: "${text?.trim()}"`);
-  if (!text?.includes("Supervisor runs the gates") || !text?.includes("backlog")) {
-    throw new Error(`Blocker chips missing expected human-readable text. Got: ${text}`);
+  const text = (await blockerChips.first().textContent())?.trim() ?? "";
+  console.log(`  [Playwright Assertion] Blocker chips content: "${text}"`);
+  // The regression this guards is a chip that degrades to a bare "#2" — a card
+  // that tells you it is blocked but not by what. Assert the shape, not a
+  // fixture title: pinning the title is what let this assertion rot unnoticed.
+  const blockerTitle = text.replace(/⊘|waiting on|#\d+|backlog|running|review|done/g, "").trim();
+  if (!text.includes("waiting on") || blockerTitle.length < 10) {
+    throw new Error(`Blocker chips are not human-readable. Got: ${text}`);
   }
 
   const blockedCard = page.locator(".card", { has: page.locator(".blocker-chips") });
@@ -218,6 +282,42 @@ await shoot("desktop-drawer-review", DESKTOP, async (page) => {
   await sleep(600);
 });
 
+// Approve → Tasks is the mechanic the docs tour is built around, so it gets its
+// own capture rather than depending on which Review card happens to sort first.
+await shoot("desktop-drawer-plan", DESKTOP, async (page) => {
+  await page.getByRole("button", { name: /Review/ }).first().click();
+  await sleep(400);
+  const planCard = page.locator(".column-review .card", { hasText: "Initial Plan for" });
+  if ((await planCard.count()) === 0) {
+    await page.locator(".lane-head").first().click();
+    await sleep(300);
+  }
+  await page.locator(".column-review .card", { hasText: "Initial Plan for" }).first().click();
+  await sleep(600);
+  const proposed = page.getByText("Proposed Tasks");
+  await proposed.first().waitFor({ state: "visible", timeout: 5000 });
+  console.log(`  [Playwright Assertion] Proposed Tasks section visible`);
+});
+
 await browser.close();
 honr.kill();
+
+// A capture that silently did not happen is the failure mode this whole file is
+// written against: the book would build green with broken images.
+const EXPECTED = [
+  "desktop-board",
+  "desktop-graph",
+  "phone-board",
+  "desktop-drawer-needs-you",
+  "desktop-drawer-review",
+  "desktop-drawer-plan",
+  "blocked-card-chip",
+];
+const missing = EXPECTED.filter((n) => !existsSync(`${OUT}/${n}.png`));
+if (missing.length) {
+  const why = `missing captures: ${missing.join(", ")}`;
+  if (STRICT) fatal(why);
+  console.log(`\n[shots] ${why}`);
+}
+
 console.log(`\n${OUT}`);
