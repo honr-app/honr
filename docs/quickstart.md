@@ -7,7 +7,8 @@ Agents being off by default is deliberate: the control plane should run on a
 laptop that only needs to show and shape work. Turning them on is
 [the next page](first-agent.md).
 
-**You need:** Rust 1.88+, and a recent Node.js if you want to build the UI.
+**You need:** a current Rust stable toolchain, and a recent Node.js if you want
+to build the UI.
 
 ## 1. Run it
 

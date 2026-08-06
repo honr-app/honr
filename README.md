@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://honr-app.github.io/"><img alt="Docs" src="https://img.shields.io/badge/docs-honr--app.github.io-3d7ea6?style=flat-square" /></a>
-  <a href="Cargo.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.88+-dea584?style=flat-square&logo=rust&logoColor=white" /></a>
+  <a href="Cargo.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-stable-dea584?style=flat-square&logo=rust&logoColor=white" /></a>
   <a href="#status"><img alt="Status" src="https://img.shields.io/badge/status-active-2ea44f?style=flat-square" /></a>
 </p>
 
@@ -72,7 +72,8 @@ you ──chat──> operator agent (Cursor / Claude Code)
 
 ## Quick start
 
-**Requirements:** Rust 1.88+, and a recent Node.js if you want to build the UI.
+**Requirements:** a current Rust stable toolchain, and a recent Node.js if you
+want to build the UI.
 
 ```bash
 git clone https://github.com/honr-app/honr.git
