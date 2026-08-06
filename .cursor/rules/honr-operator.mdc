@@ -33,4 +33,4 @@ MCP/Cursor wiring, docs the human explicitly asked for, or emergencies they auth
 
 ## Prerequisites
 
-`cargo run` on :8080. Real dispatch needs `execution.agents.enabled: true` + OpenShell (see `docs/agents.md`). Day-to-day loop: `docs/workflow.md`.
+`cargo run` on :8080. Real dispatch needs `execution.agents.enabled: true` + OpenShell (see `docs/first-agent.md`). Day-to-day loop: `docs/workflow.md`.

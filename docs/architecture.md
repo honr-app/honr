@@ -4,7 +4,7 @@ One page on how the pieces fit. Present tense; code paths, not history.
 
 ## One state machine
 
-Every mutation: UI, MCP, supervisor: goes through `Board` in `src/store.rs`.
+Every mutation — UI, MCP, supervisor — goes through `Board` in `src/store.rs`.
 Legal transitions and lifecycle invariants live in `src/machine.rs`. Transports
 (`api.rs`, `mcp.rs`, SSE) render and invoke; they do not own rules.
 
@@ -22,13 +22,14 @@ UI / MCP / supervisor
 
 | Path | What |
 |---|---|
-| `src/model.rs` | One node type. Project (container) + Task (claimable leaf). Cockpit session singleton. |
-| `src/machine.rs` | Legal transitions + lifecycle invariants (cards and cockpit session). |
+| `src/model.rs` | One node type: Project (container) + Task (claimable leaf). Cockpit session singleton. |
+| `src/machine.rs` | Legal transitions and lifecycle invariants, for cards and the cockpit session. |
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
-| `src/api.rs` `src/sse.rs` `src/cockpit_chat.rs` | The human face (REST + board SSE + cockpit chat bridge). |
-| `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs. |
+| `src/api.rs` `src/sse.rs` `src/cockpit_chat.rs` | The human face — REST, board SSE, cockpit chat bridge. |
+| `src/mcp.rs` | Operator seat tools; the host seat keeps worker verbs. |
 | `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board endpoint + sealed mTLS); every call has a deadline. |
-| `src/supervisor.rs` | Card dispatch + durable cockpit start/reconcile/stop; briefing; lease sweeping. |
+| `src/supervisor.rs` | Card dispatch, durable cockpit start/reconcile/stop, briefing, lease sweeping. |
+| `src/engine.rs` | Explicit registry of agent engines — unknown ids fail loud. |
 | `honr.yaml` | Level schema (Project + Task) and execution config. |
 | `sandbox/` | Container image, network policy. |
 | `web/` | React UI + Playwright screenshot harness. |
@@ -41,51 +42,68 @@ When agents are enabled, the supervisor:
 1. Health-checks the OpenShell gateway.
 2. Auto-enqueues claimable Backlog leaves under Projects with auto mode on.
 3. Claims the oldest `awaiting_dispatch` card within concurrency limits.
-4. Creates (or reuses) a sandbox, builds a briefing from the
-   Project→Task chain, and starts the agent detached.
+4. Creates or reuses a sandbox, builds a briefing from the Project→Task chain,
+   and starts the agent detached.
 5. Parses the output stream for liveness; calls `heartbeat` / `report` on the
    board's behalf.
-6. Sweeps expired leases; on startup, reconciles live sandboxes so a honr
+6. Sweeps expired leases, and on startup reconciles live sandboxes so a honr
    restart does not orphan a running agent.
 
-Separately, when a Board **cockpit session** exists, the supervisor materializes the
-durable cockpit: create or reuse the `cockpit` profile sandbox (`honr.cockpit` label),
-start the cockpit agent detached, reconcile across honr restart (keep sandbox +
-conversation like park), and stop cleanly when the session is cleared. That
-path never uses claim / heartbeat / report / split or the card-dispatch queue —
-Board `cockpit_session` fields stay authoritative.
+Separately, when a Board **cockpit session** exists, the supervisor materializes
+it: create or reuse the cockpit-spec sandbox (`honr.cockpit` label), start the
+agent detached, reconcile across restart (keeping sandbox and conversation, like
+park), and stop cleanly when the session is cleared. That path never touches
+claim / heartbeat / report / split or the card dispatch queue — the Board's
+`cockpit_session` fields stay authoritative.
 
-The card worker has no network path to honr. The supervisor is the only caller of
-worker verbs on the live path (`Board` in `store.rs`). The cockpit reaches host
-MCP with operator tools only.
+The card worker has no network path to honr. The supervisor is the only caller
+of worker verbs on the live path.
 
 ## MCP and REST
 
 | Face | Transport | Audience |
 |---|---|---|
-| Cockpit (operator tools only) | MCP streamable HTTP at `/mcp` | Chat / cockpit agents on the host (OAuth) |
-| Host seat (operator + worker verbs) | `Operator::host` (in-process) | Supervisor/host tooling and tests |
+| Operator seat (operator tools only) | MCP streamable HTTP at `/mcp` | Chat and cockpit agents (OAuth) |
+| Host seat (operator + worker verbs) | `Operator::host`, in-process | Supervisor/host tooling and tests |
 | Human UI | REST + board SSE | React app; one-tap answers and approvals |
-| Cockpit attach | `GET/WS /api/cockpit-attach` | Cockpit xterm → `ExecSandboxInteractive` in Board cockpit |
-| Cockpit chat bridge (legacy) | `POST /api/cockpit-chat` (SSE) | Detached-agent stream-json bridge (not Cockpit primary) |
+| Cockpit terminal | `GET`/WS `/api/cockpit-attach` | xterm → `ExecSandboxInteractive` |
+| Cockpit chat bridge (legacy) | `POST /api/cockpit-chat` (SSE) | Detached-agent stream-json bridge |
 
 `/mcp` does not expose worker verbs (`claim`, `heartbeat`, `report`, `split`,
-`escalate`, `release`, `list_ready`). Ops clients triage and dispatch; they do
-not run the card-lifecycle path.
+`escalate`, `release`, `list_ready`). Operator clients triage and dispatch; they
+do not run the card lifecycle.
 
-Steer, pin, park, halt, and cut scope want a reason. They live in MCP. What
-stays one-tap in the UI is answering an escalation and approving a review.
+Steer, pin, park, halt, and cut scope all want a reason, so they live in MCP.
+What stays one-tap in the UI is answering an escalation and approving a review.
+
+The MCP surface is stateless on purpose: tools are request/response over
+`SharedBoard`. An in-memory session id only made clients brittle across restarts
+without buying server→client streams.
+
+## How the CLI attaches
+
+There is no `ConnectSandbox` RPC. `openshell sandbox connect` is a chain:
+
+1. `GetSandbox(name)` → `sandbox_id`
+2. `CreateSshSession(sandbox_id)` → short-lived token plus gateway host/port
+3. local `ssh -tt sandbox` with `ProxyCommand=openshell ssh-proxy … --token …`
+4. `ssh-proxy` tunnels via `ForwardTcp`
+
+honr wraps steps 1–2 as `OpenShell::create_ssh_session` /
+`revoke_ssh_session` in [`src/openshell.rs`](https://github.com/honr-app/honr/blob/main/src/openshell.rs). A browser
+cannot complete the OpenSSH ProxyCommand chain, which is why the in-browser
+terminal uses `ExecSandboxInteractive` over a WebSocket instead — see
+[Cockpit](cockpit.md#how-the-browser-terminal-works).
 
 ## Persistence
 
-SQLx board store (SQLite default, Postgres optional). Configured via
-`board.database.url` or `HONR_DATABASE_URL`. Mutations flush as row updates.
-Optional one-shot import from legacy `honr.json` when the DB is empty. See
-[Quickstart](quickstart.md).
+SQLx board store — SQLite by default, Postgres optional. Configured by
+`board.database.url` or `HONR_DATABASE_URL`. Mutations flush as row updates,
+with an optional one-shot import from `honr.json` when the database is empty.
+See [Configuration](configuration.md#board-database).
 
 ## Related
 
-- [Concepts](concepts.md): product model and invariants
-- [Agents](agents.md): enabling the execution path
-- [Cockpit](cockpit.md): start / TTY attach / stop over Board cockpit session
-- [Sandbox](sandbox.md): sandbox stack and gotchas
+- [Concepts](concepts.md) — the product model
+- [Invariants](invariants.md) — what will not change, and why
+- [Sandbox](sandbox.md) — what a run looks like from inside

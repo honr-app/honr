@@ -17,3 +17,9 @@ no-section-label = true
 
 [output.html.search]
 enable = true
+
+# Pages whose content moved. The site is young, but these URLs are already in
+# the wild — a link that 404s teaches nothing.
+[output.html.redirect]
+"/agents.html" = "first-agent.html"
+"/task-repo-binding.html" = "workflow.html#which-repo-an-agent-clones"

@@ -1,26 +1,52 @@
-# honr docs
+# honr
 
-Operator-first docs for running and understanding honr.
+**honr** is a board you point at a repository. You describe what you want; it
+runs coding agents in sandboxes; pull requests come back for you to merge.
 
-| Page | What |
+The difference from a task tracker is that the board is not a report of work
+happening elsewhere. It *is* the work. Moving a card starts an agent. Answering
+a question unblocks one. Approving a plan creates the tasks.
+
+![The honr board: Backlog, Running, Needs You, Review, Done](images/desktop-board.png)
+
+## What a turn looks like
+
+1. You create a **Project** pointed at a repo and say what you want.
+2. An agent reads the repo and proposes a breakdown. You **Approve** it, and
+   those become real cards.
+3. Agents claim cards, work in isolated sandboxes, and open pull requests.
+4. Cards that need a decision stop and wait in **Needs You** — costing nothing
+   while they do.
+5. You review the PRs and merge on GitHub. honr never merges anything.
+
+The [Tour](tour.md) walks that loop with screenshots and needs nothing
+installed.
+
+## Is this for you?
+
+honr is for someone who wants several agents working a repository at once, and
+wants one place to steer them from. It assumes you are comfortable reviewing
+pull requests and running a service on your own machine.
+
+It is **not** a hosted product, and it is not an IDE assistant. There is no
+autonomy setting that merges code for you — that boundary is deliberate and
+[not moving](invariants.md).
+
+You can run the board with agents switched off: no Docker, no gateway, no
+credentials, no spend. That is the default, and it is the right way to start.
+
+## Start here
+
+| If you want to | Read |
 |---|---|
-| [Concepts](concepts.md) | What honr is: board as control plane, Project + Tasks, operator vs worker |
-| [Quickstart](quickstart.md) | Board-only `cargo run`, UI, MCP connect, empty board |
-| [Workflow](workflow.md) | Day-to-day: Project → plan → Approve → dispatch; Needs You / Review; park / steer / halt |
-| [Agents](agents.md) | Enabling real agents: compute driver, OpenShell, `honr.yaml` / Settings |
-| [Sandbox](sandbox.md) | How a sandboxed run works and the gotchas that matter |
-| [Cockpit](cockpit.md) | Durable Cockpit seat: start, TTY attach/reconnect, park/stop |
-| [Architecture](architecture.md) | One page: Board / store, supervisor, MCP / REST, persistence |
-| [Clone targets](task-repo-binding.md) | Clone from task prose; `pull_request` after report; Initial plan via `plan.json` |
+| See it work without installing anything | [Tour](tour.md) |
+| Learn the vocabulary | [Concepts](concepts.md) · [Glossary](glossary.md) |
+| Run the board locally | [Quickstart](quickstart.md) |
+| Get one real agent opening PRs | [Your first agent](first-agent.md) |
+| Operate it day to day | [Workflow](workflow.md) |
+| Understand how it is built | [Architecture](architecture.md) |
 
-Machine contracts (not prose): [`schemas/report.schema.json`](schemas/report.schema.json).
+Machine contracts, not prose: [`schemas/report.schema.json`](schemas/report.schema.json).
 
-## Building this book
-
-```bash
-mdbook serve             # http://localhost:3000  (book.toml at repo root)
-mdbook build             # writes to target/mdbook/
-# or: make docs / make docs-serve
-```
-
-CI publishes `target/mdbook` to [`honr-app/honr-app.github.io`](https://github.com/honr-app/honr-app.github.io) → [honr-app.github.io](https://honr-app.github.io/) via a write **deploy key** (`PAGES_DEPLOY_KEY` on `honr-app/honr`). Org setting **Deploy keys** must stay enabled.
+honr is under active development and is used to ship changes to itself. Expect
+sharp edges.

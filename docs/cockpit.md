@@ -1,242 +1,149 @@
-# Cockpit (TTY attach)
+# Cockpit
 
-The durable control-plane cockpit: a privileged OpenShell sandbox with narrow
-egress to host honr MCP (operator tools only). Create knobs (image, policy,
-CPU, memory, engine) come from the Board **Cockpit sandbox profile** — pick it
-in Settings → OpenShell → Sandbox specs (`POST /api/sandbox-profiles/{id}/cockpit`). Seeded
-catalog includes a `cockpit` spec and sets it as Cockpit’s preference; you can
-point Cockpit at any other spec. The live seat name stays
-`{branch_prefix}-cockpit` (label `honr.cockpit`), independent of which spec built it.
+A durable terminal seat that sits *inside* a sandbox but can reach honr's
+operator tools. Use it when you want an agent that can triage the board with
+you, rather than one working a card.
 
-Attach faces (Cockpit, host CLI connect) sit over the Board **cockpit session**
-singleton — they do not own lifecycle. Mutations go through `Board` in
-`store.rs` via REST `/api/cockpit-session*`. The supervisor materializes the
-sandbox from that record; **Cockpit attach** launches interactive `agent`
-(and resumes `conversation_id` when set).
+It is the third seat described in [Concepts](concepts.md#operator-and-worker):
+narrower than you (no merges), far wider than a card worker (which cannot see
+the board at all).
 
-Prerequisites: [Agents](agents.md) path is live (`execution.agents.enabled:
-true`, OpenShell gateway healthy, a Cockpit sandbox profile in the catalog).
-Containment: [Sandbox](sandbox.md#cockpit-vs-worker-containment).
+**Prerequisites:** the [agents path](first-agent.md) is live —
+`execution.agents.enabled: true`, a healthy OpenShell gateway, and a cockpit
+sandbox spec in the catalog.
 
-## What stays on the Board
+## Start one
+
+In the UI:
+
+1. Open **Cockpit** from the centred chevron grip in the top bar.
+2. Click **Start**.
+3. Wait a few seconds for the supervisor to provision the sandbox.
+4. Type in the terminal.
+
+That is the whole path. Everything below is for automating it or understanding
+what it did.
+
+Disconnecting the terminal does **not** stop the session — the sandbox and the
+conversation stay up under Start/Stop, and re-attaching resumes the same chat.
+Restarting honr does not stop it either: the supervisor reconciles, and you just
+open Cockpit again.
+
+## What is actually durable
+
+The session is a singleton record on the Board, not a file or a wrapper script:
 
 | Field | Meaning |
 |---|---|
-| `environment` | OpenShell sandbox name (default `{branch_prefix}-cockpit`, usually `honr-cockpit`) |
-| `conversation_id` | Cursor chat id — Cockpit attach `--resume`s it (minted via `agent create-chat` if missing) |
-| `status` | `Running` or `Parked` (park-like hold: sandbox + conversation kept) |
+| `environment` | Sandbox name — defaults to `{branch_prefix}-cockpit`, usually `honr-cockpit` |
+| `conversation_id` | Chat id the seat resumes; minted if missing |
+| `status` | `Running`, or `Parked` — a hold that keeps sandbox and conversation |
 
-`POST /api/cockpit-session` creates Running. Park / resume / `DELETE` are the hold
-and clear path. Creating the sandbox yourself, or storing conversation ids in a
-wrapper, is a second state machine — do not.
+The terminal and any CLI attach are **faces over that record**. They read and
+mutate it through `Board`; they do not own lifecycle. Creating the sandbox
+yourself, or keeping conversation ids in a wrapper script, builds a second state
+machine — don't.
 
-## Start
+Which image, policy, CPU, memory, and engine the seat gets comes from the
+**cockpit sandbox spec** (Settings → OpenShell → Sandbox specs). The seat name
+stays `{branch_prefix}-cockpit` regardless of which spec built it, so you can
+point Cockpit at any spec you like.
 
-With honr listening and agents enabled:
+## Driving it from the CLI
+
+Same Board calls the UI makes. Log in first — the cookie jar is auth, not
+lifecycle.
 
 ```bash
-# Session cookie (same login as the UI). Cookie jar is auth only — not lifecycle.
 curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"…"}' \
   http://127.0.0.1:8080/auth/login
 
-# Create the Board cockpit session (empty body is fine; supervisor fills environment).
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  -H 'Content-Type: application/json' \
-  -d '{}' \
-  http://127.0.0.1:8080/api/cockpit-session
-```
-
-Within a few seconds the supervisor creates or reuses the cockpit environment
-(from the Cockpit sandbox profile) and writes `environment` onto the session.
-Confirm:
-
-```bash
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  http://127.0.0.1:8080/api/cockpit-session
-# → { "session": { "environment": "honr-cockpit", "status": "Running", … } }
-
-openshell sandbox list --selector honr.cockpit=1
-```
-
-Optional thin shim (same Board calls; no local lifecycle file):
-[`scripts/cockpit.sh`](../scripts/cockpit.sh) `start`.
-
-## How `openshell sandbox connect` talks gRPC
-
-There is no `ConnectSandbox` RPC. The CLI path is:
-
-1. `GetSandbox(name)` → `sandbox_id`
-2. `CreateSshSession(sandbox_id)` → short-lived `token` + gateway host/port/scheme
-3. Local `ssh -tt sandbox` with `ProxyCommand=openshell ssh-proxy … --token …`
-4. `ssh-proxy` tunnels via `ForwardTcp` (`SshRelayTarget` + token)
-
-honr wraps (1)–(2) as `OpenShell::create_ssh_session` / `revoke_ssh_session` in
-[`src/openshell.rs`](../src/openshell.rs). Browsers cannot complete the OpenSSH
-ProxyCommand chain, so Cockpit attach uses a different RPC (below).
-
-Optional CLI: `openshell sandbox connect <env> --editor cursor` installs
-managed SSH config and launches native Cursor on the host. honr does **not**
-shell out for that — run it yourself if you want Remote SSH.
-
-## Cockpit attach (in-browser)
-
-Primary UI: open **Cockpit** from the centered top-bar chevron grip, Start the
-Board cockpit session, then use the xterm.js surface over authenticated WebSocket
-**`/api/cockpit-attach`**.
-
-That endpoint opens OpenShell **`ExecSandboxInteractive`** into the
-Board-named environment and runs the **Cockpit sandbox-spec engine** (Settings →
-OpenShell → Sandbox specs). Cursor uses interactive **`agent`** (`--trust
---approve-mcps --sandbox disabled`, no `--force` — tool calls prompt for
-approval) with `agent create-chat` / `--resume` when needed. OpenCode /
-Claude / agy launch their own TUI (Anthropic-shaped engines get
-`ANTHROPIC_BASE_URL=https://inference.local…`). Auth for model calls is
-OpenShell providers / `inference.local` — not host secrets copied into the
-seat. For **agy**, the attached `antigravity` provider injects only an
-`openshell:resolve:…` placeholder; attach writes that into the seat token
-file (see [Sandbox → Antigravity / agy](sandbox.md#antigravity-agy)).
-Stdin/stdout/resize are relayed over the WebSocket (no local SSH).
-
-| Face | Mechanism |
-|---|---|
-| Cockpit terminal | `GET` WebSocket `/api/cockpit-attach` → profile engine TUI |
-| Host TTY (manual) | `openshell sandbox connect <env>` (CreateSshSession + ssh) |
-
-Disconnecting the WebSocket does **not** stop the Board session — sandbox +
-conversation stay under Start/Stop. Re-attach resumes the same chat id.
-Cockpit does not surface Park/Resume (API still exists).
-
-Legacy `POST /api/cockpit-chat` (detached agent stream-json bridge) remains for
-compatibility; Cockpit no longer uses it.
-
-## MCP auth inside the seat (special for Cockpit)
-
-Host Cursor uses browser OAuth (`honr-cursor` client) against `/mcp`. That
-dance does not work cleanly inside the sandbox.
-
-Instead, honr **mints** short-lived MCP JWTs for the static public client
-`honr-cockpit` and **injects** them into the Board-named sandbox:
-
-| Path | Contents |
-|---|---|
-| `/sandbox/.honr/mcp/token.json` | access + refresh (mode 0600) |
-| `/sandbox/.honr/mcp/mcp.json` | HTTP MCP entry with `Authorization: Bearer …` (Cursor copies) |
-| `/sandbox/.honr/mcp/claude_mcp.json` | same shape; Claude `--bare` loads via `--mcp-config` |
-| `/sandbox/.gemini/config/mcp_config.json` | same shape for Antigravity (`agy`) global MCP discovery |
-| `/sandbox/.config/opencode/opencode.jsonc` | OpenCode `mcp.honr` (`type: remote` + Bearer headers) |
-| `/sandbox/.honr/mcp/env.sh` | exports `HONR_MCP_URL` + `HONR_MCP_ACCESS_TOKEN` |
-
-Triggers:
-
-- Supervisor when the cockpit sandbox becomes Ready (subject `cockpit` fallback)
-- `POST /api/cockpit-session/mcp-cred` from Cockpit after Start (subject =
-  logged-in user; silent — no status chrome in the UI)
-- Cockpit attach WebSocket open (same cookie mint, best-effort)
-
-Tokens are **not** returned to browser JS. Do not run `agent mcp login`
-inside the seat unless you intend a separate host-style OAuth flow.
-
-Resource URL (JWT `aud`) defaults to
-`http://host.docker.internal:8080/mcp` (`HONR_MCP_URL` override).
-
-## Attach / TTY reconnect (CLI)
-
-```bash
-ENV=$(curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  http://127.0.0.1:8080/api/cockpit-session \
-  | jq -r '.session.environment // empty')
-test -n "$ENV" || { echo "no cockpit session / environment yet"; exit 1; }
-
-openshell sandbox connect "$ENV"
-```
-
-After honr restart, the supervisor reconciles: if the Board session is still
-`Running` and the sandbox is live, it keeps the sandbox and
-`conversation_id`. Open Cockpit again to attach (interactive `agent
---resume`). You do not recreate the session to reconnect.
-
-Shim: `scripts/cockpit.sh attach`.
-
-Inside the seat the agent talks MCP at `$HONR_MCP_URL` (default
-`http://host.docker.internal:8080/mcp`) — operator tools only. Host chat
-clients (Cursor / Claude Code on `/mcp`) are the same cockpit tool surface;
-TTY / Cockpit attach is how you sit with the sandboxed liaison.
-
-## Park, resume, stop
-
-| Intent | Board call | Effect |
-|---|---|---|
-| Hold without deleting | `POST /api/cockpit-session/park` | Agent stopped; sandbox + conversation kept; `Parked` |
-| Continue after park | `POST /api/cockpit-session/resume` | `Running` again; supervisor restarts / resumes agent |
-| Tear down | `DELETE /api/cockpit-session` | Agent stopped; sandbox deleted; session cleared |
-
-```bash
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  -X POST http://127.0.0.1:8080/api/cockpit-session/park
-
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  -X POST http://127.0.0.1:8080/api/cockpit-session/resume
-
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  -X DELETE http://127.0.0.1:8080/api/cockpit-session
-```
-
-Shim: `park` / `resume` / `stop`. Do not `openshell sandbox delete` the cockpit box
-while a Board session still points at it — let `DELETE /api/cockpit-session` drive
-stop so inventory reconcile stays consistent.
-
-## Human owns irreversibles
-
-Attach and the cockpit agent prepare and surface **Review** / **Needs You**. Approving
-merges stays human (honr never merges). Prefer escalating ambiguous
-irreversibles rather than widening `approve_review` / `approve_plan` semantics.
-Same rule as host MCP: see [Workflow](workflow.md) triage order.
-
-## Smoke path (running board)
-
-Against a board already on `:8080` with agents + OpenShell up:
-
-```bash
-# 1. Auth
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"…"}' \
-  http://127.0.0.1:8080/auth/login >/dev/null
-
-# 2. Start seat
+# Start (empty body; the supervisor fills in `environment`)
 curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
   -H 'Content-Type: application/json' -d '{}' \
   http://127.0.0.1:8080/api/cockpit-session
-# wait until .session.environment is set
-for i in $(seq 1 30); do
-  ENV=$(curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-    http://127.0.0.1:8080/api/cockpit-session | jq -r '.session.environment // empty')
-  [ -n "$ENV" ] && break
-  sleep 2
-done
-echo "environment=$ENV"
-
-# 3. Attach (TTY) — Ctrl-D / exit leaves the seat Running
-openshell sandbox connect "$ENV"
-
-# 4. Reconnect proves durability (optional second attach)
-openshell sandbox connect "$ENV"
-
-# 5. Stop
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  -X DELETE http://127.0.0.1:8080/api/cockpit-session
-openshell sandbox list --selector honr.cockpit=1   # expect empty after reconcile
 ```
 
-Or: `scripts/cockpit.sh start && scripts/cockpit.sh attach` then
-`scripts/cockpit.sh stop`. In the UI: open Cockpit beside the Board → Start →
-attach in the terminal.
+| Intent | Call |
+|---|---|
+| Start | `POST /api/cockpit-session` |
+| Inspect | `GET /api/cockpit-session` |
+| Hold without deleting | `POST /api/cockpit-session/park` |
+| Continue after a park | `POST /api/cockpit-session/resume` |
+| Tear down | `DELETE /api/cockpit-session` |
+
+Attach a host terminal once `environment` is set:
+
+```bash
+ENV=$(curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
+  http://127.0.0.1:8080/api/cockpit-session | jq -r '.session.environment // empty')
+openshell sandbox connect "$ENV"
+```
+
+[`scripts/cockpit.sh`](https://github.com/honr-app/honr/blob/main/scripts/cockpit.sh) is a thin shim over exactly these
+calls: `start` / `attach` / `park` / `resume` / `stop`.
+
+Do not `openshell sandbox delete` the cockpit box while a Board session still
+points at it. Let `DELETE /api/cockpit-session` drive teardown so inventory
+reconcile stays consistent.
+
+## How the browser terminal works
+
+The in-browser terminal is xterm.js over an authenticated WebSocket at
+`/api/cockpit-attach`, which opens OpenShell `ExecSandboxInteractive` into the
+Board-named environment and runs the cockpit spec's engine. Stdin, stdout, and
+resize are relayed over that socket — no local SSH, because a browser cannot
+complete the OpenSSH ProxyCommand chain that `openshell sandbox connect` uses.
+(That chain is described in [Architecture](architecture.md#how-the-cli-attaches).)
+
+Cursor launches interactive `agent` with `--trust --approve-mcps --sandbox
+disabled` — deliberately no `--force`, so tool calls still prompt for approval.
+OpenCode, Claude, and agy launch their own TUIs.
+
+## Credentials inside the seat
+
+Model auth comes from OpenShell providers and `inference.local`, never from host
+secrets copied into the sandbox.
+
+MCP auth is the interesting case. Host Cursor uses browser OAuth against `/mcp`,
+and that dance does not work cleanly from inside a sandbox. So honr **mints**
+short-lived MCP JWTs for the static public client `honr-cockpit` and writes them
+into the seat:
+
+| Path | Contents |
+|---|---|
+| `/sandbox/.honr/mcp/token.json` | access + refresh, mode 0600 |
+| `/sandbox/.honr/mcp/mcp.json` | HTTP MCP entry with a Bearer header (Cursor) |
+| `/sandbox/.honr/mcp/claude_mcp.json` | same shape; Claude loads it via `--mcp-config` |
+| `/sandbox/.gemini/config/mcp_config.json` | same, for Antigravity |
+| `/sandbox/.config/opencode/opencode.jsonc` | OpenCode `mcp.honr`, remote + Bearer |
+| `/sandbox/.honr/mcp/env.sh` | exports `HONR_MCP_URL`, `HONR_MCP_ACCESS_TOKEN` |
+
+Minting happens when the sandbox becomes Ready, on
+`POST /api/cockpit-session/mcp-cred`, and on terminal attach. Tokens are never
+returned to browser JavaScript. Do not run `agent mcp login` inside the seat
+unless you specifically want a separate host-style OAuth flow.
+
+The resource URL (the JWT `aud`) defaults to
+`http://host.docker.internal:8080/mcp`; override with `HONR_MCP_URL`.
+
+For agy the attached `antigravity` provider injects only an
+`openshell:resolve:…` placeholder, and attach writes that into the seat's token
+file — never a host OAuth file. See
+[Sandbox → Antigravity](sandbox.md#antigravity--agy).
+
+## The seat still cannot merge
+
+The cockpit agent prepares and surfaces Review and Needs You. Approving a merge
+stays human, exactly as it does on the host MCP surface. Prefer escalating an
+ambiguous irreversible over widening what `approve_review` / `approve_plan`
+mean.
 
 ## Related
 
-- [Concepts](concepts.md) — operator vs cockpit vs worker
-- [Agents](agents.md) — enable compute + `cockpit` profile
-- [Architecture](architecture.md) — one state machine; supervisor cockpit loop
-- [Quickstart](quickstart.md) — host `/mcp` OAuth as the same operator tool surface
+- [Concepts](concepts.md#operator-and-worker) — how the three seats differ
+- [Sandbox](sandbox.md#cockpit-vs-worker-containment) — the two egress policies
+  side by side
+- [Configuration](configuration.md#sandbox-specs) — picking the spec

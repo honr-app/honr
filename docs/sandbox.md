@@ -1,7 +1,7 @@
 # Sandbox
 
 How a sandboxed agent run works, and the operator-relevant gotchas. Assets live
-under [`sandbox/`](../sandbox/); this page is the prose companion.
+under [`sandbox/`](https://github.com/honr-app/honr/tree/main/sandbox); this page is the prose companion.
 
 ## How credentials reach the agent
 
@@ -62,7 +62,7 @@ not carry a separate issue-store CLI or database.
 ## Image and offline gates
 
 The community base image has no Rust toolchain and the `sandbox` user has no
-sudo. For honr itself, [`sandbox/Containerfile`](../sandbox/Containerfile) bakes
+sudo. For honr itself, [`sandbox/Containerfile`](https://github.com/honr-app/honr/blob/main/sandbox/Containerfile) bakes
 `cargo` / `clippy`, Cursor Agent (`agent`), OpenCode (`opencode`), and pre-warms
 cargo and npm caches so crates.io never needs to be reachable from an agent
 sandbox.
@@ -118,8 +118,8 @@ generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 
 | Catalog id | Seed source | Egress |
 |---|---|---|
-| `default` (worker) | Built-in `src/seed_policies.rs` when catalog empty; then **board profile only** | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
-| `cockpit` | [`cockpit-policy.yaml`](../sandbox/cockpit-policy.yaml) at seed; then **board profile only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
+| `default` (worker) | Built-in `src/seed_policies.rs` when catalog empty; then **board spec only** | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
+| `cockpit` | [`cockpit-policy.yaml`](https://github.com/honr-app/honr/blob/main/sandbox/cockpit-policy.yaml) at seed; then **board spec only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
 
 Settings → OpenShell → Sandbox specs is the live source of truth for both. The
 cockpit spec seeds with `github` + `vertex` + `antigravity` attach names so
@@ -131,7 +131,7 @@ and agy gets a Bearer placeholder (never a host OAuth file).
 Bare OpenShell `generic` providers do **not** resolve
 `openshell:resolve:…` placeholders — the egress proxy only substitutes on
 endpoints declared by a **provider type**. Honr ships
-[`sandbox/openshell/antigravity.yaml`](../sandbox/openshell/antigravity.yaml)
+[`sandbox/openshell/antigravity.yaml`](https://github.com/honr-app/honr/blob/main/sandbox/openshell/antigravity.yaml)
 (`auth_style: bearer`, Cloud Code / Google API hosts) and imports it on
 provider Sync when missing.
 
@@ -145,3 +145,9 @@ provider Sync when missing.
 
 Existing cockpit specs created before this attach name need the checkbox (or
 board ensure on startup appends `antigravity` to the cockpit create-spec).
+
+## Related
+
+- [Your first agent](first-agent.md) — getting this stack running the first time
+- [Troubleshooting](troubleshooting.md) — the gotchas above, as symptoms
+- [Configuration](configuration.md#sandbox-specs) — spec resolution and engines
