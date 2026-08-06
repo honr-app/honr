@@ -3,12 +3,12 @@
 //! human reading the board, and an agent has to without any human at all.
 //!
 //! Two families share one state machine; seats gate which family is visible:
-//!   * operator tools — what a liaison / cockpit needs to triage and decide
+//!   * operator tools — what a liaison needs to triage and decide
 //!   * worker verbs  — `list_ready` `claim` `heartbeat` `split` `escalate`
 //!     `report` `release`, and nothing else
 //!
-//! `/mcp` (OAuth) is the **cockpit**: operator tools only. Worker verbs stay
-//! on the host seat for supervisor/host tooling; the live supervisor path
+//! `/mcp` (OAuth) is the **operator seat**: operator tools only. Worker verbs
+//! stay on the host seat for supervisor/host tooling; the live supervisor path
 //! calls `Board` directly. If the worker surface grows past roughly that size,
 //! the orchestrator has started leaking its own complexity into the workers.
 
@@ -37,20 +37,25 @@ type Out<T> = Result<ToolJson<T>, ErrorData>;
 
 /// Which MCP tool family a session may use.
 ///
-/// Cockpit (default `/mcp`) is the privileged chatbot / OAuth operator client.
-/// Host keeps worker verbs for supervisor-facing tooling and tests; production
-/// card lifecycle still goes through `Board` in `store.rs`, not this seat.
+/// Operator (default `/mcp`) is the privileged chatbot / OAuth client. Host
+/// keeps worker verbs for supervisor-facing tooling and tests; production card
+/// lifecycle still goes through `Board` in `store.rs`, not this seat.
+///
+/// Not named `Cockpit`: the cockpit is a *sandbox seat* that happens to be one
+/// client of this surface. Sharing a name made "is the cockpit down" ambiguous
+/// between a container and an HTTP route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum McpSeat {
     /// Operator tools only — no claim/heartbeat/report/split/escalate/release/list_ready.
     #[default]
-    Cockpit,
+    Operator,
     /// Operator tools plus worker verbs (host / supervisor tooling).
     #[allow(dead_code)] // constructed via `Operator::host` (tests + host tooling)
     Host,
 }
 
-/// Worker-verb tool names. Cockpit hides these from `tools/list` and rejects calls.
+/// Worker-verb tool names. The operator seat hides these from `tools/list` and
+/// rejects calls.
 pub const WORKER_VERB_TOOLS: &[&str] = &[
     "list_ready",
     "claim",
@@ -395,9 +400,9 @@ pub struct Operator {
 
 #[tool_router]
 impl Operator {
-    /// Cockpit — operator tools only. This is what `/mcp` mounts.
+    /// Operator seat — operator tools only. This is what `/mcp` mounts.
     pub fn new(board: SharedBoard) -> Self {
-        Self::with_seat(board, McpSeat::Cockpit)
+        Self::with_seat(board, McpSeat::Operator)
     }
 
     /// Host seat — operator tools plus worker verbs (supervisor/host tooling).
@@ -408,7 +413,7 @@ impl Operator {
 
     pub fn with_seat(board: SharedBoard, seat: McpSeat) -> Self {
         let mut tool_router = Self::tool_router();
-        if seat == McpSeat::Cockpit {
+        if seat == McpSeat::Operator {
             for name in WORKER_VERB_TOOLS {
                 tool_router.disable_route(*name);
             }
@@ -426,9 +431,9 @@ impl Operator {
     }
 
     fn deny_worker(&self, verb: &str) -> Result<(), ErrorData> {
-        if self.seat == McpSeat::Cockpit {
+        if self.seat == McpSeat::Operator {
             return Err(bad(format!(
-                "{verb} is a worker verb; cockpit is operator tools only"
+                "{verb} is a worker verb; this seat is operator tools only"
             )));
         }
         Ok(())
@@ -1115,9 +1120,9 @@ impl ServerHandler for Operator {
             me
         })
         .with_instructions(match self.seat {
-            McpSeat::Cockpit => {
-                "honr — an agent orchestration board. You are the cockpit: the human's \
-                 liaison over operator tools only (no claim/heartbeat/report/split/escalate/\
+            McpSeat::Operator => {
+                "honr — an agent orchestration board. You are the operator seat: the \
+                 human's liaison over operator tools only (no claim/heartbeat/report/split/escalate/\
                  release/list_ready — those are worker verbs on the host/supervisor path).\n\n\
                  Start with board_snapshot. Live goals expose recent_retired for mid-project \
                  cuts (retired leaves are not in column rollups). Use search_items when you \
@@ -1151,7 +1156,7 @@ impl ServerHandler for Operator {
                 "honr — host MCP seat: operator tools plus worker verbs \
                  (list_ready/claim/heartbeat/split/escalate/report/release). \
                  Card lifecycle mutations still go through Board; this seat is for \
-                 supervisor/host tooling, not the cockpit chatbot."
+                 supervisor/host tooling, not the operator chatbot."
             }
         })
     }
@@ -1159,7 +1164,7 @@ impl ServerHandler for Operator {
 
 /// Mounted on the same axum router, same port, same state as the human face.
 ///
-/// `/mcp` is the **cockpit** (operator tools only). Stateless on purpose:
+/// `/mcp` is the **operator seat** (operator tools only). Stateless on purpose:
 /// tools are request/response over `SharedBoard`; an in-memory `Mcp-Session-Id`
 /// only made Cursor brittle across `cargo run` restarts ("Session not found")
 /// without buying us server→client streams.
@@ -1441,7 +1446,7 @@ mod tests {
     #[test]
     fn cut_scope_list_ready_and_split_return_record_with_items() {
         let (board, goal_id) = test_board();
-        // Worker-verb shape checks use the host seat (cockpit hides list_ready).
+        // Worker-verb shape checks use the host seat (operator hides list_ready).
         let operator = Operator::host(board.clone());
 
         // list_ready
@@ -1768,12 +1773,12 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_seat_lists_operator_tools_and_hides_worker_verbs() {
+    fn operator_seat_lists_operator_tools_and_hides_worker_verbs() {
         let (board, _) = test_board();
-        let cockpit = Operator::new(board);
-        assert_eq!(cockpit.seat(), McpSeat::Cockpit);
+        let operator = Operator::new(board);
+        assert_eq!(operator.seat(), McpSeat::Operator);
 
-        let names: Vec<_> = cockpit
+        let names: Vec<_> = operator
             .tool_router
             .list_all()
             .into_iter()
@@ -1793,58 +1798,58 @@ mod tests {
         ] {
             assert!(
                 names.iter().any(|n| n == tool),
-                "cockpit must list operator tool {tool}; got {names:?}"
+                "operator must list operator tool {tool}; got {names:?}"
             );
             assert!(
-                cockpit.tool_router.has_route(tool),
-                "cockpit must expose {tool}"
+                operator.tool_router.has_route(tool),
+                "operator must expose {tool}"
             );
         }
 
         for verb in WORKER_VERB_TOOLS {
             assert!(
                 !names.iter().any(|n| n == *verb),
-                "cockpit must not list worker verb {verb}; got {names:?}"
+                "operator must not list worker verb {verb}; got {names:?}"
             );
             assert!(
-                !cockpit.tool_router.has_route(verb),
-                "cockpit must disable {verb}"
+                !operator.tool_router.has_route(verb),
+                "operator must disable {verb}"
             );
         }
     }
 
     #[test]
-    fn cockpit_seat_invokes_operator_tools_and_denies_worker_verbs() {
+    fn operator_seat_invokes_operator_tools_and_denies_worker_verbs() {
         let (board, goal_id) = test_board();
-        let cockpit = Operator::new(board.clone());
+        let operator = Operator::new(board.clone());
 
-        let snap = cockpit.board_snapshot().expect("cockpit board_snapshot");
-        assert!(!snap.0.goals.is_empty(), "cockpit can read the board");
+        let snap = operator.board_snapshot().expect("operator board_snapshot");
+        assert!(!snap.0.goals.is_empty(), "operator can read the board");
 
-        let park = cockpit.park(Parameters(ReasonArg {
+        let park = operator.park(Parameters(ReasonArg {
             id: goal_id,
-            reason: Some("cockpit smoke".into()),
+            reason: Some("operator smoke".into()),
         }));
         if let Err(e) = &park {
             assert!(
                 !e.message.contains("worker verb"),
-                "cockpit park must not be seat-denied: {}",
+                "operator park must not be seat-denied: {}",
                 e.message
             );
         }
 
-        let claim = cockpit.claim(Parameters(ClaimArg {
+        let claim = operator.claim(Parameters(ClaimArg {
             item_id: goal_id,
-            agent_id: "cockpit-agent".into(),
+            agent_id: "operator-agent".into(),
             model: None,
             lease_secs: 60,
         }));
         let err = match claim {
-            Ok(_) => panic!("cockpit must deny claim"),
+            Ok(_) => panic!("operator must deny claim"),
             Err(e) => e,
         };
         assert!(
-            err.message.contains("worker verb") && err.message.contains("cockpit"),
+            err.message.contains("worker verb") && err.message.contains("operator tools only"),
             "unexpected deny message: {}",
             err.message
         );
@@ -1852,7 +1857,7 @@ mod tests {
         for (label, result) in [
             (
                 "list_ready",
-                cockpit
+                operator
                     .list_ready(Parameters(ListReadyArg {
                         capabilities: vec!["any".into()],
                     }))
@@ -1860,10 +1865,10 @@ mod tests {
             ),
             (
                 "heartbeat",
-                cockpit
+                operator
                     .heartbeat(Parameters(HeartbeatArg {
                         item_id: goal_id,
-                        agent_id: "cockpit-agent".into(),
+                        agent_id: "operator-agent".into(),
                         progress: 0.1,
                         lease_secs: 30,
                         cost_cents: 0,
@@ -1872,10 +1877,10 @@ mod tests {
             ),
             (
                 "report",
-                cockpit
+                operator
                     .report(Parameters(ReportArg {
                         item_id: goal_id,
-                        agent_id: "cockpit-agent".into(),
+                        agent_id: "operator-agent".into(),
                         lines_added: 1,
                         lines_removed: 0,
                     }))
@@ -1883,19 +1888,19 @@ mod tests {
             ),
             (
                 "release",
-                cockpit
+                operator
                     .release(Parameters(AgentItemArg {
                         item_id: goal_id,
-                        agent_id: "cockpit-agent".into(),
+                        agent_id: "operator-agent".into(),
                     }))
                     .map(|_| ()),
             ),
             (
                 "escalate",
-                cockpit
+                operator
                     .escalate(Parameters(EscalateArg {
                         item_id: goal_id,
-                        agent_id: "cockpit-agent".into(),
+                        agent_id: "operator-agent".into(),
                         question: "pick?".into(),
                         options: vec![
                             OptionSpec {
@@ -1913,10 +1918,10 @@ mod tests {
             ),
             (
                 "split",
-                cockpit
+                operator
                     .split(Parameters(SplitArg {
                         item_id: goal_id,
-                        agent_id: "cockpit-agent".into(),
+                        agent_id: "operator-agent".into(),
                         children: vec![
                             ChildSpec {
                                 title: "a".into(),
@@ -1944,7 +1949,7 @@ mod tests {
             ),
         ] {
             match result {
-                Ok(_) => panic!("cockpit must deny {label}"),
+                Ok(_) => panic!("operator must deny {label}"),
                 Err(e) => assert!(
                     e.message.contains("worker verb"),
                     "{label} deny message: {}",
