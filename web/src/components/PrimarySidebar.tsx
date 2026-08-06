@@ -1,4 +1,4 @@
-/** Shared view ids for the persistent Board | Help | Settings chrome. */
+/** Shared view ids for the persistent Board | Help chrome. Settings lives in the account menu. */
 export type AppView = "board" | "help" | "settings";
 
 export interface PrimarySidebarProps {
@@ -6,7 +6,7 @@ export interface PrimarySidebarProps {
   onNavigate: (view: AppView) => void;
 }
 
-/** Persistent primary nav — Board, Help, Settings. Cockpit is a board edge rail. */
+/** Persistent primary nav — Board and Help. Settings is under the account menu. */
 export function PrimarySidebar({ view, onNavigate }: PrimarySidebarProps) {
   return (
     <nav className="sidebar" aria-label="Primary" data-testid="app-sidebar">
@@ -27,15 +27,6 @@ export function PrimarySidebar({ view, onNavigate }: PrimarySidebarProps) {
         data-testid="nav-help"
       >
         Help
-      </button>
-      <button
-        type="button"
-        className={`sidebar-btn ${view === "settings" ? "active" : ""}`}
-        aria-current={view === "settings" ? "page" : undefined}
-        onClick={() => onNavigate("settings")}
-        data-testid="nav-settings"
-      >
-        Settings
       </button>
     </nav>
   );

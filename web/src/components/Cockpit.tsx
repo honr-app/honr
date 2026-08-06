@@ -165,16 +165,6 @@ export function CockpitAttachView({
         return;
       }
 
-      // Follow the site theme switcher (data-theme on <html>).
-      const syncTheme = () => {
-        term.options.theme = xtermThemeFromDocument();
-      };
-      const themeObs = new MutationObserver(syncTheme);
-      themeObs.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ["data-theme"],
-      });
-
       let ws: WebSocket | null = null;
       try {
         ws = new WebSocket(cockpitAttachWsUrl());
@@ -226,6 +216,35 @@ export function CockpitAttachView({
           );
         }
       };
+
+      // Apply after paint so --term-* have resolved under the new data-theme.
+      // clearTextureAtlas + a one-row resize nudge refreshes Cursor's TUI chrome
+      // (palette/truecolor cells) the way a hard reload would.
+      let themeSyncRaf = 0;
+      const syncTheme = () => {
+        cancelAnimationFrame(themeSyncRaf);
+        themeSyncRaf = requestAnimationFrame(() => {
+          themeSyncRaf = requestAnimationFrame(() => {
+            if (disposed) return;
+            term.options.theme = { ...xtermThemeFromDocument() };
+            term.clearTextureAtlas();
+            term.refresh(0, Math.max(0, term.rows - 1));
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              const cols = term.cols;
+              const rows = Math.max(1, term.rows);
+              ws.send(
+                JSON.stringify({ type: "resize", cols, rows: rows + 1 }),
+              );
+              ws.send(JSON.stringify({ type: "resize", cols, rows }));
+            }
+          });
+        });
+      };
+      const themeObs = new MutationObserver(syncTheme);
+      themeObs.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme"],
+      });
 
       ws.onopen = () => {
         if (disposed) return;
@@ -292,6 +311,7 @@ export function CockpitAttachView({
 
       cleanup = () => {
         stopAgentSpinner(false);
+        cancelAnimationFrame(themeSyncRaf);
         themeObs.disconnect();
         window.removeEventListener("resize", onWinResize);
         ro?.disconnect();
