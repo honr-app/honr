@@ -4,8 +4,10 @@ Get the board running on your machine in a few minutes, with agents off. No
 Docker, no gateway, no credentials, no spend.
 
 Agents being off by default is deliberate: the control plane should run on a
-laptop that only needs to show and shape work. Turning them on is
-[the next page](first-agent.md).
+laptop that only needs to show and shape work. When you are ready for sandboxed
+runs, start from the empty-board **Welcome** guide (or **Help**) — OpenShell +
+sandbox before the Project loop — then the prose checklist on
+[Your first agent](first-agent.md).
 
 **You need:** a current Rust stable toolchain, and a recent Node.js if you want
 to build the UI.
@@ -102,6 +104,6 @@ make dev-ui               # Vite on :5173, proxying to :8080
 
 ## Next
 
-- **[Your first agent](first-agent.md)** — the checklist to a real sandboxed run
+- **[Your first agent](first-agent.md)** — Welcome/Help OpenShell onboarding, then one sandboxed run
 - [Workflow](workflow.md) — the day-to-day loop
 - [Configuration](configuration.md) — database, `honr.yaml`, environment

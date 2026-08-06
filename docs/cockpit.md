@@ -8,9 +8,9 @@ It is the third seat described in [Concepts](concepts.md#operator-and-worker):
 narrower than you (no merges), far wider than a card worker (which cannot see
 the board at all).
 
-**Prerequisites:** the [agents path](first-agent.md) is live —
-`execution.agents.enabled: true`, a healthy OpenShell gateway, and a cockpit
-sandbox spec in the catalog.
+**Prerequisites:** the [agents path](first-agent.md) (Welcome/Help OpenShell +
+sandbox onboarding) is live — agents enabled, a healthy OpenShell gateway, and a
+cockpit sandbox spec in the catalog.
 
 ## Start one
 

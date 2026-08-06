@@ -89,6 +89,6 @@ The full set, with the reasoning: [Invariants](invariants.md).
 
 - See the loop → [Tour](tour.md)
 - Run the board → [Quickstart](quickstart.md)
-- Turn on agents → [Your first agent](first-agent.md)
+- Turn on agents → Welcome/Help OpenShell guide, then [Your first agent](first-agent.md)
 - Day-to-day operation → [Workflow](workflow.md)
 - How the pieces fit → [Architecture](architecture.md)

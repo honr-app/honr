@@ -152,6 +152,6 @@ board ensure on startup appends `antigravity` to the cockpit create-spec).
 
 ## Related
 
-- [Your first agent](first-agent.md) — getting this stack running the first time
+- [Your first agent](first-agent.md) — Welcome/Help OpenShell onboarding, then the first run
 - [Troubleshooting](troubleshooting.md) — the gotchas above, as symptoms
 - [Configuration](configuration.md#sandbox-specs) — spec resolution and engines
