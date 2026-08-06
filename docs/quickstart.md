@@ -1,63 +1,65 @@
 # Quickstart
 
-Run the board with no compute driver, no gateway, and no credentials. Agents
-are off by default: that is deliberate so honr works on a laptop that only
-needs to show and shape work.
+Get the board running on your machine in a few minutes, with agents off. No
+Docker, no gateway, no credentials, no spend.
 
-## Start the server
+Agents being off by default is deliberate: the control plane should run on a
+laptop that only needs to show and shape work. Turning them on is
+[the next page](first-agent.md).
 
-```bash
-cargo run                 # :8080 (API, SSE, MCP, and the built UI)
-make dev                  # same, but cargo-watch rebuilds/restarts on Rust changes
-```
+**You need:** Rust 1.88+, and a recent Node.js if you want to build the UI.
 
-Serves `web/dist` if it exists. For UI hot reload (pair with `cargo run` or `make dev`):
+## 1. Run it
 
 ```bash
-make dev-ui               # or: cd web && npm install && npm run dev
+git clone https://github.com/honr-app/honr.git
+cd honr
+cargo run
 ```
 
-`:5173` proxies to `:8080`. `HONR_PORT` overrides the listen port. `make dev`
-needs [`cargo-watch`](https://crates.io/crates/cargo-watch)
-(`cargo install cargo-watch` or `brew install cargo-watch`).
+That serves the API, SSE, MCP, and the built UI on
+<http://127.0.0.1:8080>. `HONR_PORT` overrides the port.
 
-## Board database
+If `web/dist` does not exist yet, build the UI once:
 
-Board rows live in a SQLx store. **SQLite is the default** (local and offline
-tests). **Postgres is optional** for a shared server.
+```bash
+npm --prefix web install && npm --prefix web run build
+```
 
-| Source | Example |
-|---|---|
-| `honr.yaml` → `board.database.url` | `sqlite:honr.db` (default) |
-| Env override | `HONR_DATABASE_URL=postgres://honr:honr@127.0.0.1:5432/honr` |
+## 2. Create your admin
 
-Accepted URL forms:
+The first time you open the board it asks you to create an admin account. Until
+you do, the API refuses everything — there is no anonymous mode.
 
-- SQLite: `sqlite:honr.db`, `sqlite://…`, `sqlite::memory:` (tests)
-- Postgres: `postgres://…` or `postgresql://…`
+Pick any username and password; it is stored locally, in your board database.
 
-On boot honr opens the URL, applies versioned migrations from `migrations/`,
-and restores the board from rows.
+## 3. Make something
 
-**One-shot JSON import:** if the database is empty and `honr.json` exists in
-the working directory, honr loads that file into the DB once and leaves the
-JSON untouched (archive or delete it yourself). Later boots use the DB only.
+The board starts empty, so make it not be. Create a **Project**, give it an
+intent, and point it at a repository (`owner/name` — this is the repo the
+planning agent will clone).
 
-Offline `cargo test` always uses SQLite. To exercise Postgres migrations
-locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
+honr seeds a claimable **Initial plan** Task under it automatically. You now
+have a Project, a Task, and a board that looks like the one in the
+[Tour](tour.md) — minus anything running, because agents are off.
 
-## Connect the operator MCP
+Click into the card. The detail drawer shows **why this exists** (the chain up
+to its Project), its definition of done, and the Proposed Tasks section that an
+agent would fill in.
 
-honr must already be listening. After local admin bootstrap, `/mcp` requires
-MCP OAuth 2.1 (Bearer). That endpoint is the **cockpit**: operator tools only
-(board snapshot, dispatch, park, steer, approve_*, answer_escalation, …). Worker
-verbs (`claim`, `heartbeat`, `report`, `split`, `escalate`, `release`,
-`list_ready`) are not listed there — the supervisor calls `Board` for card
-lifecycle. Clients discover the authorization server from
-`/.well-known/oauth-protected-resource` and open a browser login/consent that
-reuses the same admin / GitHub allowlist as the board UI.
+Move it around. Nothing will claim it, nothing will spend money, and you cannot
+break anything that a restart does not fix.
 
-**Cursor**: project config is [`.cursor/mcp.json`](../.cursor/mcp.json):
+## 4. Connect a chat client (optional)
+
+You can drive the board from Cursor or Claude Code over MCP instead of the UI.
+honr must already be listening.
+
+`/mcp` is the **operator surface**: shape Projects, triage, dispatch, park,
+steer, approve. Worker verbs (`claim`, `heartbeat`, `report`, …) are not there —
+those belong to the supervisor.
+
+**Cursor** — project config is already in [`.cursor/mcp.json`](https://github.com/honr-app/honr/blob/main/.cursor/mcp.json):
 
 ```json
 {
@@ -71,26 +73,9 @@ reuses the same admin / GitHub allowlist as the board UI.
 }
 ```
 
-`CLIENT_ID` `honr-cursor` is a built-in public client (no secret). Authenticate
-from the CLI:
-
 ```bash
 agent mcp login honr
 ```
-
-That opens a browser for board login + consent. Or use **Cursor Settings →
-Tools & MCP → Authenticate**. Reload if the tools list stays empty. Access and
-refresh tokens are JWTs signed with the admin session key, so restarting honr
-does **not** require logging in again (until the refresh token expires). With
-the operator rule in
-[`.cursor/rules/honr-operator.mdc`](../.cursor/rules/honr-operator.mdc), the
-chat agent drives Projects / Plans via MCP; sandboxed workers claim Ready Tasks
-and open PRs.
-
-**Cockpit / cockpit sandbox** does not use that browser OAuth path. When you Start
-a cockpit session, honr mints `honr-cockpit` tokens and writes them under
-`/sandbox/.honr/mcp/` inside the seat (see [Cockpit](cockpit.md#mcp-auth-inside-the-seat-special-for-cockpit)).
-Host Cursor on `/mcp` stays the OAuth client above.
 
 **Claude Code:**
 
@@ -98,14 +83,23 @@ Host Cursor on `/mcp` stays the OAuth client above.
 claude mcp add --transport http honr http://localhost:8080/mcp
 ```
 
-Complete the OAuth browser flow when Claude prompts for authorization.
+Either way a browser opens for login and consent, using the same account you
+just created. Tokens survive a honr restart, so you will not be logging in
+repeatedly.
 
-## Empty board
+If the tools list stays empty, reload the client.
 
-The board starts empty. Nothing claims cards until you enable agents. See
-[Agents](agents.md). You can still create Projects (`create_project` requires
-`clone_repo` and auto-seeds Initial plan), dispatch that card, inspect columns
-in the UI, and exercise MCP tools that do not need a sandbox. Help in the
-sidebar documents the same loop.
+## Developing on it
 
-Next: [Workflow](workflow.md) for the day-to-day loop.
+```bash
+make dev                  # cargo-watch rebuilds and restarts on Rust changes
+make dev-ui               # Vite on :5173, proxying to :8080
+```
+
+`make dev` needs [`cargo-watch`](https://crates.io/crates/cargo-watch).
+
+## Next
+
+- **[Your first agent](first-agent.md)** — the checklist to a real sandboxed run
+- [Workflow](workflow.md) — the day-to-day loop
+- [Configuration](configuration.md) — database, `honr.yaml`, environment

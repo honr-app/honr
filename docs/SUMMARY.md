@@ -2,11 +2,26 @@
 
 [Introduction](index.md)
 
+# Understand
+
+- [Tour](tour.md)
 - [Concepts](concepts.md)
+- [Glossary](glossary.md)
+
+# Get started
+
 - [Quickstart](quickstart.md)
+- [Your first agent](first-agent.md)
+
+# Operate
+
 - [Workflow](workflow.md)
-- [Agents](agents.md)
-- [Sandbox](sandbox.md)
 - [Cockpit](cockpit.md)
+- [Troubleshooting](troubleshooting.md)
+
+# Reference
+
+- [Configuration](configuration.md)
 - [Architecture](architecture.md)
-- [Clone targets](task-repo-binding.md)
+- [Sandbox](sandbox.md)
+- [Invariants](invariants.md)
