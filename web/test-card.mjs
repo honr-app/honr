@@ -18,7 +18,7 @@ import {
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayMtlsReady, sandboxSpecReady, agentsEnabledReady } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import {
   chromeLocationsEqual,
@@ -1259,6 +1259,142 @@ assert(emptyBoardHtml.includes("data-testid=\"operator-guide-loop\""), "Board em
 assert(emptyBoardHtml.includes("OpenShell and sandbox"), "Board Welcome lede mentions OpenShell/sandbox");
 assert(emptyBoardHtml.includes("/settings/openshell/connectivity"), "Board empty deep-links Connectivity");
 assert(emptyBoardHtml.includes("/settings/agent-runtime"), "Board empty deep-links Agent runtime");
+assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness\""), "Board empty shows OpenShell readiness strip");
+assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness-gateway\""), "Board empty readiness: gateway row");
+assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness-sandbox\""), "Board empty readiness: sandbox row");
+assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness-agents\""), "Board empty readiness: agents row");
+
+// OpenShell readiness strip — presentational ready / not-ready fixtures
+assert.strictEqual(
+  gatewayMtlsReady({
+    healthy: true,
+    summary: "Connected",
+    not_configured: false,
+    mtls: { ca: true, client_cert: true, client_key: true, complete: true },
+  }),
+  true,
+  "gatewayMtlsReady when healthy + complete mTLS",
+);
+assert.strictEqual(
+  gatewayMtlsReady({
+    healthy: true,
+    summary: "Connected",
+    not_configured: false,
+    mtls: { ca: true, client_cert: false, client_key: false, complete: false },
+  }),
+  false,
+  "gatewayMtlsReady fails closed on incomplete mTLS",
+);
+assert.strictEqual(
+  gatewayMtlsReady({
+    healthy: false,
+    summary: "unreachable",
+    not_configured: false,
+    mtls: { ca: true, client_cert: true, client_key: true, complete: true },
+  }),
+  false,
+  "gatewayMtlsReady fails closed when unhealthy",
+);
+assert.strictEqual(
+  gatewayMtlsReady({
+    healthy: false,
+    summary: "not configured",
+    not_configured: true,
+    mtls: { ca: false, client_cert: false, client_key: false, complete: false },
+  }),
+  false,
+  "gatewayMtlsReady fails closed when not_configured",
+);
+assert.strictEqual(gatewayMtlsReady(null), false, "gatewayMtlsReady fails closed on null");
+assert.strictEqual(
+  sandboxSpecReady({
+    profiles: [{ id: "default", name: "Default", image: "honr-sandbox:latest", policy: "" }],
+    default_sandbox_profile_id: "default",
+    cockpit_sandbox_profile_id: null,
+  }),
+  true,
+  "sandboxSpecReady when default profile set",
+);
+assert.strictEqual(
+  sandboxSpecReady({
+    profiles: [],
+    default_sandbox_profile_id: null,
+    cockpit_sandbox_profile_id: null,
+  }),
+  false,
+  "sandboxSpecReady fails closed without default",
+);
+assert.strictEqual(sandboxSpecReady(null), false, "sandboxSpecReady fails closed on null");
+assert.strictEqual(
+  agentsEnabledReady({
+    enabled: true,
+    engine: "cursor",
+    max_concurrent: 2,
+    agent_timeout_secs: 300,
+    max_attempts: 3,
+    branch_prefix: "honr",
+  }),
+  true,
+  "agentsEnabledReady when enabled",
+);
+assert.strictEqual(
+  agentsEnabledReady({
+    enabled: false,
+    engine: "cursor",
+    max_concurrent: 2,
+    agent_timeout_secs: 300,
+    max_attempts: 3,
+    branch_prefix: "honr",
+  }),
+  false,
+  "agentsEnabledReady fails closed when disabled",
+);
+assert.strictEqual(agentsEnabledReady(null), false, "agentsEnabledReady fails closed on null");
+
+const readinessReadyHtml = renderToString(
+  React.createElement(OpenShellReadinessStripView, {
+    gateway: { ready: true, detail: "Connected" },
+    sandbox: { ready: true, detail: "Default: Default" },
+    agents: { ready: true, detail: "execution.agents.enabled" },
+  }),
+);
+assert(readinessReadyHtml.includes("data-testid=\"openshell-readiness\""), "Readiness strip root");
+assert(readinessReadyHtml.includes("data-ready=\"true\""), "Ready strip marks rows ready");
+assert(readinessReadyHtml.includes("data-testid=\"openshell-readiness-gateway-status\""), "Gateway status testid");
+assert(readinessReadyHtml.includes(">Ready<"), "Ready strip shows Ready labels");
+assert(readinessReadyHtml.includes("href=\"/settings/openshell/connectivity\""), "Ready strip CTA: Connectivity");
+assert(readinessReadyHtml.includes("href=\"/settings/openshell/profiles\""), "Ready strip CTA: Sandbox specs");
+assert(readinessReadyHtml.includes("href=\"/settings/agent-runtime\""), "Ready strip CTA: Agent runtime");
+assert(readinessReadyHtml.includes("Settings → Connectivity"), "Ready strip Connectivity CTA copy");
+assert(readinessReadyHtml.includes("Settings → Sandbox specs"), "Ready strip Sandbox specs CTA copy");
+assert(readinessReadyHtml.includes("Settings → Agent runtime"), "Ready strip Agent runtime CTA copy");
+
+const readinessNotReadyHtml = renderToString(
+  React.createElement(OpenShellReadinessStripView, {
+    gateway: { ready: false, detail: "gateway unreachable" },
+    sandbox: { ready: false, detail: "No default sandbox profile" },
+    agents: { ready: false, detail: "Agents disabled" },
+  }),
+);
+assert(readinessNotReadyHtml.includes("data-ready=\"false\""), "Not-ready strip marks rows not ready");
+assert(readinessNotReadyHtml.includes(">Not ready<"), "Not-ready strip shows Not ready labels");
+assert(!readinessNotReadyHtml.includes(">Ready<"), "Not-ready strip has no Ready label");
+assert(readinessNotReadyHtml.includes("gateway unreachable"), "Not-ready strip shows gateway detail");
+assert(readinessNotReadyHtml.includes("No default sandbox profile"), "Not-ready strip shows sandbox detail");
+assert(readinessNotReadyHtml.includes("Agents disabled"), "Not-ready strip shows agents detail");
+assert(readinessNotReadyHtml.includes("href=\"/settings/openshell/connectivity\""), "Not-ready CTA: Connectivity");
+assert(readinessNotReadyHtml.includes("href=\"/settings/openshell/profiles\""), "Not-ready CTA: Sandbox specs");
+assert(readinessNotReadyHtml.includes("href=\"/settings/agent-runtime\""), "Not-ready CTA: Agent runtime");
+
+const readinessCheckingHtml = renderToString(
+  React.createElement(OpenShellReadinessStripView, {
+    gateway: { ready: false, checking: true },
+    sandbox: { ready: false, checking: true },
+    agents: { ready: false, checking: true },
+  }),
+);
+assert(readinessCheckingHtml.includes("data-ready=\"false\""), "Checking state fails closed (not ready)");
+assert(readinessCheckingHtml.includes("Checking…"), "Checking state shows Checking label");
 
 // Archived toggle on empty board when only retired projects exist.
 const archivedEmptyBoardHtml = renderToString(

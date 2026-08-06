@@ -1116,6 +1116,61 @@ main.with-side-panes {
   margin: 0;
 }
 
+.openshell-readiness {
+  max-width: 640px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.openshell-readiness-head {
+  margin-bottom: 12px;
+}
+.openshell-readiness-head h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.openshell-readiness-lede {
+  margin: 0;
+  line-height: 1.5;
+  max-width: 52rem;
+}
+.openshell-readiness-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.openshell-readiness-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.openshell-readiness-item-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 10px;
+  min-width: 0;
+}
+.openshell-readiness-label {
+  font-weight: 600;
+}
+.openshell-readiness-detail {
+  font-size: 12px;
+}
+.openshell-readiness-cta {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
 .help-page {
   padding: 24px 28px 48px;
   max-width: 640px;

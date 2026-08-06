@@ -16,6 +16,12 @@ import {
 export { OpenShellPanelView } from "./OpenShellSettings.js";
 export { OpenShellProvidersPanelView } from "./OpenShellProviders.js";
 export {
+  OpenShellReadinessStripView,
+  gatewayMtlsReady,
+  sandboxSpecReady,
+  agentsEnabledReady,
+} from "./OpenShellReadiness.js";
+export {
   ProjectSandboxPicker,
   SandboxesPanelView,
 } from "./OpenShellProfiles.js";
