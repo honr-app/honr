@@ -15,6 +15,12 @@ import {
   readThemePreference,
   type ThemePreference,
 } from "./theme";
+import {
+  type ChromeLocation,
+  chromeLocationsEqual,
+  readChromeLocation,
+  writeChromeLocation,
+} from "./location";
 
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
@@ -94,12 +100,40 @@ function AuthedApp({
 }) {
   const b = useBoard();
   const now = useNow();
-  const [open, setOpen] = useState<number | null>(null);
-  const [view, setView] = useState<AppView>("board");
+  const [chrome, setChrome] = useState<ChromeLocation>(() => readChromeLocation());
+  const view = chrome.view;
+  const open = chrome.cardId;
   const [cockpitOpen, setCockpitOpen] = useState(false);
   const [themePref, setThemePref] = useState<ThemePreference>(() =>
     readThemePreference(),
   );
+
+  const navigateChrome = useCallback(
+    (next: ChromeLocation, mode: "push" | "replace" = "push") => {
+      const loc: ChromeLocation =
+        next.view === "board"
+          ? next
+          : { view: next.view, cardId: null };
+      setChrome((prev) => (chromeLocationsEqual(prev, loc) ? prev : loc));
+      writeChromeLocation(loc, mode);
+    },
+    [],
+  );
+
+  // Canonicalize the URL once on mount (unknown paths → `/`).
+  useEffect(() => {
+    writeChromeLocation(chrome, "replace");
+    // Mount-only: hydrate already came from the URL; just normalize the path.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const onPop = () => {
+      setChrome(readChromeLocation());
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   useEffect(() => {
     applyThemePreference(themePref);
@@ -142,10 +176,7 @@ function AuthedApp({
           <button
             type="button"
             className="brand-home"
-            onClick={() => {
-              setOpen(null);
-              setView("board");
-            }}
+            onClick={() => navigateChrome({ view: "board", cardId: null })}
             aria-label="Go to board"
             data-testid="brand-mark"
           >
@@ -173,10 +204,9 @@ function AuthedApp({
             isAdmin={auth.user?.kind === "admin"}
             themePref={themePref}
             onThemeChange={setThemePref}
-            onOpenSettings={() => {
-              setOpen(null);
-              setView("settings");
-            }}
+            onOpenSettings={() =>
+              navigateChrome({ view: "settings", cardId: null })
+            }
             onLogout={onLogout}
           />
         </div>
@@ -198,10 +228,9 @@ function AuthedApp({
       <div className="shell">
         <PrimarySidebar
           view={view}
-          onNavigate={(next) => {
-            if (next !== "board") setOpen(null);
-            setView(next);
-          }}
+          onNavigate={(next: AppView) =>
+            navigateChrome({ view: next, cardId: null })
+          }
         />
 
         <main className={view === "board" && open != null ? "with-side-panes" : ""}>
@@ -220,7 +249,9 @@ function AuthedApp({
                   agentTimeout={b.agentTimeout}
                   defaultEngine={b.defaultEngine}
                   defaultModel={b.defaultModel}
-                  onOpen={setOpen}
+                  onOpen={(id) =>
+                    navigateChrome({ view: "board", cardId: id })
+                  }
                   onChanged={b.refresh}
                 />
               )}
@@ -229,7 +260,9 @@ function AuthedApp({
                 <DetailDrawer
                   id={open}
                   now={now}
-                  onClose={() => setOpen(null)}
+                  onClose={() =>
+                    navigateChrome({ view: "board", cardId: null })
+                  }
                   onChanged={b.refresh}
                   defaultEngine={b.defaultEngine}
                   defaultModel={b.defaultModel}
