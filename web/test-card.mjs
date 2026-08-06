@@ -5,6 +5,7 @@ import { Card } from "./dist-test/components/Card.js";
 import { Board, isBlocked, sortFor } from "./dist-test/components/Board.js";
 import { Head, PlanEditor, planTasksFromArtifact, reduceDetail } from "./dist-test/components/Detail.js";
 import { PrimarySidebar } from "./dist-test/components/PrimarySidebar.js";
+import { AccountMenu } from "./dist-test/components/AccountMenu.js";
 import {
   Cockpit,
   CockpitAttachView,
@@ -486,7 +487,7 @@ const pingPayload = JSON.stringify({ type: "ping" });
 const parsedPing = JSON.parse(pingPayload);
 assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
-// Test 17: App chrome — Board | Help | Settings; Cockpit is a board edge rail
+// Test 17: App chrome — Board | Help in sidebar; Settings in account menu
 const sidebarHtml = renderToString(
   React.createElement(PrimarySidebar, {
     view: "board",
@@ -496,15 +497,36 @@ const sidebarHtml = renderToString(
 assert(sidebarHtml.includes("data-testid=\"app-sidebar\""), "App should render primary sidebar");
 assert(sidebarHtml.includes("Board"), "Sidebar should include Board nav");
 assert(sidebarHtml.includes("Help"), "Sidebar should include Help nav");
-assert(sidebarHtml.includes("Settings"), "Sidebar should include Settings nav");
+assert(!sidebarHtml.includes("Settings"), "Settings lives in the account menu, not the sidebar");
 assert(sidebarHtml.includes("data-testid=\"nav-board\""), "Sidebar should expose Board control");
 assert(sidebarHtml.includes("data-testid=\"nav-help\""), "Sidebar should expose Help control");
-assert(sidebarHtml.includes("data-testid=\"nav-settings\""), "Sidebar should expose Settings control");
+assert(
+  !sidebarHtml.includes("data-testid=\"nav-settings\""),
+  "Settings control must not live in the sidebar",
+);
 assert(
   !sidebarHtml.includes("data-testid=\"nav-cockpit\""),
   "Cockpit must not live in primary nav",
 );
 assert(!sidebarHtml.includes("Cockpit"), "Sidebar must not list Cockpit");
+
+const accountHtml = renderToString(
+  React.createElement(AccountMenu, {
+    login: "shanemcd",
+    themePref: "dark",
+    onThemeChange: () => {},
+    onOpenSettings: () => {},
+    onLogout: () => {},
+    defaultOpen: true,
+  }),
+);
+assert(accountHtml.includes("data-testid=\"auth-user\""), "Account menu trigger shows user");
+assert(accountHtml.includes("shanemcd"), "Account menu shows login");
+assert(accountHtml.includes("data-testid=\"account-menu\""), "Account menu panel opens");
+assert(accountHtml.includes("data-testid=\"nav-settings\""), "Settings lives in the account menu");
+assert(accountHtml.includes("data-testid=\"auth-logout\""), "Sign out lives in the account menu");
+assert(accountHtml.includes("Theme"), "Account menu includes theme switcher");
+assert(accountHtml.includes("Dark"), "Account menu theme select includes Dark");
 
 const toggleClosedHtml = renderToString(
   React.createElement(CockpitToggle, { open: false, onToggle: () => {} }),

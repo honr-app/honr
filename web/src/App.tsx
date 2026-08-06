@@ -5,6 +5,7 @@ import { CockpitDrop, CockpitToggle } from "./components/Cockpit";
 import { DetailDrawer } from "./components/Detail";
 import { Help } from "./components/Help";
 import { Login } from "./components/Login";
+import { AccountMenu } from "./components/AccountMenu";
 import { PrimarySidebar, type AppView } from "./components/PrimarySidebar";
 import { Settings } from "./components/Settings";
 import { STALE_AFTER_MS, useBoard, useNow } from "./useBoard";
@@ -167,36 +168,17 @@ function AuthedApp({
         </div>
         <div className="stats">
           <span className="live">{live} working</span>
-          <span className={b.connected ? "conn ok" : "conn off"}>
-            {b.connected ? "live" : "reconnecting…"}
-          </span>
-          <span className="dim" data-testid="auth-user">
-            {auth.user?.login}
-            {auth.user?.kind === "admin" ? " (admin)" : ""}
-          </span>
-          <button
-            type="button"
-            className="link"
-            onClick={onLogout}
-            data-testid="auth-logout"
-          >
-            Sign out
-          </button>
-          <label className="theme-picker">
-            <span className="dim">Theme</span>
-            <select
-              className="theme-toggle"
-              value={themePref}
-              aria-label="Color theme"
-              onChange={(e) =>
-                setThemePref(e.target.value as ThemePreference)
-              }
-            >
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </label>
+          <AccountMenu
+            login={auth.user?.login ?? ""}
+            isAdmin={auth.user?.kind === "admin"}
+            themePref={themePref}
+            onThemeChange={setThemePref}
+            onOpenSettings={() => {
+              setOpen(null);
+              setView("settings");
+            }}
+            onLogout={onLogout}
+          />
         </div>
       </header>
 

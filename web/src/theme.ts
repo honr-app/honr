@@ -67,42 +67,86 @@ export type XtermTheme = {
   brightMagenta: string;
   brightCyan: string;
   brightWhite: string;
+  /**
+   * Colors 16–255. Cursor Agent's follow-up chrome uses index **254**
+   * (`xterm-bg-254`), which ignores the 16 ANSI slots — override it per theme.
+   */
+  extendedAnsi?: string[];
 };
 
-function cssVar(name: string, fallback: string): string {
+/**
+ * Resolve a CSS custom property to a concrete color xterm can parse.
+ * `getPropertyValue('--x')` often returns `var(...)` / `color-mix(...)` literals
+ * that ThemeService silently drops — which is why live theme switches looked wrong
+ * while a hard reload (fallbacks / already-computed cascade) looked fine.
+ */
+function cssColor(name: string, fallback: string): string {
   if (typeof document === "undefined") return fallback;
-  const v = getComputedStyle(document.documentElement)
-    .getPropertyValue(name)
-    .trim();
-  return v || fallback;
+  const probe = document.createElement("div");
+  probe.style.cssText =
+    "position:absolute;left:-9999px;width:1px;height:1px;pointer-events:none;" +
+    `background-color:var(${name})`;
+  document.documentElement.appendChild(probe);
+  const resolved = getComputedStyle(probe).backgroundColor.trim();
+  probe.remove();
+  if (
+    !resolved ||
+    resolved === "transparent" ||
+    resolved === "rgba(0, 0, 0, 0)"
+  ) {
+    return fallback;
+  }
+  return resolved;
 }
 
-/** Build an xterm theme from the live site CSS variables. */
+/**
+ * Sparse overrides for xterm colors 16–255 (`extendedAnsi[i]` → color `i+16`).
+ * Cursor's follow-up chrome has used 256-color indices 254 (near-white) and
+ * 235 (near-black) depending on redraw — map both (and neighbors) to the
+ * theme follow-up surface so live light/dark switches stay readable.
+ */
+function extendedAnsiForDocument(dark: boolean): string[] {
+  const ext: string[] = [];
+  const follow = dark
+    ? cssColor("--term-followup-bg", "#2a3540")
+    : cssColor("--term-followup-bg", "#e8eee9");
+  for (const idx of [232, 233, 234, 235, 236, 252, 253, 254, 255]) {
+    ext[idx - 16] = follow;
+  }
+  return ext;
+}
+
+/** Build an xterm theme from live `--term-*` CSS vars (light and dark). */
 export function xtermThemeFromDocument(): XtermTheme {
-  const bg = cssVar("--term-bg", "#eef3ef");
-  const fg = cssVar("--term-fg", "#29353c");
-  const cursor = cssVar("--term-cursor", "#2377d2");
+  const dark = readDocumentTheme() === "dark";
+  const bg = cssColor("--term-bg", dark ? "#0f1a21" : "#eef3ef");
+  const fg = cssColor("--term-fg", dark ? "#e1e5e8" : "#29353c");
+  const cursor = cssColor("--term-cursor", dark ? "#4d95e0" : "#2377d2");
   return {
     background: bg,
     foreground: fg,
     cursor,
     cursorAccent: bg,
-    selectionBackground: cssVar("--term-selection", "rgba(35, 119, 210, 0.28)"),
-    black: cssVar("--term-black", "#29353c"),
-    red: cssVar("--term-red", "#dd5942"),
-    green: cssVar("--term-green", "#19874d"),
-    yellow: cssVar("--term-yellow", "#c9a227"),
-    blue: cssVar("--term-blue", "#2377d2"),
-    magenta: cssVar("--term-magenta", "#a34b2e"),
-    cyan: cssVar("--term-cyan", "#5a7a88"),
-    white: cssVar("--term-white", "#eef3ef"),
-    brightBlack: cssVar("--term-bright-black", "#8a9297"),
-    brightRed: cssVar("--term-red", "#dd5942"),
-    brightGreen: cssVar("--term-green", "#19874d"),
-    brightYellow: cssVar("--term-yellow", "#c9a227"),
-    brightBlue: cssVar("--term-blue", "#2377d2"),
-    brightMagenta: cssVar("--term-magenta", "#a34b2e"),
-    brightCyan: cssVar("--term-cyan", "#5a7a88"),
-    brightWhite: cssVar("--term-bright-white", "#ffffff"),
+    selectionBackground: cssColor(
+      "--term-selection",
+      dark ? "rgba(77, 149, 224, 0.32)" : "rgba(35, 119, 210, 0.28)",
+    ),
+    black: cssColor("--term-black", dark ? "#0b151b" : "#29353c"),
+    red: cssColor("--term-red", dark ? "#e86a54" : "#dd5942"),
+    green: cssColor("--term-green", dark ? "#3daf6e" : "#19874d"),
+    yellow: cssColor("--term-yellow", dark ? "#e4c35a" : "#c9a227"),
+    blue: cssColor("--term-blue", dark ? "#4d95e0" : "#2377d2"),
+    magenta: cssColor("--term-magenta", dark ? "#d4785a" : "#a34b2e"),
+    cyan: cssColor("--term-cyan", dark ? "#8fb4c4" : "#5a7a88"),
+    white: cssColor("--term-white", dark ? "#e1e5e8" : "#f7faf8"),
+    brightBlack: cssColor("--term-bright-black", dark ? "#7a848a" : "#6d767b"),
+    brightRed: cssColor("--term-red", dark ? "#e86a54" : "#dd5942"),
+    brightGreen: cssColor("--term-green", dark ? "#3daf6e" : "#19874d"),
+    brightYellow: cssColor("--term-yellow", dark ? "#e4c35a" : "#c9a227"),
+    brightBlue: cssColor("--term-blue", dark ? "#4d95e0" : "#2377d2"),
+    brightMagenta: cssColor("--term-magenta", dark ? "#d4785a" : "#a34b2e"),
+    brightCyan: cssColor("--term-cyan", dark ? "#8fb4c4" : "#5a7a88"),
+    brightWhite: cssColor("--term-bright-white", "#ffffff"),
+    extendedAnsi: extendedAnsiForDocument(dark),
   };
 }

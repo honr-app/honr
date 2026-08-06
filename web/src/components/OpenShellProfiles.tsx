@@ -244,42 +244,55 @@ export function SandboxesPanelView({
                   </select>
                 </label>
 
-                <fieldset
+                <div
                   className="openshell-profile-providers"
                   data-testid="sandbox-field-providers"
                 >
-                  <legend>Attach providers on create</legend>
-                  <p className="dim sandbox-field-hint">
-                    Checked names are passed to OpenShell sandbox create. Define
-                    credentials under Providers. Cockpit create still strips{" "}
-                    <code>github</code> even if listed.
-                  </p>
+                  <div className="openshell-profile-providers-head">
+                    <span className="openshell-profile-providers-title">
+                      Attach providers
+                    </span>
+                    <span className="dim sandbox-field-hint">
+                      Passed on sandbox create. Credentials live under Providers.
+                    </span>
+                  </div>
                   {availableProviders.length === 0 ? (
                     <p className="dim" data-testid="sandbox-providers-empty">
-                      No providers on the board yet — add them under Providers.
+                      No providers yet — add them under Providers.
                     </p>
                   ) : (
                     <ul className="openshell-profile-provider-ul">
-                      {availableProviders.map((p) => (
-                        <li key={p.name}>
-                          <label className="agent-runtime-check">
-                            <input
-                              type="checkbox"
-                              checked={draft.provider_names.includes(p.name)}
-                              disabled={busy}
-                              onChange={() => toggleProvider(p.name)}
-                              data-testid={`sandbox-provider-${p.name}`}
-                            />
-                            <span>
-                              <code>{p.name}</code>
-                              <span className="dim"> · {p.type}</span>
-                            </span>
-                          </label>
-                        </li>
-                      ))}
+                      {availableProviders.map((p) => {
+                        const typeDiffers =
+                          p.type.trim().toLowerCase() !==
+                          p.name.trim().toLowerCase();
+                        return (
+                          <li key={p.name}>
+                            <label className="openshell-provider-check">
+                              <input
+                                type="checkbox"
+                                checked={draft.provider_names.includes(p.name)}
+                                disabled={busy}
+                                onChange={() => toggleProvider(p.name)}
+                                data-testid={`sandbox-provider-${p.name}`}
+                              />
+                              <span className="openshell-provider-check-text">
+                                <span className="openshell-provider-check-name">
+                                  {p.name}
+                                </span>
+                                {typeDiffers ? (
+                                  <span className="dim openshell-provider-check-type">
+                                    {p.type}
+                                  </span>
+                                ) : null}
+                              </span>
+                            </label>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
-                </fieldset>
+                </div>
 
                 <label>
                   Policy (YAML)

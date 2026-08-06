@@ -36,9 +36,10 @@
   --shadow-soft:
     0 0.15em 0.9em -0.4em color-mix(in srgb, #000 6%, transparent);
 
-  /* Cockpit xterm — tracks the site theme switcher */
-  --term-bg: var(--panel-inset);
-  --term-fg: var(--ink);
+  /* Cockpit xterm — light surface. Follow-up bar is 256-color index 254
+     (see theme.ts extendedAnsi), not ANSI white. */
+  --term-bg: #eef3ef;
+  --term-fg: #29353c;
   --term-cursor: var(--accent);
   --term-selection: color-mix(in srgb, var(--accent) 28%, transparent);
   --term-black: #29353c;
@@ -48,9 +49,10 @@
   --term-blue: var(--accent);
   --term-magenta: var(--section);
   --term-cyan: var(--ready);
-  --term-white: #eef3ef;
-  --term-bright-black: var(--muted);
+  --term-white: #f7faf8;
+  --term-bright-black: #6d767b;
   --term-bright-white: #ffffff;
+  --term-followup-bg: #e8eee9;
 
   color-scheme: light;
 }
@@ -85,8 +87,9 @@
   --shadow-soft:
     0 0.2em 1em -0.3em color-mix(in srgb, #000 40%, transparent);
 
-  --term-bg: var(--panel-inset);
-  --term-fg: var(--ink);
+  /* Cockpit xterm — dark surface. --term-followup-bg remaps xterm color 254. */
+  --term-bg: #0f1a21;
+  --term-fg: #e1e5e8;
   --term-cursor: var(--accent);
   --term-selection: color-mix(in srgb, var(--accent) 32%, transparent);
   --term-black: #0b151b;
@@ -99,6 +102,7 @@
   --term-white: #e1e5e8;
   --term-bright-black: var(--muted);
   --term-bright-white: #ffffff;
+  --term-followup-bg: #2a3540;
 
   color-scheme: dark;
 }
@@ -373,38 +377,146 @@ textarea {
 .stats {
   justify-self: end;
   display: flex;
-  gap: 14px;
   align-items: center;
-  font-size: 13px;
+  gap: 14px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--dim);
 }
-.theme-picker {
+.account-menu {
+  position: relative;
+}
+.account-menu-trigger {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-}
-.theme-toggle {
+  margin: 0;
+  padding: 2px 0;
+  border: none;
+  border-radius: 0;
+  background: none;
   box-shadow: none;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 600;
   color: var(--ink);
+  font: inherit;
+  font-size: inherit;
+  font-weight: 500;
+  line-height: inherit;
+  cursor: pointer;
+  max-width: 14rem;
+  opacity: 0.86;
+}
+.account-menu-trigger:hover,
+.account-menu-trigger[aria-expanded="true"] {
+  opacity: 1;
+  border-color: transparent;
+  background: none;
+  box-shadow: none;
+}
+.account-menu-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.account-menu-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-menu-caret {
+  width: 9px;
+  height: 6px;
+  flex: 0 0 auto;
+  background-color: currentColor;
+  opacity: 0.7;
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+    center / contain no-repeat;
+}
+.account-menu-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  min-width: 188px;
+  padding: 6px;
   background: var(--panel);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
-  padding: 4px 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.account-menu-theme {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px 8px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--line);
+}
+.account-menu-theme label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.account-menu-theme-select {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+  background: var(--panel-inset);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
   cursor: pointer;
 }
-.theme-toggle:hover { border-color: var(--accent); }
-.theme-toggle:focus-visible {
+.account-menu-theme-select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.live { color: var(--ok); font-weight: 600; }
-.conn.ok { color: var(--ok); }
-.conn.off { color: var(--warn); }
+.account-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 0;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  box-shadow: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.account-menu-item:hover {
+  background: var(--panel-2);
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--ink);
+}
+.account-menu-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.account-menu-danger {
+  color: var(--dim);
+}
+.account-menu-danger:hover {
+  color: var(--needs-human);
+}
+.live {
+  color: var(--ok);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 
-/* Persistent Board | Settings — keeps Settings off the board surface. */
+/* Persistent Board | Help — Settings lives under the account menu. */
 .shell {
   flex: 1;
   display: flex;
@@ -804,22 +916,76 @@ main.with-side-panes {
   margin: 10px 0;
 }
 .openshell-profile-providers {
-  margin: 12px 0;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  margin: 2px 0;
+  padding: 0;
+  border: none;
 }
-.openshell-profile-providers legend {
-  padding: 0 4px;
+.openshell-profile-providers-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.openshell-profile-providers-title {
+  font-size: 12px;
   font-weight: 600;
+  color: var(--dim);
+}
+.openshell-profile-providers .sandbox-field-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
 }
 .openshell-profile-provider-ul {
   list-style: none;
-  margin: 8px 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  overflow: hidden;
+}
+.openshell-profile-provider-ul > li + li {
+  border-top: 1px solid var(--line);
+}
+/* Form labels are column stacks; provider rows must stay checkbox | name. */
+.sandbox-profile-form label.openshell-provider-check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 9px 12px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.sandbox-profile-form label.openshell-provider-check:hover {
+  background: var(--panel-2);
+}
+.sandbox-profile-form label.openshell-provider-check input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.openshell-provider-check-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.openshell-provider-check-name {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.openshell-provider-check-type {
+  font-size: 11px;
 }
 .openshell-profile-policy-preview {
   margin: 12px 0 0;
@@ -1873,8 +2039,6 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   text-align: center;
 }
 
-.stats .sep { color: var(--line-strong); }
-
 /* ---- Phone: the digest is the whole point of the small screen ---------- */
 
 @media (max-width: 620px) {
@@ -1885,9 +2049,13 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
   }
   header.top .cockpit-bar-slot { justify-self: center; }
   header.top .stats {
-    gap: 8px;
+    gap: 10px;
     font-size: 11px;
     flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  header.top .account-menu-name {
+    max-width: 7rem;
   }
 
   .shell { flex-direction: column; }
