@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
+import type { SettingsSection } from "../location.js";
 import type {
   AgentRuntimeConfig,
   AuthSettings,
@@ -7,7 +8,10 @@ import type {
   WebhookPollConfig,
   WorkspaceBinding,
 } from "../types.js";
-import { OpenShellPanel } from "./OpenShellSettings.js";
+import {
+  OpenShellPanel,
+  type OpenShellTab,
+} from "./OpenShellSettings.js";
 
 export { OpenShellPanelView } from "./OpenShellSettings.js";
 export { OpenShellProvidersPanelView } from "./OpenShellProviders.js";
@@ -15,13 +19,7 @@ export {
   ProjectSandboxPicker,
   SandboxesPanelView,
 } from "./OpenShellProfiles.js";
-
-type SettingsSection =
-  | "workspace"
-  | "agent-runtime"
-  | "openshell"
-  | "github-app"
-  | "access";
+export type { SettingsSection } from "../location.js";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "openshell", label: "OpenShell" },
@@ -52,9 +50,26 @@ const emptyAgentRuntime = (): AgentRuntimeConfig => ({
 
 /**
  * Settings shell — OpenShell, GitHub App, Forge, Agent runtime.
+ * Section / OpenShell tab may be controlled by the URL location contract.
  */
-export function Settings() {
-  const [section, setSection] = useState<SettingsSection>("openshell");
+export function Settings({
+  section: sectionProp,
+  openShellTab,
+  onSectionChange,
+  onOpenShellTabChange,
+}: {
+  section?: SettingsSection;
+  openShellTab?: OpenShellTab;
+  onSectionChange?: (section: SettingsSection) => void;
+  onOpenShellTabChange?: (tab: OpenShellTab) => void;
+} = {}) {
+  const [internalSection, setInternalSection] =
+    useState<SettingsSection>("openshell");
+  const section = sectionProp ?? internalSection;
+  const setSection = (next: SettingsSection) => {
+    onSectionChange?.(next);
+    if (sectionProp === undefined) setInternalSection(next);
+  };
 
   return (
     <div className="settings" data-testid="settings">
@@ -89,7 +104,10 @@ export function Settings() {
 
         <div className="settings-panel" data-testid={`settings-panel-${section}`}>
           {section === "openshell" ? (
-            <OpenShellPanel />
+            <OpenShellPanel
+              activeTab={openShellTab}
+              onTabChange={onOpenShellTabChange}
+            />
           ) : section === "github-app" ? (
             <GitHubAppPanel />
           ) : section === "access" ? (

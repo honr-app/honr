@@ -278,7 +278,13 @@ export function OpenShellPanelView({
   );
 }
 
-export function OpenShellPanel() {
+export function OpenShellPanel({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab?: OpenShellTab;
+  onTabChange?: (tab: OpenShellTab) => void;
+} = {}) {
   const [status, setStatus] = useState<OpenShellStatus | null>(null);
   const [gatewayEndpoint, setGatewayEndpoint] = useState("");
   const [caPem, setCaPem] = useState("");
@@ -345,8 +351,11 @@ export function OpenShellPanel() {
       busy={busy || loading}
       error={error}
       savedHint={savedHint}
-      activeTab={tab}
-      onTabChange={setTab}
+      activeTab={activeTab ?? tab}
+      onTabChange={(next) => {
+        onTabChange?.(next);
+        if (activeTab === undefined) setTab(next);
+      }}
       onGatewayEndpointChange={(next) => {
         setSavedHint(null);
         setGatewayEndpoint(next);

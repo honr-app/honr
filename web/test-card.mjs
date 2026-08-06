@@ -1249,33 +1249,280 @@ assert(!Object.keys(pkg.devDependencies || {}).some((d) => /patternfly/i.test(d)
   "Must not add a PatternFly devDependency");
 
 // Chrome URL location contract (History API — no router dependency)
-assert.deepStrictEqual(parseChromeLocation("/"), { view: "board", cardId: null });
-assert.deepStrictEqual(parseChromeLocation("/help"), { view: "help", cardId: null });
-assert.deepStrictEqual(parseChromeLocation("/help/"), { view: "help", cardId: null });
-assert.deepStrictEqual(parseChromeLocation("/settings"), { view: "settings", cardId: null });
+assert.deepStrictEqual(parseChromeLocation("/"), {
+  view: "board",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/help"), {
+  view: "help",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/help/"), {
+  view: "help",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
 assert.deepStrictEqual(parseChromeLocation("/settings/openshell"), {
   view: "settings",
   cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
 });
-assert.deepStrictEqual(parseChromeLocation("/card/42"), { view: "board", cardId: 42 });
-assert.deepStrictEqual(parseChromeLocation("/card/0"), { view: "board", cardId: null });
-assert.deepStrictEqual(parseChromeLocation("/card/nope"), { view: "board", cardId: null });
-assert.deepStrictEqual(parseChromeLocation("/unknown"), { view: "board", cardId: null });
-assert.strictEqual(formatChromePath({ view: "board", cardId: null }), "/");
-assert.strictEqual(formatChromePath({ view: "help", cardId: null }), "/help");
-assert.strictEqual(formatChromePath({ view: "settings", cardId: 99 }), "/settings");
-assert.strictEqual(formatChromePath({ view: "board", cardId: 7 }), "/card/7");
+assert.deepStrictEqual(parseChromeLocation("/settings/openshell/providers"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "providers",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings/openshell/profiles"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "profiles",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings/openshell/connectivity"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings/github-app"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "github-app",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings/access"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "access",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings/workspace"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "workspace",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings/agent-runtime"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "agent-runtime",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings/nope"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/card/42"), {
+  view: "board",
+  cardId: 42,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/card/0"), {
+  view: "board",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/card/nope"), {
+  view: "board",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/unknown"), {
+  view: "board",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "connectivity",
+});
+assert.strictEqual(
+  formatChromePath({
+    view: "board",
+    cardId: null,
+    settingsSection: "openshell",
+    openShellTab: "connectivity",
+  }),
+  "/",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "help",
+    cardId: null,
+    settingsSection: "openshell",
+    openShellTab: "connectivity",
+  }),
+  "/help",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: 99,
+    settingsSection: "openshell",
+    openShellTab: "connectivity",
+  }),
+  "/settings",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "openshell",
+    openShellTab: "providers",
+  }),
+  "/settings/openshell/providers",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "openshell",
+    openShellTab: "profiles",
+  }),
+  "/settings/openshell/profiles",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "github-app",
+    openShellTab: "providers",
+  }),
+  "/settings/github-app",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "access",
+    openShellTab: "connectivity",
+  }),
+  "/settings/access",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "workspace",
+    openShellTab: "connectivity",
+  }),
+  "/settings/workspace",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "agent-runtime",
+    openShellTab: "connectivity",
+  }),
+  "/settings/agent-runtime",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "board",
+    cardId: 7,
+    settingsSection: "openshell",
+    openShellTab: "connectivity",
+  }),
+  "/card/7",
+);
 assert(
   chromeLocationsEqual(
-    { view: "board", cardId: 1 },
-    { view: "board", cardId: 1 },
+    {
+      view: "board",
+      cardId: 1,
+      settingsSection: "openshell",
+      openShellTab: "connectivity",
+    },
+    {
+      view: "board",
+      cardId: 1,
+      settingsSection: "github-app",
+      openShellTab: "providers",
+    },
   ),
-  "equal chrome locations",
+  "equal chrome locations (board ignores settings axes)",
+);
+assert(
+  chromeLocationsEqual(
+    {
+      view: "settings",
+      cardId: null,
+      settingsSection: "openshell",
+      openShellTab: "providers",
+    },
+    {
+      view: "settings",
+      cardId: null,
+      settingsSection: "openshell",
+      openShellTab: "providers",
+    },
+  ),
+  "equal settings+openshell tab locations",
 );
 assert(
   !chromeLocationsEqual(
-    { view: "board", cardId: 1 },
-    { view: "help", cardId: null },
+    {
+      view: "settings",
+      cardId: null,
+      settingsSection: "openshell",
+      openShellTab: "providers",
+    },
+    {
+      view: "settings",
+      cardId: null,
+      settingsSection: "openshell",
+      openShellTab: "profiles",
+    },
+  ),
+  "distinct openshell tabs",
+);
+assert(
+  !chromeLocationsEqual(
+    {
+      view: "settings",
+      cardId: null,
+      settingsSection: "github-app",
+      openShellTab: "connectivity",
+    },
+    {
+      view: "settings",
+      cardId: null,
+      settingsSection: "access",
+      openShellTab: "connectivity",
+    },
+  ),
+  "distinct settings sections",
+);
+assert(
+  !chromeLocationsEqual(
+    {
+      view: "board",
+      cardId: 1,
+      settingsSection: "openshell",
+      openShellTab: "connectivity",
+    },
+    {
+      view: "help",
+      cardId: null,
+      settingsSection: "openshell",
+      openShellTab: "connectivity",
+    },
   ),
   "distinct chrome locations",
 );
@@ -1286,11 +1533,125 @@ assert(
     pushState: (_s, _t, url) => pushes.push(url),
     replaceState: (_s, _t, url) => replaces.push(url),
   };
-  writeChromeLocation({ view: "help", cardId: null }, "push", hist, { pathname: "/" });
-  writeChromeLocation({ view: "help", cardId: null }, "push", hist, { pathname: "/help" });
-  writeChromeLocation({ view: "board", cardId: 3 }, "replace", hist, { pathname: "/help" });
-  assert.deepStrictEqual(pushes, ["/help"], "pushState only when path changes");
+  writeChromeLocation(
+    {
+      view: "help",
+      cardId: null,
+      settingsSection: "openshell",
+      openShellTab: "connectivity",
+    },
+    "push",
+    hist,
+    { pathname: "/" },
+  );
+  writeChromeLocation(
+    {
+      view: "help",
+      cardId: null,
+      settingsSection: "openshell",
+      openShellTab: "connectivity",
+    },
+    "push",
+    hist,
+    { pathname: "/help" },
+  );
+  writeChromeLocation(
+    {
+      view: "board",
+      cardId: 3,
+      settingsSection: "openshell",
+      openShellTab: "connectivity",
+    },
+    "replace",
+    hist,
+    { pathname: "/help" },
+  );
+  writeChromeLocation(
+    {
+      view: "settings",
+      cardId: null,
+      settingsSection: "openshell",
+      openShellTab: "providers",
+    },
+    "push",
+    hist,
+    { pathname: "/settings" },
+  );
+  writeChromeLocation(
+    {
+      view: "settings",
+      cardId: null,
+      settingsSection: "agent-runtime",
+      openShellTab: "connectivity",
+    },
+    "push",
+    hist,
+    { pathname: "/settings/openshell/providers" },
+  );
+  assert.deepStrictEqual(
+    pushes,
+    ["/help", "/settings/openshell/providers", "/settings/agent-runtime"],
+    "pushState for help + settings section/tab changes",
+  );
   assert.deepStrictEqual(replaces, ["/card/3"], "replaceState for card deep link");
+}
+// Round-trip: settings section + OpenShell tab
+for (const path of [
+  "/settings",
+  "/settings/openshell/providers",
+  "/settings/openshell/profiles",
+  "/settings/github-app",
+  "/settings/access",
+  "/settings/workspace",
+  "/settings/agent-runtime",
+]) {
+  const parsed = parseChromeLocation(path);
+  assert.strictEqual(
+    formatChromePath(parsed),
+    path === "/settings/openshell/connectivity" ? "/settings" : path,
+    `round-trip ${path}`,
+  );
+}
+assert.strictEqual(
+  formatChromePath(parseChromeLocation("/settings/openshell")),
+  "/settings",
+  "openshell default tab canonicalizes to /settings",
+);
+assert.strictEqual(
+  formatChromePath(parseChromeLocation("/settings/openshell/connectivity")),
+  "/settings",
+  "explicit connectivity tab canonicalizes to /settings",
+);
+{
+  // Controlled Settings deep-link: section + OpenShell tab from URL contract
+  const settingsDeepHtml = renderToString(
+    React.createElement(Settings, {
+      section: "openshell",
+      openShellTab: "providers",
+    }),
+  );
+  assert(
+    settingsDeepHtml.includes("data-testid=\"settings-panel-openshell\""),
+    "Settings deep link opens OpenShell section",
+  );
+  assert(
+    settingsDeepHtml.includes("data-testid=\"openshell-providers-slot\"") ||
+      settingsDeepHtml.includes("data-testid=\"openshell-tab-providers\""),
+    "Settings deep link selects OpenShell Providers tab",
+  );
+  assert(
+    /aria-current="page"[^>]*data-testid="openshell-tab-providers"|data-testid="openshell-tab-providers"[^>]*aria-current="page"/.test(
+      settingsDeepHtml,
+    ),
+    "Providers tab marked current for deep link",
+  );
+  const forgeDeepHtml = renderToString(
+    React.createElement(Settings, { section: "workspace" }),
+  );
+  assert(
+    forgeDeepHtml.includes("data-testid=\"settings-panel-workspace\""),
+    "Settings deep link opens Forge (workspace) section",
+  );
 }
 assert(
   !Object.keys(pkg.dependencies || {}).some((d) => /react-router|@tanstack\/react-router|wouter/i.test(d)),
