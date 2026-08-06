@@ -5,37 +5,43 @@ under [`sandbox/`](../sandbox/); this page is the prose companion.
 
 ## How credentials reach the agent
 
-Claude Code on Vertex walks google-auth's ADC chain. In a sandbox that chain
-finds nothing and falls through to the GCE metadata server. OpenShell blocks
-metadata endpoints permanently as SSRF hardening. No policy can open them.
-Symptom: `claude -p` appears to hang, then the exec relay closes.
-
-The fix is a metadata server the sandbox *is* allowed to reach:
+Claude Code and OpenCode talk to OpenShell's local inference router. The
+gateway holds Vertex (or other provider) credentials and injects them on
+egress — nothing in the sandbox does GCP ADC or metadata discovery.
 
 ```
-OpenShell provider (gateway-side, holds gcloud ADC, auto-refreshes)
-    │  injects an OPAQUE PLACEHOLDER as GOOGLE_VERTEX_AI_TOKEN
-    ▼
-sandbox/metadata-shim.py on 127.0.0.1:8127     ← GCE_METADATA_HOST
-    │  serves that placeholder as a normal GCE token response
-    ▼
-claude (Vertex mode) → aiplatform.googleapis.com
-    │  Authorization: Bearer <placeholder>
-    ▼
-OpenShell egress proxy SUBSTITUTES THE REAL TOKEN
-    ▼
-Vertex
+openshell inference set --provider vertex --model claude-sonnet-4-6@default
+        │
+        ▼
+sandbox agent
+  ANTHROPIC_BASE_URL=https://inference.local[/v1]
+  ANTHROPIC_API_KEY=unused
+        │
+        ▼
+https://inference.local  →  gateway strips placeholder key, injects Vertex token
+        │
+        ▼
+aiplatform.googleapis.com (rawPredict / Messages API)
 ```
 
-Two properties worth preserving:
+Operator setup (once per gateway):
 
-- **No credential is ever in the sandbox.** Reading the env var gains an agent
-  nothing: the value is an opaque placeholder; the proxy substitutes on egress.
-- **Traffic goes straight to `aiplatform.googleapis.com`**, which the
-  `google-vertex-ai` provider already allow-lists. OpenShell's `inference.local`
-  router has been blocked by SSRF on this stack
-  ([NVIDIA/OpenShell#2478](https://github.com/NVIDIA/OpenShell/issues/2478));
-  the shim path sidesteps that.
+```bash
+openshell provider create --name vertex --type google-vertex-ai --from-gcloud-adc \
+  --config VERTEX_AI_PROJECT_ID=<project> --config VERTEX_AI_REGION=global
+openshell inference set --provider vertex --model claude-sonnet-4-6@default
+```
+
+Inside the sandbox honr exports (engine-specific):
+
+| Engine | `ANTHROPIC_BASE_URL` | Notes |
+|---|---|---|
+| `claude` | `https://inference.local` | Claude appends `/v1/messages`; `--bare` + `--mcp-config` for seat MCP |
+| `opencode` | `https://inference.local/v1` | OpenCode requires the `/v1` suffix |
+
+Do **not** set `CLAUDE_CODE_USE_VERTEX=1` in the sandbox. That forces direct
+Vertex + ADC/metadata discovery, which OpenShell blocks (real GCE metadata is
+SSRF-hardened). Use `inference.local` instead.
 
 ## Gateway client (gRPC + mTLS)
 
@@ -57,18 +63,22 @@ not carry a separate issue-store CLI or database.
 
 The community base image has no Rust toolchain and the `sandbox` user has no
 sudo. For honr itself, [`sandbox/Containerfile`](../sandbox/Containerfile) bakes
-`cargo` / `clippy` and pre-warms cargo and npm caches so crates.io never needs
-to be reachable from an agent sandbox.
+`cargo` / `clippy`, Cursor Agent (`agent`), OpenCode (`opencode`), and pre-warms
+cargo and npm caches so crates.io never needs to be reachable from an agent
+sandbox.
 
 ```bash
 # from the repo root; Cargo.lock and web/package-lock.json must be in context
 docker build -f sandbox/Containerfile -t honr-sandbox:latest .
+# or: make sandbox
 ```
 
 The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock` changes
-materially. Matching `/opt` entries belong in the worker **board** sandbox
-profile policy (Settings → OpenShell → Profiles → `default`; seed text in
-`src/seed_policies.rs`).
+materially, or when you need a newer Cursor/OpenCode CLI. Matching `/opt`
+entries (including `/opt/opencode`) belong in the worker **board** sandbox
+spec policy (Settings → OpenShell → Sandbox specs → `default`; seed text in
+`src/seed_policies.rs`). Live specs do not auto-pick up seed edits — paste
+policy updates (or recreate the spec) after changing the seed.
 
 Pass `--offline` in gate commands so a cache miss fails loudly instead of
 hanging on a denied fetch.
@@ -84,10 +94,8 @@ vars explicitly in `agent_env` (supervisor does this), or install wrappers on
 the default PATH. Baking `ENV PATH=…` into the Containerfile is not enough.
 
 **Upload destination is a directory** (same semantics as the old CLI): uploading
-to `/tmp/metadata-shim.py` creates a *directory* of that name with the file
-inside it, and python then reports
-`can't find '__main__' module in '/tmp/metadata-shim.py'`. Put the shim in
-`/tmp` so it lands at `/tmp/metadata-shim.py`.
+to `/tmp/foo.py` creates a *directory* of that name with the file
+inside it. Put the file in `/tmp` so it lands at `/tmp/foo.py`.
 
 **The compute driver can stop on its own.** Classify that as infrastructure,
 not as the card failing: see `is_infrastructure` in the supervisor.
@@ -113,23 +121,27 @@ generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 | `default` (worker) | Built-in `src/seed_policies.rs` when catalog empty; then **board profile only** | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
 | `cockpit` | [`cockpit-policy.yaml`](../sandbox/cockpit-policy.yaml) at seed; then **board profile only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
 
-Settings → OpenShell → Profiles is the live source of truth for both. The cockpit
-profile seeds with distinct cpu/memory (`1` / `2Gi`) from the worker default.
-Card dispatch keeps using the worker default unless a Project overrides the
-profile id.
+Settings → OpenShell → Sandbox specs is the live source of truth for both. The
+cockpit spec seeds with `github` + `vertex` + `antigravity` attach names so
+Claude/OpenCode can use workspace `inference.local`, `gh` gets an App token,
+and agy gets a Bearer placeholder (never a host OAuth file).
 
-## Failure signatures
+## Antigravity / agy
 
-| Symptom | Cause |
+Bare OpenShell `generic` providers do **not** resolve
+`openshell:resolve:…` placeholders — the egress proxy only substitutes on
+endpoints declared by a **provider type**. Honr ships
+[`sandbox/openshell/antigravity.yaml`](../sandbox/openshell/antigravity.yaml)
+(`auth_style: bearer`, Cloud Code / Google API hosts) and imports it on
+provider Sync when missing.
+
+| Layer | Holds |
 |---|---|
-| `can't find '__main__' module in '/tmp/metadata-shim.py'` | `upload` takes a destination *directory* |
-| `timeout: failed to run command 'cargo'` | toolchain not on PATH. Image `ENV` does not reach `sandbox exec` |
-| `push failed:` with nothing after it | git writes errors to stderr; check `outerr`, not stdout |
-| `(stale info)` on push | `--force-with-lease` against an ad-hoc URL instead of a named remote |
-| `create sandbox failed: connection error` | compute driver died; infrastructure, not a card retry |
-| Card flips Running → Backlog | `run_deadline_at` exceeded, Halt, or infrastructure bounce |
+| Host keychain (`gemini` / `antigravity`) | Live OAuth access token (refresh stays on host) |
+| Board provider `antigravity` | Sealed `ANTIGRAVITY_ACCESS_TOKEN` (refreshed from keychain on Sync) |
+| Gateway | Real credential; injects placeholder env into attached sandboxes |
+| Seat token file | Placeholder only + far-future expiry; **no** `refresh_token` |
+| Seat `settings.json` | `enableTelemetry: false`, `gcp.project` / `gcp.location` from Board provider config `ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION` (Settings → Providers — not host files, not Vertex/`GOOGLE_CLOUD_PROJECT`) |
 
-## Assets
-
-See [`sandbox/README.md`](../sandbox/README.md) for profile vs seed policy,
-`cockpit-policy.yaml`, `Containerfile`, and `metadata-shim.py` in short form.
+Existing cockpit specs created before this attach name need the checkbox (or
+board ensure on startup appends `antigravity` to the cockpit create-spec).

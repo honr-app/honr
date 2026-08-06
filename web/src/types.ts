@@ -50,7 +50,7 @@ export interface BlockerSummary {
   state: State;
 }
 
-/** Named OpenShell create-spec from the board catalog (Settings → OpenShell → Profiles). */
+/** Named OpenShell create-spec from the board catalog (Settings → OpenShell → Sandbox specs). */
 export interface SandboxProfile {
   id: string;
   name: string;
@@ -59,7 +59,7 @@ export interface SandboxProfile {
   policy: string;
   cpu?: string | null;
   memory?: string | null;
-  /** Agent CLI (`cursor` / `agy` / `claude`). Unset → Agent runtime default. */
+  /** Agent CLI (`cursor` / `agy` / `claude` / `opencode`). Unset → Agent runtime default. */
   engine?: string | null;
   /** Providers to attach on sandbox create (`[]` = none). */
   provider_names?: string[];

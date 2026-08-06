@@ -30,7 +30,7 @@ UI / MCP / supervisor
 | `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board endpoint + sealed mTLS); every call has a deadline. |
 | `src/supervisor.rs` | Card dispatch + durable cockpit start/reconcile/stop; briefing; lease sweeping. |
 | `honr.yaml` | Level schema (Project + Task) and execution config. |
-| `sandbox/` | Container image, network policy, metadata shim. |
+| `sandbox/` | Container image, network policy. |
 | `web/` | React UI + Playwright screenshot harness. |
 | `migrations/` | Versioned SQLx migrations for the board store. |
 
@@ -41,7 +41,7 @@ When agents are enabled, the supervisor:
 1. Health-checks the OpenShell gateway.
 2. Auto-enqueues claimable Backlog leaves under Projects with auto mode on.
 3. Claims the oldest `awaiting_dispatch` card within concurrency limits.
-4. Creates (or reuses) a sandbox, uploads the shim, builds a briefing from the
+4. Creates (or reuses) a sandbox, builds a briefing from the
    Project→Task chain, and starts the agent detached.
 5. Parses the output stream for liveness; calls `heartbeat` / `report` on the
    board's behalf.

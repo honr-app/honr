@@ -87,27 +87,8 @@ fn ready_target(board: &SharedBoard) -> Result<(String, Option<String>, String),
         .filter(|e| !e.trim().is_empty())
         .ok_or_else(|| BridgeError::conflict("cockpit session has no environment yet"))?;
     let conversation_id = session.conversation_id.filter(|c| !c.trim().is_empty());
-    let engine = resolve_cockpit_engine(board);
+    let engine = board.resolve_cockpit_engine();
     Ok((environment, conversation_id, engine))
-}
-
-fn resolve_cockpit_engine(board: &SharedBoard) -> String {
-    let resolved = board.resolve_cockpit_sandbox_create();
-    if let Some(e) = resolved
-        .engine
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return e.to_string();
-    }
-    let fallback = board.effective_agents().engine;
-    let t = fallback.trim();
-    if t.is_empty() {
-        "cursor".into()
-    } else {
-        t.to_string()
-    }
 }
 
 /// Foreground (not detached) agent turn — stdout is what we stream to the browser.
@@ -125,10 +106,11 @@ fn turn_script(
     let conv_export = resume_id
         .map(|c| format!("export HONR_CONVERSATION={}\n", shell_quote(c)))
         .unwrap_or_default();
+    let inference_exports = crate::engine::anthropic_inference_exports(engine);
     Ok(format!(
         r#"set -e
 export HONR_PROMPT={prompt}
-{conv_export}cd {WORKDIR} 2>/dev/null || cd /
+{inference_exports}{conv_export}cd {WORKDIR} 2>/dev/null || cd /
 timeout --foreground {secs} {cmd}"#,
         prompt = shell_quote(prompt),
     ))
@@ -245,7 +227,7 @@ async fn run_turn(
     if crate::engine::pre_start_auth(engine).map_err(|e| e.to_string())?
         == crate::engine::PreStartAuth::Agy
     {
-        let _ = setup_agy_auth(&os, environment).await;
+        let _ = setup_agy_auth(&os, environment, &board).await;
     }
 
     let script = turn_script(engine, prompt, conversation_id).map_err(|e| e.to_string())?;
@@ -340,8 +322,25 @@ mod tests {
 
     #[test]
     fn turn_script_rejects_unknown_engine() {
-        let err = turn_script("opencode", "hi", None).unwrap_err();
+        let err = turn_script("nope", "hi", None).unwrap_err();
         assert!(err.to_string().contains("unknown agent engine"), "{err}");
+    }
+
+    #[test]
+    fn turn_script_opencode_fresh_and_resume() {
+        let fresh = turn_script("opencode", "hi", None).unwrap();
+        assert!(
+            fresh.contains("opencode run --format json --auto \"$HONR_PROMPT\""),
+            "{fresh}"
+        );
+        assert!(!fresh.contains("--session"), "{fresh}");
+
+        let resume = turn_script("opencode", "again", Some("ses_1")).unwrap();
+        assert!(
+            resume.contains("--session \"$HONR_CONVERSATION\""),
+            "{resume}"
+        );
+        assert!(resume.contains("HONR_CONVERSATION='ses_1'"), "{resume}");
     }
 
     #[test]
@@ -350,7 +349,16 @@ mod tests {
         assert!(!s.contains("--conversation"), "{s}");
         assert!(!s.contains("--resume"), "{s}");
         assert!(!s.contains("HONR_CONVERSATION="), "{s}");
-        assert!(s.contains("claude -p \"$HONR_PROMPT\""), "{s}");
+        assert!(
+            s.contains(
+                "claude --bare --strict-mcp-config --mcp-config /sandbox/.honr/mcp/claude_mcp.json -p \"$HONR_PROMPT\""
+            ),
+            "{s}"
+        );
+        assert!(
+            s.contains("ANTHROPIC_BASE_URL=https://inference.local\n"),
+            "{s}"
+        );
     }
 
     #[test]

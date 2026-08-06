@@ -17,12 +17,13 @@ use openshell_core::metadata::{ObjectId, ObjectLabels, ObjectName};
 use openshell_core::proto::open_shell_client::OpenShellClient;
 use openshell_core::proto::datamodel::v1::{ObjectMeta, Provider};
 use openshell_core::proto::{
-    ConfigureProviderRefreshRequest, CreateProviderRequest, CreateSandboxRequest,
-    CreateSshSessionRequest, DeleteProviderRequest, DeleteSandboxRequest, ExecSandboxEvent,
-    ExecSandboxInput, ExecSandboxRequest, ExecSandboxWindowResize, GetSandboxLogsRequest,
-    GetSandboxRequest, HealthRequest, ListProviderProfilesRequest, ListProvidersRequest,
-    ListSandboxesRequest, ProviderCredentialRefreshStrategy,
-    ProviderProfile as ProtoProviderProfile, RevokeSshSessionRequest, SandboxPhase,
+    AttachSandboxProviderRequest, ConfigureProviderRefreshRequest, CreateProviderRequest,
+    CreateSandboxRequest, CreateSshSessionRequest, DeleteProviderRequest, DeleteSandboxRequest,
+    DetachSandboxProviderRequest, ExecSandboxEvent, ExecSandboxInput, ExecSandboxRequest,
+    ExecSandboxWindowResize, GetSandboxLogsRequest, GetSandboxRequest, HealthRequest,
+    ImportProviderProfilesRequest, ListProviderProfilesRequest, ListProvidersRequest,
+    ListSandboxesRequest, ProviderCredentialRefreshStrategy, ProviderProfile as ProtoProviderProfile,
+    ProviderProfileImportItem, RevokeSshSessionRequest, SandboxPhase,
     SandboxSpec as ProtoSandboxSpec, SandboxTemplate, ServiceStatus, UpdateProviderRequest,
     exec_sandbox_event, exec_sandbox_input,
 };
@@ -773,11 +774,13 @@ impl OpenShell {
 
         self.with_timeout("provider list-profiles", self.default_timeout, || async {
             let mut client = self.connect().await?;
+            // Empty workspace resolves to a scope that omits workspace-imported
+            // custom types (e.g. `antigravity`). Match CLI default + import.
             let resp = client
                 .list_provider_profiles(ListProviderProfilesRequest {
                     limit: 0,
                     offset: 0,
-                    workspace: String::new(),
+                    workspace: "default".into(),
                 })
                 .await
                 .map_err(|e| Error::Failed {
@@ -790,6 +793,149 @@ impl OpenShell {
                 .into_iter()
                 .map(provider_type_profile_from_proto)
                 .collect())
+        })
+        .await
+    }
+
+    /// Import a custom provider type from YAML (OpenShell `ImportProviderProfiles`).
+    ///
+    /// Workspace-scoped (`default`) so it matches CLI `provider profile import`
+    /// without `--global`. Callers should no-op when the type id already exists.
+    pub async fn import_provider_type_yaml(&self, source: &str, yaml: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let out = mock(&[
+                "provider".into(),
+                "profile".into(),
+                "import".into(),
+                source.into(),
+            ]);
+            if !out.ok() {
+                return Err(Error::Failed {
+                    op: "provider profile import".into(),
+                    message: out.stderr.trim().to_string(),
+                });
+            }
+            return Ok(());
+        }
+
+        let dto = openshell_providers::parse_profile_yaml(yaml).map_err(|e| Error::Failed {
+            op: "provider profile import".into(),
+            message: format!("parse {source}: {e}"),
+        })?;
+        let item = ProviderProfileImportItem {
+            profile: Some(dto.to_proto()),
+            source: source.to_string(),
+        };
+        self.with_timeout("provider profile import", self.default_timeout, || async {
+            let mut client = self.connect().await?;
+            let resp = client
+                .import_provider_profiles(ImportProviderProfilesRequest {
+                    profiles: vec![item.clone()],
+                    workspace: "default".into(),
+                })
+                .await
+                .map_err(|e| Error::Failed {
+                    op: "provider profile import".into(),
+                    message: e.to_string(),
+                })?;
+            let inner = resp.into_inner();
+            if inner.imported {
+                return Ok(());
+            }
+            let diag = inner
+                .diagnostics
+                .into_iter()
+                .map(|d| format!("{}: {}", d.field, d.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(Error::Failed {
+                op: "provider profile import".into(),
+                message: if diag.is_empty() {
+                    "import rejected".into()
+                } else {
+                    diag
+                },
+            })
+        })
+        .await
+    }
+
+    /// Attach a provider instance to a running sandbox (Providers v2).
+    pub async fn attach_sandbox_provider(&self, sandbox: &str, provider: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let out = mock(&[
+                "sandbox".into(),
+                "provider".into(),
+                "attach".into(),
+                sandbox.into(),
+                provider.into(),
+            ]);
+            if !out.ok() {
+                return Err(Error::Failed {
+                    op: "sandbox provider attach".into(),
+                    message: out.stderr.trim().to_string(),
+                });
+            }
+            return Ok(());
+        }
+
+        self.with_timeout("sandbox provider attach", self.default_timeout, || async {
+            let mut client = self.connect().await?;
+            let _ = client
+                .attach_sandbox_provider(AttachSandboxProviderRequest {
+                    sandbox_name: sandbox.to_string(),
+                    provider_name: provider.to_string(),
+                    expected_resource_version: 0,
+                    workspace: String::new(),
+                })
+                .await
+                .map_err(|e| Error::Failed {
+                    op: "sandbox provider attach".into(),
+                    message: e.to_string(),
+                })?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Detach a provider instance from a running sandbox.
+    #[allow(dead_code)]
+    pub async fn detach_sandbox_provider(&self, sandbox: &str, provider: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let out = mock(&[
+                "sandbox".into(),
+                "provider".into(),
+                "detach".into(),
+                sandbox.into(),
+                provider.into(),
+            ]);
+            if !out.ok() {
+                return Err(Error::Failed {
+                    op: "sandbox provider detach".into(),
+                    message: out.stderr.trim().to_string(),
+                });
+            }
+            return Ok(());
+        }
+
+        self.with_timeout("sandbox provider detach", self.default_timeout, || async {
+            let mut client = self.connect().await?;
+            let _ = client
+                .detach_sandbox_provider(DetachSandboxProviderRequest {
+                    sandbox_name: sandbox.to_string(),
+                    provider_name: provider.to_string(),
+                    expected_resource_version: 0,
+                    workspace: String::new(),
+                })
+                .await
+                .map_err(|e| Error::Failed {
+                    op: "sandbox provider detach".into(),
+                    message: e.to_string(),
+                })?;
+            Ok(())
         })
         .await
     }
@@ -1902,9 +2048,9 @@ mod tests {
         assert_eq!(dir, "/sandbox/.honr");
         assert_eq!(name, "report.schema.json");
         let (dir2, name2) =
-            upload_dest_parts(Path::new("sandbox/metadata-shim.py"), "/tmp").expect("shim");
+            upload_dest_parts(Path::new("sandbox/Containerfile"), "/tmp").expect("containerfile");
         assert_eq!(dir2, "/tmp");
-        assert_eq!(name2, "metadata-shim.py");
+        assert_eq!(name2, "Containerfile");
     }
 
     /// Connect's first gRPC step is CreateSshSession after GetSandbox — mock

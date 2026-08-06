@@ -9,7 +9,7 @@ export type OpenShellTab = "connectivity" | "providers" | "profiles";
 const TABS: { id: OpenShellTab; label: string }[] = [
   { id: "connectivity", label: "Connectivity" },
   { id: "providers", label: "Providers" },
-  { id: "profiles", label: "Profiles" },
+  { id: "profiles", label: "Sandbox specs" },
 ];
 
 export function OpenShellPanelView({

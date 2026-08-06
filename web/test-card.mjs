@@ -811,7 +811,7 @@ assert(
   openshellHtml.includes("data-testid=\"openshell-tab-connectivity\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-providers\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-profiles\""),
-  "OpenShell tabs: Connectivity / Providers / Profiles",
+  "OpenShell tabs: Connectivity / Providers / Sandbox specs",
 );
 
 const openshellUnhealthyHtml = renderToString(
@@ -875,11 +875,11 @@ assert(
 );
 assert(
   !openshellProvidersHtml.includes("openshell-provider-attach-"),
-  "Attach toggles live on Profiles, not Providers",
+  "Attach toggles live on Sandbox specs, not Providers",
 );
 assert(
-  openshellProvidersHtml.includes("per") && openshellProvidersHtml.includes("Profile"),
-  "Providers copy points attach to Profiles",
+  openshellProvidersHtml.includes("Sandbox spec"),
+  "Providers copy points attach to Sandbox specs",
 );
 
 const openshellManagedGithubHtml = renderToString(
@@ -1073,22 +1073,25 @@ const sandboxPanelBase = {
 const sandboxesHtml = renderToString(
   React.createElement(SandboxesPanelView, sandboxPanelBase),
 );
-assert(sandboxesHtml.includes("data-testid=\"openshell-profiles\""), "Profiles band wrapper");
-assert(sandboxesHtml.includes("data-testid=\"sandboxes-panel\""), "Profiles panel should render");
-assert(sandboxesHtml.includes(">Profiles<") || sandboxesHtml.includes("Profiles</h3>"), "Profiles heading");
-assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-list\""), "Profiles panel should list profiles");
+assert(sandboxesHtml.includes("data-testid=\"openshell-profiles\""), "Sandbox specs band wrapper");
+assert(sandboxesHtml.includes("data-testid=\"sandboxes-panel\""), "Sandbox specs panel should render");
+assert(
+  sandboxesHtml.includes(">Sandbox specs<") || sandboxesHtml.includes("Sandbox specs</h3>"),
+  "Sandbox specs heading",
+);
+assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-list\""), "Sandbox specs panel should list specs");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-default\""), "Should list default profile");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-profile-heavy\""), "Should list heavy profile");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-default-badge\""), "Default profile should be badged");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-cockpit-badge\""), "Cockpit profile should be badged");
-assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Profiles panel should support create");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Sandbox specs panel should support create");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Selected profile offers Edit");
 assert(sandboxesHtml.includes("cursor"), "Selected profile shows engine");
 assert(!sandboxesHtml.includes("data-testid=\"sandbox-delete-default\""), "Cannot delete default/cockpit profile");
 assert(!sandboxesHtml.includes("data-testid=\"sandbox-destroy\""),
-  "Profiles panel must not offer live OpenShell sandbox destroy");
+  "Sandbox specs panel must not offer live OpenShell sandbox destroy");
 assert(!/destroy sandbox|delete environment|openshell.*delete/i.test(sandboxesHtml),
-  "Profiles panel must not offer live OpenShell sandbox destroy controls");
+  "Sandbox specs panel must not offer live OpenShell sandbox destroy controls");
 
 const sandboxesHeavyHtml = renderToString(
   React.createElement(SandboxesPanelView, {

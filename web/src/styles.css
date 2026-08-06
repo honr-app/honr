@@ -315,7 +315,10 @@ textarea {
   background: var(--chrome);
   border-bottom: 1px solid var(--line);
   box-shadow: var(--shadow-soft);
-  z-index: 2;
+  /* Above .cockpit-drop — account menu is position:absolute inside here and
+     otherwise paints under the open cockpit (stacking-context trap). */
+  position: relative;
+  z-index: 4;
 }
 .brand {
   display: flex;

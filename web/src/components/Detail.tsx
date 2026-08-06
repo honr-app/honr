@@ -315,10 +315,42 @@ function parseClaudeLogLine(line: string): ParsedLogLine | null {
   try {
     const obj = JSON.parse(trimmed);
 
+    // OpenCode `run --format json` (camelCase sessionID; part payloads).
+    if (obj.type === "text" && obj.part?.text) {
+      return { text: String(obj.part.text), type: "text" };
+    }
+    if (obj.type === "tool_use" && obj.part?.tool) {
+      const name = String(obj.part.tool);
+      const input = obj.part.state?.input ?? obj.part.input;
+      const status = obj.part.state?.status;
+      const out = obj.part.state?.output;
+      if (status === "completed" || out != null) {
+        const body =
+          typeof out === "string" ? out : out != null ? JSON.stringify(out) : "";
+        return {
+          text: body
+            ? `⚙️ [${name}] ${body.slice(0, 240)}`
+            : `⚙️ [${name}] done`,
+          type: "result",
+        };
+      }
+      return {
+        text: `🔨 [${name}] ${formatToolTarget(name, input)}`,
+        type: "tool",
+      };
+    }
+    if (obj.type === "step_start" || obj.type === "step_finish") {
+      return null;
+    }
+
     // Cursor Agent CLI stream-json (not Claude Code's content_block_* shape).
     if (obj.type === "thinking") {
       if (obj.subtype === "delta" && typeof obj.text === "string" && obj.text) {
         return { text: obj.text, type: "thinking" };
+      }
+      // OpenCode may emit thinking without Cursor's subtype/delta shape.
+      if (typeof obj.part?.text === "string" && obj.part.text) {
+        return { text: obj.part.text, type: "thinking" };
       }
       return null;
     }
@@ -1076,8 +1108,8 @@ export function DetailDrawer({
                 }}
               />
               <p className="dim" style={{ marginTop: 6, fontSize: 12 }}>
-                Agent engine comes from the sandbox profile (Settings → OpenShell →
-                Profiles), not per card.
+                Agent engine comes from the sandbox spec (Settings → OpenShell →
+                Sandbox specs), not per card.
               </p>
               <div className="btns">
                 <button

@@ -48,7 +48,7 @@ Task.
 | Role | Who | Reach |
 |---|---|---|
 | **Operator (host)** | Human + chat agent on the host | MCP `/mcp`: shape Projects, triage Needs You / Review, dispatch, park / steer / halt. No worker verbs. |
-| **Cockpit** | Privileged agent in an OpenShell sandbox on the `cockpit` profile | Egress to host honr MCP, inference, and GitHub (App `GH_TOKEN`); operator tools only. No package-registry egress. Selectable in Settings → OpenShell → Profiles |
+| **Cockpit** | Privileged agent in an OpenShell sandbox on the `cockpit` sandbox spec | Egress to host honr MCP, inference, and GitHub (App `GH_TOKEN`); operator tools only. No package-registry egress. Selectable in Settings → OpenShell → Sandbox specs |
 | **Worker** | Agent inside an OpenShell sandbox on the default / project profile | GitHub + inference egress. No network path to honr. Supervisor calls `claim` / `heartbeat` / `report` on its behalf |
 
 An agent that could reach honr's MCP could approve its own review. Worker

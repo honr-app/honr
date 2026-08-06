@@ -514,7 +514,7 @@ impl OpenShellProviderDesired {
 pub struct AgentRuntimeConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Primary agent CLI (`cursor`, `agy`, or `claude`).
+    /// Primary agent CLI (`cursor`, `agy`, `claude`, or `opencode`).
     #[serde(default = "default_runtime_engine")]
     pub engine: String,
     #[serde(default = "default_runtime_concurrent")]
@@ -706,7 +706,7 @@ pub struct SandboxProfile {
     pub cpu: Option<String>,
     #[serde(default)]
     pub memory: Option<String>,
-    /// Agent CLI for cards using this profile (`cursor`, `agy`, `claude`).
+    /// Agent CLI for cards using this profile (`cursor`, `agy`, `claude`, `opencode`).
     /// When unset, claim/run falls back to Settings → Agent runtime engine.
     #[serde(default)]
     pub engine: Option<String>,
@@ -745,10 +745,16 @@ pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) 
         cpu: Some(COCKPIT_SANDBOX_CPU.into()),
         memory: Some(COCKPIT_SANDBOX_MEMORY.into()),
         engine,
-        // GitHub App identity (`GH_TOKEN`) — cockpit policy allow-lists GitHub.
-        provider_names: vec!["github".into()],
+        // GitHub App identity + Vertex (inference.local) + Antigravity (agy Bearer).
+        provider_names: vec!["github".into(), "vertex".into(), "antigravity".into()],
     }
 }
+
+/// OpenShell provider instance name / provider type id for Antigravity (`agy`).
+pub const ANTIGRAVITY_PROVIDER: &str = "antigravity";
+
+/// Shipped OpenShell provider type YAML (endpoints + Bearer credential schema).
+pub const ANTIGRAVITY_PROVIDER_TYPE_PATH: &str = "sandbox/openshell/antigravity.yaml";
 
 /// Stable id slug from a display name. Lowercase ASCII alphanumerics; runs of
 /// whitespace/`_`/`-` become a single hyphen. Empty/punctuation-only names
@@ -1249,7 +1255,14 @@ mod tests {
         assert_eq!(profile.id, COCKPIT_SANDBOX_PROFILE_ID);
         assert_eq!(profile.cpu.as_deref(), Some(COCKPIT_SANDBOX_CPU));
         assert_eq!(profile.memory.as_deref(), Some(COCKPIT_SANDBOX_MEMORY));
-        assert_eq!(profile.provider_names, vec!["github".to_string()]);
+        assert_eq!(
+            profile.provider_names,
+            vec![
+                "github".to_string(),
+                "vertex".to_string(),
+                "antigravity".to_string()
+            ]
+        );
         assert_ne!(profile.cpu, agents.cpu);
         assert_ne!(profile.memory, agents.memory);
         assert_eq!(profile.policy, cockpit_pol);

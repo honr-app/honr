@@ -101,16 +101,20 @@ function cssColor(name: string, fallback: string): string {
 
 /**
  * Sparse overrides for xterm colors 16–255 (`extendedAnsi[i]` → color `i+16`).
- * Cursor's follow-up chrome has used 256-color indices 254 (near-white) and
- * 235 (near-black) depending on redraw — map both (and neighbors) to the
- * theme follow-up surface so live light/dark switches stay readable.
+ * Cursor's follow-up chrome paints with index **254** (`xterm-bg-254`) — a
+ * near-white grey that ignores the 16 ANSI slots. Remap only that slot (and
+ * its immediate neighbor) to `--term-followup-bg`.
+ *
+ * Do not pull 232–236 or 255 into that surface: OpenCode (and others) use
+ * those as ordinary greys — 255 as bright foreground text — so remapping them
+ * made typed input the same color as the background.
  */
 function extendedAnsiForDocument(dark: boolean): string[] {
   const ext: string[] = [];
   const follow = dark
     ? cssColor("--term-followup-bg", "#2a3540")
     : cssColor("--term-followup-bg", "#e8eee9");
-  for (const idx of [232, 233, 234, 235, 236, 252, 253, 254, 255]) {
+  for (const idx of [253, 254]) {
     ext[idx - 16] = follow;
   }
   return ext;

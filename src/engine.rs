@@ -13,6 +13,8 @@ pub enum ResumeFlag {
     Conversation,
     /// Cursor Agent CLI: `agent … --resume "$HONR_CONVERSATION" …`
     Resume,
+    /// OpenCode CLI: `opencode run … --session "$HONR_CONVERSATION" …`
+    Session,
 }
 
 impl ResumeFlag {
@@ -20,6 +22,7 @@ impl ResumeFlag {
         match self {
             Self::Conversation => "--conversation \"$HONR_CONVERSATION\"",
             Self::Resume => "--resume \"$HONR_CONVERSATION\"",
+            Self::Session => "--session \"$HONR_CONVERSATION\"",
         }
     }
 }
@@ -65,6 +68,9 @@ const AGY_CONV_KEYS: &[&str] = &[
 
 const CURSOR_SESSION_KEYS: &[&str] = &["/session_id", "/result/session_id"];
 
+/// OpenCode `--format json` lines use camelCase `sessionID` (see their run stream).
+const OPENCODE_SESSION_KEYS: &[&str] = &["/sessionID", "/part/sessionID"];
+
 /// Known engines. Order is display-stable; lookup is by `id`.
 pub const ENGINES: &[Engine] = &[
     Engine {
@@ -87,11 +93,25 @@ pub const ENGINES: &[Engine] = &[
     },
     Engine {
         id: "claude",
-        prefix: "claude",
+        // `--bare` skips Claude Code's OAuth and MCP auto-discovery. Auth is
+        // OpenShell inference.local (see [`anthropic_inference_env`]); MCP is
+        // the injected cockpit/seat file via `--mcp-config`.
+        prefix: "claude --bare --strict-mcp-config --mcp-config /sandbox/.honr/mcp/claude_mcp.json",
         trailing: "--output-format stream-json --verbose --permission-mode bypassPermissions",
         prompt: PromptStyle::FlagP,
         resume: None,
         conversation_id_pointers: &[],
+        pre_start_auth: PreStartAuth::None,
+    },
+    Engine {
+        id: "opencode",
+        // Headless one-shot: JSONL events on stdout, auto-approve tool perms
+        // (sandbox is already the containment boundary). Prompt is positional.
+        prefix: "opencode run --format json --auto",
+        trailing: "",
+        prompt: PromptStyle::Positional,
+        resume: Some(ResumeFlag::Session),
+        conversation_id_pointers: OPENCODE_SESSION_KEYS,
         pre_start_auth: PreStartAuth::None,
     },
 ];
@@ -155,6 +175,49 @@ pub fn pre_start_auth(id: &str) -> Result<PreStartAuth, UnknownEngine> {
     Ok(lookup(id)?.pre_start_auth)
 }
 
+/// Sandbox env so Anthropic-shaped CLIs hit OpenShell `inference.local`.
+///
+/// The gateway holds Vertex (or other) credentials and injects them on egress.
+/// Do not set `CLAUDE_CODE_USE_VERTEX` — that forces direct ADC/metadata discovery.
+/// OpenCode needs the `/v1` suffix; Claude Code appends `/v1/messages` itself.
+pub fn anthropic_inference_env(engine_id: &str) -> Vec<(String, String)> {
+    match engine_id.trim() {
+        "opencode" => vec![
+            (
+                "ANTHROPIC_BASE_URL".into(),
+                "https://inference.local/v1".into(),
+            ),
+            ("ANTHROPIC_API_KEY".into(), "unused".into()),
+        ],
+        "claude" => vec![
+            (
+                "ANTHROPIC_BASE_URL".into(),
+                "https://inference.local".into(),
+            ),
+            ("ANTHROPIC_API_KEY".into(), "unused".into()),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Shell exports mirrored into start/turn scripts so a reused sandbox still
+/// picks up the route without recreate.
+pub fn anthropic_inference_exports(engine_id: &str) -> &'static str {
+    match engine_id.trim() {
+        "opencode" => {
+            "export ANTHROPIC_BASE_URL=https://inference.local/v1\n\
+             export ANTHROPIC_API_KEY=unused\n\
+             unset CLAUDE_CODE_USE_VERTEX\n"
+        }
+        "claude" => {
+            "export ANTHROPIC_BASE_URL=https://inference.local\n\
+             export ANTHROPIC_API_KEY=unused\n\
+             unset CLAUDE_CODE_USE_VERTEX\n"
+        }
+        _ => "",
+    }
+}
+
 /// Build the inner agent command line (no `timeout` / `setsid` wrapper).
 ///
 /// `conversation_id` is only honored when the engine declares a [`ResumeFlag`];
@@ -211,20 +274,21 @@ mod tests {
 
     #[test]
     fn known_engines_are_registered() {
-        for id in ["cursor", "agy", "claude"] {
+        for id in ["cursor", "agy", "claude", "opencode"] {
             assert_eq!(lookup(id).unwrap().id, id);
         }
     }
 
     #[test]
     fn unknown_engine_is_rejected() {
-        let err = lookup("opencode").unwrap_err();
-        assert_eq!(err.id, "opencode");
+        let err = lookup("nope").unwrap_err();
+        assert_eq!(err.id, "nope");
         let msg = err.to_string();
         assert!(msg.contains("unknown agent engine"), "{msg}");
         assert!(msg.contains("cursor"), "{msg}");
         assert!(msg.contains("agy"), "{msg}");
         assert!(msg.contains("claude"), "{msg}");
+        assert!(msg.contains("opencode"), "{msg}");
         assert!(command_line("nope", PromptEnv::Briefing, None).is_err());
         assert!(!supports_resume("nope"));
     }
@@ -234,12 +298,28 @@ mod tests {
         let cmd = command_line("claude", PromptEnv::Briefing, None).unwrap();
         assert_eq!(
             cmd,
-            "claude -p \"$HONR_BRIEFING\" --output-format stream-json --verbose --permission-mode bypassPermissions"
+            "claude --bare --strict-mcp-config --mcp-config /sandbox/.honr/mcp/claude_mcp.json -p \"$HONR_BRIEFING\" --output-format stream-json --verbose --permission-mode bypassPermissions"
         );
         // Claude has no resume flag — conversation id must not change argv.
         let ignored = command_line("claude", PromptEnv::Briefing, Some("cid")).unwrap();
         assert_eq!(ignored, cmd);
         assert!(!supports_resume("claude"));
+    }
+
+    #[test]
+    fn anthropic_inference_env_splits_opencode_v1_from_claude() {
+        let oc = anthropic_inference_env("opencode");
+        assert!(oc.iter().any(|(k, v)| {
+            k == "ANTHROPIC_BASE_URL" && v == "https://inference.local/v1"
+        }));
+        let cl = anthropic_inference_env("claude");
+        assert!(cl
+            .iter()
+            .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://inference.local"));
+        assert!(anthropic_inference_env("cursor").is_empty());
+        assert!(anthropic_inference_exports("opencode").contains("/v1"));
+        assert!(!anthropic_inference_exports("claude").contains("/v1"));
+        assert!(anthropic_inference_exports("cursor").is_empty());
     }
 
     #[test]
@@ -283,5 +363,25 @@ mod tests {
         assert!(keys.contains(&"/conversation_id"));
         assert!(keys.contains(&"/session_id"));
         assert!(keys.contains(&"/step_update/conversation_id"));
+        assert!(keys.contains(&"/sessionID"));
+    }
+
+    #[test]
+    fn opencode_argv_fresh_and_resume() {
+        let fresh = command_line("opencode", PromptEnv::Briefing, None).unwrap();
+        assert_eq!(
+            fresh,
+            "opencode run --format json --auto \"$HONR_BRIEFING\""
+        );
+        assert!(!fresh.contains("--session"));
+
+        let resume = command_line("opencode", PromptEnv::Prompt, Some("ses_abc")).unwrap();
+        assert!(
+            resume.contains("--session \"$HONR_CONVERSATION\""),
+            "{resume}"
+        );
+        assert!(resume.ends_with("\"$HONR_PROMPT\""), "{resume}");
+        assert!(supports_resume("opencode"));
+        assert_eq!(pre_start_auth("opencode").unwrap(), PreStartAuth::None);
     }
 }

@@ -63,8 +63,8 @@ export function Settings() {
         <p className="settings-lede">
           Control-plane preferences. Forge holds provider and webhook poll. Each
           card’s <code>pull_request</code> (after report) holds work remotes.
-          OpenShell holds Connectivity, Providers, and Profiles (providers
-          attach per profile). GitHub App holds sealed App credentials for
+          OpenShell holds Connectivity, Providers, and Sandbox specs (providers
+          attach per spec). GitHub App holds sealed App credentials for
           installation tokens. Agent runtime holds concurrency, timeouts, and
           the fallback engine.
         </p>
@@ -901,7 +901,7 @@ export function AgentRuntimePanelView({
         Process knobs for OpenShell sandboxes: branch prefix, concurrency,
         timeouts, and the fallback agent engine when a profile omits one.
         Seeded from <code>honr.yaml</code>; edits persist on the Board. Per-run
-        engine lives on OpenShell → Profiles.
+        engine lives on OpenShell → Sandbox specs.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -946,6 +946,7 @@ export function AgentRuntimePanelView({
             <option value="cursor">cursor</option>
             <option value="agy">agy</option>
             <option value="claude">claude</option>
+            <option value="opencode">opencode</option>
           </select>
         </label>
 

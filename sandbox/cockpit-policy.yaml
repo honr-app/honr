@@ -8,7 +8,7 @@ filesystem_policy:
   include_workdir: true
   # Same /opt layout as the worker image so one Containerfile serves both
   # profiles; cockpit does not need write to cargo/npm caches for package fetch.
-  read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust, /opt/cursor-agent, /opt/cargo, /opt/npm-cache]
+  read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust, /opt/cursor-agent, /opt/opencode, /opt/cargo, /opt/npm-cache]
   read_write: [/sandbox, /tmp, /dev]
 
 landlock:
@@ -50,6 +50,8 @@ network_policies:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/agy }
       - { path: /usr/bin/agy }
+      - { path: /usr/local/bin/opencode }
+      - { path: /opt/opencode/bin/opencode }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
       - { path: /usr/local/bin/agent }
@@ -78,6 +80,8 @@ network_policies:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/agy }
       - { path: /usr/bin/agy }
+      - { path: /usr/local/bin/opencode }
+      - { path: /opt/opencode/bin/opencode }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
 
@@ -98,6 +102,8 @@ network_policies:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/agy }
       - { path: /usr/bin/agy }
+      - { path: /usr/local/bin/opencode }
+      - { path: /opt/opencode/bin/opencode }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
       - { path: /usr/local/bin/agent }
@@ -132,6 +138,21 @@ network_policies:
       - { path: /usr/local/bin/cursor-agent }
       - { path: /opt/cursor-agent/versions/**/cursor-agent }
       - { path: /opt/cursor-agent/versions/**/node }
+      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/bash }
+      - { path: /bin/bash }
+
+  opencode:
+    name: opencode
+    endpoints:
+      - { host: models.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: opencode.ai, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: '*.opencode.ai', port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: api.opencode.ai, port: 443, protocol: rest, enforcement: enforce, access: full }
+    binaries:
+      - { path: /usr/local/bin/opencode }
+      - { path: /opt/opencode/bin/opencode }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
       - { path: /usr/bin/bash }

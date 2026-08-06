@@ -52,6 +52,16 @@ RUN curl -fsSL https://cursor.com/install | bash \
  && chmod -R a+rX /opt/cursor-agent \
  && /usr/local/bin/agent --version
 
+# Bake OpenCode CLI. Installer writes $HOME/.opencode/bin; relocate under /opt
+# and expose /usr/local/bin/opencode on the default PATH (same ENV caveat).
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+ && mkdir -p /opt/opencode \
+ && cp -a /root/.opencode/. /opt/opencode/ \
+ && test -x /opt/opencode/bin/opencode \
+ && ln -sfn /opt/opencode/bin/opencode /usr/local/bin/opencode \
+ && chmod -R a+rX /opt/opencode \
+ && /usr/local/bin/opencode --version
+
 # ---- rustup shims & environment --------------------------------------------
 
 # The toolchain must work from ANY shell, not just one that inherited our env.

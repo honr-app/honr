@@ -101,7 +101,7 @@ do not treat a stale local `main` as truth.
 | `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board mTLS); every call has a deadline |
 | `src/cockpit_chat.rs` | Host-mediated cockpit chat bridge (prompt → sandbox seat → SSE) |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs |
-| `sandbox/` | Containerfile, network policy, metadata shim |
+| `sandbox/` | Containerfile, network policy |
 | `web/` | React UI + `npm run shots` screenshot harness |
 | `docs/sandbox.md` | How a sandboxed run works and the gotchas that matter. Read before touching `sandbox/`. |
 

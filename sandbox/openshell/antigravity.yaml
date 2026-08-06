@@ -1,0 +1,54 @@
+# OpenShell provider type for Google Antigravity (agy).
+# Bearer injection on Cloud Code / Google API endpoints so the seat only sees
+# openshell:resolve placeholders — never a host OAuth file.
+id: antigravity
+display_name: Google Antigravity (agy)
+description: Antigravity CLI / Cloud Code assist user OAuth (Bearer access token)
+category: agent
+credentials:
+  - name: access_token
+    description: Google OAuth access token for Antigravity / Cloud Code
+    env_vars:
+      - ANTIGRAVITY_ACCESS_TOKEN
+    required: true
+    auth_style: bearer
+    header_name: authorization
+    query_param: ""
+endpoints:
+  - host: cloudcode-pa.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: daily-cloudcode-pa.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: www.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: oauth2.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: people.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: play.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/local/bin/agy
+  - /usr/bin/agy
+inference_capable: false
+discovery:
+  credentials:
+    - access_token

@@ -1,5 +1,6 @@
 //! honr — an agent orchestrator whose board is a control plane, not a report.
 
+mod antigravity;
 mod api;
 mod auth;
 mod db;

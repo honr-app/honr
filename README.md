@@ -144,7 +144,7 @@ Operator orientation for agents working *on* this repo:
 | `src/supervisor.rs` | Dispatch, sandbox lifecycle, lease sweeping |
 | `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs |
 | `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board mTLS) |
-| `sandbox/` | Container image, network policy, metadata shim |
+| `sandbox/` | Container image, network policy |
 | `web/` | React UI |
 | `docs/` | Operator docs |
 | `assets/` | Branding |

@@ -1251,6 +1251,19 @@ async fn delete_openshell_provider(
 }
 
 async fn sync_openshell_providers(AxState(b): AxState<SharedBoard>) -> Json<SyncProvidersOut> {
+    let os = b.openshell_client();
+    // Custom provider types must exist before CreateProvider(type=antigravity).
+    if let Err(e) = crate::antigravity::ensure_provider_type_imported(&os).await {
+        tracing::warn!(error = %e, "antigravity provider type import skipped");
+    }
+    // Best-effort: refresh sealed access token from host keychain when the
+    // Board already has an antigravity provider (no refresh_token in the seat).
+    match crate::antigravity::refresh_board_credentials_from_keychain(&b) {
+        Ok(true) => tracing::info!("refreshed antigravity credentials from host keychain"),
+        Ok(false) => {}
+        Err(e) => tracing::debug!(error = %e, "antigravity keychain refresh skipped"),
+    }
+
     let desired = b.openshell_providers();
     let mut applied = Vec::new();
     let mut errors = Vec::new();
@@ -1263,6 +1276,15 @@ async fn sync_openshell_providers(AxState(b): AxState<SharedBoard>) -> Json<Sync
             }),
         }
     }
+
+    if let Err(e) = crate::antigravity::attach_to_running_cockpit(&b).await {
+        tracing::warn!(error = %e, "antigravity cockpit attach after sync failed");
+        errors.push(SyncProviderError {
+            name: crate::model::ANTIGRAVITY_PROVIDER.into(),
+            error: format!("cockpit attach: {e}"),
+        });
+    }
+
     Json(SyncProvidersOut { applied, errors })
 }
 
@@ -3313,5 +3335,265 @@ mod tests {
         assert_eq!(out.sub, "admin");
         assert!(!out.resource.is_empty());
         assert!(out.expires_at > 0);
+    }
+
+    #[tokio::test]
+    async fn sync_imports_antigravity_provider_type_before_create() {
+        use crate::model::OpenShellProviderDesired;
+        use crate::secrets::seal_string_map;
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-agy-sync-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let key_path = dir.join("master.key");
+        let _env = crate::secrets::master_key_env::Guard::with_key_path(&key_path);
+
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::<Vec<String>>::new()));
+        let seen_c = seen.clone();
+        let os = crate::openshell::OpenShell::mock(
+            move |args| {
+                seen_c.lock().push(args.to_vec());
+                let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                if argv == ["status"] {
+                    return crate::openshell::Output {
+                        code: 0,
+                        stdout: "Connected".into(),
+                        stderr: String::new(),
+                    };
+                }
+                if argv.starts_with(&["provider", "list-profiles"]) {
+                    // Empty → ensure path imports shipped YAML.
+                    return crate::openshell::Output {
+                        code: 0,
+                        stdout: "[]".into(),
+                        stderr: String::new(),
+                    };
+                }
+                if argv.starts_with(&["provider", "profile", "import"]) {
+                    return crate::openshell::Output {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    };
+                }
+                if argv.starts_with(&["provider", "list"]) {
+                    return crate::openshell::Output {
+                        code: 0,
+                        stdout: "[]".into(),
+                        stderr: String::new(),
+                    };
+                }
+                if argv.starts_with(&["provider", "create"]) {
+                    return crate::openshell::Output {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    };
+                }
+                if argv.starts_with(&["sandbox", "provider", "attach"]) {
+                    return crate::openshell::Output {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    };
+                }
+                crate::openshell::Output {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }
+            },
+            std::time::Duration::from_secs(5),
+        );
+
+        let path = dir.join("board.json");
+        let mut board = crate::store::Board::new(crate::schema::Schema::default(), path);
+        board.openshell = Some(os);
+        let b = std::sync::Arc::new(board);
+
+        let mut creds = BTreeMap::new();
+        creds.insert("ANTIGRAVITY_ACCESS_TOKEN".into(), "openshell:resolve:test".into());
+        let sealed = seal_string_map(&creds).expect("seal");
+        b.upsert_openshell_provider(
+            OpenShellProviderDesired {
+                name: "antigravity".into(),
+                provider_type: "antigravity".into(),
+                config: BTreeMap::new(),
+                credentials_sealed: Some(sealed),
+                credential_keys: vec!["ANTIGRAVITY_ACCESS_TOKEN".into()],
+                refresh: None,
+            }
+            .normalized(),
+        );
+
+        let Json(synced) = sync_openshell_providers(AxState(b.clone())).await;
+        assert!(
+            synced.errors.is_empty(),
+            "unexpected sync errors: {:?}",
+            synced.errors
+        );
+        assert!(synced.applied.iter().any(|n| n == "antigravity"));
+
+        let calls = seen.lock().clone();
+        let import_idx = calls
+            .iter()
+            .position(|a| a.windows(3).any(|w| w == ["provider", "profile", "import"]))
+            .expect("import before create");
+        let create_idx = calls
+            .iter()
+            .position(|a| a.windows(2).any(|w| w == ["provider", "create"]))
+            .expect("provider create");
+        assert!(
+            import_idx < create_idx,
+            "import must precede create: {calls:?}"
+        );
+    }
+
+    /// Operator helper (not a unit test): seal host gcloud ADC into board `vertex`
+    /// and apply to the gateway. Stop the running honr process first so flush is
+    /// not overwritten by in-memory state.
+    ///
+    /// ```bash
+    /// cargo test --offline upsert_live_vertex_provider -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "writes the live board DB + gateway"]
+    async fn upsert_live_vertex_provider() {
+        use crate::db::DurableBoardStore;
+        use crate::model::{OpenShellProviderDesired, OpenShellProviderRefreshDesired};
+        use crate::secrets::seal_string_map;
+        use crate::store::Board;
+        use std::sync::Arc;
+
+        let adc_path = dirs::home_dir()
+            .expect("home")
+            .join(".config/gcloud/application_default_credentials.json");
+        let adc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&adc_path).expect("read ADC"))
+                .expect("parse ADC");
+        assert_eq!(adc["type"], "authorized_user");
+
+        let mut material = BTreeMap::new();
+        material.insert(
+            "client_id".into(),
+            adc["client_id"].as_str().expect("client_id").into(),
+        );
+        material.insert(
+            "client_secret".into(),
+            adc["client_secret"].as_str().expect("client_secret").into(),
+        );
+        material.insert(
+            "refresh_token".into(),
+            adc["refresh_token"].as_str().expect("refresh_token").into(),
+        );
+        let material_sealed = seal_string_map(&material).expect("seal refresh");
+
+        let project = std::env::var("ANTHROPIC_VERTEX_PROJECT_ID")
+            .unwrap_or_else(|_| "itpc-gcp-hcm-pe-eng-claude".into());
+        let region = std::env::var("VERTEX_AI_REGION").unwrap_or_else(|_| "global".into());
+        let mut config = BTreeMap::new();
+        config.insert("VERTEX_AI_PROJECT_ID".into(), project.clone());
+        config.insert("VERTEX_AI_REGION".into(), region.clone());
+        config.insert("VERTEX_AI_LOCATION".into(), region.clone());
+
+        let desired = OpenShellProviderDesired {
+            name: "vertex".into(),
+            provider_type: "google-vertex-ai".into(),
+            config,
+            credentials_sealed: None,
+            credential_keys: vec!["GOOGLE_VERTEX_AI_TOKEN".into()],
+            refresh: Some(OpenShellProviderRefreshDesired {
+                credential_key: "GOOGLE_VERTEX_AI_TOKEN".into(),
+                strategy: "oauth2_refresh_token".into(),
+                material_sealed,
+                secret_material_keys: vec!["client_secret".into(), "refresh_token".into()],
+            }),
+        }
+        .normalized();
+
+        let mut schema = crate::schema::Schema::load("honr.yaml").unwrap_or_default();
+        crate::db::apply_database_url_override(&mut schema.board.database);
+        let url = schema.board.database.parsed().expect("database url");
+        let store = Arc::new(
+            DurableBoardStore::connect(url.as_str())
+                .await
+                .expect("open board db"),
+        );
+        let board: SharedBoard = Arc::new(
+            Board::load_with_store(schema, std::path::PathBuf::from("honr.json"), store)
+                .await
+                .expect("load board"),
+        );
+
+        let stored = board.upsert_openshell_provider(desired);
+        assert!(stored.refresh.is_some());
+        apply_desired_to_gateway(&board, &stored)
+            .await
+            .expect("gateway apply");
+        board.flush();
+        eprintln!(
+            "upserted board+gateway provider vertex (project={project} region={region})"
+        );
+    }
+
+    /// Operator helper: seal Antigravity access token from macOS keychain into
+    /// board `antigravity` and apply. Stop the running honr process first.
+    ///
+    /// ```bash
+    /// cargo test --offline upsert_live_antigravity_provider -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "writes the live board DB + gateway"]
+    async fn upsert_live_antigravity_provider() {
+        use crate::db::DurableBoardStore;
+        use crate::store::Board;
+        use std::sync::Arc;
+
+        let token = crate::antigravity::read_access_token_from_keychain().expect("keychain");
+        let mut config = BTreeMap::new();
+        config.insert(
+            crate::antigravity::CONFIG_PROJECT.into(),
+            std::env::var("ANTIGRAVITY_GCP_PROJECT").expect(
+                "set ANTIGRAVITY_GCP_PROJECT (do not hardcode a personal project id in source)",
+            ),
+        );
+        config.insert(
+            crate::antigravity::CONFIG_LOCATION.into(),
+            std::env::var("ANTIGRAVITY_GCP_LOCATION").unwrap_or_else(|_| "global".into()),
+        );
+        let desired =
+            crate::antigravity::desired_from_access_token(&token, config).expect("desired");
+
+        let mut schema = crate::schema::Schema::load("honr.yaml").unwrap_or_default();
+        crate::db::apply_database_url_override(&mut schema.board.database);
+        let url = schema.board.database.parsed().expect("database url");
+        let store = Arc::new(
+            DurableBoardStore::connect(url.as_str())
+                .await
+                .expect("open board db"),
+        );
+        let board: SharedBoard = Arc::new(
+            Board::load_with_store(schema, std::path::PathBuf::from("honr.json"), store)
+                .await
+                .expect("load board"),
+        );
+
+        let os = board.openshell_client();
+        crate::antigravity::ensure_provider_type_imported(&os)
+            .await
+            .expect("import provider type");
+        let stored = board.upsert_openshell_provider(desired);
+        apply_desired_to_gateway(&board, &stored)
+            .await
+            .expect("gateway apply");
+        let _ = crate::antigravity::attach_to_running_cockpit(&board).await;
+        board.flush();
+        eprintln!("upserted board+gateway provider antigravity");
     }
 }

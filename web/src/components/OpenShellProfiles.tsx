@@ -101,11 +101,12 @@ export function SandboxesPanelView({
     >
       <section aria-labelledby="openshell-profiles-title" data-testid="sandboxes-panel">
         <div className="openshell-band-head">
-          <h3 id="openshell-profiles-title">Profiles</h3>
+          <h3 id="openshell-profiles-title">Sandbox specs</h3>
           <p className="dim">
             Create-specs (image, policy, resources, engine) and which providers
-            attach when a sandbox is created from this profile. Providers are
-            defined under the Providers tab; attach them here.
+            attach when a sandbox is created from this spec. Providers are
+            defined under the Providers tab (each has a provider type); attach
+            them here.
           </p>
         </div>
 
@@ -115,7 +116,7 @@ export function SandboxesPanelView({
           <div className="openshell-profile-rail">
             {profiles.length === 0 ? (
               <div className="settings-placeholder" data-testid="sandboxes-empty">
-                <p>No profiles yet.</p>
+                <p>No sandbox specs yet.</p>
                 <p className="dim">Create one, or wait for the catalog to seed.</p>
               </div>
             ) : (
@@ -241,6 +242,7 @@ export function SandboxesPanelView({
                     <option value="cursor">Cursor Agent (cursor)</option>
                     <option value="agy">Antigravity CLI (agy)</option>
                     <option value="claude">Claude Code (Anthropic)</option>
+                    <option value="opencode">OpenCode (opencode)</option>
                   </select>
                 </label>
 
@@ -499,7 +501,7 @@ export function SandboxesPanel() {
       >
         <section aria-labelledby="openshell-profiles-title" data-testid="sandboxes-panel">
           <div className="openshell-band-head">
-            <h3 id="openshell-profiles-title">Profiles</h3>
+            <h3 id="openshell-profiles-title">Sandbox specs</h3>
             <p className="dim">loading…</p>
           </div>
         </section>
@@ -592,7 +594,7 @@ export function ProjectSandboxPicker({
   return (
     <div className="project-sandbox-picker" data-testid="project-sandbox-picker">
       <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
-        Sandbox profile
+        Sandbox spec
       </label>
       <p className="dim" style={{ marginBottom: 4, fontSize: 12 }}>
         Override for this Project. Unset uses the global default ({defaultLabel}

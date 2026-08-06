@@ -75,7 +75,7 @@ docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 
 From the repo root, not `sandbox/`: `Cargo.lock` and `web/package-lock.json`
 must be in context. Other product repos may use a different image via
-Settings → OpenShell → Profiles.
+Settings → OpenShell → Sandbox specs.
 
 Then flip `execution.agents.enabled: true` in `honr.yaml` and **restart** -
 config is read once at startup; there is no hot reload and no runtime toggle.
@@ -114,11 +114,35 @@ as a textarea). That is the source of truth. At create, the supervisor writes a
 temp file for OpenShell's `--policy` flag. `execution.agents.policy: embedded`
 only seeds an empty catalog — there is no host `sandbox/policy.yaml` to edit.
 
-**Engine** is a field on the sandbox profile (Settings → OpenShell → Profiles).
-When a profile omits it, claim/run falls back to Settings → Agent runtime
+**Engine** is a field on the sandbox spec (Settings → OpenShell → Sandbox specs).
+When a spec omits it, claim/run falls back to Settings → Agent runtime
 `engine`. Per-card engine overrides are ignored.
 
-Profiles are managed under Settings → OpenShell → Profiles (REST:
+Registered engines (explicit registry in `src/engine.rs` — unknown ids fail
+loud, no silent Claude fallthrough):
+
+| Id | Binary / launch | Resume |
+|---|---|---|
+| `cursor` | `agent … --output-format stream-json` | `--resume` |
+| `agy` | `agy … --output-format stream-json` | `--conversation` |
+| `claude` | `claude --bare -p … --output-format stream-json` | (none) |
+| `opencode` | `opencode run --format json --auto` | `--session` |
+
+Claude and OpenCode use OpenShell `inference.local` (`ANTHROPIC_BASE_URL`);
+configure a workspace Vertex route with `openshell inference set` (see
+[`docs/sandbox.md`](sandbox.md)). OpenCode is baked into `honr-sandbox`
+(`/usr/local/bin/opencode`) with models.dev / opencode.ai egress in the seed +
+cockpit policies. Do not bake API keys into the image.
+
+**agy** uses OpenShell provider type `antigravity` (shipped YAML under
+`sandbox/openshell/antigravity.yaml`). Sync imports the type, seals the host
+access token into Board provider `antigravity`, and attaches it so the seat
+only sees `ANTIGRAVITY_ACCESS_TOKEN=openshell:resolve:…`. Pre-start / cockpit
+attach write that placeholder into
+`/sandbox/.gemini/antigravity-cli/antigravity-oauth-token` — never a host
+OAuth file. Details: [`docs/sandbox.md`](sandbox.md#antigravity-agy).
+
+Sandbox specs are managed under Settings → OpenShell → Sandbox specs (REST:
 `/api/sandbox-profiles`). Concurrency, timeouts, and the fallback engine live
 under Agent runtime.
 

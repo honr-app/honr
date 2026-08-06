@@ -1155,6 +1155,7 @@ dependencies = [
  "jsonwebtoken",
  "openshell-core",
  "openshell-policy",
+ "openshell-providers",
  "parking_lot",
  "prost",
  "prost-types",
@@ -1911,6 +1912,21 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yml",
+]
+
+[[package]]
+name = "openshell-providers"
+version = "0.0.0"
+source = "git+https://github.com/NVIDIA/OpenShell#832841295992f0112f43f27de5d68213376ff3cb"
+dependencies = [
+ "glob",
+ "openshell-core",
+ "openshell-policy",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "thiserror",
+ "url",
 ]
 
 [[package]]
@@ -4007,7 +4023,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

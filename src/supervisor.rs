@@ -34,13 +34,6 @@ const WORKDIR: &str = "/sandbox/repo";
 /// does not exist in the OpenShell image and the sandbox user cannot `mkdir` it
 /// at `/` (Permission denied). Never put verdicts under `{WORKDIR}/.honr`.
 const VERDICT_DIR: &str = "/sandbox/.honr";
-const SHIM_LOCAL: &str = "sandbox/metadata-shim.py";
-/// `sandbox upload` takes a destination **directory**, not a destination file:
-/// uploading to `/tmp/metadata-shim.py` creates a *directory* of that name with
-/// the file inside it, and python then reports
-/// `can't find '__main__' module in '/tmp/metadata-shim.py'`.
-const SHIM_DEST_DIR: &str = "/tmp";
-const SHIM_REMOTE: &str = "/tmp/metadata-shim.py";
 
 /// The agent's output, its process group, and its exit code — in `/tmp` rather
 /// than the checkout, so the agent's own `git clean` cannot take the record of
@@ -782,12 +775,18 @@ fn sandbox_spec_for_card(
     resolved: &crate::model::ResolvedSandboxCreate,
     attach_providers: &[String],
 ) -> SandboxSpec {
+    let engine = resolved
+        .engine
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
     SandboxSpec {
         name: name.to_string(),
         from: resolved.image.clone(),
         providers: attach_providers.to_vec(),
         policy: Some(resolved.policy.clone()),
-        env: agent_env(),
+        env: agent_env(engine),
         labels: vec![(LABEL_ITEM.to_string(), id.to_string())],
         cpu: resolved.cpu.clone(),
         memory: resolved.memory.clone(),
@@ -905,66 +904,6 @@ async fn wait_until_sandbox_ready(os: &OpenShell, name: &str) -> anyhow::Result<
     }
 }
 
-async fn ensure_shim_up(os: &OpenShell, name: &str, short: Duration) -> anyhow::Result<()> {
-    // Upload/exec right after create occasionally hits a dead relay; retry.
-    let mut last = String::new();
-    for attempt in 1..=5 {
-        match os.upload(name, SHIM_LOCAL, SHIM_DEST_DIR).await {
-            Ok(()) => {
-                last.clear();
-                break;
-            }
-            Err(e) => {
-                last = e.to_string();
-                if !is_infrastructure(&last) || attempt == 5 {
-                    return Err(e.into());
-                }
-                tracing::warn!("#{attempt}/5 upload shim to {name} failed (retrying): {last}");
-                tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
-            }
-        }
-    }
-    if !last.is_empty() {
-        anyhow::bail!("upload shim to {name}: {last}");
-    }
-
-    let script = format!(
-        r#"set -e
-if curl -sf -H 'Metadata-Flavor: Google' http://127.0.0.1:8127/ >/dev/null 2>&1; then
-  exit 0
-fi
-nohup python3 {SHIM_REMOTE} >/tmp/shim.log 2>&1 &
-for i in $(seq 1 40); do
-  if curl -sf -H 'Metadata-Flavor: Google' http://127.0.0.1:8127/ >/dev/null; then
-    echo shim-up; exit 0
-  fi
-  sleep 0.25
-done
-echo shim-down >&2; cat /tmp/shim.log >&2; exit 1"#
-    );
-    let mut last_exec = String::new();
-    for attempt in 1..=5 {
-        match os.exec(name, &script, short).await {
-            Ok(up) if up.ok() => return Ok(()),
-            Ok(up) => {
-                last_exec = outerr(&up);
-                if !is_infrastructure(&last_exec) {
-                    anyhow::bail!("metadata shim never came up: {last_exec}");
-                }
-            }
-            Err(e) => {
-                last_exec = e.to_string();
-                if !is_infrastructure(&last_exec) {
-                    return Err(e.into());
-                }
-            }
-        }
-        tracing::warn!("#{attempt}/5 start shim on {name} failed (retrying): {last_exec}");
-        tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
-    }
-    anyhow::bail!("metadata shim never came up: {last_exec}")
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_inside(
     board: &SharedBoard,
@@ -1009,9 +948,6 @@ async fn run_inside(
         with_board_cancel(board, id, wait_until_sandbox_ready(os, name)).await?;
         beat(0.01)?;
 
-        with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
-        beat(0.02)?;
-
         let _ =
             with_board_cancel(board, id, ensure_report_schema_in_sandbox(os, name, short)).await;
 
@@ -1026,8 +962,6 @@ async fn run_inside(
         BranchState::Fresh
     } else {
         beat(0.01)?;
-        with_board_cancel(board, id, ensure_shim_up(os, name, short)).await?;
-        beat(0.02)?;
 
         let _ =
             with_board_cancel(board, id, ensure_report_schema_in_sandbox(os, name, short)).await;
@@ -1085,7 +1019,7 @@ async fn run_inside(
         );
     }
     if crate::engine::pre_start_auth(engine)? == crate::engine::PreStartAuth::Agy {
-        with_board_cancel(board, id, setup_agy_auth(os, name)).await?;
+        with_board_cancel(board, id, setup_agy_auth(os, name, board)).await?;
     }
     let script = start_script(
         cfg,
@@ -1895,12 +1829,13 @@ fn start_script(
     let conv_export = conversation_id
         .map(|c| format!("export HONR_CONVERSATION={}\n", shell_quote(c)))
         .unwrap_or_default();
+    let inference_exports = crate::engine::anthropic_inference_exports(engine);
     Ok(format!(
         r#"set -e
 rm -f {AGENT_PID} {AGENT_STATUS}
 : > {AGENT_LOG}
 export HONR_BRIEFING={brief}
-{conv_export}setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} {cmd} >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
+{inference_exports}{conv_export}setsid nohup bash -c 'echo $$ > {AGENT_PID}; cd {WORKDIR} && timeout --foreground {secs} {cmd} >> {AGENT_LOG} 2>&1; echo $? > {AGENT_STATUS}' </dev/null >/dev/null 2>&1 &
 for i in $(seq 1 40); do
   if [ -s {AGENT_PID} ]; then exit 0; fi
   sleep 0.25
@@ -1968,38 +1903,123 @@ pub(crate) async fn stop_agent(os: &OpenShell, name: &str) {
     let _ = os.exec(name, &script, Duration::from_secs(30)).await;
 }
 
-/// Minimal antigravity-cli settings for `agy` in the sandbox.
-/// GCP project/location used to live in honr Vertex config; that path is gone
-/// until OpenShell configuration is managed entirely in honr.
-pub(crate) fn agy_auth_settings_json() -> String {
-    r#"{"enableTelemetry":false}"#.into()
-}
-
-pub(crate) async fn setup_agy_auth(os: &OpenShell, name: &str) -> anyhow::Result<()> {
-    let settings = agy_auth_settings_json();
+/// Write agy token file + settings — never upload a host OAuth/settings file.
+///
+/// Requires `ANTIGRAVITY_ACCESS_TOKEN` (OpenShell placeholder from the attached
+/// `antigravity` provider). The file stores that placeholder only; the gateway
+/// resolves Bearer on Cloud Code endpoints declared by the provider type.
+/// `gcp.project` / `location` come from Board provider config
+/// (`ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION`) — set via API/UI.
+pub(crate) async fn setup_agy_auth(
+    os: &OpenShell,
+    name: &str,
+    board: &crate::store::SharedBoard,
+) -> anyhow::Result<()> {
+    let (project, location) = match crate::antigravity::gcp_from_board(board) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(sandbox = %name, error = %e, "agy auth: Board config incomplete");
+            // Still write the token file so login shape is ready once config exists.
+            let token_only = r#"set -e
+TOKEN="${ANTIGRAVITY_ACCESS_TOKEN:-}"
+if [ -z "$TOKEN" ]; then
+  echo 'agy auth: ANTIGRAVITY_ACCESS_TOKEN missing (antigravity provider not attached)' >&2
+  exit 0
+fi
+mkdir -p /sandbox/.gemini/antigravity-cli
+python3 - <<'PY'
+import json, os
+cli = "/sandbox/.gemini/antigravity-cli"
+token = os.environ["ANTIGRAVITY_ACCESS_TOKEN"]
+with open(f"{cli}/antigravity-oauth-token", "w", encoding="utf-8") as f:
+    json.dump(
+        {
+            "auth_method": "gcp",
+            "token": {
+                "access_token": token,
+                "token_type": "Bearer",
+                "expiry": "2099-01-01T00:00:00Z",
+            },
+        },
+        f,
+    )
+os.chmod(f"{cli}/antigravity-oauth-token", 0o600)
+PY
+"#;
+            let out = os.exec(name, token_only, Duration::from_secs(20)).await?;
+            if !out.ok() {
+                anyhow::bail!(
+                    "agy auth inject failed (exit {}): {}",
+                    out.code,
+                    out.stderr.trim()
+                );
+            }
+            return Ok(());
+        }
+    };
+    let project_q = shell_quote(&project);
+    let location_q = shell_quote(&location);
     let script = format!(
         r#"set -e
+TOKEN="${{ANTIGRAVITY_ACCESS_TOKEN:-}}"
+if [ -z "$TOKEN" ]; then
+  echo 'agy auth: ANTIGRAVITY_ACCESS_TOKEN missing (antigravity provider not attached)' >&2
+  exit 0
+fi
+export HONR_AGY_PROJECT={project_q}
+export HONR_AGY_LOCATION={location_q}
 mkdir -p /sandbox/.gemini/antigravity-cli
-echo '{settings}' > /sandbox/.gemini/antigravity-cli/settings.json
+python3 - <<'PY'
+import json, os
+cli = "/sandbox/.gemini/antigravity-cli"
+token = os.environ["ANTIGRAVITY_ACCESS_TOKEN"]
+project = os.environ["HONR_AGY_PROJECT"]
+location = os.environ["HONR_AGY_LOCATION"]
+# Nested shape matches Antigravity CLI oauth file — flat access_token is ignored.
+with open(f"{{cli}}/antigravity-oauth-token", "w", encoding="utf-8") as f:
+    json.dump(
+        {{
+            "auth_method": "gcp",
+            "token": {{
+                "access_token": token,
+                "token_type": "Bearer",
+                "expiry": "2099-01-01T00:00:00Z",
+            }},
+        }},
+        f,
+    )
+os.chmod(f"{{cli}}/antigravity-oauth-token", 0o600)
+with open(f"{{cli}}/settings.json", "w", encoding="utf-8") as f:
+    json.dump(
+        {{
+            "enableTelemetry": False,
+            "allowNonWorkspaceAccess": True,
+            "gcp": {{"project": project, "location": location}},
+        }},
+        f,
+    )
+PY
 "#
     );
-    let _ = os.exec(name, &script, Duration::from_secs(10)).await;
-    let home = std::env::var("HOME").unwrap_or_default();
-    let host_token = format!("{home}/.gemini/antigravity-cli/antigravity-oauth-token");
-    if std::path::Path::new(&host_token).exists() {
-        let _ = os
-            .upload(
-                name,
-                &host_token,
-                "/sandbox/.gemini/antigravity-cli/antigravity-oauth-token",
-            )
-            .await;
+    let out = os.exec(name, &script, Duration::from_secs(20)).await?;
+    if !out.ok() {
+        anyhow::bail!(
+            "agy auth inject failed (exit {}): {}",
+            out.code,
+            out.stderr.trim()
+        );
+    }
+    if out.stderr.contains("ANTIGRAVITY_ACCESS_TOKEN missing") {
+        tracing::warn!(
+            sandbox = %name,
+            "agy auth: provider placeholder missing; attach antigravity and re-sync"
+        );
     }
     Ok(())
 }
 
-fn agent_env() -> Vec<(String, String)> {
-    vec![
+fn agent_env(engine: &str) -> Vec<(String, String)> {
+    let mut env = vec![
         ("DISABLE_TELEMETRY".into(), "1".into()),
         ("DISABLE_ERROR_REPORTING".into(), "1".into()),
         ("DISABLE_AUTOUPDATER".into(), "1".into()),
@@ -2021,7 +2041,9 @@ fn agent_env() -> Vec<(String, String)> {
             "NODE_COMPILE_CACHE".into(),
             "/tmp/cursor-compile-cache".into(),
         ),
-    ]
+    ];
+    env.extend(crate::engine::anthropic_inference_env(engine));
+    env
 }
 
 /// A credential helper that echoes the injected token. The value is OpenShell's
@@ -2789,8 +2811,9 @@ fn sandbox_spec_for_cockpit(
     name: &str,
     resolved: &crate::model::ResolvedSandboxCreate,
     attach_providers: &[String],
+    engine: &str,
 ) -> SandboxSpec {
-    let mut env = agent_env();
+    let mut env = agent_env(engine);
     // Cockpit policy allow-lists host.docker.internal:8080 for MCP.
     env.push((
         "HONR_MCP_URL".into(),
@@ -2808,22 +2831,8 @@ fn sandbox_spec_for_cockpit(
     }
 }
 
-fn cockpit_engine(board: &SharedBoard, resolved: &crate::model::ResolvedSandboxCreate) -> String {
-    if let Some(e) = resolved
-        .engine
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return e.to_string();
-    }
-    let fallback = board.effective_agents().engine;
-    let t = fallback.trim();
-    if t.is_empty() {
-        "cursor".into()
-    } else {
-        t.to_string()
-    }
+fn cockpit_engine(board: &SharedBoard, _resolved: &crate::model::ResolvedSandboxCreate) -> String {
+    board.resolve_cockpit_engine()
 }
 
 fn ensure_cockpit_running(board: &SharedBoard) -> anyhow::Result<()> {
@@ -2929,7 +2938,7 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<()> {
         }
     };
 
-    let spec = sandbox_spec_for_cockpit(&name, &resolved, &attach);
+    let spec = sandbox_spec_for_cockpit(&name, &resolved, &attach, &engine);
     let result = run_cockpit_inside(&board, &os, &agents, &name, &spec, &engine, is_reused).await;
     finalize_cockpit(&os, &board, &name, &result).await;
     result
@@ -2954,14 +2963,11 @@ async fn run_cockpit_inside(
         .await;
         with_cockpit_cancel(board, async { os.create(spec).await.map_err(Into::into) }).await?;
         with_cockpit_cancel(board, wait_until_sandbox_ready(os, name)).await?;
-        with_cockpit_cancel(board, ensure_shim_up(os, name, short)).await?;
         let _ = with_cockpit_cancel(
             board,
             exec_with_infra_retry(os, name, &empty_workdir_script(), short, "cockpit workdir"),
         )
         .await?;
-    } else {
-        with_cockpit_cancel(board, ensure_shim_up(os, name, short)).await?;
     }
 
     // Inject MCP Bearer + mcp.json so Cockpit's interactive `agent` (and any
@@ -3827,6 +3833,13 @@ mod tests {
             .as_deref(),
             Some("c6b62c6f-7ead-4fd6-9922-e952131177ff")
         );
+        assert_eq!(
+            parse_conversation_id(
+                r#"{"type":"step_start","sessionID":"ses_494719016ffe85dkDMj0FPRbHK","timestamp":1}"#
+            )
+            .as_deref(),
+            Some("ses_494719016ffe85dkDMj0FPRbHK")
+        );
         assert_eq!(parse_conversation_id(r#"{"type":"assistant"}"#), None);
         assert_eq!(parse_conversation_id("not json"), None);
     }
@@ -3860,13 +3873,39 @@ mod tests {
 
     #[test]
     fn start_script_rejects_unknown_engine() {
-        let err = start_script(&repo_cfg(), "x", "opencode", None).unwrap_err();
+        let err = start_script(&repo_cfg(), "x", "nope", None).unwrap_err();
         assert!(
             err.to_string().contains("unknown agent engine"),
             "{err}"
         );
         // Must not silently emit a claude command.
         assert!(!err.to_string().contains("claude -p"), "{err}");
+    }
+
+    #[test]
+    fn opencode_engine_uses_run_json_auto_and_session() {
+        let s = start_script(&repo_cfg(), "do the thing", "opencode", None).unwrap();
+        assert!(s.contains("timeout --foreground"), "{s}");
+        assert!(
+            s.contains("opencode run --format json --auto \"$HONR_BRIEFING\""),
+            "{s}"
+        );
+        assert!(!s.contains("--session"), "{s}");
+        let resume = start_script(
+            &repo_cfg(),
+            "continue",
+            "opencode",
+            Some("ses_494719016ffe85dkDMj0FPRbHK"),
+        )
+        .unwrap();
+        assert!(
+            resume.contains("--session \"$HONR_CONVERSATION\""),
+            "{resume}"
+        );
+        assert!(
+            resume.contains("HONR_CONVERSATION='ses_494719016ffe85dkDMj0FPRbHK'"),
+            "{resume}"
+        );
     }
 
     #[test]
@@ -3972,7 +4011,7 @@ mod tests {
             "supervisor must not upload beads DB or set BEADS_SANDBOX_DIR"
         );
 
-        let env = agent_env();
+        let env = agent_env("claude");
         assert!(
             env.iter().all(|(k, _)| k != "BEADS_DIR"),
             "agent_env must not export BEADS_DIR: {env:?}"
@@ -3982,6 +4021,36 @@ mod tests {
             !script.contains("BEADS_DIR"),
             "start script must not export BEADS_DIR: {script}"
         );
+    }
+
+    #[test]
+    fn anthropic_engines_point_at_inference_local() {
+        let claude_env = agent_env("claude");
+        assert!(
+            claude_env.iter().any(|(k, v)| {
+                k == "ANTHROPIC_BASE_URL" && v == "https://inference.local"
+            }),
+            "{claude_env:?}"
+        );
+        let oc_env = agent_env("opencode");
+        assert!(
+            oc_env.iter().any(|(k, v)| {
+                k == "ANTHROPIC_BASE_URL" && v == "https://inference.local/v1"
+            }),
+            "{oc_env:?}"
+        );
+        assert!(
+            agent_env("cursor")
+                .iter()
+                .all(|(k, _)| k != "ANTHROPIC_BASE_URL"),
+            "cursor must not force Anthropic base URL"
+        );
+        let script = start_script(&repo_cfg(), "briefing", "opencode", None).unwrap();
+        assert!(
+            script.contains("ANTHROPIC_BASE_URL=https://inference.local/v1"),
+            "{script}"
+        );
+        assert!(script.contains("unset CLAUDE_CODE_USE_VERTEX"), "{script}");
     }
 
     /// Following is a *reader*. It can start part-way through, which is what
@@ -4138,7 +4207,7 @@ mod tests {
             profile_id: Some("cockpit".into()),
             providers: Vec::new(),
         };
-        let spec = sandbox_spec_for_cockpit("honr-cockpit", &resolved, &[]);
+        let spec = sandbox_spec_for_cockpit("honr-cockpit", &resolved, &[], "agy");
         assert_eq!(spec.name, "honr-cockpit");
         assert_eq!(spec.cpu.as_deref(), Some("1"));
         assert_eq!(spec.memory.as_deref(), Some("2Gi"));
@@ -5486,11 +5555,92 @@ mod tests {
         assert_eq!(over_spec.memory.as_deref(), Some("16Gi"));
     }
 
-    #[test]
-    fn agy_auth_settings_json_is_minimal_without_vertex() {
-        let j = agy_auth_settings_json();
-        assert!(j.contains(r#""enableTelemetry":false"#), "{j}");
-        assert!(!j.contains("gcp"), "vertex gcp block removed: {j}");
+    #[tokio::test]
+    async fn setup_agy_auth_writes_placeholder_token_via_exec_not_host_upload() {
+        use std::sync::Arc;
+        let path = std::env::temp_dir().join(format!(
+            "honr-agy-auth-board-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let board = Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let mut config = std::collections::BTreeMap::new();
+        config.insert(
+            crate::antigravity::CONFIG_PROJECT.into(),
+            "test-agy-project".into(),
+        );
+        config.insert(
+            crate::antigravity::CONFIG_LOCATION.into(),
+            "global".into(),
+        );
+        board.upsert_openshell_provider(
+            crate::model::OpenShellProviderDesired {
+                name: "antigravity".into(),
+                provider_type: "antigravity".into(),
+                config,
+                credentials_sealed: None,
+                credential_keys: vec!["ANTIGRAVITY_ACCESS_TOKEN".into()],
+                refresh: None,
+            }
+            .normalized(),
+        );
+
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::<Vec<String>>::new()));
+        let seen_c = seen.clone();
+        let os = OpenShell::mock(
+            move |args| {
+                seen_c.lock().push(args.to_vec());
+                Output {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }
+            },
+            Duration::from_secs(5),
+        );
+        setup_agy_auth(&os, "honr-cockpit", &board)
+            .await
+            .expect("setup");
+
+        let calls = seen.lock().clone();
+        assert!(
+            calls.iter().all(|a| !a.iter().any(|s| s == "upload")),
+            "must not upload host oauth file: {calls:?}"
+        );
+        let exec = calls
+            .iter()
+            .find(|a| a.iter().any(|s| s == "exec"))
+            .expect("exec call");
+        let script = exec
+            .iter()
+            .find(|s| s.contains("ANTIGRAVITY_ACCESS_TOKEN"))
+            .expect("inject script");
+        assert!(
+            script.contains("antigravity-oauth-token"),
+            "token file path: {script}"
+        );
+        assert!(
+            script.contains("auth_method") && script.contains("access_token"),
+            "nested token shape: {script}"
+        );
+        assert!(
+            script.contains("test-agy-project"),
+            "must use Board antigravity config project: {script}"
+        );
+        assert!(
+            !script.contains("GCP_PROJECT_ID") && !script.contains("GOOGLE_CLOUD_PROJECT"),
+            "must not derive project from Vertex seat env: {script}"
+        );
+        assert!(
+            script.contains("enableTelemetry"),
+            "settings.json: {script}"
+        );
     }
 
     #[test]

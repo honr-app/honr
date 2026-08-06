@@ -103,7 +103,9 @@ export function Card({ item, column, now, agentTimeout, defaultEngine, defaultMo
                   ? "🤖 claude"
                   : engine === "cursor"
                     ? "◈ cursor"
-                    : `◍ ${engine || model || "?"}`}
+                    : engine === "opencode"
+                      ? "◐ opencode"
+                      : `◍ ${engine || model || "?"}`}
             </span>
             <span className={endingSoon ? "countdown ending-soon" : "countdown"}>
               {remaining !== null ? formatCountdown(remaining) : "—"}

@@ -3,10 +3,10 @@
 The durable control-plane cockpit: a privileged OpenShell sandbox with narrow
 egress to host honr MCP (operator tools only). Create knobs (image, policy,
 CPU, memory, engine) come from the Board **Cockpit sandbox profile** — pick it
-in Settings → OpenShell → Profiles (`POST /api/sandbox-profiles/{id}/cockpit`). Seeded
-catalog includes a `cockpit` profile and sets it as Cockpit’s preference; you can
-point Cockpit at any other profile. The live seat name stays
-`{branch_prefix}-cockpit` (label `honr.cockpit`), independent of which profile built it.
+in Settings → OpenShell → Sandbox specs (`POST /api/sandbox-profiles/{id}/cockpit`). Seeded
+catalog includes a `cockpit` spec and sets it as Cockpit’s preference; you can
+point Cockpit at any other spec. The live seat name stays
+`{branch_prefix}-cockpit` (label `honr.cockpit`), independent of which spec built it.
 
 Attach faces (Cockpit, host CLI connect) sit over the Board **cockpit session**
 singleton — they do not own lifecycle. Mutations go through `Board` in
@@ -87,16 +87,21 @@ Board cockpit session, then use the xterm.js surface over authenticated WebSocke
 **`/api/cockpit-attach`**.
 
 That endpoint opens OpenShell **`ExecSandboxInteractive`** into the
-Board-named environment and runs interactive Cursor **`agent`** (`--trust
+Board-named environment and runs the **Cockpit sandbox-spec engine** (Settings →
+OpenShell → Sandbox specs). Cursor uses interactive **`agent`** (`--trust
 --approve-mcps --sandbox disabled`, no `--force` — tool calls prompt for
-approval). If the session has a `conversation_id`, attach passes **`--resume
-<id>`**; otherwise it runs `agent create-chat`, stores the id on the Board,
-then resumes that chat. Stdin/stdout/resize are relayed over the WebSocket
-(no local SSH).
+approval) with `agent create-chat` / `--resume` when needed. OpenCode /
+Claude / agy launch their own TUI (Anthropic-shaped engines get
+`ANTHROPIC_BASE_URL=https://inference.local…`). Auth for model calls is
+OpenShell providers / `inference.local` — not host secrets copied into the
+seat. For **agy**, the attached `antigravity` provider injects only an
+`openshell:resolve:…` placeholder; attach writes that into the seat token
+file (see [Sandbox → Antigravity / agy](sandbox.md#antigravity-agy)).
+Stdin/stdout/resize are relayed over the WebSocket (no local SSH).
 
 | Face | Mechanism |
 |---|---|
-| Cockpit terminal | `GET` WebSocket `/api/cockpit-attach` → interactive `agent` |
+| Cockpit terminal | `GET` WebSocket `/api/cockpit-attach` → profile engine TUI |
 | Host TTY (manual) | `openshell sandbox connect <env>` (CreateSshSession + ssh) |
 
 Disconnecting the WebSocket does **not** stop the Board session — sandbox +
@@ -117,7 +122,10 @@ Instead, honr **mints** short-lived MCP JWTs for the static public client
 | Path | Contents |
 |---|---|
 | `/sandbox/.honr/mcp/token.json` | access + refresh (mode 0600) |
-| `/sandbox/.honr/mcp/mcp.json` | HTTP MCP entry with `Authorization: Bearer …` |
+| `/sandbox/.honr/mcp/mcp.json` | HTTP MCP entry with `Authorization: Bearer …` (Cursor copies) |
+| `/sandbox/.honr/mcp/claude_mcp.json` | same shape; Claude `--bare` loads via `--mcp-config` |
+| `/sandbox/.gemini/config/mcp_config.json` | same shape for Antigravity (`agy`) global MCP discovery |
+| `/sandbox/.config/opencode/opencode.jsonc` | OpenCode `mcp.honr` (`type: remote` + Bearer headers) |
 | `/sandbox/.honr/mcp/env.sh` | exports `HONR_MCP_URL` + `HONR_MCP_ACCESS_TOKEN` |
 
 Triggers:

@@ -45,7 +45,7 @@ export function OpenShellProvidersPanelView({
 }) {
   const typeOptions = profiles.length
     ? profiles.map((p) => p.id)
-    : ["github", "google-vertex-ai", "cursor", "claude"];
+    : ["github", "google-vertex-ai", "cursor", "claude", "antigravity"];
   // Prefer a non-App type for "Add" — github/GH_TOKEN is owned by GitHub App.
   const defaultAddType =
     typeOptions.find((t) => t !== "github") ?? typeOptions[0] ?? "google-vertex-ai";
@@ -74,11 +74,12 @@ export function OpenShellProvidersPanelView({
         <h3 id="openshell-providers-title">Providers</h3>
         <p className="dim">
           Desired provider catalog on the board (credentials sealed). Save
-          applies to the gateway when reachable; Sync all recreates after a
-          wipe. Which providers attach on create is chosen per{" "}
-          <strong>Profile</strong>, not here. Provider <code>github</code> is
-          owned by Settings → GitHub App (<code>GH_TOKEN</code>); do not manage
-          those credentials by hand.
+          applies to the gateway when reachable; Sync all imports missing
+          provider types, applies credentials, and attaches listed providers to
+          a running cockpit seat. Which providers attach on create is chosen per{" "}
+          <strong>Sandbox spec</strong>, not here. Provider <code>github</code>{" "}
+          is owned by Settings → GitHub App (<code>GH_TOKEN</code>); do not
+          manage those credentials by hand.
         </p>
       </div>
 
@@ -121,7 +122,7 @@ export function OpenShellProvidersPanelView({
 
       {providers.length === 0 && !draft ? (
         <p className="dim" data-testid="openshell-providers-empty">
-          No providers yet. Add one here, then attach it on a Profile for sandbox
+          No providers yet. Add one here, then attach it on a Sandbox spec for
           create.
         </p>
       ) : (
@@ -212,7 +213,7 @@ export function OpenShellProvidersPanelView({
             />
           </label>
           <label>
-            Type
+            Provider type
             <select
               className="search-input"
               value={draft.type}
@@ -292,6 +293,47 @@ export function OpenShellProvidersPanelView({
                     })
                   }
                   data-testid="openshell-provider-config-location"
+                />
+              </label>
+            </>
+          )}
+          {draft.type === "antigravity" && (
+            <>
+              <label>
+                ANTIGRAVITY_GCP_PROJECT
+                <input
+                  className="search-input"
+                  value={draft.config?.ANTIGRAVITY_GCP_PROJECT ?? ""}
+                  disabled={busy}
+                  onChange={(e) =>
+                    onDraftChange({
+                      ...draft,
+                      config: {
+                        ...(draft.config ?? {}),
+                        ANTIGRAVITY_GCP_PROJECT: e.target.value,
+                      },
+                    })
+                  }
+                  data-testid="openshell-provider-config-agy-project"
+                  placeholder="GCP project id"
+                />
+              </label>
+              <label>
+                ANTIGRAVITY_GCP_LOCATION
+                <input
+                  className="search-input"
+                  value={draft.config?.ANTIGRAVITY_GCP_LOCATION ?? "global"}
+                  disabled={busy}
+                  onChange={(e) =>
+                    onDraftChange({
+                      ...draft,
+                      config: {
+                        ...(draft.config ?? {}),
+                        ANTIGRAVITY_GCP_LOCATION: e.target.value,
+                      },
+                    })
+                  }
+                  data-testid="openshell-provider-config-agy-location"
                 />
               </label>
             </>

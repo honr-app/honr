@@ -205,7 +205,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub memory: Option<String>,
     /// Sandboxes are heavy and this is alpha software. Do not start at seven.
-    /// Primary agent CLI engine (`cursor`, `agy`, or `claude`).
+    /// Primary agent CLI engine (`cursor`, `agy`, `claude`, or `opencode`).
     #[serde(default = "d_engine")]
     pub engine: String,
     #[serde(default = "d_concurrent")]

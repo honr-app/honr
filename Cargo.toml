@@ -48,6 +48,7 @@ tar = "0.4.46"
 rustls = { version = "0.23.43", default-features = false, features = ["std", "logging", "tls12", "ring"] }
 openshell-core = { git = "https://github.com/NVIDIA/OpenShell", version = "0.0.0", default-features = false }
 openshell-policy = { git = "https://github.com/NVIDIA/OpenShell", version = "0.0.0" }
+openshell-providers = { git = "https://github.com/NVIDIA/OpenShell", version = "0.0.0" }
 argon2 = "0.5.3"
 hmac = "0.13.0"
 sha2 = "0.11.0"

@@ -592,6 +592,10 @@ impl Board {
             tracing::info!("seeded cockpit sandbox profile for control-plane seat");
             board.flush();
         }
+        if board.ensure_cockpit_antigravity_provider() {
+            tracing::info!("ensured cockpit sandbox spec attaches antigravity provider");
+            board.flush();
+        }
         if board.seed_workspace_binding_if_empty() {
             tracing::info!("seeded workspace binding from execution.agents.repo");
             board.flush();
@@ -647,6 +651,10 @@ impl Board {
         }
         if board.ensure_cockpit_sandbox_profile() {
             tracing::info!("seeded cockpit sandbox profile for control-plane seat");
+            board.flush();
+        }
+        if board.ensure_cockpit_antigravity_provider() {
+            tracing::info!("ensured cockpit sandbox spec attaches antigravity provider");
             board.flush();
         }
         if board.seed_workspace_binding_if_empty() {
@@ -1964,6 +1972,39 @@ impl Board {
         changed
     }
 
+    /// Append `antigravity` to the cockpit create-spec's `provider_names` when
+    /// missing. Covers boards seeded before Antigravity was a first-class
+    /// provider type — seed only fills an empty catalog.
+    pub fn ensure_cockpit_antigravity_provider(&self) -> bool {
+        use crate::model::{ANTIGRAVITY_PROVIDER, COCKPIT_SANDBOX_PROFILE_ID};
+        let mut s = self.state.write();
+        let mut ids = std::collections::BTreeSet::new();
+        ids.insert(COCKPIT_SANDBOX_PROFILE_ID.to_string());
+        if let Some(cid) = &s.cockpit_sandbox_profile_id {
+            ids.insert(cid.clone());
+        }
+        let mut changed = false;
+        for id in ids {
+            let Some(profile) = s.sandbox_profiles.get_mut(&id) else {
+                continue;
+            };
+            if profile
+                .provider_names
+                .iter()
+                .any(|n| n == ANTIGRAVITY_PROVIDER)
+            {
+                continue;
+            }
+            profile.provider_names.push(ANTIGRAVITY_PROVIDER.into());
+            changed = true;
+        }
+        drop(s);
+        if changed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        changed
+    }
+
     // ------------------------------------------------ workspace binding (board state)
 
     /// Seed Forge binding when unbound.
@@ -2728,6 +2769,26 @@ impl Board {
         ResolvedSandboxCreate::from_profile(&crate::model::cockpit_sandbox_profile_from_agents(
             &self.effective_agents(),
         ))
+    }
+
+    /// Engine for Cockpit attach / chat: profile engine, else Agent runtime.
+    pub fn resolve_cockpit_engine(&self) -> String {
+        let resolved = self.resolve_cockpit_sandbox_create();
+        if let Some(e) = resolved
+            .engine
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return e.to_string();
+        }
+        let fallback = self.effective_agents().engine;
+        let t = fallback.trim();
+        if t.is_empty() {
+            "cursor".into()
+        } else {
+            t.to_string()
+        }
     }
 
     /// Resolve create knobs for a card at sandbox create.
@@ -5276,6 +5337,26 @@ mod tests {
         let worker = b.get_sandbox_profile("default").expect("default");
         assert_eq!(resolved.cpu, worker.cpu);
         assert_eq!(resolved.image, worker.image);
+    }
+
+    #[test]
+    fn resolve_cockpit_engine_prefers_profile_over_runtime() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-resolve-cockpit-engine-{}",
+                std::process::id()
+            )),
+        );
+        assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
+        b.set_agent_runtime(crate::model::AgentRuntimeConfig {
+            engine: "cursor".into(),
+            ..Default::default()
+        });
+        let mut cockpit = b.get_sandbox_profile("cockpit").expect("cockpit");
+        cockpit.engine = Some("opencode".into());
+        b.upsert_sandbox_profile(cockpit).expect("save");
+        assert_eq!(b.resolve_cockpit_engine(), "opencode");
     }
 
     #[test]
@@ -8723,8 +8804,12 @@ mod tests {
         );
         assert_eq!(
             cockpit_profile.provider_names,
-            vec!["github".to_string()],
-            "cockpit seed attaches github for GH_TOKEN"
+            vec![
+                "github".to_string(),
+                "vertex".to_string(),
+                "antigravity".to_string()
+            ],
+            "cockpit seed attaches github + vertex + antigravity"
         );
         // Second seed is a no-op.
         assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
@@ -8772,6 +8857,21 @@ mod tests {
         assert!(!b.ensure_cockpit_sandbox_profile_from(&agents_for_seed()));
         assert_eq!(b.list_sandbox_profiles().len(), 2);
         assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
+        // Fresh seed already includes antigravity; strip it and ensure restores.
+        {
+            let mut p = b.get_sandbox_profile("cockpit").expect("cockpit");
+            p.provider_names
+                .retain(|n| n != crate::model::ANTIGRAVITY_PROVIDER);
+            b.upsert_sandbox_profile(p).expect("strip");
+        }
+        assert!(b.ensure_cockpit_antigravity_provider());
+        assert!(b
+            .get_sandbox_profile("cockpit")
+            .expect("cockpit")
+            .provider_names
+            .iter()
+            .any(|n| n == crate::model::ANTIGRAVITY_PROVIDER));
+        assert!(!b.ensure_cockpit_antigravity_provider());
     }
 
     fn agents_with_repo() -> AgentConfig {

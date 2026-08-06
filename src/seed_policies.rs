@@ -18,8 +18,8 @@ filesystem_policy:
   # pre-warmed registries baked by sandbox/Containerfile. Cargo and npm both
   # write to their caches during a build, so those two must be read_write —
   # without them a build fails on permissions, which surfaces as a hang.
-  # /opt/cursor-agent is the baked Cursor CLI (node + index.js); read-only.
-  read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust, /opt/cursor-agent]
+  # /opt/cursor-agent and /opt/opencode are baked CLIs; read-only.
+  read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust, /opt/cursor-agent, /opt/opencode]
   read_write: [/sandbox, /tmp, /dev, /opt/cargo, /opt/npm-cache]
 
 landlock:
@@ -41,6 +41,8 @@ network_policies:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/agy }
       - { path: /usr/bin/agy }
+      - { path: /usr/local/bin/opencode }
+      - { path: /opt/opencode/bin/opencode }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
 
@@ -60,6 +62,8 @@ network_policies:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/agy }
       - { path: /usr/bin/agy }
+      - { path: /usr/local/bin/opencode }
+      - { path: /opt/opencode/bin/opencode }
       - { path: /usr/bin/node }
       # rustup resolves `cargo` to the toolchain binary; git deps hit github.com
       # as that path, not the /usr/local/bin or /opt/cargo/bin wrapper.
@@ -100,6 +104,8 @@ network_policies:
       - { path: /usr/local/bin/cursor-agent }
       - { path: /opt/cursor-agent/versions/**/cursor-agent }
       - { path: /opt/cursor-agent/versions/**/node }
+      - { path: /usr/local/bin/opencode }
+      - { path: /opt/opencode/bin/opencode }
 
   # Cursor Agent CLI. Builtin OpenShell `cursor` profile only covers editor
   # bootstrap hosts; the CLI's agent loop also hits api5 / repoNN hosts.
@@ -130,6 +136,23 @@ network_policies:
       - { path: /usr/local/bin/cursor-agent }
       - { path: /opt/cursor-agent/versions/**/cursor-agent }
       - { path: /opt/cursor-agent/versions/**/node }
+      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/bash }
+      - { path: /bin/bash }
+
+  # OpenCode CLI — models catalog + product hosts. Provider inference hosts
+  # (Anthropic/OpenAI/…) come from attached OpenShell providers or Vertex above.
+  opencode:
+    name: opencode
+    endpoints:
+      - { host: models.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: opencode.ai, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: '*.opencode.ai', port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: api.opencode.ai, port: 443, protocol: rest, enforcement: enforce, access: full }
+    binaries:
+      - { path: /usr/local/bin/opencode }
+      - { path: /opt/opencode/bin/opencode }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
       - { path: /usr/bin/bash }

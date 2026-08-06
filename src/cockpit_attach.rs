@@ -6,14 +6,14 @@
 //! or stops the session. Host `openshell sandbox connect` remains a manual CLI
 //! path; honr does not shell out to launch editors.
 //!
-//! Attach drops into interactive Cursor `agent` (not a bare shell). When the
-//! Board session has a `conversation_id`, we pass `--resume` so the TTY
-//! continues that thread after the supervisor's headless scrape.
+//! Attach launches the **Cockpit sandbox-spec engine** (Settings → OpenShell →
+//! Sandbox specs), not a bare shell. Cursor still uses interactive `agent`
+//! with optional `--resume`; OpenCode / Claude / agy get their own TUI argv.
 
 use crate::model::CockpitSessionStatus;
 use crate::openshell::InteractiveEvent;
 use crate::store::SharedBoard;
-use crate::supervisor::{cockpit_briefing, shell_quote, stop_agent};
+use crate::supervisor::{cockpit_briefing, setup_agy_auth, shell_quote, stop_agent};
 use crate::ws::{read_frame, write_frame, WsFrame};
 
 use axum::extract::{Request, State as AxState};
@@ -79,29 +79,86 @@ fn ready_environment(board: &SharedBoard) -> Result<String, AttachError> {
         .ok_or_else(|| AttachError::conflict("cockpit session has no environment yet"))
 }
 
-/// Interactive Cursor Agent CLI argv for Cockpit attach.
+/// Whether a Board `conversation_id` can be resumed on this engine.
 ///
-/// Login shell so PATH finds `agent`; `exec` replaces the shell. No `--force`:
-/// Cockpit is a human-in-the-loop seat, so tool calls should prompt (unlike
-/// headless card workers). `--trust` / `--sandbox disabled` still apply —
-/// OpenShell already contains the process. `--approve-mcps` skips the MCP
-/// server approval prompt (injected `honr` is intentional for this seat).
-/// `--resume` continues a Board conversation. `initial_prompt` seeds a freshly
-/// minted chat (omit on reconnect).
+/// Cursor ids are UUID-shaped; OpenCode uses `ses_*`. Mixing them after a
+/// profile engine switch would hang or error — start fresh instead.
+pub(crate) fn conversation_usable(engine: &str, id: &str) -> bool {
+    let id = id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    match engine.trim() {
+        "cursor" => !id.starts_with("ses_"),
+        "opencode" => id.starts_with("ses_"),
+        "agy" => true,
+        "claude" => false,
+        _ => false,
+    }
+}
+
+/// Interactive agent argv for Cockpit attach (profile engine).
+///
+/// Login shell so PATH finds the binary; `exec` replaces the shell. Cursor
+/// keeps human-in-the-loop flags (no `--force`). Anthropic-shaped engines get
+/// `inference.local` exports from [`crate::engine::anthropic_inference_exports`].
 pub(crate) fn attach_agent_command(
+    engine: &str,
     conversation_id: Option<&str>,
     initial_prompt: Option<&str>,
 ) -> Vec<String> {
-    let mut agent = String::from("agent --trust --approve-mcps --sandbox disabled");
-    if let Some(cid) = conversation_id.map(str::trim).filter(|s| !s.is_empty()) {
-        agent.push_str(" --resume ");
-        agent.push_str(&shell_quote(cid));
-    }
-    if let Some(prompt) = initial_prompt.map(str::trim).filter(|s| !s.is_empty()) {
-        agent.push(' ');
-        agent.push_str(&shell_quote(prompt));
-    }
-    let script = format!("cd {WORKDIR} 2>/dev/null || cd /sandbox; exec {agent}");
+    let engine = engine.trim();
+    let cid = conversation_id
+        .map(str::trim)
+        .filter(|s| conversation_usable(engine, s));
+    let prompt = initial_prompt.map(str::trim).filter(|s| !s.is_empty());
+    let inference = crate::engine::anthropic_inference_exports(engine);
+
+    let agent = match engine {
+        "opencode" => {
+            let mut cmd = String::from("opencode");
+            if let Some(id) = cid {
+                // Interactive TUI: continue a prior session when we have one.
+                cmd.push_str(" --session ");
+                cmd.push_str(&shell_quote(id));
+            }
+            cmd
+        }
+        // `--bare` skips MCP auto-discovery; point at the injected seat config.
+        "claude" => format!(
+            "claude --bare --strict-mcp-config --mcp-config {}",
+            crate::cockpit_mcp::COCKPIT_CLAUDE_MCP_CONFIG
+        ),
+        "agy" => {
+            let mut cmd = String::from("agy --dangerously-skip-permissions");
+            if let Some(id) = cid {
+                cmd.push_str(" --conversation ");
+                cmd.push_str(&shell_quote(id));
+            }
+            if let Some(p) = prompt {
+                cmd.push_str(" -p ");
+                cmd.push_str(&shell_quote(p));
+            }
+            cmd
+        }
+        // cursor (default): human-in-the-loop Cursor Agent CLI.
+        _ => {
+            let mut cmd = String::from("agent --trust --approve-mcps --sandbox disabled");
+            if let Some(id) = cid {
+                cmd.push_str(" --resume ");
+                cmd.push_str(&shell_quote(id));
+            }
+            if let Some(p) = prompt {
+                cmd.push(' ');
+                cmd.push_str(&shell_quote(p));
+            }
+            cmd
+        }
+    };
+
+    let script = format!(
+        "{inference}cd {WORKDIR} 2>/dev/null || cd /sandbox; exec {agent}"
+    );
     vec!["bash".into(), "-lc".into(), script]
 }
 
@@ -160,13 +217,26 @@ exit 1
 }
 
 /// `(conversation_id, freshly_minted)`.
+///
+/// Cursor can mint via `agent create-chat`. Other engines either reuse a
+/// compatible Board id or start with none (TUI creates its own session).
 async fn ensure_conversation_id(
     board: &SharedBoard,
     os: &crate::openshell::OpenShell,
     environment: &str,
+    engine: &str,
 ) -> Option<(String, bool)> {
     if let Some(id) = session_conversation_id(board) {
-        return Some((id, false));
+        if conversation_usable(engine, &id) {
+            return Some((id, false));
+        }
+        // Engine switched (e.g. cursor → opencode): drop the stale id.
+        if let Err(e) = board.update_cockpit_session(None, Some(String::new())) {
+            tracing::warn!("cockpit-attach clear stale conversation_id: {e}");
+        }
+    }
+    if engine.trim() != "cursor" {
+        return None;
     }
     let out = match os
         .exec(environment, &create_chat_script(), Duration::from_secs(30))
@@ -200,7 +270,7 @@ struct ClientCtrl {
     rows: Option<u32>,
 }
 
-/// Authenticated WebSocket → interactive `agent` in the Board cockpit sandbox.
+/// Authenticated WebSocket → interactive profile engine in the Board cockpit sandbox.
 async fn cockpit_attach_ws(
     AxState(board): AxState<SharedBoard>,
     headers: HeaderMap,
@@ -260,13 +330,21 @@ where
     let (mut reader, mut writer) = tokio::io::split(stream);
     let os = board.openshell_client();
 
+    let engine = board.resolve_cockpit_engine();
+
+    if engine.trim() == "agy" {
+        if let Err(e) = setup_agy_auth(&os, &environment, &board).await {
+            tracing::warn!("cockpit-attach agy auth: {e}");
+        }
+    }
+
     // Free leftover detached / hung create-chat / prior interactive attach so
     // the new TTY is uncontested. `stop_agent` only knows the supervisor pidfile.
     stop_agent(&os, &environment).await;
     let _ = os
         .exec(
             &environment,
-            "pkill -f '/usr/local/bin/agent' 2>/dev/null || pkill -f 'cursor-agent' 2>/dev/null || true",
+            "pkill -f '/usr/local/bin/agent' 2>/dev/null || pkill -f 'cursor-agent' 2>/dev/null || pkill -f '/usr/local/bin/opencode' 2>/dev/null || pkill -f '/opt/opencode/bin/opencode' 2>/dev/null || pkill -f 'claude --bare' 2>/dev/null || pkill -f '/usr/local/bin/agy' 2>/dev/null || true",
             Duration::from_secs(10),
         )
         .await;
@@ -282,17 +360,19 @@ where
         }
     }
 
-    let ensured = ensure_conversation_id(&board, &os, &environment).await;
+    let ensured = ensure_conversation_id(&board, &os, &environment, &engine).await;
     let (conversation_id, fresh) = match &ensured {
         Some((id, fresh)) => (Some(id.as_str()), *fresh),
         None => (None, false),
     };
-    let briefing = if fresh {
+    // Cursor fresh chats get the briefing as the initial prompt; other engines
+    // open their TUI without a forced first message.
+    let briefing = if fresh && engine == "cursor" {
         Some(cockpit_briefing())
     } else {
         None
     };
-    let command = attach_agent_command(conversation_id, briefing.as_deref());
+    let command = attach_agent_command(&engine, conversation_id, briefing.as_deref());
 
     // Initial size; client sends resize ASAP after ready.
     let mut session = os
@@ -306,6 +386,7 @@ where
             json!({
                 "type": "ready",
                 "environment": environment,
+                "engine": engine,
                 "resumed": conversation_id.is_some() && !fresh,
                 "conversation_id": conversation_id,
             })
@@ -422,7 +503,7 @@ mod tests {
 
     #[test]
     fn attach_agent_command_cold_start() {
-        let cmd = attach_agent_command(None, Some("be the cockpit"));
+        let cmd = attach_agent_command("cursor", None, Some("be the cockpit"));
         assert_eq!(cmd[0], "bash");
         assert_eq!(cmd[1], "-lc");
         let script = &cmd[2];
@@ -441,7 +522,11 @@ mod tests {
 
     #[test]
     fn attach_agent_command_resumes_board_conversation() {
-        let cmd = attach_agent_command(Some("22096329-228f-47a1-a16f-cbde6da8fe5b"), None);
+        let cmd = attach_agent_command(
+            "cursor",
+            Some("22096329-228f-47a1-a16f-cbde6da8fe5b"),
+            None,
+        );
         let script = &cmd[2];
         assert!(
             script.contains("--resume '22096329-228f-47a1-a16f-cbde6da8fe5b'"),
@@ -460,7 +545,7 @@ mod tests {
 
     #[test]
     fn attach_agent_command_fresh_chat_seeds_briefing() {
-        let cmd = attach_agent_command(Some("new-chat-id"), Some("hello seat"));
+        let cmd = attach_agent_command("cursor", Some("new-chat-id"), Some("hello seat"));
         let script = &cmd[2];
         assert!(script.contains("--resume 'new-chat-id'"), "{script}");
         assert!(script.contains("'hello seat'"), "{script}");
@@ -468,8 +553,68 @@ mod tests {
 
     #[test]
     fn attach_agent_command_ignores_blank_conversation() {
-        let cmd = attach_agent_command(Some("  "), None);
+        let cmd = attach_agent_command("cursor", Some("  "), None);
         assert!(!cmd[2].contains("--resume"), "{}", cmd[2]);
+    }
+
+    #[test]
+    fn attach_agent_command_opencode_uses_inference_local() {
+        let cmd = attach_agent_command("opencode", None, None);
+        let script = &cmd[2];
+        assert!(script.contains("exec opencode"), "{script}");
+        assert!(
+            script.contains("ANTHROPIC_BASE_URL=https://inference.local/v1"),
+            "{script}"
+        );
+        assert!(!script.contains("agent --trust"), "{script}");
+    }
+
+    #[test]
+    fn attach_agent_command_agy_launches_tui() {
+        let cmd = attach_agent_command("agy", None, None);
+        let script = &cmd[2];
+        assert!(script.contains("exec agy"), "{script}");
+        assert!(
+            script.contains("--dangerously-skip-permissions"),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn attach_agent_command_claude_loads_injected_mcp() {
+        let cmd = attach_agent_command("claude", None, None);
+        let script = &cmd[2];
+        assert!(
+            script.contains("exec claude --bare --strict-mcp-config --mcp-config"),
+            "{script}"
+        );
+        assert!(
+            script.contains(crate::cockpit_mcp::COCKPIT_CLAUDE_MCP_CONFIG),
+            "{script}"
+        );
+        assert!(
+            script.contains("ANTHROPIC_BASE_URL=https://inference.local\n"),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn attach_ignores_cursor_id_on_opencode() {
+        assert!(!conversation_usable(
+            "opencode",
+            "22096329-228f-47a1-a16f-cbde6da8fe5b"
+        ));
+        assert!(conversation_usable("opencode", "ses_abc"));
+        let cmd = attach_agent_command(
+            "opencode",
+            Some("22096329-228f-47a1-a16f-cbde6da8fe5b"),
+            None,
+        );
+        assert!(
+            !cmd[2].contains("--session"),
+            "stale cursor id must not resume: {}",
+            cmd[2]
+        );
     }
 
     #[test]

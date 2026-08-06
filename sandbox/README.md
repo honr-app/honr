@@ -45,7 +45,5 @@ docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 Rebuild when `Cargo.lock` changes. Matching `/opt` entries belong in the worker
 **board** profile policy (and the embedded seed in `src/seed_policies.rs`).
 
-## `metadata-shim.py`
-
-A minimal GCE metadata server, uploaded to the sandbox and run on `127.0.0.1:8127` for the lifetime
-of an agent.
+Claude / OpenCode auth goes through OpenShell `inference.local` (see
+[`docs/sandbox.md`](../docs/sandbox.md)) — no in-sandbox metadata shim.

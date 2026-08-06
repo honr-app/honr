@@ -15,6 +15,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const COCKPIT_MCP_DIR: &str = "/sandbox/.honr/mcp";
 
+/// Claude `--bare` does not auto-discover project MCP; attach / engine argv
+/// pass this path via `--mcp-config`.
+pub const COCKPIT_CLAUDE_MCP_CONFIG: &str = "/sandbox/.honr/mcp/claude_mcp.json";
+
+/// Antigravity (`agy`) global MCP config path (`~/.gemini/config/mcp_config.json`).
+pub const COCKPIT_AGY_MCP_CONFIG: &str = "/sandbox/.gemini/config/mcp_config.json";
+
+/// OpenCode global config (`~/.config/opencode/opencode.jsonc`) — MCP lives under `mcp`.
+pub const COCKPIT_OPENCODE_CONFIG: &str = "/sandbox/.config/opencode/opencode.jsonc";
+
 /// Fallback principal when no browser session is available (supervisor reconcile).
 pub const COCKPIT_FALLBACK_SUB: &str = "cockpit";
 
@@ -57,7 +67,7 @@ pub async fn provision_cockpit_mcp(
     Ok(tokens)
 }
 
-/// Write token.json, mcp.json, claude snippet, and env.sh into the sandbox.
+/// Write token.json, mcp.json, claude/opencode snippets, and env.sh into the sandbox.
 pub async fn inject_cockpit_mcp(
     os: &OpenShell,
     sandbox: &str,
@@ -69,6 +79,7 @@ pub async fn inject_cockpit_mcp(
     let token_path = staging.join("token.json");
     let mcp_path = staging.join("mcp.json");
     let claude_path = staging.join("claude_mcp.json");
+    let opencode_path = staging.join("opencode.jsonc");
     let env_path = staging.join("env.sh");
 
     let token_doc = json!({
@@ -90,6 +101,10 @@ pub async fn inject_cockpit_mcp(
     std::fs::write(&mcp_path, &mcp_bytes)?;
     // Same HTTP MCP shape for Claude Code's config reader.
     std::fs::write(&claude_path, &mcp_bytes)?;
+    // OpenCode uses a different schema (`mcp` map, `type: remote`).
+    let opencode_bytes = serde_json::to_vec_pretty(&opencode_jsonc_document(tokens))
+        .map_err(|e| Error::Msg(e.to_string()))?;
+    std::fs::write(&opencode_path, &opencode_bytes)?;
 
     let env_sh = format!(
         "# honr cockpit MCP — sourced from ~/.bashrc when present\n\
@@ -106,7 +121,9 @@ pub async fn inject_cockpit_mcp(
     let mkdir = os
         .exec(
             sandbox,
-            &format!("mkdir -p {COCKPIT_MCP_DIR} /sandbox/.cursor /sandbox/repo/.cursor 2>/dev/null || mkdir -p {COCKPIT_MCP_DIR}"),
+            &format!(
+                "mkdir -p {COCKPIT_MCP_DIR} /sandbox/.cursor /sandbox/repo/.cursor /sandbox/.gemini/config /sandbox/.config/opencode 2>/dev/null || mkdir -p {COCKPIT_MCP_DIR}"
+            ),
             std::time::Duration::from_secs(60),
         )
         .await?;
@@ -123,16 +140,44 @@ pub async fn inject_cockpit_mcp(
         .await?;
     os.upload(sandbox, claude_path.to_str().unwrap(), COCKPIT_MCP_DIR)
         .await?;
+    os.upload(sandbox, opencode_path.to_str().unwrap(), COCKPIT_MCP_DIR)
+        .await?;
     os.upload(sandbox, env_path.to_str().unwrap(), COCKPIT_MCP_DIR)
         .await?;
 
-    // Project / home Cursor config copies + bashrc hook (best effort).
+    // Engine-specific installs + bashrc hook (best effort).
     let place = format!(
         r#"set -e
 chmod 600 {COCKPIT_MCP_DIR}/token.json {COCKPIT_MCP_DIR}/env.sh 2>/dev/null || true
-mkdir -p /sandbox/.cursor /sandbox/repo/.cursor 2>/dev/null || true
+mkdir -p /sandbox/.cursor /sandbox/repo/.cursor /sandbox/.gemini/config /sandbox/.config/opencode 2>/dev/null || true
 cp -f {COCKPIT_MCP_DIR}/mcp.json /sandbox/.cursor/mcp.json 2>/dev/null || true
 cp -f {COCKPIT_MCP_DIR}/mcp.json /sandbox/repo/.cursor/mcp.json 2>/dev/null || true
+# Project-scoped Claude MCP (non-bare / discovery); --bare still needs --mcp-config.
+cp -f {COCKPIT_MCP_DIR}/claude_mcp.json /sandbox/repo/.mcp.json 2>/dev/null || true
+# Antigravity reads ~/.gemini/config/mcp_config.json (same HTTP MCP shape as Cursor).
+cp -f {COCKPIT_MCP_DIR}/mcp.json {COCKPIT_AGY_MCP_CONFIG} 2>/dev/null || true
+# OpenCode: merge `mcp.honr` into opencode.jsonc (remote + Bearer headers).
+python3 - <<'PY'
+import json
+from pathlib import Path
+src = Path("{COCKPIT_MCP_DIR}/opencode.jsonc")
+dst = Path("{COCKPIT_OPENCODE_CONFIG}")
+frag = json.loads(src.read_text())
+doc = {{"$schema": "https://opencode.ai/config.json"}}
+if dst.exists() and dst.stat().st_size:
+    try:
+        doc = json.loads(dst.read_text())
+    except Exception:
+        pass
+if not isinstance(doc, dict):
+    doc = {{"$schema": "https://opencode.ai/config.json"}}
+mcp = doc.get("mcp") if isinstance(doc.get("mcp"), dict) else {{}}
+mcp.update(frag.get("mcp") or {{}})
+doc["mcp"] = mcp
+doc.setdefault("$schema", "https://opencode.ai/config.json")
+dst.parent.mkdir(parents=True, exist_ok=True)
+dst.write_text(json.dumps(doc, indent=2) + "\n")
+PY
 # Login shells: export Bearer for tools that read the env.
 touch /sandbox/.bashrc
 if ! grep -q 'honr/mcp/env.sh' /sandbox/.bashrc 2>/dev/null; then
@@ -153,7 +198,31 @@ pub async fn clear_cockpit_mcp(os: &OpenShell, sandbox: &str) -> Result<()> {
     let out = os
         .exec(
             sandbox,
-            &format!("rm -rf {COCKPIT_MCP_DIR} /sandbox/.cursor/mcp.json /sandbox/repo/.cursor/mcp.json 2>/dev/null || true"),
+            &format!(
+                r#"set +e
+rm -rf {COCKPIT_MCP_DIR} /sandbox/.cursor/mcp.json /sandbox/repo/.cursor/mcp.json {COCKPIT_AGY_MCP_CONFIG} 2>/dev/null
+python3 - <<'PY'
+import json
+from pathlib import Path
+p = Path("{COCKPIT_OPENCODE_CONFIG}")
+if not p.exists():
+    raise SystemExit(0)
+try:
+    doc = json.loads(p.read_text())
+except Exception:
+    raise SystemExit(0)
+mcp = doc.get("mcp")
+if isinstance(mcp, dict):
+    mcp.pop("honr", None)
+    if mcp:
+        doc["mcp"] = mcp
+    else:
+        doc.pop("mcp", None)
+    p.write_text(json.dumps(doc, indent=2) + "\n")
+PY
+true
+"#
+            ),
             std::time::Duration::from_secs(60),
         )
         .await?;
@@ -198,6 +267,22 @@ pub fn mcp_json_document(tokens: &OpsMcpTokens) -> serde_json::Value {
     })
 }
 
+/// OpenCode `opencode.jsonc` fragment (`mcp` map, remote HTTP + headers).
+pub fn opencode_jsonc_document(tokens: &OpsMcpTokens) -> serde_json::Value {
+    json!({
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+            "honr": {
+                "type": "remote",
+                "url": tokens.resource,
+                "headers": {
+                    "Authorization": format!("Bearer {}", tokens.access_token)
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +308,12 @@ mod tests {
         assert_eq!(
             doc["mcpServers"]["honr"]["url"],
             "http://host.docker.internal:8080/mcp"
+        );
+        let oc = opencode_jsonc_document(&tokens);
+        assert_eq!(oc["mcp"]["honr"]["type"], "remote");
+        assert_eq!(
+            oc["mcp"]["honr"]["headers"]["Authorization"],
+            "Bearer tok-access"
         );
     }
 
@@ -258,11 +349,26 @@ mod tests {
             calls.iter().any(|a| a.windows(2).any(|w| w[0] == "exec" || a.contains(&"sandbox".into()))),
             "expected sandbox cockpit: {calls:?}"
         );
-        // mkdir + four uploads + place script
+        // mkdir + uploads (token/mcp/claude/opencode/env) + place script
         let uploads = calls
             .iter()
             .filter(|a| a.iter().any(|s| s == "upload"))
             .count();
-        assert!(uploads >= 4, "expected >=4 uploads, got {uploads}: {calls:?}");
+        assert!(uploads >= 5, "expected >=5 uploads, got {uploads}: {calls:?}");
+        let place = calls
+            .iter()
+            .rev()
+            .find(|a| a.iter().any(|s| s.contains("mcp.json")))
+            .expect("place script");
+        let script = place.join(" ");
+        assert!(
+            script.contains(COCKPIT_AGY_MCP_CONFIG),
+            "must install Antigravity mcp_config.json: {script}"
+        );
+        assert!(
+            script.contains(COCKPIT_OPENCODE_CONFIG)
+                || script.contains("opencode.jsonc"),
+            "must install OpenCode mcp config: {script}"
+        );
     }
 }
