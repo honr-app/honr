@@ -4711,6 +4711,123 @@ facts are pasted, then unpark";
         }
     }
 
+    /// True when a submitted GitHub PR review should steer the matching card.
+    /// `CHANGES_REQUESTED` and `COMMENT`/`COMMENTED` share one Board path;
+    /// `APPROVED` / dismissed (and anything else) are no-ops.
+    #[allow(dead_code)] // webhook + poll cards call this; Board owns the rule
+    pub fn is_actionable_pr_review_state(state: &str) -> bool {
+        matches!(
+            state.trim().to_ascii_uppercase().as_str(),
+            "CHANGES_REQUESTED" | "COMMENT" | "COMMENTED"
+        )
+    }
+
+    /// Pointer steer note for forge PR review feedback — identity only, no body.
+    fn pr_review_feedback_steer_note(pr_url: &str, pr_number: Option<u64>) -> String {
+        let identity = match pr_number {
+            Some(n) => format!("{pr_url} (#{n})"),
+            None => pr_url.to_string(),
+        };
+        format!(
+            "There is PR review feedback on {identity}. Inspect it with gh \
+             (e.g. `gh pr view` / reviews); figure out the rest from the review itself."
+        )
+    }
+
+    /// When GitHub submits PR review feedback (`CHANGES_REQUESTED` or `COMMENT`),
+    /// steer the matching card and move it to Backlog — same treatment as human
+    /// [`Self::request_changes`], without embedding the review body.
+    ///
+    /// Matches Review, NeedsHuman, Claimed, and Running cards by normalized PR
+    /// URL (same matching as merge completion). `APPROVED` / dismissed → no-op.
+    /// Idempotent: already-Backlog cards are not matched again.
+    ///
+    /// History `by` defaults to `github-review` (webhook). Polling should use
+    /// [`Self::apply_pr_review_feedback_by`] with `github-poll`.
+    #[allow(dead_code)] // wired by webhook-pr-review / poll-pr-review-feedback cards
+    pub fn apply_pr_review_feedback(
+        &self,
+        pr_url: &str,
+        pr_number: Option<u64>,
+        review_state: &str,
+    ) -> Option<ItemId> {
+        self.apply_pr_review_feedback_by(pr_url, pr_number, review_state, "github-review")
+    }
+
+    /// Same as [`Self::apply_pr_review_feedback`] with an explicit history actor.
+    #[allow(dead_code)] // wired by webhook-pr-review / poll-pr-review-feedback cards
+    pub fn apply_pr_review_feedback_by(
+        &self,
+        pr_url: &str,
+        pr_number: Option<u64>,
+        review_state: &str,
+        by: &str,
+    ) -> Option<ItemId> {
+        if !Self::is_actionable_pr_review_state(review_state) {
+            return None;
+        }
+
+        let needle = Self::normalize_pr_url(pr_url);
+        if needle.is_empty() {
+            return None;
+        }
+
+        let id = {
+            let s = self.state.read();
+            s.items
+                .values()
+                .find(|i| {
+                    matches!(
+                        i.state,
+                        State::Review | State::NeedsHuman | State::Claimed | State::Running
+                    ) && i
+                        .pr_url()
+                        .is_some_and(|u| Self::normalize_pr_url(u) == needle)
+                })
+                .map(|i| i.id)?
+        };
+
+        let note = Self::pr_review_feedback_steer_note(pr_url.trim(), pr_number);
+        let by = if by.trim().is_empty() {
+            "github-review"
+        } else {
+            by.trim()
+        };
+
+        // Mirror request_changes: steer note, clear proposal, → Backlog, story.
+        {
+            let mut s = self.state.write();
+            let it = s.items.get_mut(&id)?;
+            it.notes.push(Note {
+                at: Utc::now(),
+                author: by.into(),
+                text: note.clone(),
+            });
+            it.run_failures = 0;
+            it.escalation = None;
+            it.proposal = None;
+        }
+
+        let reason = match pr_number {
+            Some(n) => format!("PR review feedback (#{n})"),
+            None => "PR review feedback".into(),
+        };
+        match self.transition(id, State::Backlog, by, Some(reason)) {
+            Ok(item) => {
+                self.emit(&item);
+                self.story(
+                    id,
+                    format!("{}: PR review feedback — Backlog ({})", item.title, note),
+                );
+                Some(id)
+            }
+            Err(e) => {
+                tracing::warn!(id, error = %e, "apply_pr_review_feedback transition failed");
+                None
+            }
+        }
+    }
+
     // -------------------------------------------------------- derived reads
 
     /// Returns active (non-terminal) siblings of `id` (sharing the same parent)
@@ -7572,6 +7689,243 @@ mod tests {
                 .is_none(),
             "no match"
         );
+    }
+
+    /// Review card + CHANGES_REQUESTED → Backlog with a pointer-style steer note
+    /// (no review-body dump). COMMENT shares the same path. APPROVED / unknown
+    /// URL are no-ops; duplicate apply is safe.
+    #[test]
+    fn apply_pr_review_feedback_steers_review_to_backlog() {
+        let b = Arc::new(Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-pr-review-feedback-{}.json",
+                std::process::id()
+            )),
+        ));
+        let p = b
+            .create(
+                None,
+                "Review Feedback Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Feature",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "human", None);
+        let _ = b.transition(t.id, State::Backlog, "human", None);
+        let _ = b.transition(t.id, State::Claimed, "agent", None);
+        let _ = b.transition(t.id, State::Running, "agent", None);
+        let _ = b.transition(t.id, State::Review, "agent", None);
+        let pr = "https://github.com/honr-app/honr/pull/261/";
+        b.set_pr_url(t.id, Some(pr.into()));
+        // Proposal must be cleared like human request_changes — set via propose
+        // is blocked when a PR exists, so plant one directly then apply feedback.
+        b.set_proposal(
+            t.id,
+            crate::model::TaskProposal {
+                summary: "would dump review body here".into(),
+                tasks: vec![crate::model::PlanTaskSpec {
+                    key: "a".into(),
+                    title: "A".into(),
+                    intent: "a".into(),
+                    definition_of_done: "a done".into(),
+                    blocked_by_keys: vec![],
+                    capability: None,
+                    item_id: None,
+                    repo: None,
+                }],
+            },
+        )
+        .expect("plant proposal");
+        assert!(b.get(t.id).unwrap().proposal.is_some());
+
+        let id = b
+            .apply_pr_review_feedback(
+                "https://GitHub.com/honr-app/honr/pull/261",
+                Some(261),
+                "CHANGES_REQUESTED",
+            )
+            .expect("CHANGES_REQUESTED should steer Review → Backlog");
+        assert_eq!(id, t.id);
+        let item = b.get(t.id).unwrap();
+        assert_eq!(item.state, State::Backlog);
+        assert!(item.proposal.is_none(), "proposal cleared");
+        let note = item
+            .notes
+            .last()
+            .expect("pointer steer note")
+            .text
+            .clone();
+        assert!(
+            note.contains("PR review feedback") && note.contains("gh"),
+            "pointer-style note expected, got: {note}"
+        );
+        assert!(
+            !note.to_ascii_lowercase().contains("would dump")
+                && !note.contains("CHANGES_REQUESTED"),
+            "must not embed review body or dump state jargon as the body: {note}"
+        );
+        assert!(
+            note.contains("261") || note.contains("pull/261"),
+            "note should identify the PR: {note}"
+        );
+
+        // Idempotent: already Backlog — not matched again.
+        assert!(
+            b.apply_pr_review_feedback(
+                "https://github.com/honr-app/honr/pull/261",
+                Some(261),
+                "CHANGES_REQUESTED",
+            )
+            .is_none(),
+            "duplicate apply is safe"
+        );
+        assert_eq!(b.get(t.id).unwrap().notes.len(), item.notes.len());
+    }
+
+    #[test]
+    fn apply_pr_review_feedback_comment_same_path_as_changes_requested() {
+        let b = Arc::new(Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-pr-review-comment-{}.json",
+                std::process::id()
+            )),
+        ));
+        let p = b
+            .create(
+                None,
+                "Comment Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Feature",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "human", None);
+        let _ = b.transition(t.id, State::Backlog, "human", None);
+        let _ = b.transition(t.id, State::Claimed, "agent", None);
+        let _ = b.transition(t.id, State::Running, "agent", None);
+        let _ = b.transition(t.id, State::Review, "agent", None);
+        b.set_pr_url(
+            t.id,
+            Some("https://github.com/honr-app/honr/pull/262".into()),
+        );
+
+        let id = b
+            .apply_pr_review_feedback(
+                "https://github.com/honr-app/honr/pull/262",
+                Some(262),
+                "COMMENT",
+            )
+            .expect("COMMENT should steer like CHANGES_REQUESTED");
+        assert_eq!(id, t.id);
+        let item = b.get(t.id).unwrap();
+        assert_eq!(item.state, State::Backlog);
+        let note = &item.notes.last().unwrap().text;
+        assert!(note.contains("PR review feedback") && note.contains("gh"));
+        assert!(!note.contains("please fix the typo in line 12"));
+    }
+
+    #[test]
+    fn apply_pr_review_feedback_approved_and_unknown_are_noop() {
+        let b = Arc::new(Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-pr-review-noop-{}.json",
+                std::process::id()
+            )),
+        ));
+        let p = b
+            .create(
+                None,
+                "Noop Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Feature",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "human", None);
+        let _ = b.transition(t.id, State::Backlog, "human", None);
+        let _ = b.transition(t.id, State::Claimed, "agent", None);
+        let _ = b.transition(t.id, State::Running, "agent", None);
+        let _ = b.transition(t.id, State::Review, "agent", None);
+        b.set_pr_url(
+            t.id,
+            Some("https://github.com/honr-app/honr/pull/263".into()),
+        );
+        let notes_before = b.get(t.id).unwrap().notes.len();
+
+        assert!(
+            b.apply_pr_review_feedback(
+                "https://github.com/honr-app/honr/pull/263",
+                Some(263),
+                "APPROVED",
+            )
+            .is_none(),
+            "APPROVED is a no-op"
+        );
+        assert!(
+            b.apply_pr_review_feedback(
+                "https://github.com/honr-app/honr/pull/263",
+                Some(263),
+                "dismissed",
+            )
+            .is_none(),
+            "dismissed is a no-op"
+        );
+        assert_eq!(b.get(t.id).unwrap().state, State::Review);
+        assert_eq!(b.get(t.id).unwrap().notes.len(), notes_before);
+
+        assert!(
+            b.apply_pr_review_feedback(
+                "https://github.com/honr-app/honr/pull/9999",
+                Some(9999),
+                "CHANGES_REQUESTED",
+            )
+            .is_none(),
+            "unknown PR URL is a no-op"
+        );
+        assert_eq!(b.get(t.id).unwrap().state, State::Review);
     }
 
     #[test]
