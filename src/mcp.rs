@@ -203,6 +203,22 @@ pub struct ColumnArg {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchArg {
+    /// Case-insensitive substring — title, intent, DoD, notes, history reasons.
+    pub query: String,
+    /// Restrict to one Project (and its Tasks). Omit for the whole board.
+    #[serde(default)]
+    pub goal: Option<ItemId>,
+    /// Max hits (default 20, hard cap 50).
+    #[serde(default = "default_search_limit")]
+    pub limit: usize,
+}
+
+fn default_search_limit() -> usize {
+    20
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListReadyArg {
     /// Capability tags this agent can serve, e.g. `["any"]` or `["any","writer"]`.
     pub capabilities: Vec<String>,
@@ -304,6 +320,15 @@ pub struct GoalLine {
     /// column's question.
     pub columns: Vec<String>,
     pub latest: Option<String>,
+    /// Mid-project scope cuts still under this live goal (newest first).
+    /// Empty when nothing was retired, or when the Project itself is archived.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_retired: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct SearchOut {
+    pub items: Vec<crate::store::SearchHit>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -459,13 +484,24 @@ impl Operator {
                     .map(|c| format!("{:?}: {}", c.column, c.summary.text))
                     .collect(),
                 latest: g.story.last().map(|s| s.text.clone()),
+                recent_retired: g
+                    .recent_retired
+                    .iter()
+                    .map(|r| match &r.reason {
+                        Some(reason) if !reason.is_empty() => {
+                            format!("#{} {} — {}", r.id, r.title, reason)
+                        }
+                        _ => format!("#{} {}", r.id, r.title),
+                    })
+                    .collect(),
             })
             .collect();
 
         Ok(ToolJson(SnapshotOut {
             goals,
             hint: "Anything in needs_you is stopping an agent and costing throughput. Review can \
-                   wait until this evening."
+                   wait until this evening. recent_retired on a live goal is a mid-project cut — \
+                   use list_column(retired) or item_detail for the full card."
                 .into(),
         }))
     }
@@ -553,17 +589,35 @@ impl Operator {
     #[tool(
         name = "item_detail",
         description = "Everything about one card: ancestry, Plan on the Project, project_prompt, \
-                       cost, history and any pending question. Call this before answering an \
-                       escalation or approving a review — the Plan says whether the work serves \
-                       the goal."
+                       cost, history and any pending question. On a Project, `children` is \
+                       [{id,title,state,last_reason}] (not bare ids) so mid-project retirements \
+                       are visible. Call this before answering an escalation or approving a \
+                       review — the Plan says whether the work serves the goal."
     )]
     fn item_detail(&self, Parameters(a): Parameters<IdArg>) -> Out<serde_json::Value> {
         let item = self.board.get(a.id).ok_or_else(|| bad(format!("no work item #{}", a.id)))?;
         Ok(ToolJson(serde_json::json!({
             "item": item,
             "ancestry": self.board.ancestry(a.id),
-            "children": self.board.children_of(a.id),
+            "children": self.board.child_summaries(a.id),
         })))
+    }
+
+    #[tool(
+        name = "search_items",
+        description = "Find cards by keyword across title, intent, definition_of_done, notes, \
+                       and history reasons. Use when you know a phrase ('sandbox image', \
+                       'OpenCode') but not the id, or when board_snapshot's retired Project \
+                       lines are the wrong place to look. Optional goal scopes to one Project."
+    )]
+    fn search_items(&self, Parameters(a): Parameters<SearchArg>) -> Out<SearchOut> {
+        let q = a.query.trim();
+        if q.is_empty() {
+            return Err(bad("query must not be empty"));
+        }
+        Ok(ToolJson(SearchOut {
+            items: self.board.search_items(q, a.goal, a.limit),
+        }))
     }
 
     #[tool(
@@ -1065,7 +1119,11 @@ impl ServerHandler for Operator {
                 "honr — an agent orchestration board. You are the cockpit: the human's \
                  liaison over operator tools only (no claim/heartbeat/report/split/escalate/\
                  release/list_ready — those are worker verbs on the host/supervisor path).\n\n\
-                 Start with board_snapshot. Triage in this order, because urgency differs:\n\
+                 Start with board_snapshot. Live goals expose recent_retired for mid-project \
+                 cuts (retired leaves are not in column rollups). Use search_items when you \
+                 know a phrase but not an id. item_detail on a Project returns children with \
+                 state and last_reason.\n\n\
+                 Triage in this order, because urgency differs:\n\
                  1. Needs You — an agent is stopped and burning nothing while it waits. Every \
                     minute costs throughput. Resolve these first.\n\
                  2. Review — finished and safe. It can wait until this evening. Sort by blast \
@@ -1404,6 +1462,146 @@ mod tests {
     }
 
     #[test]
+    fn board_snapshot_surfaces_recent_retired_under_live_goal() {
+        let (board, goal_id) = test_board();
+        let operator = Operator::new(board.clone());
+        let leaf = board
+            .create(
+                Some(goal_id),
+                "Bake CLI into sandbox image",
+                "install binary in Containerfile",
+                Some("image rebuilds".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("leaf");
+        let _ = board.transition(leaf.id, State::Shaping, "test", None);
+        let _ = board.transition(leaf.id, State::Backlog, "test", None);
+        board
+            .cut_scope(leaf.id, Some("done locally, not by an agent".into()))
+            .expect("retire leaf");
+
+        let snap = operator.board_snapshot().expect("snapshot");
+        let goal = snap
+            .0
+            .goals
+            .iter()
+            .find(|g| g.goal == goal_id)
+            .expect("goal line");
+        assert!(
+            goal.recent_retired
+                .iter()
+                .any(|l| l.contains(&format!("#{}", leaf.id))
+                    && l.contains("Bake CLI")
+                    && l.contains("done locally")),
+            "snapshot must surface mid-project retire: {:?}",
+            goal.recent_retired
+        );
+
+        let digest = operator.board_digest().expect("digest");
+        let dg = digest
+            .0
+            .goals
+            .iter()
+            .find(|g| g.goal_id == goal_id)
+            .expect("digest goal");
+        assert_eq!(dg.recently_retired.len(), 1);
+        assert_eq!(dg.recently_retired[0].id, leaf.id);
+        assert_eq!(
+            dg.recently_retired[0].reason.as_deref(),
+            Some("done locally, not by an agent")
+        );
+    }
+
+    #[test]
+    fn item_detail_children_include_state_and_last_reason() {
+        let (board, goal_id) = test_board();
+        let operator = Operator::new(board.clone());
+        let leaf = board
+            .create(
+                Some(goal_id),
+                "Child task",
+                "why",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("leaf");
+        let _ = board.transition(leaf.id, State::Shaping, "test", None);
+        board
+            .cut_scope(leaf.id, Some("cut reason".into()))
+            .expect("retire");
+
+        let detail = operator
+            .item_detail(Parameters(IdArg { id: goal_id }))
+            .expect("detail");
+        let kids = detail.0["children"].as_array().expect("children array");
+        let child = kids
+            .iter()
+            .find(|c| c["id"] == leaf.id)
+            .expect("child row");
+        assert_eq!(child["title"], "Child task");
+        assert_eq!(child["state"], "Retired");
+        assert_eq!(child["last_reason"], "cut reason");
+    }
+
+    #[test]
+    fn search_items_finds_by_title_and_history_reason() {
+        let (board, goal_id) = test_board();
+        let operator = Operator::new(board.clone());
+        let leaf = board
+            .create(
+                Some(goal_id),
+                "Bake OpenCode CLI into sandbox image",
+                "policy hosts",
+                Some("opencode --version".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("leaf");
+        let _ = board.transition(leaf.id, State::Shaping, "test", None);
+        board
+            .cut_scope(
+                leaf.id,
+                Some("Sandbox image work will be done locally".into()),
+            )
+            .expect("retire");
+
+        let by_title = operator
+            .search_items(Parameters(SearchArg {
+                query: "sandbox image".into(),
+                goal: None,
+                limit: 20,
+            }))
+            .expect("search title");
+        assert!(
+            by_title.0.items.iter().any(|h| h.id == leaf.id && h.matched_in == "title"),
+            "title hit: {:?}",
+            by_title.0.items
+        );
+
+        let by_reason = operator
+            .search_items(Parameters(SearchArg {
+                query: "done locally".into(),
+                goal: Some(goal_id),
+                limit: 20,
+            }))
+            .expect("search reason");
+        assert!(
+            by_reason
+                .0
+                .items
+                .iter()
+                .any(|h| h.id == leaf.id && h.matched_in == "history"),
+            "history hit: {:?}",
+            by_reason.0.items
+        );
+    }
+
+    #[test]
     fn list_column_sorts_unblocked_ready_first() {
         let (board, goal_id) = test_board();
         let operator = Operator::new(board.clone());
@@ -1584,6 +1782,8 @@ mod tests {
 
         for tool in [
             "board_snapshot",
+            "search_items",
+            "item_detail",
             "dispatch",
             "park",
             "steer",

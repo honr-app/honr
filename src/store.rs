@@ -248,6 +248,44 @@ pub struct ColumnView {
     pub summary: ChunkSummary,
 }
 
+/// Child card summary for Project `item_detail` (and similar).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
+pub struct ChildSummary {
+    pub id: ItemId,
+    pub title: String,
+    /// Debug-style state name (`Retired`, `Running`, …) — matches MCP card lines.
+    pub state: String,
+    /// Last transition reason when present (retire/cut reasons show up here).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reason: Option<String>,
+}
+
+/// A leaf retired under an active Project — mid-flight scope cuts the snapshot
+/// used to hide, which made "what did we just cut?" unanswerable from MCP alone.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
+pub struct RetiredSnippet {
+    pub id: ItemId,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// Keyword search hit across title / intent / DoD / notes / history reasons.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
+pub struct SearchHit {
+    pub id: ItemId,
+    pub title: String,
+    pub state: String,
+    /// Containing Project id when the hit is a child Task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<ItemId>,
+    /// Where the query matched (`title`, `intent`, `definition_of_done`, `notes`, `history`).
+    pub matched_in: String,
+    /// Short excerpt for triage (not the full field).
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GoalView {
     pub id: ItemId,
@@ -268,6 +306,10 @@ pub struct GoalView {
     pub archived: bool,
     pub columns: Vec<ColumnView>,
     pub story: Vec<StoryLine>,
+    /// Recent retired children on an *active* Project (newest first, capped).
+    /// Empty for archived Projects — the whole tree is already out of scope.
+    #[serde(default)]
+    pub recent_retired: Vec<RetiredSnippet>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -354,6 +396,9 @@ pub struct GoalDigest {
     pub in_review: usize,
     pub ready_to_dispatch: Vec<ReadyCard>,
     pub latest_story: Option<String>,
+    /// Mid-project cuts still on this live goal (newest first, capped).
+    #[serde(default)]
+    pub recently_retired: Vec<RetiredSnippet>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -770,12 +815,131 @@ impl Board {
         Self::children_of_indexed(&s, id)
     }
 
+    /// Children with title/state/last transition reason — Project triage without
+    /// guessing ids from a bare list.
+    pub fn child_summaries(&self, id: ItemId) -> Vec<ChildSummary> {
+        let s = self.state.read();
+        let mut kids = Self::children_of_indexed(&s, id);
+        kids.sort_unstable();
+        kids.into_iter()
+            .filter_map(|cid| {
+                let child = s.items.get(&cid)?;
+                Some(Self::child_summary_of(child))
+            })
+            .collect()
+    }
+
+    fn child_summary_of(item: &WorkItem) -> ChildSummary {
+        let last_reason = item.history.last().and_then(|t| t.reason.clone());
+        ChildSummary {
+            id: item.id,
+            title: item.title.clone(),
+            state: format!("{:?}", item.state),
+            last_reason,
+        }
+    }
+
+    /// Case-insensitive substring search over title, intent, DoD, notes, history.
+    /// Results prefer title hits, then intent, then the rest; capped by `limit`.
+    pub fn search_items(
+        &self,
+        query: &str,
+        goal: Option<ItemId>,
+        limit: usize,
+    ) -> Vec<SearchHit> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let limit = limit.min(50);
+        let s = self.state.read();
+
+        let mut hits: Vec<(u8, SearchHit)> = Vec::new();
+        for item in s.items.values() {
+            if let Some(g) = goal {
+                if Self::goal_of(&s, item.id) != g {
+                    continue;
+                }
+            }
+            if let Some((rank, matched_in, detail)) = Self::search_match(item, &q) {
+                hits.push((
+                    rank,
+                    SearchHit {
+                        id: item.id,
+                        title: item.title.clone(),
+                        state: format!("{:?}", item.state),
+                        goal: Some(Self::goal_of(&s, item.id)),
+                        matched_in: matched_in.into(),
+                        detail,
+                    },
+                ));
+            }
+        }
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        hits.into_iter().take(limit).map(|(_, h)| h).collect()
+    }
+
+    /// Lower rank = better. Returns (rank, field name, excerpt).
+    fn search_match(item: &WorkItem, q: &str) -> Option<(u8, &'static str, String)> {
+        let excerpt = |s: &str| -> String {
+            let flat = s.replace('\n', " ");
+            if flat.len() <= 160 {
+                flat
+            } else {
+                format!("{}…", &flat[..160])
+            }
+        };
+        if item.title.to_lowercase().contains(q) {
+            return Some((0, "title", excerpt(&item.title)));
+        }
+        if item.intent.to_lowercase().contains(q) {
+            return Some((1, "intent", excerpt(&item.intent)));
+        }
+        if let Some(dod) = item.definition_of_done.as_ref() {
+            if dod.to_lowercase().contains(q) {
+                return Some((2, "definition_of_done", excerpt(dod)));
+            }
+        }
+        for n in &item.notes {
+            if n.text.to_lowercase().contains(q) {
+                return Some((3, "notes", excerpt(&n.text)));
+            }
+        }
+        for t in item.history.iter().rev() {
+            if let Some(reason) = &t.reason {
+                if reason.to_lowercase().contains(q) {
+                    return Some((4, "history", excerpt(reason)));
+                }
+            }
+        }
+        None
+    }
+
     /// Children via `children_by_parent` (not a full items scan).
     fn children_of_indexed(s: &BoardState, id: ItemId) -> Vec<ItemId> {
         s.children_by_parent
             .get(&id)
             .map(|kids| kids.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    fn recent_retired_of(members: &[&WorkItem], cap: usize) -> Vec<RetiredSnippet> {
+        let mut out: Vec<RetiredSnippet> = members
+            .iter()
+            .filter(|i| i.state == State::Retired)
+            .map(|i| {
+                let retire = i.history.iter().rev().find(|t| t.to == State::Retired);
+                RetiredSnippet {
+                    id: i.id,
+                    title: i.title.clone(),
+                    reason: retire.and_then(|t| t.reason.clone()),
+                    at: retire.map(|t| t.at).unwrap_or(i.entered_state_at),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.id.cmp(&b.id)));
+        out.truncate(cap);
+        out
     }
 
     fn has_children(s: &BoardState, id: ItemId) -> bool {
@@ -4620,6 +4784,12 @@ facts are pasted, then unpark";
         }
 
         let plan_status = Self::plan_status_label(s, gid);
+        // Active Projects only — archived trees are already "scope cut" as a unit.
+        let recent_retired = if archived {
+            Vec::new()
+        } else {
+            Self::recent_retired_of(&members, 5)
+        };
 
         Some(GoalView {
             id: gid,
@@ -4639,6 +4809,7 @@ facts are pasted, then unpark";
             archived,
             columns,
             story: s.stories.get(&gid).cloned().unwrap_or_default(),
+            recent_retired,
         })
     }
 
@@ -4820,6 +4991,8 @@ facts are pasted, then unpark";
                     })
                     .collect();
 
+                let recently_retired = Self::recent_retired_of(&members, 5);
+
                 Some(GoalDigest {
                     goal_id: gid,
                     goal: goal.title.clone(),
@@ -4843,6 +5016,7 @@ facts are pasted, then unpark";
                         .get(&gid)
                         .and_then(|v| v.last())
                         .map(|l| l.text.clone()),
+                    recently_retired,
                 })
             })
             .collect();
