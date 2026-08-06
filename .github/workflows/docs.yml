@@ -38,7 +38,11 @@ jobs:
   shots:
     runs-on: ubuntu-latest
     steps:
+      # This job runs `npm ci` and `cargo build` — arbitrary build scripts —
+      # and pushes nothing. No reason to leave GITHUB_TOKEN in .git/config.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -86,7 +90,11 @@ jobs:
     needs: shots
     runs-on: ubuntu-latest
     steps:
+      # Publishing below authenticates with PAGES_DEPLOY_KEY, not the checkout
+      # token, so nothing here needs GITHUB_TOKEN left in .git/config.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # mdBook copies non-markdown files out of `src`, so images land at
       # /images/* in the built book and in the deployed site.
