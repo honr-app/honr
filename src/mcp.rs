@@ -371,6 +371,11 @@ pub struct CutScopeOut {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
+pub struct UnarchiveScopeOut {
+    pub items: Vec<ItemId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
 pub struct ListReadyOut {
     pub items: Vec<CardLine>,
 }
@@ -907,6 +912,17 @@ impl Operator {
     fn cut_scope(&self, Parameters(a): Parameters<ReasonArg>) -> Out<CutScopeOut> {
         let ids = self.board.cut_scope(a.id, a.reason).map_err(bad)?;
         Ok(ToolJson(CutScopeOut { items: ids }))
+    }
+
+    #[tool(
+        name = "unarchive_scope",
+        description = "Restore a retired Project or subtree from history (inverse of cut_scope / \
+                       Archive). In-flight priors remapped to Backlog — never Claimed/Running. \
+                       Confirm with the human before calling this."
+    )]
+    fn unarchive_scope(&self, Parameters(a): Parameters<ReasonArg>) -> Out<UnarchiveScopeOut> {
+        let ids = self.board.unarchive_scope(a.id, a.reason).map_err(bad)?;
+        Ok(ToolJson(UnarchiveScopeOut { items: ids }))
     }
 
     #[tool(
@@ -1467,6 +1483,45 @@ mod tests {
     }
 
     #[test]
+    fn unarchive_scope_restores_and_rejects_non_retired() {
+        let (board, goal_id) = test_board();
+        let operator = Operator::new(board.clone());
+
+        let reject = operator.unarchive_scope(Parameters(ReasonArg {
+            id: goal_id,
+            reason: None,
+        }));
+        let err = match reject {
+            Ok(_) => panic!("unarchive on live Project must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.message.contains("not retired"),
+            "expected not-retired error, got {}",
+            err.message
+        );
+
+        board
+            .cut_scope(goal_id, Some("archived".into()))
+            .expect("cut");
+        let ok = operator
+            .unarchive_scope(Parameters(ReasonArg {
+                id: goal_id,
+                reason: Some("restored".into()),
+            }))
+            .expect("unarchive_scope should succeed");
+        let ok_val = serde_json::to_value(&ok.0).expect("serialize");
+        assert!(ok_val.is_object(), "unarchive_scope response must be a JSON record");
+        assert!(ok_val.as_object().unwrap().contains_key("items"));
+        assert!(
+            ok.0.items.contains(&goal_id),
+            "restored root must be in items: {:?}",
+            ok.0.items
+        );
+        assert_eq!(board.get(goal_id).unwrap().state, State::Shaping);
+    }
+
+    #[test]
     fn board_snapshot_surfaces_recent_retired_under_live_goal() {
         let (board, goal_id) = test_board();
         let operator = Operator::new(board.clone());
@@ -1792,6 +1847,8 @@ mod tests {
             "dispatch",
             "park",
             "steer",
+            "cut_scope",
+            "unarchive_scope",
             "approve_review",
             "approve_plan",
             "answer_escalation",
