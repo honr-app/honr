@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "../api.js";
 import type { OpenShellSettings, OpenShellStatus } from "../types.js";
+import { OpenShellPoliciesPanel } from "./OpenShellPolicies.js";
 import { OpenShellProvidersPanel } from "./OpenShellProviders.js";
 import { OpenShellProviderTypesPanel } from "./OpenShellProviderTypes.js";
 import { SandboxesPanel } from "./OpenShellProfiles.js";
@@ -9,12 +10,14 @@ export type OpenShellTab =
   | "connectivity"
   | "providers"
   | "provider-types"
+  | "policies"
   | "profiles";
 
 const TABS: { id: OpenShellTab; label: string }[] = [
   { id: "connectivity", label: "Connectivity" },
   { id: "providers", label: "Providers" },
   { id: "provider-types", label: "Provider types" },
+  { id: "policies", label: "Policies" },
   { id: "profiles", label: "Sandbox specs" },
 ];
 
@@ -39,6 +42,7 @@ export function OpenShellPanelView({
   onClearMtls,
   providers,
   providerTypes,
+  policies,
   profiles,
 }: {
   status: OpenShellStatus | null;
@@ -62,6 +66,7 @@ export function OpenShellPanelView({
   onClearMtls: () => void;
   providers?: ReactNode;
   providerTypes?: ReactNode;
+  policies?: ReactNode;
   profiles?: ReactNode;
 }) {
   const [internalTab, setInternalTab] = useState<OpenShellTab>("connectivity");
@@ -92,9 +97,9 @@ export function OpenShellPanelView({
       <header className="openshell-hero">
         <h2 id="openshell-title">OpenShell</h2>
         <p className="dim openshell-hero-lead">
-          Gateway talk for sandboxes: connect once, define providers, then choose
-          what each profile attaches at create. Host Docker / Colima stay outside
-          honr.
+          Gateway talk for sandboxes: connect once, define providers and
+          policies, then choose what each sandbox spec attaches at create. Host
+          Docker / Colima stay outside honr.
         </p>
         <div
           className="openshell-status-chip"
@@ -276,6 +281,12 @@ export function OpenShellPanelView({
         </div>
       )}
 
+      {tab === "policies" && (
+        <div className="openshell-pane" data-testid="openshell-policies-host">
+          {policies}
+        </div>
+      )}
+
       {tab === "profiles" && (
         <div className="openshell-pane" data-testid="openshell-profiles-host">
           {profiles}
@@ -403,6 +414,7 @@ export function OpenShellPanel({
       }}
       providers={<OpenShellProvidersPanel gatewayHealthy={!!status?.healthy} />}
       providerTypes={<OpenShellProviderTypesPanel />}
+      policies={<OpenShellPoliciesPanel />}
       profiles={<SandboxesPanel />}
     />
   );

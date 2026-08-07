@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import type {
+  OpenShellPolicy,
   OpenShellProviderView,
   SandboxProfile,
   SandboxProfileCreateDefaults,
 } from "../types.js";
-import { YamlEditor } from "./YamlEditor.js";
 
 type ProfileDraft = {
   id: string;
   name: string;
   image: string;
-  policy: string;
+  policy_id: string;
   cpu: string;
   memory: string;
   engine: string;
@@ -23,7 +23,7 @@ const emptyDraft = (defaults?: SandboxProfileCreateDefaults | null): ProfileDraf
   id: "",
   name: defaults?.name ?? "Default",
   image: defaults?.image ?? "",
-  policy: defaults?.policy ?? "",
+  policy_id: defaults?.policy_id ?? "",
   cpu: defaults?.cpu ?? "",
   memory: defaults?.memory ?? "",
   engine: defaults?.engine?.trim() || "cursor",
@@ -35,7 +35,7 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
     id: p.id,
     name: p.name,
     image: p.image,
-    policy: p.policy,
+    policy_id: p.policy_id,
     cpu: p.cpu ?? "",
     memory: p.memory ?? "",
     engine: p.engine?.trim() || "cursor",
@@ -43,8 +43,17 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
   };
 }
 
+function policyLabel(
+  policyId: string,
+  policies: OpenShellPolicy[],
+): string {
+  const match = policies.find((p) => p.id === policyId);
+  return match ? match.name : policyId || "none";
+}
+
 export function SandboxesPanelView({
   profiles,
+  policies,
   defaultId,
   cockpitId,
   availableProviders,
@@ -64,6 +73,7 @@ export function SandboxesPanelView({
   onSetCockpit,
 }: {
   profiles: SandboxProfile[];
+  policies: OpenShellPolicy[];
   defaultId: string | null;
   cockpitId: string | null;
   availableProviders: OpenShellProviderView[];
@@ -106,11 +116,12 @@ export function SandboxesPanelView({
         <div className="openshell-band-head">
           <h3 id="openshell-profiles-title">Sandbox specs</h3>
           <p className="dim">
-            Create-specs (image, policy, resources, engine) and which providers
-            attach when a sandbox is created from this spec. The first profile
-            becomes the global default; Cockpit uses that default unless you
-            point Cockpit at another profile. Providers are defined under the
-            Providers tab; attach them here.
+            Create-specs (image, resources, engine) plus a reference to a named{" "}
+            <strong>Policy</strong>, and which providers attach when a sandbox
+            is created from this spec. The first profile becomes the global
+            default; Cockpit uses that default unless you point Cockpit at
+            another profile. Edit allow-list YAML under the Policies tab;
+            attach providers defined under Providers.
           </p>
         </div>
 
@@ -122,8 +133,8 @@ export function SandboxesPanelView({
               <div className="settings-placeholder" data-testid="sandboxes-empty">
                 <p>No sandbox specs yet.</p>
                 <p className="dim">
-                  Create one — the form starts from a minimal policy. It becomes
-                  the default (and Cockpit) until you add another.
+                  Create one — the form starts from the minimal policy. It
+                  becomes the default (and Cockpit) until you add another.
                 </p>
               </div>
             ) : (
@@ -253,6 +264,34 @@ export function SandboxesPanelView({
                   </select>
                 </label>
 
+                <label>
+                  Policy
+                  <select
+                    className="search-input"
+                    value={draft.policy_id}
+                    disabled={busy || policies.length === 0}
+                    onChange={(e) =>
+                      onDraftChange({ ...draft, policy_id: e.target.value })
+                    }
+                    required
+                    data-testid="sandbox-field-policy"
+                  >
+                    {policies.length === 0 ? (
+                      <option value="">No policies — add under Policies</option>
+                    ) : (
+                      policies.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.id})
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  <span className="dim sandbox-field-hint">
+                    OpenShell allow-list from the Policies catalog. Edit YAML
+                    under Policies.
+                  </span>
+                </label>
+
                 <div
                   className="openshell-profile-providers"
                   data-testid="sandbox-field-providers"
@@ -303,21 +342,6 @@ export function SandboxesPanelView({
                   )}
                 </div>
 
-                <label>
-                  Policy (YAML)
-                  <YamlEditor
-                    className="sandbox-policy-textarea"
-                    value={draft.policy}
-                    disabled={busy}
-                    onChange={(policy) => onDraftChange({ ...draft, policy })}
-                    required
-                    rows={18}
-                    placeholder={
-                      "version: 1\nfilesystem_policy:\n  include_workdir: true\n"
-                    }
-                    data-testid="sandbox-field-policy"
-                  />
-                </label>
                 <div className="sandbox-profile-form-row">
                   <label>
                     CPU
@@ -379,6 +403,16 @@ export function SandboxesPanelView({
                       {[selected.cpu, selected.memory].filter(Boolean).join(" / ")}
                     </>
                   )}
+                </div>
+                <div
+                  className="openshell-profile-attach-summary"
+                  data-testid="sandbox-policy-summary"
+                >
+                  <span className="dim">Policy</span>
+                  <strong data-testid="sandbox-policy-name">
+                    {policyLabel(selected.policy_id, policies)}
+                  </strong>
+                  <span className="dim sandbox-profile-id">{selected.policy_id}</span>
                 </div>
                 <div
                   className="openshell-profile-attach-summary"
@@ -447,6 +481,7 @@ export function SandboxesPanelView({
 
 export function SandboxesPanel() {
   const [profiles, setProfiles] = useState<SandboxProfile[]>([]);
+  const [policies, setPolicies] = useState<OpenShellPolicy[]>([]);
   const [providers, setProviders] = useState<OpenShellProviderView[]>([]);
   const [defaultId, setDefaultId] = useState<string | null>(null);
   const [cockpitId, setCockpitId] = useState<string | null>(null);
@@ -461,13 +496,18 @@ export function SandboxesPanel() {
 
   const refresh = useCallback(() => {
     setLoading(true);
-    return Promise.all([api.listSandboxProfiles(), api.listOpenShellProviders()])
-      .then(([out, prov]) => {
+    return Promise.all([
+      api.listSandboxProfiles(),
+      api.listOpenShellProviders(),
+      api.listOpenShellPolicies(),
+    ])
+      .then(([out, prov, pol]) => {
         setProfiles(out.profiles);
         setDefaultId(out.default_sandbox_profile_id);
         setCockpitId(out.cockpit_sandbox_profile_id);
         setCreateDefaults(out.create_defaults);
         setProviders(prov.providers);
+        setPolicies(pol.policies);
         setSelectedId((cur) => {
           if (cur && out.profiles.some((p) => p.id === cur)) return cur;
           return (
@@ -514,6 +554,7 @@ export function SandboxesPanel() {
   return (
     <SandboxesPanelView
       profiles={profiles}
+      policies={policies}
       defaultId={defaultId}
       cockpitId={cockpitId}
       availableProviders={providers}
@@ -537,11 +578,16 @@ export function SandboxesPanel() {
         setDraft(emptyDraft(createDefaults));
       }}
       onSave={() => {
+        const policy_id = draft.policy_id.trim();
+        if (!policy_id) {
+          setError("policy is required — add one under Policies");
+          return;
+        }
         const body = {
           ...(editingId ? { id: draft.id.trim() } : {}),
           name: draft.name.trim(),
           image: draft.image.trim(),
-          policy: draft.policy,
+          policy_id,
           cpu: draft.cpu.trim() || null,
           memory: draft.memory.trim() || null,
           engine: draft.engine.trim() || null,
