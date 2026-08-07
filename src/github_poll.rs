@@ -4,17 +4,19 @@
 //! installation token and scans Review/NeedsHuman PRs plus default-branch tips
 //! for repos on live cards. Merges call `complete_for_merged_pr_by(..., "github-poll")`;
 //! tip changes call `notify_main_advanced` then Review mergeable catch-up.
-//! Webhooks keep working in parallel.
+//! Newly submitted PR reviews (`CHANGES_REQUESTED` / `COMMENT`) call
+//! `apply_pr_review_feedback_by(..., "github-poll")` — pointer steer + Backlog,
+//! sharing Board effects with the webhook path. Webhooks keep working in parallel.
 
 use crate::github_app;
 use crate::model::{State, MIN_WEBHOOK_POLL_INTERVAL_SECS};
-use crate::store::{parse_github_pr_url, SharedBoard};
+use crate::store::{parse_github_pr_url, Board, SharedBoard};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Actor string written into transition history for poll-driven Done.
+/// Actor string written into transition history for poll-driven Done / steer.
 pub const POLL_BY: &str = "github-poll";
 
 /// How often the loop re-checks Settings when polling is off.
@@ -117,6 +119,18 @@ pub async fn tick(board: &SharedBoard) -> Result<(), String> {
                 );
             }
         }
+
+        match fetch_reviews(&token, &pr.owner_repo, pr.number).await {
+            Ok(reviews) => apply_new_reviews(board, pr, &reviews),
+            Err(e) => {
+                tracing::debug!(
+                    repo = %pr.owner_repo,
+                    number = pr.number,
+                    error = %e,
+                    "poll: PR reviews fetch failed"
+                );
+            }
+        }
     }
 
     for repo in &targets.repos {
@@ -148,6 +162,48 @@ pub async fn tick(board: &SharedBoard) -> Result<(), String> {
     Ok(())
 }
 
+/// Apply newly submitted actionable reviews; seed cursor on first observation.
+fn apply_new_reviews(board: &SharedBoard, pr: &PrTarget, reviews: &[ReviewInfo]) {
+    let max_id = reviews.iter().map(|r| r.id).max().unwrap_or(0);
+    let prev = board.webhook_poll_pr_review_cursor(&pr.owner_repo, pr.number);
+
+    // Always advance the cursor to the tip we observed (including empty → 0)
+    // so first-observation seed does not re-fire forever.
+    board.set_webhook_poll_pr_review_cursor(&pr.owner_repo, pr.number, max_id);
+
+    let Some(cursor) = prev else {
+        tracing::debug!(
+            repo = %pr.owner_repo,
+            number = pr.number,
+            max_id,
+            "poll: seeded PR review cursor"
+        );
+        return;
+    };
+
+    let html_url = format!("https://github.com/{}/pull/{}", pr.owner_repo, pr.number);
+    let mut new_reviews: Vec<&ReviewInfo> = reviews.iter().filter(|r| r.id > cursor).collect();
+    new_reviews.sort_by_key(|r| r.id);
+
+    for review in new_reviews {
+        if !Board::is_actionable_pr_review_state(&review.state) {
+            continue;
+        }
+        if let Some(id) =
+            board.apply_pr_review_feedback_by(&html_url, Some(pr.number), &review.state, POLL_BY)
+        {
+            tracing::info!(
+                id,
+                pr = %pr.owner_repo,
+                number = pr.number,
+                review_id = review.id,
+                state = %review.state,
+                "poll: PR review feedback → Backlog"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PrTarget {
     owner_repo: String,
@@ -176,6 +232,17 @@ fn collect_targets(board: &SharedBoard) -> Targets {
                 }
             }
             State::Claimed | State::Running => {
+                if let Some(url) = item.pr_url() {
+                    if let Some((owner_repo, number)) = parse_github_pr_url(url) {
+                        // Live cards with a PR: poll reviews (merge complete still
+                        // only matches Review/NeedsHuman on the Board).
+                        prs.insert(PrTarget {
+                            owner_repo: owner_repo.clone(),
+                            number,
+                        });
+                        repos.insert(owner_repo);
+                    }
+                }
                 if let Ok(Some(repo)) = board.resolve_card_repo(item.id) {
                     let upstream = repo.upstream.trim();
                     if !upstream.is_empty() {
@@ -197,6 +264,12 @@ fn collect_targets(board: &SharedBoard) -> Targets {
 struct PullInfo {
     merged: bool,
     html_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ReviewInfo {
+    id: u64,
+    state: String,
 }
 
 async fn fetch_pull(
@@ -240,6 +313,52 @@ async fn fetch_pull(
         merged: body.merged,
         html_url: body.html_url,
     }))
+}
+
+async fn fetch_reviews(
+    token: &str,
+    owner_repo: &str,
+    number: u64,
+) -> Result<Vec<ReviewInfo>, String> {
+    #[derive(Deserialize)]
+    struct Resp {
+        id: u64,
+        #[serde(default)]
+        state: String,
+    }
+    let url = format!(
+        "{}/repos/{owner_repo}/pulls/{number}/reviews",
+        github_app::github_api_base()
+    );
+    let resp = client()?
+        .get(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("GET reviews: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(Vec::new());
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "GET reviews HTTP {status}: {}",
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+    let body: Vec<Resp> = resp
+        .json()
+        .await
+        .map_err(|e| format!("GET reviews json: {e}"))?;
+    Ok(body
+        .into_iter()
+        .map(|r| ReviewInfo {
+            id: r.id,
+            state: r.state,
+        })
+        .collect())
 }
 
 async fn fetch_default_tip(token: &str, owner_repo: &str) -> Result<Option<(String, String)>, String> {
@@ -400,17 +519,20 @@ mod tests {
         merged: bool,
         tip_sha: &'static str,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        spawn_poll_mock_for_pr(merged, tip_sha, None).await
+        spawn_poll_mock_for_pr(merged, tip_sha, None, Arc::new(Mutex::new(Vec::new()))).await
     }
 
     /// When `merged_only_number` is set, only that PR number reports `merged: true`.
+    /// `reviews` is shared state the mock returns for GET .../pulls/{n}/reviews.
     async fn spawn_poll_mock_for_pr(
         merged: bool,
         tip_sha: &'static str,
         merged_only_number: Option<u64>,
+        reviews: Arc<Mutex<Vec<serde_json::Value>>>,
     ) -> (String, tokio::task::JoinHandle<()>) {
         use axum::extract::Path;
 
+        let reviews_get = reviews.clone();
         let app = Router::new()
             .route(
                 "/app/installations/{id}/access_tokens",
@@ -419,6 +541,16 @@ mod tests {
                         "token": "ghs_poll_token",
                         "expires_at": "2099-01-01T00:00:00Z"
                     }))
+                }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/pulls/{number}/reviews",
+                get(move || {
+                    let reviews_get = reviews_get.clone();
+                    async move {
+                        let list = reviews_get.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        Json(serde_json::Value::Array(list))
+                    }
                 }),
             )
             .route(
@@ -457,6 +589,37 @@ mod tests {
             axum::serve(listener, app).await.expect("serve mock");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    fn review_card(board: &SharedBoard) -> crate::model::ItemId {
+        let p = board
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let t = board
+            .create(
+                Some(p.id),
+                "T",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = board.transition(t.id, State::Shaping, "test", None);
+        let _ = board.transition(t.id, State::Backlog, "test", None);
+        let _ = board.transition(t.id, State::Claimed, "test", None);
+        let _ = board.transition(t.id, State::Running, "test", None);
+        let _ = board.transition(t.id, State::Review, "test", None);
+        board.set_pull_request(
+            t.id,
+            Some(crate::model::PullRequest {
+                url: "https://github.com/acme/widgets/pull/7".into(),
+                base: Some(crate::model::PullRequestEnd::new("acme/widgets", "main")),
+                head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/t")),
+            }),
+        );
+        t.id
     }
 
     #[test]
@@ -541,7 +704,8 @@ mod tests {
             }),
         );
 
-        let (base, handle) = spawn_poll_mock_for_pr(true, "aaa111", Some(7)).await;
+        let (base, handle) =
+            spawn_poll_mock_for_pr(true, "aaa111", Some(7), Arc::new(Mutex::new(Vec::new()))).await;
         let _api = github_api_env::Guard::set(&base);
 
         tick(&board).await.expect("tick");
@@ -642,6 +806,153 @@ mod tests {
             }
         }
         assert!(!again, "idempotent tip must not re-fire MainAdvanced");
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn review_seed_only_first_tick_does_not_bounce() {
+        let (dir, board, _env) = test_board("review-seed");
+        seal_test_app(&board);
+        board.set_webhook_poll_config(WebhookPollConfig {
+            enabled: true,
+            interval_secs: 60,
+        });
+        let id = review_card(&board);
+
+        let reviews = Arc::new(Mutex::new(vec![serde_json::json!({
+            "id": 1001,
+            "state": "CHANGES_REQUESTED",
+            "body": "please fix the flaky test"
+        })]));
+        let (base, handle) = spawn_poll_mock_for_pr(false, "sha", None, reviews).await;
+        let _api = github_api_env::Guard::set(&base);
+
+        tick(&board).await.expect("seed tick");
+        assert_eq!(
+            board.get(id).unwrap().state,
+            State::Review,
+            "first observation must only seed the cursor"
+        );
+        assert_eq!(
+            board.webhook_poll_pr_review_cursor("acme/widgets", 7),
+            Some(1001)
+        );
+
+        // Same reviews again — still no bounce.
+        tick(&board).await.expect("idempotent tick");
+        assert_eq!(board.get(id).unwrap().state, State::Review);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn new_changes_requested_review_steers_to_backlog() {
+        let (dir, board, _env) = test_board("review-cr");
+        seal_test_app(&board);
+        board.set_webhook_poll_config(WebhookPollConfig {
+            enabled: true,
+            interval_secs: 60,
+        });
+        let id = review_card(&board);
+        board.set_webhook_poll_pr_review_cursor("acme/widgets", 7, 1000);
+
+        let reviews = Arc::new(Mutex::new(vec![
+            serde_json::json!({ "id": 1000, "state": "COMMENTED", "body": "old" }),
+            serde_json::json!({
+                "id": 1002,
+                "state": "CHANGES_REQUESTED",
+                "body": "must not appear in steer note"
+            }),
+        ]));
+        let (base, handle) = spawn_poll_mock_for_pr(false, "sha", None, reviews).await;
+        let _api = github_api_env::Guard::set(&base);
+
+        tick(&board).await.expect("tick");
+        let item = board.get(id).unwrap();
+        assert_eq!(item.state, State::Backlog);
+        let by = item.history.last().map(|h| h.by.clone()).unwrap_or_default();
+        assert_eq!(by, POLL_BY, "poll must use github-poll actor");
+        let note = item.notes.last().expect("pointer steer").text.clone();
+        assert!(
+            note.contains("PR review feedback") && note.contains("gh"),
+            "pointer-style note expected, got: {note}"
+        );
+        assert!(
+            !note.contains("must not appear"),
+            "must not dump review body: {note}"
+        );
+        assert_eq!(
+            board.webhook_poll_pr_review_cursor("acme/widgets", 7),
+            Some(1002)
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn new_comment_review_same_backlog_path() {
+        let (dir, board, _env) = test_board("review-comment");
+        seal_test_app(&board);
+        board.set_webhook_poll_config(WebhookPollConfig {
+            enabled: true,
+            interval_secs: 60,
+        });
+        let id = review_card(&board);
+        board.set_webhook_poll_pr_review_cursor("acme/widgets", 7, 50);
+
+        let reviews = Arc::new(Mutex::new(vec![serde_json::json!({
+            "id": 51,
+            "state": "COMMENTED",
+            "body": "nit: rename this"
+        })]));
+        let (base, handle) = spawn_poll_mock_for_pr(false, "sha", None, reviews).await;
+        let _api = github_api_env::Guard::set(&base);
+
+        tick(&board).await.expect("tick");
+        let item = board.get(id).unwrap();
+        assert_eq!(item.state, State::Backlog);
+        assert_eq!(
+            item.history.last().map(|h| h.by.as_str()),
+            Some(POLL_BY)
+        );
+        let note = item.notes.last().expect("pointer").text.clone();
+        assert!(note.contains("PR review feedback") && note.contains("gh"));
+        assert!(!note.contains("nit: rename"));
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn approved_review_does_not_mutate_board() {
+        let (dir, board, _env) = test_board("review-approved");
+        seal_test_app(&board);
+        board.set_webhook_poll_config(WebhookPollConfig {
+            enabled: true,
+            interval_secs: 60,
+        });
+        let id = review_card(&board);
+        board.set_webhook_poll_pr_review_cursor("acme/widgets", 7, 1);
+
+        let reviews = Arc::new(Mutex::new(vec![serde_json::json!({
+            "id": 2,
+            "state": "APPROVED",
+            "body": "lgtm"
+        })]));
+        let (base, handle) = spawn_poll_mock_for_pr(false, "sha", None, reviews).await;
+        let _api = github_api_env::Guard::set(&base);
+
+        tick(&board).await.expect("tick");
+        assert_eq!(board.get(id).unwrap().state, State::Review);
+        assert_eq!(
+            board.webhook_poll_pr_review_cursor("acme/widgets", 7),
+            Some(2),
+            "cursor still advances past APPROVED"
+        );
 
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);

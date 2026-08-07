@@ -105,6 +105,9 @@ pub const META_WEBHOOK_POLL: &str = "webhook_poll";
 /// JSON object: `owner/name` → last-seen default-branch tip SHA (poll path).
 pub const META_WEBHOOK_POLL_TIPS: &str = "webhook_poll_tips";
 
+/// JSON object: `owner/name#number` → last-seen PR review id (poll path).
+pub const META_WEBHOOK_POLL_PR_REVIEWS: &str = "webhook_poll_pr_reviews";
+
 /// JSON blob: optional [`crate::model::CockpitSession`] (control-plane cockpit).
 pub const META_COCKPIT_SESSION: &str = "cockpit_session";
 
