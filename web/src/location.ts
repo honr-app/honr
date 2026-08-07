@@ -4,7 +4,6 @@ import type { OpenShellTab } from "./components/OpenShellSettings";
 /** Settings nav sections mirrored under `/settings/...`. */
 export type SettingsSection =
   | "openshell"
-  | "github-app"
   | "access"
   | "workspace"
   | "agent-runtime";
@@ -14,7 +13,6 @@ export const DEFAULT_OPENSHELL_TAB: OpenShellTab = "connectivity";
 
 const SETTINGS_SECTIONS = new Set<string>([
   "openshell",
-  "github-app",
   "access",
   "workspace",
   "agent-runtime",
@@ -46,6 +44,7 @@ export type ChromeLocation = {
  *   `/settings/openshell`                → settings / OpenShell / Connectivity
  *   `/settings/openshell/:tab`           → settings / OpenShell / tab
  *   `/settings/:section`                 → settings / section
+ *   `/settings/github-app`               → redirect target: OpenShell / Providers
  *   `/card/:id`                          → board with DetailDrawer open on that card
  */
 export function parseChromeLocation(pathname: string): ChromeLocation {
@@ -186,6 +185,13 @@ function parseSettingsPath(
   }
 
   const [head, tab] = parts;
+  // Retired top-level GitHub App page → Providers (App access token lives there).
+  if (head === "github-app") {
+    return {
+      settingsSection: "openshell",
+      openShellTab: "providers",
+    };
+  }
   if (head === "openshell") {
     if (tab && OPENSHELL_TABS.has(tab)) {
       return {

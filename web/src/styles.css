@@ -1060,6 +1060,44 @@ textarea.sandbox-policy-textarea {
   background: var(--panel);
 }
 
+.openshell-providers-host {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.openshell-providers-host .openshell-band {
+  margin-top: 0;
+}
+a.button-link {
+  display: inline-flex;
+  align-items: center;
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 11px;
+  text-decoration: none;
+  box-shadow: var(--shadow-soft);
+}
+a.button-link:hover {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+.github-app-oauth-optional {
+  margin: 4px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.github-app-oauth-optional summary {
+  cursor: pointer;
+  font-size: 12px;
+}
+.github-app-oauth-optional label {
+  margin-top: 8px;
+}
 .openshell-providers-head h3 {
   margin: 0 0 4px;
   font-size: 15px;

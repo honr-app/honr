@@ -145,8 +145,9 @@ export function Login({
 
         {!bootstrap && !status.github_login_enabled && (
           <p className="login-hint" data-testid="login-github-disabled">
-            GitHub login needs Client ID + Client secret on Settings → GitHub App
-            (after you sign in as local admin).
+            GitHub login needs Client ID + Client secret on the shipped
+            github-app provider (Settings → OpenShell → Providers; after you
+            sign in as local admin).
           </p>
         )}
       </section>

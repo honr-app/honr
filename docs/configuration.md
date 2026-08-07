@@ -7,7 +7,7 @@ Two layers:
 | Layer | Role |
 |---|---|
 | **Process boot** | Database URL (`HONR_DATABASE_URL` else `sqlite:honr.db`). Hierarchy is compile-time Project + Task. |
-| **Board DB + Settings / API** | Live source of truth for sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval), OpenShell gateway/providers, Forge, and GitHub App. |
+| **Board DB + Settings / API** | Live source of truth for sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval), OpenShell gateway/providers (incl. shipped `github-app`), and Forge. |
 
 ## Board database
 
@@ -81,7 +81,8 @@ use a minimal policy (`src/seed_policies.rs`); operators add egress as needed.
 Cockpit uses the global default sandbox spec unless you set an explicit Cockpit
 profile under Sandbox specs.
 
-## OpenShell / Forge / GitHub App
+## OpenShell / Forge / GitHub App provider
 
-Connectivity, providers, provider types, Forge poll, and GitHub App credentials
-are board Settings — see the Settings UI and [Your first agent](first-agent.md).
+Connectivity, providers (including the shipped `github-app` type that mints
+`GH_TOKEN`), provider types, and Forge poll are board Settings — see the
+Settings UI and [Your first agent](first-agent.md).

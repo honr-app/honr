@@ -110,8 +110,11 @@ Agents then reach models at `https://inference.local` and the gateway swaps in
 the real credential on the way out. Details, including the one environment
 variable that will silently break this: [Sandbox](sandbox.md).
 
-For GitHub, use **Settings → GitHub App**, not the providers band. Installation
-tokens sync into the OpenShell `github` provider as `GH_TOKEN` on their own.
+For GitHub, add or edit the shipped **`github-app`** provider under
+**Settings → OpenShell → Providers** (type profile under **Provider types**,
+same catalog as `cursor-agent` / `antigravity`). Set App ID, private key, and
+installation; Save/Sync mints `GH_TOKEN` onto the gateway — attach that
+provider on your Sandbox spec.
 
 **Check:** Sync reports success and the providers you expect are listed on the
 gateway.

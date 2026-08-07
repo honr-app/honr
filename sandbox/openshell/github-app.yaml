@@ -1,0 +1,56 @@
+# OpenShell provider type for GitHub App–minted installation tokens.
+# Honr mints GH_TOKEN (App JWT → installation access token) and syncs only
+# that credential to the gateway — never the App private key.
+id: github-app
+display_name: GitHub Application Access Token
+description: GitHub App installation token as GH_TOKEN (minted by honr)
+category: agent
+credentials:
+  - name: gh_token
+    description: Short-lived GitHub App installation access token
+    env_vars:
+      - GH_TOKEN
+    required: true
+    auth_style: bearer
+    header_name: authorization
+    query_param: ""
+discovery:
+  credentials:
+    - gh_token
+endpoints:
+  - host: api.github.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: uploads.github.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: github.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: raw.githubusercontent.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: objects.githubusercontent.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: codeload.github.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/bin/gh
+  - /usr/local/bin/gh
+  - /usr/bin/git
+  - /usr/bin/curl
+inference_capable: false

@@ -597,6 +597,11 @@ pub struct WebhookPollConfig {
     /// Seconds between ticks. Clamped to ≥ [`MIN_WEBHOOK_POLL_INTERVAL_SECS`].
     #[serde(default = "default_webhook_poll_interval_secs")]
     pub interval_secs: u64,
+    /// OpenShell provider instance that supplies the host poll token
+    /// (`github-app` mint, or a `github` / other row with sealed `GH_TOKEN`).
+    /// Required when polling is enabled — never inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
 }
 
 /// Floor for poll interval (Settings + loop). Below this, GitHub rate limits hurt.
@@ -611,16 +616,21 @@ impl Default for WebhookPollConfig {
         Self {
             enabled: false,
             interval_secs: default_webhook_poll_interval_secs(),
+            provider_name: None,
         }
     }
 }
 
 impl WebhookPollConfig {
-    /// Clamp interval; leave `enabled` as given.
+    /// Clamp interval; trim provider name (empty → None).
     pub fn normalized(mut self) -> Self {
         if self.interval_secs < MIN_WEBHOOK_POLL_INTERVAL_SECS {
             self.interval_secs = MIN_WEBHOOK_POLL_INTERVAL_SECS;
         }
+        self.provider_name = self
+            .provider_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         self
     }
 }
@@ -769,6 +779,13 @@ pub const CURSOR_AGENT_PROVIDER_TYPE: &str = "cursor-agent";
 
 /// Shipped OpenShell provider type YAML filename for Cursor Agent.
 pub const CURSOR_AGENT_PROVIDER_TYPE_NAME: &str = "cursor-agent.yaml";
+
+/// Custom board provider type for GitHub App–minted `GH_TOKEN`.
+/// Distinct from OpenShell builtin `github` (paste a PAT).
+pub const GITHUB_APP_PROVIDER_TYPE: &str = "github-app";
+
+/// Shipped OpenShell provider type YAML filename for GitHub App.
+pub const GITHUB_APP_PROVIDER_TYPE_NAME: &str = "github-app.yaml";
 
 /// Board-owned OpenShell provider type profile (Settings → OpenShell → Provider types).
 ///

@@ -786,8 +786,9 @@ assert(guideHtml.includes("/settings/openshell/connectivity"), "OpenShell deep l
 assert(guideHtml.includes("/settings/openshell/providers"), "OpenShell deep link: Providers");
 assert(guideHtml.includes("/settings/openshell/profiles"), "OpenShell deep link: Sandbox specs");
 assert(guideHtml.includes("/settings/agent-runtime"), "OpenShell deep link: Agent runtime");
-assert(guideHtml.includes("/settings/github-app"), "OpenShell deep link: GitHub App for GH_TOKEN");
-assert(guideHtml.includes("GH_TOKEN"), "OperatorGuide mentions GH_TOKEN via GitHub App");
+assert(guideHtml.includes("github-app"), "OperatorGuide mentions github-app provider");
+assert(guideHtml.includes("GH_TOKEN"), "OperatorGuide mentions GH_TOKEN");
+assert(guideHtml.includes("cursor-agent"), "OperatorGuide places github-app with other shipped types");
 assert(guideHtml.includes("Sandbox specs"), "OperatorGuide names Sandbox specs tab");
 assert(guideHtml.includes("mTLS"), "OperatorGuide mentions mTLS on Connectivity");
 // Order: Quickstart → MCP (with examples) → OpenShell/sandbox.
@@ -809,6 +810,7 @@ const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
 assert(!settingsHtml.includes("data-testid=\"settings-nav-sandboxes\""), "Sandboxes nav item removed");
 assert(settingsHtml.includes("data-testid=\"settings-nav-openshell\""), "Settings should nav to OpenShell");
+assert(!settingsHtml.includes("data-testid=\"settings-nav-github-app\""), "GitHub App folded into OpenShell Providers");
 assert(settingsHtml.includes("data-testid=\"openshell-panel\""), "Default section is OpenShell");
 assert(settingsHtml.includes("data-testid=\"openshell-subnav\""), "OpenShell has section subnav");
 assert(settingsHtml.includes("data-testid=\"openshell-tab-profiles\""), "OpenShell tab for Profiles");
@@ -942,7 +944,7 @@ const openshellProvidersHtml = renderToString(
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers\""), "Providers band renders");
 assert(
   openshellProvidersHtml.includes(">Providers<") || openshellProvidersHtml.includes("Providers</h3>"),
-  "Providers heading",
+  "Providers catalog heading",
 );
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-provider-gh-clankr\""), "Provider row renders");
 assert(openshellProvidersHtml.includes("data-testid=\"openshell-providers-sync\""), "Sync all control");
@@ -950,8 +952,8 @@ assert(!openshellProvidersHtml.includes("openshell-providers-import-adc"), "Impo
 assert(openshellProvidersHtml.includes("on gateway"), "Gateway sync badge");
 assert(!openshellProvidersHtml.includes("sk-"), "Providers view must not echo secrets");
 assert(
-  openshellProvidersHtml.includes("Settings → GitHub App"),
-  "Providers intro points at GitHub App for tokens",
+  openshellProvidersHtml.includes("github-app"),
+  "Providers intro mentions github-app type",
 );
 assert(
   !openshellProvidersHtml.includes("openshell-provider-attach-"),
@@ -962,27 +964,41 @@ assert(
   "Providers copy points attach to Sandbox specs",
 );
 
+// github-app ships as a normal catalog row (type github-app).
 const openshellManagedGithubHtml = renderToString(
   React.createElement(OpenShellProvidersPanelView, {
     providers: [
       {
-        name: "github",
-        type: "github",
-        config: {},
-        credential_keys: ["GH_TOKEN"],
+        name: "github-app",
+        type: "github-app",
+        config: { GITHUB_APP_ID: "123" },
+        credential_keys: ["GITHUB_APP_PRIVATE_KEY", "GH_TOKEN"],
         has_credentials: true,
+        has_refresh: false,
+        gateway_synced: true,
+      },
+      {
+        name: "vertex",
+        type: "google-vertex-ai",
+        config: {},
+        credential_keys: [],
+        has_credentials: false,
         has_refresh: false,
         gateway_synced: true,
       },
     ],
     gatewayReachable: true,
-    profiles: [],
-    draft: {
-      name: "github",
-      type: "github",
-      config: {},
-      credentials: {},
-    },
+    profiles: [
+      {
+        id: "github-app",
+        display_name: "GitHub Application Access Token",
+        description: "minted GH_TOKEN",
+        source: "board",
+        credential_env_vars: ["GH_TOKEN"],
+        form_config_keys: ["GITHUB_APP_ID", "GITHUB_INSTALLATION_ID"],
+      },
+    ],
+    draft: null,
     onDraftChange: () => {},
     onSave: () => {},
     onCancelEdit: () => {},
@@ -992,24 +1008,63 @@ const openshellManagedGithubHtml = renderToString(
   }),
 );
 assert(
-  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-managed-github\""),
-  "Managed github row marks App source",
+  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-github-app\""),
+  "github-app lists in the Providers catalog",
 );
 assert(
-  openshellManagedGithubHtml.includes("secrets: GH_TOKEN · GitHub App"),
-  "Managed github row lists attached env vars like other providers",
+  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-vertex\""),
+  "Other providers still list in the catalog",
+);
+
+const githubAppDraftHtml = renderToString(
+  React.createElement(OpenShellProvidersPanelView, {
+    providers: [],
+    gatewayReachable: true,
+    profiles: [
+      {
+        id: "github-app",
+        display_name: "GitHub Application Access Token",
+        description: "minted GH_TOKEN",
+        source: "board",
+        credential_env_vars: ["GH_TOKEN"],
+        form_config_keys: ["GITHUB_APP_ID", "GITHUB_INSTALLATION_ID"],
+      },
+    ],
+    draft: {
+      name: "github-app",
+      type: "github-app",
+      config: { GITHUB_APP_ID: "123" },
+      credentials: {},
+    },
+    installations: [{ id: 99, account_login: "acme", account_type: "Organization" }],
+    onRefreshInstallations: () => {},
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onSync: () => {},
+  }),
 );
 assert(
-  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-cred-GH_TOKEN\""),
-  "Managed github form still shows GH_TOKEN field",
+  githubAppDraftHtml.includes("data-testid=\"openshell-provider-cred-GITHUB_APP_PRIVATE_KEY\""),
+  "github-app form shows private key, not pasted GH_TOKEN",
 );
 assert(
-  openshellManagedGithubHtml.includes("data-testid=\"openshell-provider-app-managed-note\""),
-  "Managed github field hint points at GitHub App mint",
+  !githubAppDraftHtml.includes("data-testid=\"openshell-provider-cred-GH_TOKEN\""),
+  "mint-managed GH_TOKEN is not a form credential field",
 );
 assert(
-  openshellManagedGithubHtml.includes("Edit"),
-  "Managed github keeps Edit control like other providers",
+  githubAppDraftHtml.includes("data-testid=\"github-app-install-link\""),
+  "Install / manage on GitHub link on provider form",
+);
+assert(
+  githubAppDraftHtml.includes("data-testid=\"github-app-refresh-installations\""),
+  "Refresh installations on provider form",
+);
+assert(
+  githubAppDraftHtml.includes("data-testid=\"openshell-provider-config-GITHUB_APP_ID\""),
+  "App ID config field",
 );
 
 const openshellProvidersEmptyHtml = renderToString(
@@ -1099,6 +1154,49 @@ assert(
   "Shipped badge on provider type row",
 );
 
+const openshellProviderTypesGithubHtml = renderToString(
+  React.createElement(OpenShellProviderTypesPanelView, {
+    types: [
+      {
+        id: "github-app",
+        display_name: "GitHub Application Access Token",
+        description: "minted GH_TOKEN",
+        source: "board",
+        credential_env_vars: ["GH_TOKEN"],
+        form_config_keys: ["GITHUB_APP_ID", "GITHUB_INSTALLATION_ID"],
+        yaml: "id: github-app\n",
+        shipped: true,
+      },
+      {
+        id: "antigravity",
+        display_name: "Google Antigravity (agy)",
+        description: "",
+        source: "board",
+        credential_env_vars: ["ANTIGRAVITY_ACCESS_TOKEN"],
+        form_config_keys: ["ANTIGRAVITY_GCP_PROJECT", "ANTIGRAVITY_GCP_LOCATION"],
+        yaml: "id: antigravity\n",
+        shipped: true,
+      },
+    ],
+    draft: null,
+    editingId: null,
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onAdd: () => {},
+  }),
+);
+assert(
+  openshellProviderTypesGithubHtml.includes("data-testid=\"openshell-provider-type-github-app\""),
+  "Shipped github-app type lists next to antigravity",
+);
+assert(
+  openshellProviderTypesGithubHtml.includes("data-testid=\"openshell-provider-type-antigravity\""),
+  "antigravity type still listed",
+);
+
 const openshellWithBandsHtml = renderToString(
   React.createElement(OpenShellPanelView, {
     ...openshellPanelProps,
@@ -1135,7 +1233,9 @@ const workspaceHtml = renderToString(
     poll: {
       enabled: false,
       interval_secs: 60,
+      provider_name: null,
     },
+    credentialOptions: [],
     onDraftChange: () => {},
     onPollChange: () => {},
     onSave: () => {},
@@ -1147,6 +1247,10 @@ assert(workspaceHtml.includes("data-testid=\"workspace-field-forge\""), "Provide
 assert(workspaceHtml.includes("data-testid=\"workspace-poll\""), "Poll fallback controls");
 assert(workspaceHtml.includes("data-testid=\"workspace-poll-enabled\""), "Poll enabled checkbox");
 assert(workspaceHtml.includes("data-testid=\"workspace-poll-interval\""), "Poll interval field");
+assert(workspaceHtml.includes("data-testid=\"workspace-poll-credential\""), "Credential select");
+assert(workspaceHtml.includes("data-testid=\"workspace-poll-auth\""), "Poll credential status");
+assert(workspaceHtml.includes("no GitHub credentials"), "Empty state names missing credentials");
+assert(workspaceHtml.includes("Create a provider"), "Empty state tells what to create");
 assert(!workspaceHtml.includes("data-testid=\"workspace-first-clone-defaults\""), "no first-clone defaults");
 assert(!workspaceHtml.includes("data-testid=\"workspace-field-upstream\""), "no upstream field");
 assert(!workspaceHtml.includes("data-testid=\"workspace-field-fork\""), "no fork field");
@@ -1161,6 +1265,89 @@ assert(
 );
 assert(workspaceHtml.includes("data-testid=\"workspace-save\""), "Forge save control");
 
+const workspaceAuthReadyHtml = renderToString(
+  React.createElement(WorkspacePanelView, {
+    draft: { forge: "github" },
+    poll: { enabled: true, interval_secs: 30, provider_name: "github-app" },
+    credentialOptions: [
+      {
+        name: "github-app",
+        type: "github-app",
+        config: {},
+        credential_keys: ["GITHUB_APP_PRIVATE_KEY", "GH_TOKEN"],
+        has_credentials: true,
+        has_refresh: false,
+        gateway_synced: true,
+      },
+      {
+        name: "gh-pat",
+        type: "github",
+        config: {},
+        credential_keys: ["GH_TOKEN"],
+        has_credentials: true,
+        has_refresh: false,
+        gateway_synced: true,
+      },
+    ],
+    githubAppConfigured: true,
+    onDraftChange: () => {},
+    onPollChange: () => {},
+    onSave: () => {},
+  }),
+);
+assert(
+  workspaceAuthReadyHtml.includes("github-app ready"),
+  "Ready state labels selected credential ready",
+);
+assert(
+  workspaceAuthReadyHtml.includes("gh-pat"),
+  "PAT-style github provider listed as selectable credential",
+);
+assert(
+  workspaceAuthReadyHtml.includes("/settings/openshell/providers"),
+  "Link to OpenShell Providers for App config",
+);
+assert(
+  !workspaceAuthReadyHtml.includes("data-testid=\"workspace-poll-auth-warn\""),
+  "No skip warning when selected credential ready",
+);
+
+const workspaceAuthMissingHtml = renderToString(
+  React.createElement(WorkspacePanelView, {
+    draft: { forge: "github" },
+    poll: { enabled: true, interval_secs: 30, provider_name: null },
+    credentialOptions: [
+      {
+        name: "github-app",
+        type: "github-app",
+        config: {},
+        credential_keys: ["GITHUB_APP_PRIVATE_KEY"],
+        has_credentials: true,
+        has_refresh: false,
+      },
+    ],
+    githubAppConfigured: false,
+    onDraftChange: () => {},
+    onPollChange: () => {},
+    onSave: () => {},
+  }),
+);
+assert(
+  workspaceAuthMissingHtml.includes("credential not selected"),
+  "No auto-select when provider_name unset",
+);
+assert(
+  workspaceAuthMissingHtml.includes("data-testid=\"workspace-poll-auth-warn\""),
+  "Warn when poll enabled without selected credential",
+);
+assert(
+  workspaceAuthMissingHtml.includes("will skip"),
+  "Warn copy says poll will skip",
+);
+assert(
+  workspaceAuthMissingHtml.includes("Nothing is inferred"),
+  "Copy says nothing is inferred",
+);
 const fixtureProfiles = [
   {
     id: "default",
@@ -1573,8 +1760,8 @@ assert.deepStrictEqual(parseChromeLocation("/settings/openshell/connectivity"), 
 assert.deepStrictEqual(parseChromeLocation("/settings/github-app"), {
   view: "settings",
   cardId: null,
-  settingsSection: "github-app",
-  openShellTab: "connectivity",
+  settingsSection: "openshell",
+  openShellTab: "providers",
 });
 assert.deepStrictEqual(parseChromeLocation("/settings/access"), {
   view: "settings",
@@ -1682,10 +1869,10 @@ assert.strictEqual(
   formatChromePath({
     view: "settings",
     cardId: null,
-    settingsSection: "github-app",
+    settingsSection: "openshell",
     openShellTab: "providers",
   }),
-  "/settings/github-app",
+  "/settings/openshell/providers",
 );
 assert.strictEqual(
   formatChromePath({
@@ -1734,7 +1921,7 @@ assert(
     {
       view: "board",
       cardId: 1,
-      settingsSection: "github-app",
+      settingsSection: "access",
       openShellTab: "providers",
     },
   ),
@@ -1779,7 +1966,7 @@ assert(
     {
       view: "settings",
       cardId: null,
-      settingsSection: "github-app",
+      settingsSection: "workspace",
       openShellTab: "connectivity",
     },
     {
@@ -1882,7 +2069,6 @@ for (const path of [
   "/settings",
   "/settings/openshell/providers",
   "/settings/openshell/profiles",
-  "/settings/github-app",
   "/settings/access",
   "/settings/workspace",
   "/settings/agent-runtime",
@@ -1894,6 +2080,11 @@ for (const path of [
     `round-trip ${path}`,
   );
 }
+assert.strictEqual(
+  formatChromePath(parseChromeLocation("/settings/github-app")),
+  "/settings/openshell/providers",
+  "legacy /settings/github-app canonicalizes to Providers",
+);
 assert.strictEqual(
   formatChromePath(parseChromeLocation("/settings/openshell")),
   "/settings",

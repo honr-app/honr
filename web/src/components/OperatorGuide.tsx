@@ -168,12 +168,11 @@ export function OperatorGuide() {
               Settings → OpenShell → Providers
             </a>
             {" "}
-            — model providers; Sync applies them to the gateway. For GitHub{" "}
-            <code>GH_TOKEN</code>, use{" "}
-            <a className="operator-guide-link" href="/settings/github-app">
-              Settings → GitHub App
-            </a>
-            , not the providers band.
+            — configure providers (including shipped type{" "}
+            <code>github-app</code> / <code>GH_TOKEN</code>). Sync applies them
+            to the gateway. Provider types lists the shipped{" "}
+            <code>github-app</code> profile next to <code>cursor-agent</code>{" "}
+            and <code>antigravity</code>.
           </li>
           <li>
             <a
