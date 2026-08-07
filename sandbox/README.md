@@ -19,15 +19,17 @@ Empty boards seed `default` from the built-in string in
 sandboxes. Policy filesystem/process sections are immutable on a live sandbox;
 set them at create time.
 
-## `cockpit-policy.yaml`
+## Cockpit network policy (board profile)
 
-The **cockpit** control-plane seat policy: egress to the host honr MCP
-endpoint (`host.docker.internal` / `127.0.0.1` / `localhost` on port 8080),
-inference, and GitHub (App `GH_TOKEN` via the `github` provider). Package
-registries stay on the worker identity. Seeded into the sandbox-profile catalog
-as id `cockpit` (Settings → OpenShell → Profiles) with lighter cpu/memory than
-the worker default. After seed, the board profile is authoritative for cockpit
-too.
+The **cockpit** control-plane seat policy lives on the board sandbox profile
+(`cockpit`): Settings → OpenShell → Profiles. Egress: host honr MCP
+(`host.docker.internal` / `127.0.0.1` / `localhost` on port 8080), inference,
+and GitHub (App `GH_TOKEN` via the `github` provider). Package registries stay
+on the worker identity.
+
+Empty boards seed `cockpit` from `DEFAULT_COCKPIT_SANDBOX_POLICY` in
+`src/seed_policies.rs` (lighter cpu/memory than the worker default). After
+seed, the board profile is authoritative — edit there, not a host YAML path.
 
 ## `Containerfile`
 

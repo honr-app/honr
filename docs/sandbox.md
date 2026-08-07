@@ -125,7 +125,7 @@ generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 | Catalog id | Seed source | Egress |
 |---|---|---|
 | `default` (worker) | Built-in `src/seed_policies.rs` when catalog empty; then **board spec only** | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
-| `cockpit` | [`cockpit-policy.yaml`](https://github.com/honr-app/honr/blob/main/sandbox/cockpit-policy.yaml) at seed; then **board spec only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
+| `cockpit` | Built-in `DEFAULT_COCKPIT_SANDBOX_POLICY` in `src/seed_policies.rs` when catalog empty; then **board spec only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
 
 Settings → OpenShell → Sandbox specs is the live source of truth for both. The
 cockpit spec seeds with `github` + `vertex` + `antigravity` attach names so

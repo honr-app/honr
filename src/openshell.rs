@@ -2186,7 +2186,7 @@ mod cockpit_policy_create_tests {
 
     #[test]
     fn build_create_request_accepts_cockpit_mcp_protocol_policy() {
-        let yaml = std::fs::read_to_string("sandbox/cockpit-policy.yaml").expect("file");
+        let yaml = crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY.to_string();
         assert!(yaml.contains("protocol: mcp"), "seed must use protocol mcp");
         let spec = SandboxSpec {
             name: "honr-cockpit-policy-test".into(),
