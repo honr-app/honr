@@ -105,6 +105,31 @@ re-queues it. Unpark clears the hold and queues the supervisor, same as Start.
 Prefer **park** over **halt** when the agent is stuck and you want the same
 conversation to continue. Prefer **steer** when the note can wait.
 
+## PR review feedback
+
+When GitHub submits a PR review with state `CHANGES_REQUESTED` or `COMMENT`,
+honr treats it like human **Request changes**: pointer steer note, clear any
+proposal, move the matching card to Backlog. Same path for both review states —
+no auto-dispatch.
+
+The steer note only points at the PR (url / number). It tells the next agent
+there is review feedback and to inspect it with `gh` (e.g. `gh pr view` /
+reviews). It does not summarize or paste the review body; the agent figures out
+the rest from the review itself.
+
+Matching uses the card's `pr_url` the same way merge completion does. Applies
+in Review, Needs You, and live Claimed/Running. Duplicate deliveries are safe
+(already-Backlog cards are not matched again).
+
+Ingress is the same webhook endpoint: `x-github-event=pull_request_review` with
+`action=submitted`. Forge polling (when enabled) watches open PRs for newly
+submitted reviews and calls the same Board helper — first observation only seeds
+a per-PR cursor so historical reviews do not bounce the card.
+
+GitHub `APPROVED` and dismissed reviews are board no-ops. Approving a PR on
+GitHub does **not** Approve the card in honr, and it does not merge. Approve and
+merge stay human.
+
 ## When main moves
 
 Ingress is `POST /api/webhooks/github`. A push to the default branch emits
@@ -145,11 +170,14 @@ gh extension install cli/gh-webhook   # once
 
 gh webhook forward \
   --repo=<owner/name> \
-  --events=pull_request,push \
+  --events=pull_request,pull_request_review,push \
   --url=http://127.0.0.1:8080/api/webhooks/github
 ```
 
-One forwarder per repo at a time. For a polling fallback instead, see
+`pull_request` and `push` cover merge → Done and main-advanced;
+`pull_request_review` covers submitted review feedback → steer (see
+[PR review feedback](#pr-review-feedback)). One forwarder per repo at a time.
+For a polling fallback instead, see
 [Configuration](configuration.md#forge-and-webhooks).
 
 ## Next
