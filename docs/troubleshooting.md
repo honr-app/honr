@@ -51,18 +51,20 @@ literally too. Git's real remote helper is `/usr/lib/git-core/git-remote-http`,
 not `git`.
 
 Grep the sandbox log for `DENIED`. Policy lives on the **board sandbox spec**
-(Settings → OpenShell → Sandbox specs), not in a file on the host — editing a
-YAML file on disk does not change a live sandbox.
+(Settings → OpenShell → Sandbox specs). Change it there (or via
+`/api/sandbox-profiles`); then create a new sandbox so the updated policy is
+applied at create time.
 
 ### Policy edits are not taking effect
 
 Two separate traps:
 
 - **Policy is immutable on a live sandbox** for the filesystem and process
-  sections. It is set at create time.
-- **Live specs do not pick up seed edits.** `src/seed_policies.rs` seeds an
-  *empty* catalog. Once a spec exists, the board copy is the source of truth —
-  paste the update into Settings, or recreate the spec.
+  sections. It is set at create time — recreate the sandbox after a policy
+  change.
+- **Empty-catalog seed is one-shot.** `src/seed_policies.rs` fills an empty
+  catalog; after that the board spec is authoritative. Paste updates into
+  Settings, or recreate the spec, when you change the desired policy.
 
 ### The model calls hang
 

@@ -1,15 +1,14 @@
 //! Built-in sandbox policy text for **empty-catalog seed only**.
 //!
 //! Live worker and cockpit policy live on the board sandbox profiles
-//! (`Settings → Profiles`, `meta.sandbox_profiles`). Do not reintroduce host
-//! policy path seeds — editing a host file does not change running profiles.
+//! (`Settings → Profiles`, `meta.sandbox_profiles`).
 
 /// Default card-worker OpenShell policy seeded into the `default` profile when
 /// the catalog is empty. After seed, edit the profile on the board.
 pub const DEFAULT_WORKER_SANDBOX_POLICY: &str = r#"# honr card-worker sandbox: reach Vertex / Cursor for inference and GitHub for
 # code. Default-deny includes honr MCP — workers stay air-gapped from the board.
 # The privileged cockpit uses DEFAULT_COCKPIT_SANDBOX_POLICY (cockpit profile) instead.
-# Live edits: Settings → OpenShell → Profiles → default (not this string).
+# Live edits: Settings → OpenShell → Profiles → default.
 version: 1
 
 filesystem_policy:
@@ -162,12 +161,12 @@ network_policies:
 
 /// Default cockpit OpenShell policy seeded into the `cockpit` profile when
 /// the catalog is empty (or when ensure-cockpit inserts it). After seed,
-/// edit the profile on the board — not a host YAML path.
+/// edit the profile on the board.
 pub const DEFAULT_COCKPIT_SANDBOX_POLICY: &str = r#"# honr cockpit sandbox: privileged control-plane seat.
 # Egress: host honr MCP, inference, and GitHub (App `GH_TOKEN` via the `github`
 # provider). Package registries stay on the card-worker profile (`default`).
 # Worker sandboxes stay air-gapped from honr (no honr MCP allow-list there).
-# Live edits: Settings → OpenShell → Profiles → cockpit (not this string).
+# Live edits: Settings → OpenShell → Profiles → cockpit.
 version: 1
 
 filesystem_policy:

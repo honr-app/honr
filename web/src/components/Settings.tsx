@@ -924,8 +924,9 @@ export function AgentRuntimePanelView({
       <p className="dim">
         Process knobs for OpenShell sandboxes: branch prefix, concurrency,
         timeouts, and the fallback agent engine when a profile omits one.
-        Seeded from <code>honr.yaml</code>; edits persist on the Board. Per-run
-        engine lives on OpenShell → Sandbox specs.
+        Fresh boards seed from compiled defaults; edits persist on the Board.
+        Per-run engine lives on OpenShell → Sandbox specs. The process boot gate
+        also lives in <code>honr.yaml</code> (<code>execution.agents.enabled</code>).
       </p>
 
       {error && <div className="err">{error}</div>}
