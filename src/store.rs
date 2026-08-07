@@ -31,7 +31,8 @@ pub struct BoardState {
     /// they will be right to.
     #[serde(default)]
     pub stories: BTreeMap<ItemId, Vec<StoryLine>>,
-    /// Named sandbox create profiles. Seeded from YAML AgentConfig when empty.
+    /// Named sandbox create profiles. Empty catalogs seed `default`+`cockpit`
+    /// from compiled [`AgentConfig::default`] / embedded policy constants.
     #[serde(default)]
     pub sandbox_profiles: BTreeMap<String, SandboxProfile>,
     /// Global default profile id. Projects may override via `sandbox_profile_id`.
@@ -40,7 +41,7 @@ pub struct BoardState {
     /// Profile used when Cockpit Start creates the cockpit sandbox.
     #[serde(default)]
     pub cockpit_sandbox_profile_id: Option<String>,
-    /// Per-install forge/repo binding. Seeded from yaml; Board is SoT after.
+    /// Per-install forge binding. Seeded to `github` when unset; Board is SoT after.
     #[serde(default)]
     pub workspace: Option<WorkspaceBinding>,
     /// Gateway URL for direct mTLS clients (Settings → OpenShell). Not secret.
@@ -64,7 +65,8 @@ pub struct BoardState {
     /// Org teams (`org/team_slug`) whose members may Sign in with GitHub.
     #[serde(default)]
     pub auth_allowed_teams: Vec<String>,
-    /// Process agent knobs (Settings → Agent runtime). Seeded from yaml; Board SoT after.
+    /// Process agent knobs (Settings → Agent runtime). Seeded from compiled
+    /// defaults (`agents.enabled` from `honr.yaml` boot gate); Board SoT after.
     #[serde(default)]
     pub agent_runtime: Option<AgentRuntimeConfig>,
     /// Desired OpenShell providers (Settings → OpenShell → Providers). Board SoT.
@@ -590,7 +592,11 @@ impl Board {
             }
         }
         if board.seed_sandbox_profiles_if_empty() {
-            tracing::info!("seeded sandbox profile catalog from execution.agents");
+            tracing::info!("seeded sandbox profile catalog from compiled defaults");
+            board.flush();
+        }
+        if board.ensure_default_sandbox_profile() {
+            tracing::info!("seeded default sandbox profile for card workers");
             board.flush();
         }
         if board.ensure_cockpit_sandbox_profile() {
@@ -602,11 +608,11 @@ impl Board {
             board.flush();
         }
         if board.seed_workspace_binding_if_empty() {
-            tracing::info!("seeded workspace binding from execution.agents.repo");
+            tracing::info!("seeded workspace forge binding");
             board.flush();
         }
         if board.seed_agent_runtime_if_empty() {
-            tracing::info!("seeded agent runtime from execution.agents");
+            tracing::info!("seeded agent runtime from compiled defaults");
             board.flush();
         }
         board
@@ -651,7 +657,11 @@ impl Board {
             board.flush();
         }
         if board.seed_sandbox_profiles_if_empty() {
-            tracing::info!("seeded sandbox profile catalog from execution.agents");
+            tracing::info!("seeded sandbox profile catalog from compiled defaults");
+            board.flush();
+        }
+        if board.ensure_default_sandbox_profile() {
+            tracing::info!("seeded default sandbox profile for card workers");
             board.flush();
         }
         if board.ensure_cockpit_sandbox_profile() {
@@ -663,11 +673,11 @@ impl Board {
             board.flush();
         }
         if board.seed_workspace_binding_if_empty() {
-            tracing::info!("seeded workspace binding from execution.agents.repo");
+            tracing::info!("seeded workspace forge binding");
             board.flush();
         }
         if board.seed_agent_runtime_if_empty() {
-            tracing::info!("seeded agent runtime from execution.agents");
+            tracing::info!("seeded agent runtime from compiled defaults");
             board.flush();
         }
         Ok(board)
@@ -1892,23 +1902,22 @@ impl Board {
 
     /// Seed worker `default` + cockpit profiles when the catalog is empty.
     /// Returns true when profiles were inserted. After seed, the board profile
-    /// is authoritative — edit via Settings / `/api/sandbox-profiles`. Worker
-    /// seed policy comes from `agents.policy` via
-    /// [`crate::model::resolve_policy_yaml`] (usually the built-in embedded
-    /// default); cockpit seeds from
-    /// [`crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY`].
+    /// is authoritative — edit via Settings / `/api/sandbox-profiles`.
+    ///
+    /// Create knobs come from compiled [`AgentConfig::default`] and embedded
+    /// policy constants — not from `honr.yaml` image/cpu/memory/policy fields.
     pub fn seed_sandbox_profiles_if_empty(&self) -> bool {
-        self.seed_sandbox_profiles_from(&self.schema.execution.agents)
+        self.seed_sandbox_profiles_from(&AgentConfig::default())
     }
 
     /// Same as [`Self::seed_sandbox_profiles_if_empty`] but with an explicit
-    /// AgentConfig (tests and callers that don't want schema.agents).
+    /// AgentConfig (tests and callers that don't want compiled defaults).
     pub fn seed_sandbox_profiles_from(&self, agents: &AgentConfig) -> bool {
         let mut s = self.state.write();
         if !s.sandbox_profiles.is_empty() {
             return false;
         }
-        let id = "default".to_string();
+        let id = crate::model::DEFAULT_SANDBOX_PROFILE_ID.to_string();
         let engine = {
             let e = agents.engine.trim();
             if e.is_empty() {
@@ -1941,13 +1950,62 @@ impl Board {
         true
     }
 
+    /// Insert the worker `default` catalog entry when missing (never overwrite),
+    /// and point `default_sandbox_profile_id` at it when that preference is unset.
+    /// Together with [`Self::ensure_cockpit_sandbox_profile`], boot always leaves
+    /// `default`+`cockpit` so live create does not depend on compiled-default
+    /// fallback text.
+    pub fn ensure_default_sandbox_profile(&self) -> bool {
+        self.ensure_default_sandbox_profile_from(&AgentConfig::default())
+    }
+
+    /// Same as [`Self::ensure_default_sandbox_profile`] with an explicit AgentConfig.
+    pub fn ensure_default_sandbox_profile_from(&self, agents: &AgentConfig) -> bool {
+        let mut s = self.state.write();
+        let mut changed = false;
+        let default_id = crate::model::DEFAULT_SANDBOX_PROFILE_ID;
+        if !s.sandbox_profiles.contains_key(default_id) {
+            let engine = {
+                let e = agents.engine.trim();
+                if e.is_empty() {
+                    None
+                } else {
+                    Some(e.to_string())
+                }
+            };
+            s.sandbox_profiles.insert(
+                default_id.to_string(),
+                SandboxProfile {
+                    id: default_id.to_string(),
+                    name: "Default".into(),
+                    image: agents.image.clone(),
+                    policy: resolve_policy_yaml(&agents.policy),
+                    cpu: agents.cpu.clone(),
+                    memory: agents.memory.clone(),
+                    engine,
+                    provider_names: Vec::new(),
+                },
+            );
+            changed = true;
+        }
+        if s.default_sandbox_profile_id.is_none() && s.sandbox_profiles.contains_key(default_id) {
+            s.default_sandbox_profile_id = Some(default_id.to_string());
+            changed = true;
+        }
+        drop(s);
+        if changed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        changed
+    }
+
     /// Insert the `cockpit` catalog entry when missing (never overwrite), and
     /// point `cockpit_sandbox_profile_id` at it when that preference is unset.
     /// Boards that already had a worker default used to keep the preference
     /// empty forever — resolve then fell through to the air-gapped worker
     /// profile and Cockpit MCP stayed `policy_denied`.
     pub fn ensure_cockpit_sandbox_profile(&self) -> bool {
-        self.ensure_cockpit_sandbox_profile_from(&self.schema.execution.agents)
+        self.ensure_cockpit_sandbox_profile_from(&AgentConfig::default())
     }
 
     /// Same as [`Self::ensure_cockpit_sandbox_profile`] with an explicit AgentConfig.
@@ -2013,13 +2071,14 @@ impl Board {
 
     // ------------------------------------------------ workspace binding (board state)
 
-    /// Seed Forge binding when unbound.
-    /// Work remotes come from yaml `execution.agents.repo` and card `pull_request`.
+    /// Seed Forge binding when unbound. Always `github` — not from `honr.yaml`.
+    /// Card work remotes come from `pull_request` after publish.
     pub fn seed_workspace_binding_if_empty(&self) -> bool {
-        self.seed_workspace_binding_from(&self.schema.execution.agents)
+        self.seed_workspace_binding_from(&AgentConfig::default())
     }
 
-    /// Same as [`Self::seed_workspace_binding_if_empty`] with an explicit AgentConfig.
+    /// Same as [`Self::seed_workspace_binding_if_empty`] with an explicit AgentConfig
+    /// (ignored; kept for call-site symmetry with other seed helpers).
     pub fn seed_workspace_binding_from(&self, _agents: &AgentConfig) -> bool {
         let mut s = self.state.write();
         if s.workspace.is_some() {
@@ -2372,25 +2431,37 @@ impl Board {
 
     // ------------------------------------------------ agent runtime (board state)
 
-    /// Seed Agent runtime from yaml when unset. Returns true when inserted.
+    /// Seed Agent runtime when unset. Process knobs come from compiled
+    /// [`AgentRuntimeConfig::default`]; `enabled` copies the `honr.yaml`
+    /// `execution.agents.enabled` boot gate so a fresh install with agents on
+    /// still dispatches. Settings/API edit thereafter.
     pub fn seed_agent_runtime_if_empty(&self) -> bool {
-        self.seed_agent_runtime_from(&self.schema.execution.agents)
+        self.seed_agent_runtime_config(AgentRuntimeConfig {
+            enabled: self.schema.execution.agents.enabled,
+            ..AgentRuntimeConfig::default()
+        })
     }
 
-    /// Same as [`Self::seed_agent_runtime_if_empty`] with an explicit AgentConfig.
+    /// Same as [`Self::seed_agent_runtime_if_empty`] but map knobs from an
+    /// explicit AgentConfig (tests).
+    #[cfg(test)]
     pub fn seed_agent_runtime_from(&self, agents: &AgentConfig) -> bool {
-        let mut s = self.state.write();
-        if s.agent_runtime.is_some() {
-            return false;
-        }
-        s.agent_runtime = Some(AgentRuntimeConfig {
+        self.seed_agent_runtime_config(AgentRuntimeConfig {
             enabled: agents.enabled,
             engine: agents.engine.clone(),
             max_concurrent: agents.max_concurrent,
             agent_timeout_secs: agents.agent_timeout_secs,
             max_attempts: agents.max_attempts,
             branch_prefix: agents.branch_prefix.clone(),
-        });
+        })
+    }
+
+    fn seed_agent_runtime_config(&self, runtime: AgentRuntimeConfig) -> bool {
+        let mut s = self.state.write();
+        if s.agent_runtime.is_some() {
+            return false;
+        }
+        s.agent_runtime = Some(runtime.normalized());
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         true
@@ -2413,7 +2484,9 @@ impl Board {
     }
 
     /// AgentConfig for supervisor / sandbox create: durable Settings overlay on
-    /// yaml (image/policy/cpu/memory/repo still come from yaml / profiles).
+    /// compiled create-knob defaults. Image/policy/cpu/memory live on board
+    /// profiles after seed; `honr.yaml` only supplies the `enabled` boot gate
+    /// (and optional legacy `repo`) before runtime is seeded.
     pub fn effective_agents(&self) -> AgentConfig {
         self.agents_with_workspace(&self.schema.execution.agents)
     }
@@ -2432,8 +2505,10 @@ impl Board {
         }
     }
 
-    /// AgentConfig from yaml with durable Settings → Agent runtime overlay.
-    /// Remotes for a run still come from [`Self::resolve_card_repo`].
+    /// Compiled create-knob defaults with durable Settings → Agent runtime overlay.
+    /// `yaml_agents.enabled` / `repo` are the only yaml fields consulted (boot
+    /// gate + legacy remotes). Remotes for a run still come from
+    /// [`Self::resolve_card_repo`].
     pub fn agents_with_workspace(&self, yaml_agents: &AgentConfig) -> AgentConfig {
         let rt = self.agent_runtime();
         Self::overlay_agent_runtime(yaml_agents, rt.as_ref())
@@ -2445,7 +2520,12 @@ impl Board {
         yaml_agents: &AgentConfig,
         rt: Option<&AgentRuntimeConfig>,
     ) -> AgentConfig {
-        let mut cfg = yaml_agents.clone();
+        let mut cfg = AgentConfig {
+            // Boot gate / legacy remotes from yaml; create knobs stay compiled.
+            enabled: yaml_agents.enabled,
+            repo: yaml_agents.repo.clone(),
+            ..AgentConfig::default()
+        };
         let Some(rt) = rt else {
             return cfg;
         };
@@ -2782,7 +2862,7 @@ impl Board {
     /// Create knobs for the Cockpit / cockpit sandbox.
     ///
     /// Order: `cockpit_sandbox_profile_id` → `default_sandbox_profile_id` →
-    /// synthetic cockpit-from-agents.
+    /// synthetic cockpit-from-compiled-defaults.
     pub fn resolve_cockpit_sandbox_create(&self) -> ResolvedSandboxCreate {
         let s = self.state.read();
         if let Some(ref cid) = s.cockpit_sandbox_profile_id {
@@ -2797,7 +2877,7 @@ impl Board {
         }
         drop(s);
         ResolvedSandboxCreate::from_profile(&crate::model::cockpit_sandbox_profile_from_agents(
-            &self.effective_agents(),
+            &AgentConfig::default(),
         ))
     }
 
@@ -2824,12 +2904,13 @@ impl Board {
     /// Resolve create knobs for a card at sandbox create.
     ///
     /// Order: Project `sandbox_profile_id` → board `default_sandbox_profile_id`
-    /// → YAML `execution.agents` image/policy/cpu/memory. Missing catalog
-    /// entries fall through to the next step (YAML is always last resort).
+    /// → compiled [`AgentConfig::default`] (last resort). Missing catalog
+    /// entries fall through; boot ensures `default`+`cockpit` so the fallback
+    /// is rarely hit. Do not weaken this order.
     pub fn resolve_sandbox_create(&self, item_id: ItemId) -> ResolvedSandboxCreate {
         let item = match self.get(item_id) {
             Some(i) => i,
-            None => return ResolvedSandboxCreate::from_agents(&self.schema.execution.agents),
+            None => return ResolvedSandboxCreate::from_agents(&AgentConfig::default()),
         };
         let project = if item.is_project() {
             Some(item)
@@ -2850,7 +2931,7 @@ impl Board {
             }
         }
         drop(s);
-        ResolvedSandboxCreate::from_agents(&self.schema.execution.agents)
+        ResolvedSandboxCreate::from_agents(&AgentConfig::default())
     }
 
     /// Engine for a card at claim/run: sandbox profile engine, else Agent runtime.
@@ -9129,7 +9210,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_profiles_seed_from_yaml_when_catalog_empty() {
+    fn sandbox_profiles_seed_from_agents_when_catalog_empty() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join("honr-test-sbx-seed.json"),
@@ -9179,6 +9260,70 @@ mod tests {
         );
         // Second seed is a no-op.
         assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
+        assert_eq!(b.list_sandbox_profiles().len(), 2);
+    }
+
+    #[test]
+    fn sandbox_profiles_if_empty_uses_compiled_defaults_not_yaml() {
+        let mut schema = Schema::default();
+        schema.execution.agents = AgentConfig {
+            image: "yaml-must-not-seed:1".into(),
+            policy: "version: 1\n# yaml-must-not-seed\n".into(),
+            cpu: Some("99".into()),
+            memory: Some("99Gi".into()),
+            engine: "agy".into(),
+            ..Default::default()
+        };
+        let b = Board::new(
+            schema,
+            std::env::temp_dir().join(format!(
+                "honr-test-sbx-seed-defaults-{}",
+                std::process::id()
+            )),
+        );
+        assert!(b.seed_sandbox_profiles_if_empty());
+        let compiled = AgentConfig::default();
+        let p = b.get_sandbox_profile("default").expect("default");
+        assert_eq!(p.image, compiled.image);
+        assert_eq!(p.policy, resolve_policy_yaml(&compiled.policy));
+        assert_eq!(p.cpu, compiled.cpu);
+        assert_eq!(p.memory, compiled.memory);
+        assert_eq!(p.engine.as_deref(), Some(compiled.engine.as_str()));
+        assert_ne!(p.image, "yaml-must-not-seed:1");
+        assert!(b.get_sandbox_profile("cockpit").is_some());
+    }
+
+    #[test]
+    fn sandbox_profiles_ensure_default_when_catalog_only_has_cockpit() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-sbx-ensure-default-{}",
+                std::process::id()
+            )),
+        );
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "cockpit".into(),
+            name: "Cockpit".into(),
+            image: "cockpit:1".into(),
+            policy: SEED_POLICY_YAML.into(),
+            cpu: Some("1".into()),
+            memory: Some("2Gi".into()),
+            engine: Some("cursor".into()),
+            provider_names: vec!["github".into()],
+        })
+        .expect("cockpit");
+        b.set_cockpit_sandbox_profile("cockpit").unwrap();
+        assert!(b.get_sandbox_profile("default").is_none());
+        assert!(b.ensure_default_sandbox_profile());
+        let p = b.get_sandbox_profile("default").expect("default");
+        assert_eq!(p.image, AgentConfig::default().image);
+        assert_eq!(
+            b.default_sandbox_profile_id().as_deref(),
+            Some("default"),
+            "ensure sets global default preference when unset"
+        );
+        assert!(!b.ensure_default_sandbox_profile());
         assert_eq!(b.list_sandbox_profiles().len(), 2);
     }
 
@@ -9253,7 +9398,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_binding_seeds_forge_from_yaml_when_unbound() {
+    fn workspace_binding_seeds_forge_when_unbound() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!("honr-test-ws-seed-{}.json", std::process::id())),
@@ -9306,14 +9451,16 @@ mod tests {
     }
 
     #[test]
-    fn agent_runtime_seeds_from_yaml_and_overlays_effective_agents() {
+    fn agent_runtime_seeds_from_defaults_and_overlays_effective_agents() {
         let mut schema = Schema::default();
         schema.execution.agents = AgentConfig {
             enabled: true,
-            engine: "cursor".into(),
-            max_concurrent: 2,
-            agent_timeout_secs: 1800,
-            max_attempts: 3,
+            // Yaml create/runtime knobs must not win over compiled seed defaults.
+            engine: "agy".into(),
+            max_concurrent: 7,
+            agent_timeout_secs: 60,
+            max_attempts: 9,
+            image: "yaml-only:1".into(),
             ..Default::default()
         };
         let b = Board::new(
@@ -9324,10 +9471,34 @@ mod tests {
             )),
         );
         assert!(b.agent_runtime().is_none());
-        assert!(b.seed_agent_runtime_from(&b.schema.execution.agents.clone()));
+        assert!(b.seed_agent_runtime_if_empty());
         let seeded = b.agent_runtime().expect("seeded");
-        assert_eq!(seeded.engine, "cursor");
+        assert!(seeded.enabled, "yaml enabled is the boot gate");
+        let compiled_rt = AgentRuntimeConfig::default();
+        assert_eq!(seeded.engine, compiled_rt.engine);
+        assert_eq!(seeded.max_concurrent, compiled_rt.max_concurrent);
+        assert_eq!(seeded.agent_timeout_secs, compiled_rt.agent_timeout_secs);
+        assert_eq!(seeded.max_attempts, compiled_rt.max_attempts);
         assert!(!b.seed_agent_runtime_if_empty(), "second seed is a no-op");
+
+        // Explicit from() helper still maps AgentConfig knobs (tests / callers).
+        let other = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-agent-rt-from-{}.json",
+                std::process::id()
+            )),
+        );
+        assert!(other.seed_agent_runtime_from(&AgentConfig {
+            enabled: true,
+            engine: "claude".into(),
+            max_concurrent: 3,
+            ..Default::default()
+        }));
+        assert_eq!(
+            other.agent_runtime().expect("from").engine,
+            "claude"
+        );
 
         b.set_agent_runtime(AgentRuntimeConfig {
             enabled: true,
@@ -9341,8 +9512,9 @@ mod tests {
         assert_eq!(eff.engine, "agy");
         assert_eq!(eff.max_concurrent, 1);
         assert_eq!(eff.agent_timeout_secs, 900);
-        // Image / policy still from yaml (sandbox profiles own create-spec).
-        assert_eq!(eff.image, b.schema.execution.agents.image);
+        // Create knobs stay compiled defaults (profiles own live create-spec).
+        assert_eq!(eff.image, AgentConfig::default().image);
+        assert_ne!(eff.image, "yaml-only:1");
     }
 
     #[test]
@@ -10185,8 +10357,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_sandbox_create_project_override_then_default_then_yaml() {
-        let yaml_policy = "version: 1\n# yaml-fallback\n";
+    fn resolve_sandbox_create_project_override_then_default_then_compiled() {
+        let yaml_policy = "version: 1\n# yaml-must-not-win\n";
         let def_policy = "version: 1\n# default-profile\n";
         let alt_policy = "version: 1\n# alt-profile\n";
         let mut schema = Schema::default();
@@ -10204,7 +10376,7 @@ mod tests {
                 std::process::id()
             )),
         );
-        // Empty catalog → YAML (inline content from agents.policy).
+        // Empty catalog → compiled defaults (yaml create knobs ignored).
         let project = b
             .create(None, "P", "why", None, Origin::Human, true, None)
             .unwrap();
@@ -10219,10 +10391,12 @@ mod tests {
                 None,
             )
             .unwrap();
-        let yaml = b.resolve_sandbox_create(task.id);
-        assert!(yaml.profile_id.is_none());
-        assert_eq!(yaml.image, "yaml-img");
-        assert_eq!(yaml.policy, yaml_policy);
+        let compiled = AgentConfig::default();
+        let fallback = b.resolve_sandbox_create(task.id);
+        assert!(fallback.profile_id.is_none());
+        assert_eq!(fallback.image, compiled.image);
+        assert_eq!(fallback.policy, resolve_policy_yaml(&compiled.policy));
+        assert_ne!(fallback.image, "yaml-img");
 
         b.upsert_sandbox_profile(SandboxProfile {
             id: "default".into(),
