@@ -42,7 +42,7 @@ credentials, no spend. That is the default, and it is the right way to start.
 | See it work without installing anything | [Tour](tour.md) |
 | Learn the vocabulary | [Concepts](concepts.md) · [Glossary](glossary.md) |
 | Run the board locally | [Quickstart](quickstart.md) |
-| Get one real agent opening PRs | [Your first agent](first-agent.md) |
+| Get one real agent opening PRs | Welcome/Help, then [Your first agent](first-agent.md) |
 | Operate it day to day | [Workflow](workflow.md) |
 | Understand how it is built | [Architecture](architecture.md) |
 
