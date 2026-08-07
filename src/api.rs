@@ -610,13 +610,9 @@ async fn put_agent_runtime(
     Json(b.set_agent_runtime(req))
 }
 
-/// Fallback when board runtime is still unset: compiled defaults with the
-/// `honr.yaml` `enabled` boot gate.
-fn runtime_seed_fallback(agents: &crate::schema::AgentConfig) -> AgentRuntimeConfig {
-    AgentRuntimeConfig {
-        enabled: agents.enabled,
-        ..AgentRuntimeConfig::default()
-    }
+/// Fallback when board runtime is still unset: compiled defaults.
+fn runtime_seed_fallback(_agents: &crate::schema::AgentConfig) -> AgentRuntimeConfig {
+    AgentRuntimeConfig::default()
 }
 
 // ---------------------------------------------------------------- OpenShell connectivity
@@ -3230,7 +3226,6 @@ mod tests {
             }),
         )
         .await;
-        assert!(saved.enabled);
         assert_eq!(
             saved.interval_secs,
             crate::model::MIN_WEBHOOK_POLL_INTERVAL_SECS
@@ -3562,7 +3557,6 @@ mod tests {
                 .as_nanos()
         ));
         let mut schema = crate::schema::Schema::default();
-        schema.execution.agents.enabled = true;
         schema.execution.agents.engine = "cursor".into();
         let b = std::sync::Arc::new(crate::store::Board::new(schema, path));
 
@@ -3572,7 +3566,6 @@ mod tests {
         let Json(saved) = put_agent_runtime(
             AxState(b.clone()),
             Json(crate::model::AgentRuntimeConfig {
-                enabled: true,
                 engine: "agy".into(),
                 max_concurrent: 1,
                 agent_timeout_secs: 600,
@@ -3895,7 +3888,7 @@ mod tests {
         }
         .normalized();
 
-        let mut schema = crate::schema::Schema::load("honr.yaml").unwrap_or_default();
+        let mut schema = crate::schema::Schema::default();
         crate::db::apply_database_url_override(&mut schema.board.database);
         let url = schema.board.database.parsed().expect("database url");
         let store = Arc::new(

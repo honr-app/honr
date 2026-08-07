@@ -180,13 +180,14 @@ export interface AuthSettings {
 
 /** Settings → Agent runtime (process knobs; empty boards seed from compiled defaults). */
 export interface AgentRuntimeConfig {
-  enabled: boolean;
   engine: string;
   max_concurrent: number;
   agent_timeout_secs: number;
   max_attempts: number;
   /** Branch/sandbox stem (default honr → honr/card-N). */
   branch_prefix: string;
+  /** Supervisor lease/reconcile tick (ms). */
+  sweep_interval_ms: number;
 }
 
 /** GET /api/openshell/status — gateway health for Settings. */

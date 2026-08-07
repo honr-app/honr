@@ -70,10 +70,10 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let mut schema = Schema::load("honr.yaml").unwrap_or_else(|e| {
-        tracing::warn!("could not read honr.yaml ({e}); falling back to defaults");
-        Schema::default()
-    });
+    // Hierarchy + agent create knobs are compiled defaults. Database URL is
+    // process boot only (`HONR_DATABASE_URL` else sqlite:honr.db) — it cannot
+    // live on board Settings (Settings persist inside the DB).
+    let mut schema = Schema::default();
     db::apply_database_url_override(&mut schema.board.database);
     let json_path = PathBuf::from("honr.json");
     let board: SharedBoard = match schema.board.database.parsed() {

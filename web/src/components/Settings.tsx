@@ -20,7 +20,6 @@ export {
   OpenShellReadinessStripView,
   gatewayMtlsReady,
   sandboxSpecReady,
-  agentsEnabledReady,
 } from "./OpenShellReadiness.js";
 export {
   ProjectSandboxPicker,
@@ -47,12 +46,12 @@ const emptyWebhookPoll = (): WebhookPollConfig => ({
 });
 
 const emptyAgentRuntime = (): AgentRuntimeConfig => ({
-  enabled: false,
   engine: "cursor",
   max_concurrent: 2,
   agent_timeout_secs: 1800,
   max_attempts: 3,
   branch_prefix: "honr",
+  sweep_interval_ms: 2000,
 });
 
 /**
@@ -924,10 +923,9 @@ export function AgentRuntimePanelView({
       <h2 id="agent-runtime-title">Agent runtime</h2>
       <p className="dim">
         Process knobs for OpenShell sandboxes: branch prefix, concurrency,
-        timeouts, and the fallback agent engine when a profile omits one.
-        Fresh boards seed from compiled defaults; edits persist on the Board.
-        Per-run engine lives on OpenShell → Sandbox specs. The process boot gate
-        also lives in <code>honr.yaml</code> (<code>execution.agents.enabled</code>).
+        timeouts, sweep interval, and the fallback agent engine when a profile
+        omits one. Fresh boards seed from compiled defaults; edits persist on
+        the Board. Per-run engine lives on OpenShell → Sandbox specs.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -945,21 +943,6 @@ export function AgentRuntimePanelView({
           onSave();
         }}
       >
-        <label className="agent-runtime-check">
-          <input
-            type="checkbox"
-            checked={draft.enabled}
-            disabled={busy}
-            onChange={(e) => onDraftChange({ ...draft, enabled: e.target.checked })}
-            data-testid="agent-runtime-field-enabled"
-          />
-          Agents enabled
-          <span className="dim sandbox-field-hint">
-            Turning agents on when the process started disabled still needs a
-            honr restart so the dispatch loop starts.
-          </span>
-        </label>
-
         <label>
           Default engine
           <select
@@ -1029,23 +1012,45 @@ export function AgentRuntimePanelView({
           </span>
         </label>
 
-        <label>
-          Max attempts
-          <input
-            className="search-input"
-            type="number"
-            min={1}
-            value={draft.max_attempts}
-            disabled={busy}
-            onChange={(e) =>
-              onDraftChange({
-                ...draft,
-                max_attempts: Math.max(1, Number(e.target.value) || 1),
-              })
-            }
-            data-testid="agent-runtime-field-max-attempts"
-          />
-        </label>
+        <div className="sandbox-profile-form-row">
+          <label>
+            Max attempts
+            <input
+              className="search-input"
+              type="number"
+              min={1}
+              value={draft.max_attempts}
+              disabled={busy}
+              onChange={(e) =>
+                onDraftChange({
+                  ...draft,
+                  max_attempts: Math.max(1, Number(e.target.value) || 1),
+                })
+              }
+              data-testid="agent-runtime-field-max-attempts"
+            />
+          </label>
+          <label>
+            Sweep interval (ms)
+            <input
+              className="search-input"
+              type="number"
+              min={100}
+              value={draft.sweep_interval_ms}
+              disabled={busy}
+              onChange={(e) =>
+                onDraftChange({
+                  ...draft,
+                  sweep_interval_ms: Math.max(100, Number(e.target.value) || 2000),
+                })
+              }
+              data-testid="agent-runtime-field-sweep"
+            />
+            <span className="dim sandbox-field-hint">
+              How often the supervisor checks overdue run deadlines.
+            </span>
+          </label>
+        </div>
 
         <div className="btns">
           <button

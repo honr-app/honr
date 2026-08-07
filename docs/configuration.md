@@ -1,16 +1,13 @@
 # Configuration
 
-Where each knob lives, and which ones are read once at startup.
+Where each knob lives, and which ones are process-boot vs board-owned.
 
-Three layers:
+Two layers:
 
 | Layer | Role |
 |---|---|
-| **`honr.yaml`** | Boot essentials only: board database URL, level schema, sweep timing, and the `agents.enabled` process gate. Read once at startup. |
-| **Compiled defaults** | Create-form prefill for sandbox specs (`src/seed_policies.rs` minimal policy) and unset Agent runtime (`AgentConfig::default`). |
-| **Board DB + Settings / API** | Live source of truth for sandbox specs, Agent runtime, OpenShell gateway/providers, Forge, and GitHub App. Edit in the UI or via REST. |
-
-Changing `honr.yaml` after a board already has the corresponding rows does not rewrite those rows. Live create knobs (image, policy, cpu, memory, engine) and Agent runtime process settings are board-owned.
+| **Process boot** | Database URL (`HONR_DATABASE_URL` else `sqlite:honr.db`). Hierarchy is compile-time Project + Task. |
+| **Board DB + Settings / API** | Live source of truth for sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval), OpenShell gateway/providers, Forge, and GitHub App. |
 
 ## Board database
 
@@ -19,7 +16,7 @@ optional, for a shared server.
 
 | Source | Example |
 |---|---|
-| `honr.yaml` → `board.database.url` | `sqlite:honr.db` (default) |
+| Compiled default | `sqlite:honr.db` |
 | Environment override | `HONR_DATABASE_URL=postgres://honr:honr@127.0.0.1:5432/honr` |
 
 Accepted forms:
@@ -29,6 +26,9 @@ Accepted forms:
 
 On boot honr opens the URL, applies versioned migrations from `migrations/`, and
 restores the board from rows.
+
+The database URL cannot live in board Settings — Settings persist *inside* the
+database.
 
 **One-shot JSON import:** if the database is empty and `honr.json` exists in the
 working directory, honr imports it once and leaves the JSON alone — archive or
@@ -42,50 +42,25 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 | Variable | Effect |
 |---|---|
 | `HONR_PORT` | Listen port (default 8080) |
-| `HONR_DATABASE_URL` | Overrides `board.database.url` |
+| `HONR_DATABASE_URL` | Board database URL (default `sqlite:honr.db`) |
 | `HONR_MCP_URL` | Resource URL minted into cockpit MCP tokens. Defaults to `http://host.docker.internal:8080/mcp` |
 | `HONR_TEST_DATABASE_URL` | Postgres URL for migration tests |
 
 One host secret file: `~/.config/honr/master.key`, which seals credentials
 stored on the board.
 
-## `honr.yaml`
+## Hierarchy
 
-Boot-only knobs. A typical file:
+Project + Task is fixed in code (`schema::default_levels`). There is no
+install-time level ladder to configure.
 
-```yaml
-board:
-  database:
-    url: sqlite:honr.db
+## Agent runtime
 
-levels:
-  - name: Project
-    horizon: 2q
-    owner: human
-    elaborate: on_commit
-  - name: Task
-    horizon: 1d
-    owner: agent
-    claimable: true
-    requires: [definition_of_done]
-
-execution:
-  sweep_interval_ms: 2000
-  agents:
-    enabled: false          # see: Your first agent
-```
-
-| Field | Why it is set that way |
-|---|---|
-| `board.database` | Where the board persists. Overridable with `HONR_DATABASE_URL`. |
-| `levels` | Project + Task schema for this install. |
-| `sweep_interval_ms` | How often the supervisor checks overdue run deadlines. |
-| `agents.enabled` | **Off by default.** Process boot gate — read once at startup. Turning it on spends real money. On a fresh board it also seeds Settings → Agent runtime; after that, Settings owns the durable toggle (restart still required when enabling a process that started disabled). |
-
-Optional `execution.agents` fields that older files may still carry (`engine`,
-`image`, `policy`, `cpu`, `memory`, concurrency, timeouts, `repo`,
-`branch_prefix`) parse for compatibility. Empty-catalog seed and last-resort
-create knobs use compiled defaults instead; live edits stay on the board.
+**Settings → Agent runtime** (REST: `/api/agent-runtime`): default engine,
+concurrency, agent timeout, max attempts, branch prefix, and sweep interval.
+Empty boards seed from compiled defaults; edits persist on the board. The
+supervisor always starts dispatch and cockpit; OpenShell gateway + a sandbox
+spec are the practical readiness gates.
 
 ## Sandbox specs
 
@@ -98,67 +73,15 @@ supervisor writes it to a temp file for OpenShell's `--policy` flag.
 
 ### Which spec a card gets
 
-Resolved in this order:
+Resolution order is documented in [Sandbox](sandbox.md). Create-form defaults
+use a minimal policy (`src/seed_policies.rs`); operators add egress as needed.
 
-1. **Project override** — `sandbox_profile_id` on the containing Project, if set
-   and present in the catalog
-2. **Global default** — `default_sandbox_profile_id` on durable board state
-3. **Compiled-default fallback** — `AgentConfig::default()` image / policy / cpu /
-   memory / engine (same constants that seed an empty catalog)
+### Cockpit
 
-An empty catalog is seeded with two specs:
+Cockpit uses the global default sandbox spec unless you set an explicit Cockpit
+profile under Sandbox specs.
 
-Sandbox specs are operator-created. The first profile becomes the global
-default; Cockpit uses that default unless you set an explicit Cockpit profile.
-Create prefill uses the minimal policy in `src/seed_policies.rs` — add egress
-(honr MCP, registries, toolchains) in the YAML when needed.
+## OpenShell / Forge / GitHub App
 
-## Engines
-
-Which agent CLI runs in a seat. It is a field on the sandbox spec; when a spec
-omits it, claim falls back to **Settings → Agent runtime**. Per-card overrides
-are ignored.
-
-| Id | Launch | Resume |
-|---|---|---|
-| `cursor` | `agent … --output-format stream-json` | `--resume` |
-| `agy` | `agy … --output-format stream-json` | `--conversation` |
-| `claude` | `claude --bare -p … --output-format stream-json` | (none) |
-| `opencode` | `opencode run --format json --auto` | `--session` |
-
-The registry in `src/engine.rs` is explicit: an unknown id fails loudly rather
-than silently falling through to Claude.
-
-Claude and OpenCode use OpenShell `inference.local` via `ANTHROPIC_BASE_URL`.
-`agy` uses the `antigravity` provider type. Both are covered in
-[Sandbox](sandbox.md).
-
-## Providers
-
-**Settings → OpenShell → Providers** holds the desired list with credentials
-sealed. That list is the source of truth; **Sync** applies it to the gateway
-(`POST /api/openshell/providers/sync`), and Save also applies when the gateway is
-reachable. Which providers attach on create is chosen per **Sandbox spec**, not
-on the provider row.
-
-**Settings → OpenShell → Provider types** holds custom OpenShell provider type
-profiles (YAML) on the board. Shipped types (`antigravity`, `cursor-agent`) seed
-on startup. Sync imports board types to the gateway before applying provider
-instances. Builtin OpenShell `cursor` stays egress-only on the gateway; use
-board type `cursor-agent` when the seat needs `CURSOR_API_KEY`.
-
-Provider `github` is owned by **Settings → GitHub App** — installation tokens
-sync in as `GH_TOKEN`. Do not hand-edit that provider's credentials.
-
-## Forge and webhooks
-
-**Settings → Forge** configures the forge provider and an optional **webhook
-polling fallback**: honr polls GitHub on an interval *in addition to* webhooks
-(default 60s, minimum 15s) using the App installation token. Same board effects
-either way — merge → Done, main-advanced, and submitted PR review feedback
-(`CHANGES_REQUESTED` / `COMMENT` → pointer steer + Backlog). Needs a configured
-GitHub App and installation id.
-
-Webhook ingress is `POST /api/webhooks/github`. See
-[Workflow](workflow.md#when-main-moves) for what a push does, and
-[PR review feedback](workflow.md#pr-review-feedback) for submitted reviews.
+Connectivity, providers, provider types, Forge poll, and GitHub App credentials
+are board Settings — see the Settings UI and [Your first agent](first-agent.md).

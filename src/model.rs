@@ -508,13 +508,11 @@ impl OpenShellProviderDesired {
 
 /// Per-install agent process knobs (Settings → Agent runtime).
 ///
-/// Empty boards seed from compiled [`Default`] (`enabled` copies the
-/// `honr.yaml` boot gate). Board is source of truth after. Image / policy /
-/// cpu / memory live on sandbox profiles; work remotes on card `pull_request`.
+/// Empty boards seed from compiled [`Default`]. Board is source of truth after.
+/// Image / policy / cpu / memory live on sandbox profiles; work remotes on
+/// card `pull_request`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentRuntimeConfig {
-    #[serde(default)]
-    pub enabled: bool,
     /// Primary agent CLI (`cursor`, `agy`, `claude`, or `opencode`).
     #[serde(default = "default_runtime_engine")]
     pub engine: String,
@@ -527,6 +525,9 @@ pub struct AgentRuntimeConfig {
     /// Branch / sandbox name stem (default `honr` → `honr/card-N`).
     #[serde(default = "default_runtime_branch_prefix")]
     pub branch_prefix: String,
+    /// How often the supervisor checks overdue run deadlines (ms).
+    #[serde(default = "default_runtime_sweep")]
+    pub sweep_interval_ms: u64,
 }
 
 fn default_runtime_engine() -> String {
@@ -544,16 +545,19 @@ fn default_runtime_attempts() -> u32 {
 fn default_runtime_branch_prefix() -> String {
     "honr".into()
 }
+fn default_runtime_sweep() -> u64 {
+    2000
+}
 
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             engine: default_runtime_engine(),
             max_concurrent: default_runtime_concurrent(),
             agent_timeout_secs: default_runtime_timeout(),
             max_attempts: default_runtime_attempts(),
             branch_prefix: default_runtime_branch_prefix(),
+            sweep_interval_ms: default_runtime_sweep(),
         }
     }
 }
@@ -574,6 +578,9 @@ impl AgentRuntimeConfig {
         }
         if self.max_attempts == 0 {
             self.max_attempts = default_runtime_attempts();
+        }
+        if self.sweep_interval_ms < 100 {
+            self.sweep_interval_ms = default_runtime_sweep();
         }
         self
     }

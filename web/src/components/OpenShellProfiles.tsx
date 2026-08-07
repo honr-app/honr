@@ -5,6 +5,7 @@ import type {
   SandboxProfile,
   SandboxProfileCreateDefaults,
 } from "../types.js";
+import { YamlEditor } from "./YamlEditor.js";
 
 type ProfileDraft = {
   id: string;
@@ -306,16 +307,13 @@ export function SandboxesPanelView({
 
                 <label>
                   Policy (YAML)
-                  <textarea
+                  <YamlEditor
                     className="sandbox-policy-textarea"
                     value={draft.policy}
                     disabled={busy}
-                    onChange={(e) =>
-                      onDraftChange({ ...draft, policy: e.target.value })
-                    }
+                    onChange={(policy) => onDraftChange({ ...draft, policy })}
                     required
                     rows={10}
-                    spellCheck={false}
                     placeholder={
                       "version: 1\nfilesystem_policy:\n  include_workdir: true\n"
                     }
@@ -448,11 +446,6 @@ export function SandboxesPanelView({
                     </button>
                   )}
                 </div>
-                <pre className="openshell-profile-policy-preview" data-testid="sandbox-policy-preview">
-                  {selected.policy.length > 400
-                    ? `${selected.policy.slice(0, 400)}…`
-                    : selected.policy}
-                </pre>
               </div>
             ) : (
               <div className="settings-placeholder" data-testid="sandboxes-select-hint">

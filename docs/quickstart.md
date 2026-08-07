@@ -106,4 +106,4 @@ make dev-ui               # Vite on :5173, proxying to :8080
 
 - **[Your first agent](first-agent.md)** — Welcome/Help OpenShell onboarding, then one sandboxed run
 - [Workflow](workflow.md) — the day-to-day loop
-- [Configuration](configuration.md) — database, `honr.yaml`, environment
+- [Configuration](configuration.md) — database URL, environment, Settings

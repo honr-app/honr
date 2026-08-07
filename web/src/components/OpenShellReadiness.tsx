@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
-import type {
-  AgentRuntimeConfig,
-  OpenShellStatus,
-  SandboxProfilesOut,
-} from "../types.js";
+import type { OpenShellStatus, SandboxProfilesOut } from "../types.js";
 
 /** Fail-closed: healthy gateway + complete mTLS only. */
 export function gatewayMtlsReady(status: OpenShellStatus | null | undefined): boolean {
@@ -24,14 +20,6 @@ export function sandboxSpecReady(
   return typeof id === "string" && id.length > 0;
 }
 
-/** Fail-closed: agents effectively enabled. */
-export function agentsEnabledReady(
-  cfg: AgentRuntimeConfig | null | undefined,
-): boolean {
-  if (!cfg) return false;
-  return cfg.enabled === true;
-}
-
 export type ReadinessRow = {
   /** True only when known-ready; unknown/error/incomplete → false. */
   ready: boolean;
@@ -42,17 +30,15 @@ export type ReadinessRow = {
 };
 
 /**
- * Presentational Welcome readiness strip — three checks with Settings CTAs.
- * Mirror OpenShellPanelView: export for UI tests; no fetch here.
+ * Presentational Welcome readiness strip — gateway + sandbox checks with
+ * Settings CTAs. Export for UI tests; no fetch here.
  */
 export function OpenShellReadinessStripView({
   gateway,
   sandbox,
-  agents,
 }: {
   gateway: ReadinessRow;
   sandbox: ReadinessRow;
-  agents: ReadinessRow;
 }) {
   return (
     <section
@@ -81,13 +67,6 @@ export function OpenShellReadinessStripView({
           row={sandbox}
           href="/settings/openshell/profiles"
           cta="Settings → Sandbox specs"
-        />
-        <ReadinessItem
-          testId="openshell-readiness-agents"
-          label="Agents enabled"
-          row={agents}
-          href="/settings/agent-runtime"
-          cta="Settings → Agent runtime"
         />
       </ul>
     </section>
@@ -154,16 +133,14 @@ const checkingRow = (): ReadinessRow => ({ ready: false, checking: true });
 export function OpenShellReadinessStrip() {
   const [gateway, setGateway] = useState<ReadinessRow>(checkingRow);
   const [sandbox, setSandbox] = useState<ReadinessRow>(checkingRow);
-  const [agents, setAgents] = useState<ReadinessRow>(checkingRow);
 
   useEffect(() => {
     let cancelled = false;
 
     const load = async () => {
-      const [st, profiles, runtime] = await Promise.all([
+      const [st, profiles] = await Promise.all([
         api.getOpenShellStatus().catch(() => null),
         api.listSandboxProfiles().catch(() => null),
-        api.getAgentRuntime().catch(() => null),
       ]);
       if (cancelled) return;
 
@@ -186,17 +163,6 @@ export function OpenShellReadinessStrip() {
         sandDetail = "No default sandbox profile";
       }
       setSandbox({ ready: sandReady, checking: false, detail: sandDetail });
-
-      const agentsReady = agentsEnabledReady(runtime);
-      setAgents({
-        ready: agentsReady,
-        checking: false,
-        detail: runtime
-          ? agentsReady
-            ? "execution.agents.enabled"
-            : "Agents disabled"
-          : "Could not read agent runtime",
-      });
     };
 
     load();
@@ -206,10 +172,6 @@ export function OpenShellReadinessStrip() {
   }, []);
 
   return (
-    <OpenShellReadinessStripView
-      gateway={gateway}
-      sandbox={sandbox}
-      agents={agents}
-    />
+    <OpenShellReadinessStripView gateway={gateway} sandbox={sandbox} />
   );
 }

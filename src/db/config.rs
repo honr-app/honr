@@ -1,4 +1,4 @@
-//! Board database URL config (`honr.yaml` / env).
+//! Board database URL config (compiled default / `HONR_DATABASE_URL`).
 
 use serde::{Deserialize, Serialize};
 
@@ -78,7 +78,7 @@ pub enum ParseDatabaseUrlError {
     UnsupportedScheme { url: String },
 }
 
-/// `board.database` in `honr.yaml`.
+/// Board database URL (process boot).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardDatabaseConfig {
     /// SQLx URL. Default `sqlite:honr.db`. Override with `HONR_DATABASE_URL`.
@@ -103,7 +103,7 @@ impl BoardDatabaseConfig {
     }
 }
 
-/// Prefer `HONR_DATABASE_URL` when set; otherwise keep the yaml/default value.
+/// Prefer `HONR_DATABASE_URL` when set; otherwise keep the compiled default.
 pub fn apply_database_url_override(cfg: &mut BoardDatabaseConfig) {
     if let Ok(url) = std::env::var(ENV_DATABASE_URL) {
         let url = url.trim();

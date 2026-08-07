@@ -6,7 +6,6 @@
 
 use crate::db::BoardDatabaseConfig;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Level {
@@ -24,8 +23,9 @@ pub struct Level {
 }
 
 /// How work actually gets executed. The run budget is
-/// `agents.agent_timeout_secs`; `lease_secs` / `heartbeat_expect_secs` are
-/// ignored leftovers kept so older `honr.yaml` files still parse.
+/// `agents.agent_timeout_secs`; `lease_secs` / `heartbeat_expect_secs` /
+/// `sweep_interval_ms` are ignored leftovers kept so older `honr.yaml` files
+/// still parse. Live sweep interval is Settings → Agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionConfig {
     /// Deprecated — ignored. Run deadline is `agents.agent_timeout_secs`.
@@ -34,11 +34,11 @@ pub struct ExecutionConfig {
     /// Deprecated — ignored. UI shows countdown to `run_deadline_at`.
     #[serde(default = "d_hb")]
     pub heartbeat_expect_secs: i64,
-    /// How often to check for overdue run deadlines.
+    /// Deprecated — ignored. Live value is `AgentRuntimeConfig.sweep_interval_ms`.
     #[serde(default = "d_sweep")]
     pub sweep_interval_ms: u64,
-    /// Real agents in real sandboxes. Off by default: the board must still run
-    /// on a machine with no podman, no gateway and no credentials.
+    /// Compiled create-knob defaults (image/policy/engine/…). Live process
+    /// knobs overlay from Settings → Agent runtime.
     #[serde(default)]
     pub agents: AgentConfig,
 }
@@ -188,14 +188,8 @@ impl RepoConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Process boot gate in `honr.yaml` (`execution.agents.enabled`). Off by
-    /// default so the board runs without podman/gateway/credentials. After
-    /// seed, Settings → Agent runtime owns the durable toggle (restart still
-    /// required when enabling a process that started disabled).
-    #[serde(default)]
-    pub enabled: bool,
     /// Sandbox create image. Compiled default seeds empty board profiles;
-    /// live edits are Settings → Profiles (not `honr.yaml`).
+    /// live edits are Settings → Sandbox specs.
     #[serde(default = "d_image")]
     pub image: String,
     /// Seed / last-resort policy marker: `embedded` (default), empty, legacy
@@ -278,7 +272,6 @@ pub fn cockpit_sandbox_name(prefix: &str) -> String {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             image: d_image(),
             policy: d_policy(),
             repo: RepoConfig::default(),
@@ -298,13 +291,10 @@ impl AgentConfig {
     /// hang if it's wrong at exec time, so check it at startup instead.
     ///
     /// Work remotes (`repo.upstream`, optional `fork`) are **not** required
-    /// here: they resolve per card from `pr_url` and yaml (see
+    /// here: they resolve per card from `pr_url` (see
     /// `Board::resolve_card_repo`). An incomplete install default only fails
     /// when a card has no `pr_url` and no yaml upstream.
     pub fn validate(&self) -> Result<(), String> {
-        if !self.enabled {
-            return Ok(());
-        }
         // Live policy is the board sandbox profile. `agents.policy` is seed /
         // YAML-fallback only — never a host path that must exist on disk.
         if crate::model::is_supported_agents_policy(&self.policy) {
@@ -324,8 +314,33 @@ pub struct BoardConfig {
     pub database: BoardDatabaseConfig,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Fixed Project + Task hierarchy (the only supported ladder).
+pub fn default_levels() -> Vec<Level> {
+    vec![
+        Level {
+            name: "Project".into(),
+            horizon: Some("2q".into()),
+            owner: Some("human".into()),
+            elaborate: Some("on_commit".into()),
+            requires: vec![],
+            claimable: false,
+        },
+        Level {
+            name: "Task".into(),
+            horizon: Some("1d".into()),
+            owner: Some("agent".into()),
+            elaborate: None,
+            requires: vec!["definition_of_done".into()],
+            claimable: true,
+        },
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schema {
+    /// Always Project + Task. Serde default fills compiled levels when absent
+    /// from a leftover yaml fixture; boot no longer reads `honr.yaml`.
+    #[serde(default = "default_levels")]
     pub levels: Vec<Level>,
     #[serde(default)]
     pub execution: ExecutionConfig,
@@ -333,16 +348,17 @@ pub struct Schema {
     pub board: BoardConfig,
 }
 
-impl Schema {
-    pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let raw = std::fs::read_to_string(path.as_ref())?;
-        let schema: Schema = serde_yaml::from_str(&raw)?;
-        schema.validate();
-        Ok(schema)
+impl Default for Schema {
+    fn default() -> Self {
+        Self {
+            levels: default_levels(),
+            execution: ExecutionConfig::default(),
+            board: BoardConfig::default(),
+        }
     }
+}
 
-
-
+impl Schema {
     /// Depth 0 → Project, depth ≥1 → Task (flat under Project). Extra depth
     /// collapses to Task so a mistaken nest still labels correctly.
     pub fn level_for_depth(&self, depth: usize) -> Option<&Level> {
@@ -363,27 +379,6 @@ impl Schema {
     pub fn task_level(&self) -> Option<&Level> {
         self.levels.iter().find(|l| l.claimable).or_else(|| self.levels.last())
     }
-
-    /// A schema that declares a rung a human can't occupy should say so at
-    /// configuration time, not at 2am. We can't know child counts here, so this
-    /// only catches the structural mistakes.
-    fn validate(&self) {
-        if self.levels.is_empty() {
-            tracing::warn!("level schema declares no levels; the tree will render unlabelled");
-        }
-        if self.levels.len() > 2 {
-            tracing::warn!(
-                count = self.levels.len(),
-                "more than 2 levels: Plan A is Project + Task only; deeper ladders are retired"
-            );
-        }
-        if !self.levels.iter().any(|l| l.claimable) {
-            tracing::warn!("no level is marked claimable; agents will find nothing to pick up");
-        }
-        if !self.levels.iter().any(|l| !l.claimable) {
-            tracing::warn!("no non-claimable Project level; every node would look claimable");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -392,7 +387,6 @@ mod tests {
 
     fn workable() -> AgentConfig {
         AgentConfig {
-            enabled: true,
             repo: RepoConfig {
                 upstream: "honr-app/honr".into(),
                 fork: "clankrshq/honr".into(),
@@ -402,18 +396,22 @@ mod tests {
         }
     }
 
-    /// Off by default. The board has to run on a machine with no podman, no
-    /// gateway and no credentials.
     #[test]
-    fn agents_are_off_unless_asked_for() {
-        assert!(!AgentConfig::default().enabled);
-        assert!(AgentConfig::default().validate().is_ok());
+    fn default_schema_is_project_plus_task() {
+        let s = Schema::default();
+        assert_eq!(s.levels.len(), 2);
+        assert_eq!(s.project_level().unwrap().name, "Project");
+        assert_eq!(s.task_level().unwrap().name, "Task");
+        assert!(s.task_level().unwrap().claimable);
+        assert!(s.execution.agents.validate().is_ok());
+        let db = s.board.database.parsed().expect("default sqlite url");
+        assert_eq!(db.backend(), crate::db::DatabaseBackend::Sqlite);
     }
 
     /// Every one of these presents as a hang if it's wrong at exec time, so
     /// they are checked at startup instead.
     #[test]
-    fn enabling_agents_requires_a_complete_config() {
+    fn agent_policy_must_be_supported() {
         assert!(workable().validate().is_ok(), "the reference config must pass");
 
         // Work remotes are resolved per card — empty fork is fine at process start.
@@ -431,7 +429,7 @@ mod tests {
 
         // Existing path is still rejected — seed never reads host policy files.
         let mut path_policy = workable();
-        path_policy.policy = "honr.yaml".into();
+        path_policy.policy = "legacy-host-path.yaml".into();
         assert!(
             path_policy.validate().is_err(),
             "existing host path must not pass as agents.policy"
@@ -440,22 +438,6 @@ mod tests {
         let mut inline = workable();
         inline.policy = "version: 1\n# inline-ok\n".into();
         assert!(inline.validate().is_ok());
-    }
-
-    /// honr.yaml must parse: boot essentials (board.database, levels, sweep,
-    /// agents.enabled) plus any legacy agent fields with serde defaults.
-    #[test]
-    fn shipped_honr_yaml_parses() {
-        let s = Schema::load("honr.yaml").expect("honr.yaml parses");
-        assert!(!s.levels.is_empty(), "levels should be declared");
-        assert!(s.levels.iter().any(|l| l.claimable), "something must be claimable");
-        s.execution.agents.validate().expect("shipped agent config is valid");
-        assert!(
-            s.execution.agents.enabled,
-            "shipped install keeps agents.enabled boot gate on"
-        );
-        let db = s.board.database.parsed().expect("board.database.url parses");
-        assert_eq!(db.backend(), crate::db::DatabaseBackend::Sqlite);
     }
 
     #[test]

@@ -65,8 +65,7 @@ failure it prevents over one that names the function it calls.
 Before you finish: `cargo test` and `cargo clippy --all-targets -- -D warnings`
 must both be clean. Both run `--offline` inside a sandbox.
 
-`git add -A` has twice committed something unintended here — `enabled: true` in
-`honr.yaml` most notably. Stage deliberately.
+`git add -A` has committed unintended local state here before. Stage deliberately.
 
 ## Things that will waste your time if you don't know them
 
@@ -108,7 +107,7 @@ do not treat a stale local `main` as truth.
 ## Environment
 
 Model credentials for sandboxed agents come from OpenShell providers (Settings
-→ OpenShell / GitHub App), not from `honr.yaml` Agent runtime fields. GitHub
+→ OpenShell / GitHub App), not from process boot. GitHub
 git + `gh` in the sandbox use the App installation token (`GH_TOKEN`) for
 `execution.agents.repo` (`upstream` / `fork` / `base`).
 
