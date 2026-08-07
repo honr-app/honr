@@ -139,30 +139,13 @@ live on the board; [Configuration](configuration.md#sandbox-specs) and
 **Check:** `podman image ls | grep honr-sandbox`, and the default spec's image
 matches what you built.
 
-## 5. Turn agents on
+## 5. Agent runtime (optional tune)
 
-Enable agents in **Settings → Agent runtime**, or set the process boot gate in
-`honr.yaml`:
+Dispatch starts with the process. Tune concurrency / timeouts / sweep under
+**Settings → Agent runtime** if you want ([Configuration](configuration.md)).
 
-```yaml
-# honr.yaml
-execution:
-  agents:
-    enabled: true
-```
-
-Board Settings is the live source of truth for Agent runtime once saved
-([Configuration](configuration.md)). `honr.yaml` `agents.enabled` is the
-startup gate (and the seed for a fresh board's runtime toggle). If the process
-started with agents disabled, **restart honr** after enabling so the dispatch
-loop starts.
-
-> Put `enabled: false` back before you commit YAML. It has been committed as
-> `true` once already, swept in by `git add -A`, which makes a fresh clone spend
-> money on startup.
-
-**Check:** the startup log no longer says
-`execution.agents.enabled = false; board runs with no executor`.
+**Check:** OpenShell readiness on Welcome shows Gateway/mTLS and Sandbox spec
+ready.
 
 ## 6. Run one card
 

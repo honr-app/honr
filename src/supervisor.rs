@@ -53,13 +53,8 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
 
     // Durable Settings overlay (seeded from compiled defaults at board load).
     let agents = board.effective_agents();
-    if !agents.enabled {
-        tracing::info!("execution.agents.enabled = false; board runs with no executor");
-        tokio::spawn(sweeper_loop(board, cfg, Arc::default()));
-        return;
-    }
     if let Err(e) = agents.validate() {
-        tracing::error!("agents enabled but misconfigured: {e}");
+        tracing::error!("agent config misconfigured: {e}");
         tokio::spawn(sweeper_loop(board, cfg, Arc::default()));
         return;
     }
@@ -82,9 +77,7 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
 /// `active` must be the same set dispatch uses so we never treat an in-flight
 /// setup as "no live agent" and bounce the card back to Backlog.
 async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig, active: Active) {
-    let mut t = tokio::time::interval(Duration::from_millis(cfg.sweep_interval_ms));
     loop {
-        t.tick().await;
         for id in board.sweep_leases() {
             tracing::info!("run deadline exceeded on #{id}; requeued");
         }
@@ -106,6 +99,14 @@ async fn sweeper_loop(board: SharedBoard, cfg: ExecutionConfig, active: Active) 
         if let Err(e) = crate::github_app::ensure_github_provider(&board).await {
             tracing::warn!("GitHub App provider sync: {e}");
         }
+        // Re-read Settings → Agent runtime each tick so saves apply without restart.
+        let ms = board
+            .agent_runtime()
+            .map(|r| r.sweep_interval_ms)
+            .filter(|ms| *ms >= 100)
+            .unwrap_or(cfg.sweep_interval_ms)
+            .max(100);
+        tokio::time::sleep(Duration::from_millis(ms)).await;
     }
 }
 
@@ -5956,7 +5957,6 @@ mod tests {
         assert!(board.seed_agent_runtime_if_empty());
 
         board.set_agent_runtime(crate::model::AgentRuntimeConfig {
-            enabled: true,
             engine: "claude".into(),
             max_concurrent: 1,
             agent_timeout_secs: 1800,

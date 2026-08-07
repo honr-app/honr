@@ -57,7 +57,6 @@ dev:
 		-w Cargo.toml \
 		-w Cargo.lock \
 		-w migrations \
-		-w honr.yaml \
 		-w sandbox \
 		-i target \
 		-i web \

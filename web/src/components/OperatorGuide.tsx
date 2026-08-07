@@ -186,14 +186,12 @@ export function OperatorGuide() {
             — default profile / sandbox image runs will use.
           </li>
           <li>
-            Enable agents via{" "}
+            Tune concurrency / timeouts under{" "}
             <a className="operator-guide-link" href="/settings/agent-runtime">
               Settings → Agent runtime
             </a>
             {" "}
-            or <code>honr.yaml</code> (
-            <code>execution.agents.enabled</code>), then restart if you changed
-            the file.
+            if needed (dispatch starts with the process).
           </li>
         </ol>
       </section>

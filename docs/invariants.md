@@ -79,9 +79,8 @@ cargo clippy --all-targets -- -D warnings
 
 Both must be clean, and both run `--offline` inside a sandbox.
 
-Stage deliberately. `git add -A` has twice committed something unintended here,
-`enabled: true` in `honr.yaml` most notably — which would make a fresh clone
-spend money on startup.
+Stage deliberately. `git add -A` has committed unintended local state here
+before — prefer explicit paths.
 
 ### Building these docs
 

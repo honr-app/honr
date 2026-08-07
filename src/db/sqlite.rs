@@ -1115,7 +1115,6 @@ mod tests {
         // Round-trip Agent runtime meta.
         let mut with_rt = again;
         with_rt.agent_runtime = Some(crate::model::AgentRuntimeConfig {
-            enabled: true,
             engine: "agy".into(),
             max_concurrent: 1,
             agent_timeout_secs: 900,
@@ -1131,7 +1130,7 @@ mod tests {
             .agent_runtime
             .as_ref()
             .expect("agent_runtime round-trip");
-        assert!(rt.enabled);
+        assert_eq!(rt.engine, "agy");
         assert_eq!(rt.engine, "agy");
         assert_eq!(rt.max_concurrent, 1);
 

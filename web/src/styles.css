@@ -725,7 +725,8 @@ main.with-side-panes {
   width: 100%;
   color: var(--ink);
 }
-.sandbox-profile-form textarea.sandbox-policy-textarea {
+.sandbox-profile-form textarea.sandbox-policy-textarea,
+textarea.sandbox-policy-textarea {
   width: 100%;
   min-height: 140px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -733,6 +734,20 @@ main.with-side-panes {
   line-height: 1.4;
   color: var(--ink);
   box-sizing: border-box;
+}
+.yaml-editor {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.yaml-editor .cm-editor {
+  width: 100%;
+  max-width: 100%;
+}
+.yaml-editor[data-disabled="true"] .cm-editor,
+.yaml-editor[aria-disabled="true"] .cm-editor {
+  opacity: 0.65;
+  pointer-events: none;
 }
 .sandbox-field-hint {
   font-size: 11px;
@@ -989,17 +1004,6 @@ main.with-side-panes {
 }
 .openshell-provider-check-type {
   font-size: 11px;
-}
-.openshell-profile-policy-preview {
-  margin: 12px 0 0;
-  padding: 10px;
-  font-size: 12px;
-  max-height: 160px;
-  overflow: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  white-space: pre-wrap;
 }
 @media (max-width: 720px) {
   .openshell-profiles-layout {

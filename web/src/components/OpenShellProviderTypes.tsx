@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import type { OpenShellProviderTypeEntry } from "../types.js";
+import { YamlEditor } from "./YamlEditor.js";
 
 /** Presentational Provider types band — exported for UI tests without fetch. */
 export function OpenShellProviderTypesPanelView({
@@ -151,12 +152,12 @@ export function OpenShellProviderTypesPanelView({
           </label>
           <label>
             YAML
-            <textarea
-              className="search-input"
+            <YamlEditor
+              className="sandbox-policy-textarea"
               rows={16}
               value={draft.yaml}
               disabled={busy}
-              onChange={(e) => onDraftChange({ ...draft, yaml: e.target.value })}
+              onChange={(yaml) => onDraftChange({ ...draft, yaml })}
               data-testid="openshell-provider-type-field-yaml"
               placeholder={"id: my-type\ndisplay_name: …\ncredentials:\n  - name: api_key\n    env_vars:\n      - MY_API_KEY\n"}
             />

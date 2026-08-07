@@ -66,7 +66,7 @@ pub struct BoardState {
     #[serde(default)]
     pub auth_allowed_teams: Vec<String>,
     /// Process agent knobs (Settings → Agent runtime). Seeded from compiled
-    /// defaults (`agents.enabled` from `honr.yaml` boot gate); Board SoT after.
+    /// defaults; Board SoT after.
     #[serde(default)]
     pub agent_runtime: Option<AgentRuntimeConfig>,
     /// Desired OpenShell providers (Settings → OpenShell → Providers). Board SoT.
@@ -2363,15 +2363,10 @@ impl Board {
 
     // ------------------------------------------------ agent runtime (board state)
 
-    /// Seed Agent runtime when unset. Process knobs come from compiled
-    /// [`AgentRuntimeConfig::default`]; `enabled` copies the `honr.yaml`
-    /// `execution.agents.enabled` boot gate so a fresh install with agents on
-    /// still dispatches. Settings/API edit thereafter.
+    /// Seed Agent runtime when unset from compiled [`AgentRuntimeConfig::default`].
+    /// Settings/API edit thereafter.
     pub fn seed_agent_runtime_if_empty(&self) -> bool {
-        self.seed_agent_runtime_config(AgentRuntimeConfig {
-            enabled: self.schema.execution.agents.enabled,
-            ..AgentRuntimeConfig::default()
-        })
+        self.seed_agent_runtime_config(AgentRuntimeConfig::default())
     }
 
     /// Same as [`Self::seed_agent_runtime_if_empty`] but map knobs from an
@@ -2379,12 +2374,12 @@ impl Board {
     #[cfg(test)]
     pub fn seed_agent_runtime_from(&self, agents: &AgentConfig) -> bool {
         self.seed_agent_runtime_config(AgentRuntimeConfig {
-            enabled: agents.enabled,
             engine: agents.engine.clone(),
             max_concurrent: agents.max_concurrent,
             agent_timeout_secs: agents.agent_timeout_secs,
             max_attempts: agents.max_attempts,
             branch_prefix: agents.branch_prefix.clone(),
+            ..AgentRuntimeConfig::default()
         })
     }
 
@@ -2417,8 +2412,7 @@ impl Board {
 
     /// AgentConfig for supervisor / sandbox create: durable Settings overlay on
     /// compiled create-knob defaults. Image/policy/cpu/memory live on board
-    /// profiles after seed; `honr.yaml` only supplies the `enabled` boot gate
-    /// (and optional legacy `repo`) before runtime is seeded.
+    /// sandbox specs; optional legacy `repo` may still come from schema agents.
     pub fn effective_agents(&self) -> AgentConfig {
         self.agents_with_workspace(&self.schema.execution.agents)
     }
@@ -2438,9 +2432,8 @@ impl Board {
     }
 
     /// Compiled create-knob defaults with durable Settings → Agent runtime overlay.
-    /// `yaml_agents.enabled` / `repo` are the only yaml fields consulted (boot
-    /// gate + legacy remotes). Remotes for a run still come from
-    /// [`Self::resolve_card_repo`].
+    /// Legacy `repo` may still come from schema agents. Remotes for a run still
+    /// come from [`Self::resolve_card_repo`].
     pub fn agents_with_workspace(&self, yaml_agents: &AgentConfig) -> AgentConfig {
         let rt = self.agent_runtime();
         Self::overlay_agent_runtime(yaml_agents, rt.as_ref())
@@ -2453,15 +2446,13 @@ impl Board {
         rt: Option<&AgentRuntimeConfig>,
     ) -> AgentConfig {
         let mut cfg = AgentConfig {
-            // Boot gate / legacy remotes from yaml; create knobs stay compiled.
-            enabled: yaml_agents.enabled,
+            // Legacy remotes from schema; create knobs stay compiled defaults.
             repo: yaml_agents.repo.clone(),
             ..AgentConfig::default()
         };
         let Some(rt) = rt else {
             return cfg;
         };
-        cfg.enabled = rt.enabled;
         cfg.engine = rt.engine.clone();
         cfg.max_concurrent = rt.max_concurrent;
         cfg.agent_timeout_secs = rt.agent_timeout_secs;
@@ -9231,7 +9222,6 @@ mod tests {
 
     fn agents_with_repo() -> AgentConfig {
         AgentConfig {
-            enabled: true,
             repo: crate::schema::RepoConfig {
                 upstream: "acme/widgets".into(),
                 fork: "bot/widgets".into(),
@@ -9287,7 +9277,6 @@ mod tests {
         assert!(b.yaml_work_repo().is_none());
 
         let agents = AgentConfig {
-            enabled: true,
             ..Default::default()
         };
         let overlaid = b.agents_with_workspace(&agents);
@@ -9298,7 +9287,6 @@ mod tests {
     fn agent_runtime_seeds_from_defaults_and_overlays_effective_agents() {
         let mut schema = Schema::default();
         schema.execution.agents = AgentConfig {
-            enabled: true,
             // Yaml create/runtime knobs must not win over compiled seed defaults.
             engine: "agy".into(),
             max_concurrent: 7,
@@ -9317,7 +9305,7 @@ mod tests {
         assert!(b.agent_runtime().is_none());
         assert!(b.seed_agent_runtime_if_empty());
         let seeded = b.agent_runtime().expect("seeded");
-        assert!(seeded.enabled, "yaml enabled is the boot gate");
+        assert_eq!(seeded.engine, "cursor");
         let compiled_rt = AgentRuntimeConfig::default();
         assert_eq!(seeded.engine, compiled_rt.engine);
         assert_eq!(seeded.max_concurrent, compiled_rt.max_concurrent);
@@ -9334,7 +9322,6 @@ mod tests {
             )),
         );
         assert!(other.seed_agent_runtime_from(&AgentConfig {
-            enabled: true,
             engine: "claude".into(),
             max_concurrent: 3,
             ..Default::default()
@@ -9345,7 +9332,6 @@ mod tests {
         );
 
         b.set_agent_runtime(AgentRuntimeConfig {
-            enabled: true,
             engine: "agy".into(),
             max_concurrent: 1,
             agent_timeout_secs: 900,
@@ -10279,7 +10265,6 @@ mod tests {
             )),
         );
         b.set_agent_runtime(AgentRuntimeConfig {
-            enabled: true,
             engine: "cursor".into(),
             ..Default::default()
         });
@@ -10333,7 +10318,6 @@ mod tests {
             )),
         );
         b.set_agent_runtime(AgentRuntimeConfig {
-            enabled: true,
             engine: "claude".into(),
             ..Default::default()
         });
