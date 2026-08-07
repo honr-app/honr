@@ -3,17 +3,18 @@
 
 use crate::model::{
     AgentRuntimeConfig, CockpitSession, ItemId, OpenShellProviderDesired,
-    OpenShellProviderRefreshDesired, SandboxProfile, State, WebhookPollConfig, WorkItem,
-    WorkspaceBinding,
+    OpenShellProviderRefreshDesired, OpenShellProviderTypeDesired, SandboxProfile,
+    SandboxProfileCreateDefaults, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
 use crate::openshell::{ProviderRefreshSpec, ProviderTypeProfile};
+use crate::provider_types::ProviderTypeCatalogEntry;
 use crate::secrets::{open_string_map, seal_string_map};
 use crate::store::{AncestryLine, SharedBoard};
 
 use axum::extract::{Path, State as AxState};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,10 @@ pub fn routes() -> Router<SharedBoard> {
             "/sandbox-profiles/{id}/cockpit",
             post(set_cockpit_sandbox_profile),
         )
+        .route(
+            "/sandbox-profiles/cockpit/clear",
+            post(clear_cockpit_sandbox_profile),
+        )
         .route("/workspace", get(get_workspace).put(put_workspace))
         .route("/webhook-poll", get(get_webhook_poll).put(put_webhook_poll))
         .route(
@@ -126,6 +131,14 @@ pub fn routes() -> Router<SharedBoard> {
         .route(
             "/openshell/provider-profiles",
             get(list_openshell_provider_profiles),
+        )
+        .route(
+            "/openshell/provider-types",
+            get(list_openshell_provider_types).put(put_openshell_provider_type),
+        )
+        .route(
+            "/openshell/provider-types/{id}",
+            delete(delete_openshell_provider_type),
         )
         .route("/github-app", get(get_github_app).put(put_github_app))
         .route("/github-app/sync-token", post(sync_github_app_token))
@@ -1227,13 +1240,18 @@ async fn delete_openshell_provider(
 
 async fn sync_openshell_providers(AxState(b): AxState<SharedBoard>) -> Json<SyncProvidersOut> {
     let os = b.openshell_client();
-    // Custom provider types must exist before CreateProvider(type=antigravity).
-    if let Err(e) = crate::antigravity::ensure_provider_type_imported(&os).await {
-        tracing::warn!(error = %e, "antigravity provider type import skipped");
-    }
-    let desired = b.openshell_providers();
     let mut applied = Vec::new();
     let mut errors = Vec::new();
+    // Board custom types must exist on the gateway before CreateProvider.
+    // Import-or-skip only; updating changed YAML may need a gateway update path later.
+    if let Err(e) = crate::provider_types::import_board_types_to_gateway(&b, &os).await {
+        tracing::warn!(error = %e, "board provider type import failed");
+        errors.push(SyncProviderError {
+            name: "provider-types".into(),
+            error: e,
+        });
+    }
+    let desired = b.openshell_providers();
     for p in desired {
         match apply_desired_to_gateway(&b, &p).await {
             Ok(()) => applied.push(p.name),
@@ -1269,6 +1287,66 @@ async fn list_openshell_provider_profiles(
         .map_err(|e| ApiError(e.to_string()))
 }
 
+#[derive(Deserialize)]
+pub struct ProviderTypeWrite {
+    pub id: String,
+    pub yaml: String,
+    #[serde(default)]
+    pub form_config_keys: Option<Vec<String>>,
+}
+
+async fn list_openshell_provider_types(
+    AxState(b): AxState<SharedBoard>,
+) -> Json<Vec<ProviderTypeCatalogEntry>> {
+    let board_types = b.openshell_provider_types();
+    let gateway: Vec<ProviderTypeProfile> = b
+        .openshell_client()
+        .list_provider_profiles()
+        .await
+        .unwrap_or_default();
+    Json(crate::provider_types::merge_catalog(&board_types, &gateway))
+}
+
+async fn put_openshell_provider_type(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<ProviderTypeWrite>,
+) -> Result<Json<OpenShellProviderTypeDesired>, ApiError> {
+    let id = req.id.trim().to_string();
+    if id.is_empty() {
+        return Err(ApiError("provider type id required".into()));
+    }
+    let _meta = crate::provider_types::parse_provider_type_yaml(&req.yaml, Some(&id))?;
+    let existing = b.openshell_provider_types().get(&id).cloned();
+    let form_config_keys = match req.form_config_keys {
+        Some(keys) => keys,
+        None => existing
+            .as_ref()
+            .map(|e| e.form_config_keys.clone())
+            .unwrap_or_default(),
+    };
+    let shipped = existing.as_ref().map(|e| e.shipped).unwrap_or(false);
+    let stored = b
+        .upsert_openshell_provider_type(OpenShellProviderTypeDesired {
+            id,
+            yaml: req.yaml,
+            shipped,
+            form_config_keys,
+        })
+        .map_err(ApiError)?;
+    Ok(Json(stored))
+}
+
+async fn delete_openshell_provider_type(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let id = id.trim().to_string();
+    if !b.delete_openshell_provider_type(&id) {
+        return Err(ApiError(format!("no provider type {id:?}")));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---------------------------------------------------------------- sandbox profiles
 
 #[derive(Serialize)]
@@ -1276,6 +1354,8 @@ pub struct SandboxProfilesOut {
     pub profiles: Vec<SandboxProfile>,
     pub default_sandbox_profile_id: Option<String>,
     pub cockpit_sandbox_profile_id: Option<String>,
+    /// Prefill for Settings → Create (minimal policy, no honr-specific egress).
+    pub create_defaults: SandboxProfileCreateDefaults,
 }
 
 fn sandbox_profiles_out(b: &crate::store::SharedBoard) -> SandboxProfilesOut {
@@ -1283,6 +1363,7 @@ fn sandbox_profiles_out(b: &crate::store::SharedBoard) -> SandboxProfilesOut {
         profiles: b.list_sandbox_profiles(),
         default_sandbox_profile_id: b.default_sandbox_profile_id(),
         cockpit_sandbox_profile_id: b.cockpit_sandbox_profile_id(),
+        create_defaults: crate::model::sandbox_profile_create_defaults(),
     }
 }
 
@@ -1358,6 +1439,13 @@ async fn set_cockpit_sandbox_profile(
     Path(id): Path<String>,
 ) -> ApiResult<SandboxProfilesOut> {
     b.set_cockpit_sandbox_profile(&id).map_err(ApiError)?;
+    Ok(Json(sandbox_profiles_out(&b)))
+}
+
+async fn clear_cockpit_sandbox_profile(
+    AxState(b): AxState<SharedBoard>,
+) -> ApiResult<SandboxProfilesOut> {
+    b.clear_cockpit_sandbox_profile();
     Ok(Json(sandbox_profiles_out(&b)))
 }
 
@@ -3614,7 +3702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_imports_antigravity_provider_type_before_create() {
+    async fn sync_imports_board_provider_types_before_create() {
         use crate::model::OpenShellProviderDesired;
         use crate::secrets::seal_string_map;
         use std::sync::Arc;
@@ -3644,7 +3732,6 @@ mod tests {
                     };
                 }
                 if argv.starts_with(&["provider", "list-profiles"]) {
-                    // Empty → ensure path imports shipped YAML.
                     return crate::openshell::Output {
                         code: 0,
                         stdout: "[]".into(),
@@ -3692,6 +3779,8 @@ mod tests {
         let mut board = crate::store::Board::new(crate::schema::Schema::default(), path);
         board.openshell = Some(os);
         let b = std::sync::Arc::new(board);
+        // Boot seeds shipped types; Board::new alone does not.
+        assert!(crate::provider_types::ensure_shipped_on_board(&b) >= 1);
 
         let mut creds = BTreeMap::new();
         creds.insert("ANTIGRAVITY_ACCESS_TOKEN".into(), "openshell:resolve:test".into());
@@ -3728,6 +3817,15 @@ mod tests {
         assert!(
             import_idx < create_idx,
             "import must precede create: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|a| {
+                a.windows(4).any(|w| {
+                    w == ["provider", "profile", "import", "antigravity.yaml"]
+                        || w == ["provider", "profile", "import", "cursor-agent.yaml"]
+                })
+            }),
+            "sync should import shipped board types: {calls:?}"
         );
     }
 

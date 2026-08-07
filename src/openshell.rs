@@ -2185,11 +2185,10 @@ mod cockpit_policy_create_tests {
     use super::*;
 
     #[test]
-    fn build_create_request_accepts_cockpit_mcp_protocol_policy() {
-        let yaml = crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY.to_string();
-        assert!(yaml.contains("protocol: mcp"), "seed must use protocol mcp");
+    fn build_create_request_accepts_minimal_policy() {
+        let yaml = crate::seed_policies::MINIMAL_SANDBOX_POLICY.to_string();
         let spec = SandboxSpec {
-            name: "honr-cockpit-policy-test".into(),
+            name: "honr-policy-test".into(),
             from: "honr-sandbox:latest".into(),
             providers: vec![],
             policy: Some(yaml),
@@ -2209,8 +2208,8 @@ mod cockpit_policy_create_tests {
         let yaml_out =
             openshell_policy::serialize_sandbox_policy(policy).expect("serialize");
         assert!(
-            yaml_out.contains("8080") && yaml_out.contains("mcp"),
-            "create request policy lost host MCP allow-list:\n{yaml_out}"
+            yaml_out.contains("include_workdir") && yaml_out.contains("/sandbox"),
+            "create request must keep minimal filesystem policy:\n{yaml_out}"
         );
     }
 }

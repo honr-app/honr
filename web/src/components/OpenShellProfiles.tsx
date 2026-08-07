@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
-import type { OpenShellProviderView, SandboxProfile } from "../types.js";
+import type {
+  OpenShellProviderView,
+  SandboxProfile,
+  SandboxProfileCreateDefaults,
+} from "../types.js";
 
 type ProfileDraft = {
   id: string;
@@ -14,14 +18,14 @@ type ProfileDraft = {
   provider_names: string[];
 };
 
-const emptyDraft = (): ProfileDraft => ({
+const emptyDraft = (defaults?: SandboxProfileCreateDefaults | null): ProfileDraft => ({
   id: "",
-  name: "",
-  image: "",
-  policy: "",
-  cpu: "",
-  memory: "",
-  engine: "cursor",
+  name: defaults?.name ?? "Default",
+  image: defaults?.image ?? "",
+  policy: defaults?.policy ?? "",
+  cpu: defaults?.cpu ?? "",
+  memory: defaults?.memory ?? "",
+  engine: defaults?.engine?.trim() || "cursor",
   provider_names: [],
 });
 
@@ -57,6 +61,7 @@ export function SandboxesPanelView({
   onDelete,
   onSetDefault,
   onSetCockpit,
+  onClearCockpit,
 }: {
   profiles: SandboxProfile[];
   defaultId: string | null;
@@ -76,16 +81,15 @@ export function SandboxesPanelView({
   onDelete: (id: string) => void;
   onSetDefault: (id: string) => void;
   onSetCockpit: (id: string) => void;
+  onClearCockpit?: () => void;
 }) {
   const isCreate = editingId === "";
   const isEditing = editingId !== null;
   const selected =
     selectedId != null ? profiles.find((p) => p.id === selectedId) : undefined;
-  const canDeleteSelected =
-    !!selected &&
-    selected.id !== defaultId &&
-    selected.id !== cockpitId &&
-    !isEditing;
+  /** Cockpit uses an explicit override, else the global default. */
+  const effectiveCockpitId = cockpitId ?? defaultId;
+  const canDeleteSelected = !!selected && !isEditing;
 
   const toggleProvider = (name: string) => {
     const set = new Set(draft.provider_names);
@@ -104,9 +108,10 @@ export function SandboxesPanelView({
           <h3 id="openshell-profiles-title">Sandbox specs</h3>
           <p className="dim">
             Create-specs (image, policy, resources, engine) and which providers
-            attach when a sandbox is created from this spec. Providers are
-            defined under the Providers tab (each has a provider type); attach
-            them here.
+            attach when a sandbox is created from this spec. The first profile
+            becomes the global default; Cockpit uses that default unless you
+            point Cockpit at another profile. Providers are defined under the
+            Providers tab; attach them here.
           </p>
         </div>
 
@@ -117,13 +122,16 @@ export function SandboxesPanelView({
             {profiles.length === 0 ? (
               <div className="settings-placeholder" data-testid="sandboxes-empty">
                 <p>No sandbox specs yet.</p>
-                <p className="dim">Create one, or wait for the catalog to seed.</p>
+                <p className="dim">
+                  Create one — the form starts from a minimal policy. It becomes
+                  the default (and Cockpit) until you add another.
+                </p>
               </div>
             ) : (
               <ul className="openshell-profile-rail-ul">
                 {profiles.map((p) => {
                   const isDefault = defaultId === p.id;
-                  const isCockpit = cockpitId === p.id;
+                  const isCockpit = effectiveCockpitId === p.id;
                   const active = selectedId === p.id;
                   return (
                     <li key={p.id}>
@@ -407,7 +415,7 @@ export function SandboxesPanelView({
                       Set default
                     </button>
                   )}
-                  {selected.id !== cockpitId && (
+                  {selected.id !== effectiveCockpitId && (
                     <button
                       type="button"
                       disabled={busy}
@@ -415,6 +423,18 @@ export function SandboxesPanelView({
                       data-testid={`sandbox-set-cockpit-${selected.id}`}
                     >
                       Use for Cockpit
+                    </button>
+                  )}
+                  {onClearCockpit &&
+                    cockpitId != null &&
+                    selected.id === cockpitId && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={onClearCockpit}
+                      data-testid="sandbox-clear-cockpit"
+                    >
+                      Cockpit → use default
                     </button>
                   )}
                   {canDeleteSelected && (
@@ -451,12 +471,14 @@ export function SandboxesPanel() {
   const [providers, setProviders] = useState<OpenShellProviderView[]>([]);
   const [defaultId, setDefaultId] = useState<string | null>(null);
   const [cockpitId, setCockpitId] = useState<string | null>(null);
+  const [createDefaults, setCreateDefaults] =
+    useState<SandboxProfileCreateDefaults | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<ProfileDraft>(emptyDraft);
+  const [draft, setDraft] = useState<ProfileDraft>(() => emptyDraft());
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -465,6 +487,7 @@ export function SandboxesPanel() {
         setProfiles(out.profiles);
         setDefaultId(out.default_sandbox_profile_id);
         setCockpitId(out.cockpit_sandbox_profile_id);
+        setCreateDefaults(out.create_defaults);
         setProviders(prov.providers);
         setSelectedId((cur) => {
           if (cur && out.profiles.some((p) => p.id === cur)) return cur;
@@ -524,7 +547,7 @@ export function SandboxesPanel() {
       onDraftChange={setDraft}
       onStartCreate={() => {
         setEditingId("");
-        setDraft(emptyDraft());
+        setDraft(emptyDraft(createDefaults));
       }}
       onStartEdit={(p) => {
         setEditingId(p.id);
@@ -532,7 +555,7 @@ export function SandboxesPanel() {
       }}
       onCancelEdit={() => {
         setEditingId(null);
-        setDraft(emptyDraft());
+        setDraft(emptyDraft(createDefaults));
       }}
       onSave={() => {
         const body = {
@@ -547,7 +570,7 @@ export function SandboxesPanel() {
         };
         run(api.upsertSandboxProfile(body)).then(() => {
           setEditingId(null);
-          setDraft(emptyDraft());
+          setDraft(emptyDraft(createDefaults));
         });
       }}
       onDelete={(id) => {
@@ -564,6 +587,7 @@ export function SandboxesPanel() {
       }}
       onSetDefault={(id) => run(api.setDefaultSandboxProfile(id))}
       onSetCockpit={(id) => run(api.setCockpitSandboxProfile(id))}
+      onClearCockpit={() => run(api.clearCockpitSandboxProfile())}
     />
   );
 }

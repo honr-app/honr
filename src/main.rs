@@ -13,6 +13,7 @@ mod mcp;
 mod mcp_oauth;
 mod model;
 mod openshell;
+mod provider_types;
 mod cockpit_attach;
 mod cockpit_chat;
 mod cockpit_mcp;

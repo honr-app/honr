@@ -99,6 +99,12 @@ pub const META_AGENT_RUNTIME: &str = "agent_runtime";
 /// JSON array of [`crate::model::OpenShellProviderDesired`].
 pub const META_OPENSHELL_PROVIDERS: &str = "openshell_providers";
 
+/// JSON map id → [`crate::model::OpenShellProviderTypeDesired`].
+pub const META_OPENSHELL_PROVIDER_TYPES: &str = "openshell_provider_types";
+
+/// JSON array of shipped provider type ids the operator deleted (skip re-seed).
+pub const META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES: &str = "openshell_provider_type_tombstones";
+
 /// JSON blob: [`crate::model::WebhookPollConfig`].
 pub const META_WEBHOOK_POLL: &str = "webhook_poll";
 

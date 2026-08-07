@@ -15,6 +15,7 @@ import {
 
 export { OpenShellPanelView } from "./OpenShellSettings.js";
 export { OpenShellProvidersPanelView } from "./OpenShellProviders.js";
+export { OpenShellProviderTypesPanelView } from "./OpenShellProviderTypes.js";
 export {
   OpenShellReadinessStripView,
   gatewayMtlsReady,

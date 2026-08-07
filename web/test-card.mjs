@@ -18,7 +18,7 @@ import {
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayMtlsReady, sandboxSpecReady, agentsEnabledReady } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayMtlsReady, sandboxSpecReady, agentsEnabledReady } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import {
   chromeLocationsEqual,
@@ -888,8 +888,9 @@ assert(openshellHtml.includes("data-testid=\"openshell-subnav\""), "OpenShell su
 assert(
   openshellHtml.includes("data-testid=\"openshell-tab-connectivity\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-providers\"") &&
+    openshellHtml.includes("data-testid=\"openshell-tab-provider-types\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-profiles\""),
-  "OpenShell tabs: Connectivity / Providers / Sandbox specs",
+  "OpenShell tabs: Connectivity / Providers / Provider types / Sandbox specs",
 );
 
 const openshellUnhealthyHtml = renderToString(
@@ -1026,6 +1027,76 @@ const openshellProvidersEmptyHtml = renderToString(
 );
 assert(openshellProvidersEmptyHtml.includes("data-testid=\"openshell-providers-empty\""), "Empty providers state");
 assert(openshellProvidersEmptyHtml.includes("gateway offline"), "Offline gateway badge");
+
+const openshellCursorAgentHtml = renderToString(
+  React.createElement(OpenShellProvidersPanelView, {
+    providers: [],
+    gatewayReachable: true,
+    profiles: [
+      {
+        id: "cursor-agent",
+        display_name: "Cursor Agent",
+        description: "CURSOR_API_KEY",
+        source: "board",
+        credential_env_vars: ["CURSOR_API_KEY"],
+        form_config_keys: [],
+      },
+    ],
+    draft: {
+      name: "cursor-cli",
+      type: "cursor-agent",
+      config: {},
+      credentials: {},
+    },
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onSync: () => {},
+  }),
+);
+assert(
+  openshellCursorAgentHtml.includes("data-testid=\"openshell-provider-cred-CURSOR_API_KEY\""),
+  "cursor-agent type renders CURSOR_API_KEY credential field",
+);
+
+const openshellProviderTypesHtml = renderToString(
+  React.createElement(OpenShellProviderTypesPanelView, {
+    types: [
+      {
+        id: "cursor-agent",
+        display_name: "Cursor Agent",
+        description: "",
+        source: "board",
+        credential_env_vars: ["CURSOR_API_KEY"],
+        form_config_keys: [],
+        yaml: "id: cursor-agent\n",
+        shipped: true,
+      },
+    ],
+    draft: null,
+    editingId: null,
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onAdd: () => {},
+  }),
+);
+assert(
+  openshellProviderTypesHtml.includes("data-testid=\"openshell-provider-types\""),
+  "Provider types band renders",
+);
+assert(
+  openshellProviderTypesHtml.includes("data-testid=\"openshell-provider-type-cursor-agent\""),
+  "Shipped cursor-agent type row renders",
+);
+assert(
+  openshellProviderTypesHtml.includes("shipped"),
+  "Shipped badge on provider type row",
+);
 
 const openshellWithBandsHtml = renderToString(
   React.createElement(OpenShellPanelView, {
@@ -1165,10 +1236,10 @@ assert(sandboxesHtml.includes("data-testid=\"sandbox-cockpit-badge\""), "Cockpit
 assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Sandbox specs panel should support create");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Selected profile offers Edit");
 assert(sandboxesHtml.includes("cursor"), "Selected profile shows engine");
-assert(!sandboxesHtml.includes("data-testid=\"sandbox-delete-default\""), "Cannot delete default/cockpit profile");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-delete-default\""), "Default profile can be deleted");
 assert(!sandboxesHtml.includes("data-testid=\"sandbox-destroy\""),
   "Sandbox specs panel must not offer live OpenShell sandbox destroy");
-assert(!/destroy sandbox|delete environment|openshell.*delete/i.test(sandboxesHtml),
+assert(!/destroy sandbox|delete environment/i.test(sandboxesHtml),
   "Sandbox specs panel must not offer live OpenShell sandbox destroy controls");
 
 const sandboxesHeavyHtml = renderToString(
@@ -1511,6 +1582,12 @@ assert.deepStrictEqual(parseChromeLocation("/settings/openshell/providers"), {
   settingsSection: "openshell",
   openShellTab: "providers",
 });
+assert.deepStrictEqual(parseChromeLocation("/settings/openshell/provider-types"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "provider-types",
+});
 assert.deepStrictEqual(parseChromeLocation("/settings/openshell/profiles"), {
   view: "settings",
   cardId: null,
@@ -1612,6 +1689,15 @@ assert.strictEqual(
     openShellTab: "providers",
   }),
   "/settings/openshell/providers",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "openshell",
+    openShellTab: "provider-types",
+  }),
+  "/settings/openshell/provider-types",
 );
 assert.strictEqual(
   formatChromePath({

@@ -718,20 +718,20 @@ pub struct SandboxProfile {
     pub provider_names: Vec<String>,
 }
 
-/// Catalog id for the worker default create-spec.
-pub const DEFAULT_SANDBOX_PROFILE_ID: &str = "default";
+/// Create-form / last-resort knobs when the catalog has no matching profile.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxProfileCreateDefaults {
+    pub name: String,
+    pub image: String,
+    pub policy: String,
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    pub engine: Option<String>,
+}
 
-/// Catalog id for the privileged cockpit control-plane seat (not the card worker).
-pub const COCKPIT_SANDBOX_PROFILE_ID: &str = "cockpit";
-
-/// Lighter create knobs than the worker default — chat seat, not a build box.
-pub const COCKPIT_SANDBOX_CPU: &str = "1";
-pub const COCKPIT_SANDBOX_MEMORY: &str = "2Gi";
-
-/// Build the seedable `cockpit` catalog entry from AgentConfig image/engine and
-/// [`crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY`]. Cpu/memory stay
-/// distinct from the worker default. After seed, the board profile is SoT.
-pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) -> SandboxProfile {
+/// Minimal defaults for Settings → Sandbox specs → Create.
+pub fn sandbox_profile_create_defaults() -> SandboxProfileCreateDefaults {
+    let agents = crate::schema::AgentConfig::default();
     let engine = {
         let e = agents.engine.trim();
         if e.is_empty() {
@@ -740,24 +740,60 @@ pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) 
             Some(e.to_string())
         }
     };
-    SandboxProfile {
-        id: COCKPIT_SANDBOX_PROFILE_ID.into(),
-        name: "Cockpit".into(),
-        image: agents.image.clone(),
-        policy: crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY.to_string(),
-        cpu: Some(COCKPIT_SANDBOX_CPU.into()),
-        memory: Some(COCKPIT_SANDBOX_MEMORY.into()),
+    SandboxProfileCreateDefaults {
+        name: "Default".into(),
+        image: agents.image,
+        policy: crate::seed_policies::MINIMAL_SANDBOX_POLICY.to_string(),
+        cpu: None,
+        memory: None,
         engine,
-        // GitHub App identity + Vertex (inference.local) + Antigravity (agy Bearer).
-        provider_names: vec!["github".into(), "vertex".into(), "antigravity".into()],
     }
 }
 
 /// OpenShell provider instance name / provider type id for Antigravity (`agy`).
 pub const ANTIGRAVITY_PROVIDER: &str = "antigravity";
 
-/// Shipped OpenShell provider type YAML (endpoints + Bearer credential schema).
+/// Shipped OpenShell provider type YAML filename (import source label).
 pub const ANTIGRAVITY_PROVIDER_TYPE_NAME: &str = "antigravity.yaml";
+
+/// Custom board provider type for Cursor Agent CLI (`CURSOR_API_KEY`).
+/// Distinct from OpenShell builtin `cursor` (egress-only, no credentials).
+pub const CURSOR_AGENT_PROVIDER_TYPE: &str = "cursor-agent";
+
+/// Shipped OpenShell provider type YAML filename for Cursor Agent.
+pub const CURSOR_AGENT_PROVIDER_TYPE_NAME: &str = "cursor-agent.yaml";
+
+/// Board-owned OpenShell provider type profile (Settings → OpenShell → Provider types).
+///
+/// YAML is the OpenShell profile document. `form_config_keys` drives non-secret
+/// config fields on the Add Provider form (not declared in OpenShell YAML).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenShellProviderTypeDesired {
+    pub id: String,
+    pub yaml: String,
+    /// Seeded from the repo; operators may edit yaml / form keys.
+    #[serde(default)]
+    pub shipped: bool,
+    /// Non-secret config keys shown on Add Provider for this type.
+    #[serde(default)]
+    pub form_config_keys: Vec<String>,
+}
+
+impl OpenShellProviderTypeDesired {
+    pub fn normalized(mut self) -> Self {
+        self.id = self.id.trim().to_string();
+        self.yaml = self.yaml.trim().to_string();
+        self.form_config_keys = self
+            .form_config_keys
+            .into_iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+        self.form_config_keys.sort();
+        self.form_config_keys.dedup();
+        self
+    }
+}
 
 /// Stable id slug from a display name. Lowercase ASCII alphanumerics; runs of
 /// whitespace/`_`/`-` become a single hyphen. Empty/punctuation-only names
@@ -857,19 +893,17 @@ pub fn is_supported_agents_policy(policy: &str) -> bool {
     t.is_empty() || t == "embedded" || t == "sandbox/policy.yaml" || is_inline_policy_yaml(policy)
 }
 
-/// Turn `execution.agents.policy` into seed / YAML-fallback content.
+/// Turn `execution.agents.policy` into last-resort YAML content.
 ///
-/// Live worker policy is the board sandbox profile. This never reads a host
-/// policy file: inline YAML is returned as-is; `embedded` / empty / legacy
+/// Live policy is the board sandbox profile. This never reads a host policy
+/// file: inline YAML is returned as-is; `embedded` / empty / legacy
 /// `sandbox/policy.yaml` (and any other non-inline value) resolve to the
-/// built-in worker default.
+/// minimal built-in default.
 pub fn resolve_policy_yaml(path_or_yaml: &str) -> String {
     if is_inline_policy_yaml(path_or_yaml) {
         return path_or_yaml.to_string();
     }
-    // Markers and unrecognized short strings → embedded default. Never
-    // `std::fs::read_to_string` for seed / YAML-fallback.
-    crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY.to_string()
+    crate::seed_policies::MINIMAL_SANDBOX_POLICY.to_string()
 }
 
 /// If a stored profile still holds a host path (pre–inline-policy boards),
@@ -1223,80 +1257,30 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_sandbox_policy_seed_is_distinct_from_worker() {
-        let cockpit_pol = crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY;
-        let worker = crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY;
+    fn minimal_sandbox_policy_parses_and_stays_minimal() {
+        let policy = crate::seed_policies::MINIMAL_SANDBOX_POLICY;
         assert!(
-            cockpit_pol.contains("honr-mcp") && cockpit_pol.contains("host.docker.internal"),
-            "cockpit policy must allow host honr MCP egress"
-        );
-        assert!(
-            cockpit_pol.contains("protocol: mcp")
-                && cockpit_pol.contains("allow_all_known_mcp_methods: true"),
-            "cockpit host MCP must use OpenShell protocol: mcp (rest+access:full 403s /mcp)"
+            !policy.contains("honr-mcp") && !policy.contains("host.docker.internal"),
+            "create default must not bake honr MCP egress"
         );
         assert!(
-            cockpit_pol.contains("name: github") && cockpit_pol.contains("api.github.com"),
-            "cockpit allow-lists GitHub for App GH_TOKEN / gh / git"
+            !policy.contains("index.crates.io") && !policy.contains("/opt/rust"),
+            "create default must not bake package registries or rust toolchain paths"
         );
-        assert!(
-            !cockpit_pol.contains("package-registries") && !cockpit_pol.contains("index.crates.io"),
-            "cockpit must not copy worker package-registry egress"
-        );
-        assert!(
-            !worker.contains("honr-mcp") && !worker.contains("host.docker.internal"),
-            "worker policy stays air-gapped from honr MCP"
-        );
-        assert!(
-            worker.contains("name: github") && worker.contains("api.github.com"),
-            "worker keeps GitHub code egress"
-        );
-        assert!(
-            worker.contains("/opt/rust/toolchains/**/bin/cargo"),
-            "worker seed allows rustup toolchain cargo for github git deps"
-        );
-        assert!(
-            worker.contains("/opt/cargo-target"),
-            "worker seed must allow write to the precompiled cargo target dir"
-        );
-        assert!(
-            cockpit_pol.contains("/opt/cargo-target"),
-            "cockpit policy must include the precompiled cargo target dir"
-        );
-        openshell_policy::parse_sandbox_policy(cockpit_pol)
-            .expect("embedded cockpit policy parses");
-        openshell_policy::parse_sandbox_policy(worker).expect("embedded worker policy parses");
-
-        let agents = crate::schema::AgentConfig {
-            image: "honr-sandbox:latest".into(),
-            engine: "cursor".into(),
-            cpu: Some("2".into()),
-            memory: Some("4Gi".into()),
-            ..Default::default()
-        };
-        let profile = cockpit_sandbox_profile_from_agents(&agents);
-        assert_eq!(profile.id, COCKPIT_SANDBOX_PROFILE_ID);
-        assert_eq!(profile.cpu.as_deref(), Some(COCKPIT_SANDBOX_CPU));
-        assert_eq!(profile.memory.as_deref(), Some(COCKPIT_SANDBOX_MEMORY));
-        assert_eq!(
-            profile.provider_names,
-            vec![
-                "github".to_string(),
-                "vertex".to_string(),
-                "antigravity".to_string()
-            ]
-        );
-        assert_ne!(profile.cpu, agents.cpu);
-        assert_ne!(profile.memory, agents.memory);
-        assert_eq!(profile.policy, cockpit_pol);
+        openshell_policy::parse_sandbox_policy(policy).expect("minimal policy parses");
+        let defaults = sandbox_profile_create_defaults();
+        assert_eq!(defaults.name, "Default");
+        assert_eq!(defaults.policy, policy);
+        assert!(defaults.cpu.is_none());
+        assert!(defaults.memory.is_none());
     }
 
     #[test]
     fn resolve_policy_yaml_never_reads_host_paths() {
-        let worker = crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY;
-        assert_eq!(resolve_policy_yaml("embedded"), worker);
-        assert_eq!(resolve_policy_yaml(""), worker);
-        assert_eq!(resolve_policy_yaml("sandbox/policy.yaml"), worker);
+        let minimal = crate::seed_policies::MINIMAL_SANDBOX_POLICY;
+        assert_eq!(resolve_policy_yaml("embedded"), minimal);
+        assert_eq!(resolve_policy_yaml(""), minimal);
+        assert_eq!(resolve_policy_yaml("sandbox/policy.yaml"), minimal);
         assert_eq!(resolve_policy_yaml("version: 1\n# inline\n"), "version: 1\n# inline\n");
 
         let dir = std::env::temp_dir().join(format!(
@@ -1311,8 +1295,8 @@ mod tests {
         std::fs::write(&path, "version: 1\n# must-not-load\n").unwrap();
         assert_eq!(
             resolve_policy_yaml(path.to_str().unwrap()),
-            worker,
-            "seed/YAML-fallback must not read an arbitrary host path"
+            minimal,
+            "YAML-fallback must not read an arbitrary host path"
         );
         let _ = std::fs::remove_dir_all(&dir);
 

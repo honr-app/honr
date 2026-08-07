@@ -6,6 +6,7 @@ use super::codec::{
     META_NEXT_ID, META_OPENSHELL_GATEWAY_ENDPOINT, META_AUTH_ALLOWED_TEAMS,
     META_AUTH_ALLOWED_USERS, META_AUTH_SEALED, META_GITHUB_APP_INSTALLATION_ID,
     META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS,
+    META_OPENSHELL_PROVIDER_TYPES, META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES,
     META_COCKPIT_SESSION, META_SANDBOX_PROFILES, META_WEBHOOK_POLL, META_WEBHOOK_POLL_PR_REVIEWS,
     META_WEBHOOK_POLL_TIPS, META_WORKSPACE_BINDING,
 };
@@ -71,6 +72,9 @@ impl PostgresBoardStore {
         let auth_allowed_teams = self.load_auth_allowed_teams().await?;
         let agent_runtime = self.load_agent_runtime().await?;
         let openshell_providers = self.load_openshell_providers().await?;
+        let openshell_provider_types = self.load_openshell_provider_types().await?;
+        let openshell_provider_type_tombstones =
+            self.load_openshell_provider_type_tombstones().await?;
         let webhook_poll = self.load_webhook_poll().await?;
         let webhook_poll_tips = self.load_webhook_poll_tips().await?;
         let webhook_poll_pr_reviews = self.load_webhook_poll_pr_reviews().await?;
@@ -92,6 +96,8 @@ impl PostgresBoardStore {
             auth_allowed_teams,
             agent_runtime,
             openshell_providers,
+            openshell_provider_types,
+            openshell_provider_type_tombstones,
             webhook_poll,
             webhook_poll_tips,
             webhook_poll_pr_reviews,
@@ -221,6 +227,19 @@ impl PostgresBoardStore {
         let providers_json = serde_json::to_string(&state.openshell_providers)
             .map_err(|e| StoreError::Query(format!("serialize openshell_providers: {e}")))?;
         set_meta_tx(&mut tx, META_OPENSHELL_PROVIDERS, &providers_json).await?;
+        let provider_types_json = serde_json::to_string(&state.openshell_provider_types)
+            .map_err(|e| StoreError::Query(format!("serialize openshell_provider_types: {e}")))?;
+        set_meta_tx(&mut tx, META_OPENSHELL_PROVIDER_TYPES, &provider_types_json).await?;
+        let tombstones_json = serde_json::to_string(&state.openshell_provider_type_tombstones)
+            .map_err(|e| {
+                StoreError::Query(format!("serialize openshell_provider_type_tombstones: {e}"))
+            })?;
+        set_meta_tx(
+            &mut tx,
+            META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES,
+            &tombstones_json,
+        )
+        .await?;
         let webhook_poll_json = match &state.webhook_poll {
             None => String::new(),
             Some(cfg) => serde_json::to_string(cfg)
@@ -382,6 +401,31 @@ impl PostgresBoardStore {
             Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(Vec::new()),
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode openshell_providers: {e}"))),
+        }
+    }
+
+    async fn load_openshell_provider_types(
+        &self,
+    ) -> Result<BTreeMap<String, crate::model::OpenShellProviderTypeDesired>, StoreError> {
+        match self.meta_get(META_OPENSHELL_PROVIDER_TYPES).await? {
+            None => Ok(BTreeMap::new()),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(BTreeMap::new()),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode openshell_provider_types: {e}"))),
+        }
+    }
+
+    async fn load_openshell_provider_type_tombstones(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        match self.meta_get(META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES).await? {
+            None => Ok(std::collections::BTreeSet::new()),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => {
+                Ok(std::collections::BTreeSet::new())
+            }
+            Some(raw) => serde_json::from_str(&raw).map_err(|e| {
+                StoreError::Query(format!("decode openshell_provider_type_tombstones: {e}"))
+            }),
         }
     }
 

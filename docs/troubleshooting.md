@@ -62,9 +62,8 @@ Two separate traps:
 - **Policy is immutable on a live sandbox** for the filesystem and process
   sections. It is set at create time — recreate the sandbox after a policy
   change.
-- **Empty-catalog seed is one-shot.** `src/seed_policies.rs` fills an empty
-  catalog; after that the board spec is authoritative. Paste updates into
-  Settings, or recreate the spec, when you change the desired policy.
+- **Board specs are authoritative.** Create starts from the minimal policy in
+  `src/seed_policies.rs`; paste updates into Settings when you change egress.
 
 ### The model calls hang
 

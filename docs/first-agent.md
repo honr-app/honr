@@ -122,8 +122,9 @@ Build or pull whatever your sandbox spec's image field names. For honr's own
 Rust toolchain image:
 
 ```bash
-docker build -f sandbox/Containerfile -t honr-sandbox:latest .
-# or: make sandbox
+make sandbox
+# or: podman build -f sandbox/Containerfile -t honr-sandbox:latest .
+# Docker: CONTAINER_ENGINE=docker make sandbox
 ```
 
 From the **repo root**, not `sandbox/` — `Cargo.lock` and
@@ -135,7 +136,7 @@ Then confirm the board's **default** sandbox spec in
 live on the board; [Configuration](configuration.md#sandbox-specs) and
 [Sandbox](sandbox.md) cover resolution and policy.
 
-**Check:** `docker image ls | grep honr-sandbox`, and the default spec's image
+**Check:** `podman image ls | grep honr-sandbox`, and the default spec's image
 matches what you built.
 
 ## 5. Turn agents on
