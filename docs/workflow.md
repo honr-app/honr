@@ -111,16 +111,23 @@ Ingress is `POST /api/webhooks/github`. A push to the default branch emits
 `MainAdvanced`, which does three things:
 
 **1. Merged card → Done.** When a Review or Needs You card's `pr_url` matches
-the merged PR, it completes. Same-parent Review siblings with open PRs get
-`rebase_requested`. Webhook and polling both go through the same Board
-completion helper, so sibling catch-up behaves identically either way.
+the merged PR, it completes. Webhook and polling both go through the same Board
+completion helper.
 
-**2. Review conflict observation.** Every Review card with an open PR targeting
-the advanced base is queued for a host-side GitHub API `mergeable` check — an
-App installation token, not a `git rebase` in a sandbox. `MERGEABLE` clears the
-queue and the card stays in Review. `CONFLICTING` bounces it to Backlog with a
-note so a worker can reclaim and rebase. `UNKNOWN` stays queued and retries next
-sweep, because GitHub computes mergeability asynchronously.
+**2. Review catch-up (CONFLICTING-only).** Main advancing under a Review PR is a
+no-op unless GitHub reports a conflict. honr observes the host GitHub API
+`mergeable` field with an App installation token — not a `git rebase` in a
+sandbox — for every open Review PR targeting the advanced base (tip advance and
+same-parent sibling merge share this path):
+
+| `mergeable` | What happens |
+|---|---|
+| **MERGEABLE** | Silent no-op. Card stays in Review; no catch-up work signal. |
+| **UNKNOWN** | GitHub is still computing. Retry on the next sweep. |
+| **CONFLICTING** | Bounce to Backlog with a binding note so a worker can reclaim and rebase. |
+
+Repeated overlapping conflict files escalate to **Needs You** (decomposition
+failure) when those file lists are present.
 
 **3. Live runs get steered.** Each Claimed or Running card gets a note to fetch
 and rebase onto upstream main. Because steer alone does not inject mid-turn,
@@ -128,9 +135,8 @@ honr then parks and unparks so the agent acts on resume — sandbox and
 conversation id are preserved.
 
 Review cards are deliberately *not* parked to reuse that path; they stay in
-Review until a conflict or a human bounce. And steering Running does not replace
-Review catch-up: both fire on the same `MainAdvanced`, so a Review PR is not left
-behind when only Running moved.
+Review unless GitHub reports CONFLICTING (or a human bounces them). Steering
+Running does not replace Review catch-up: both fire on the same `MainAdvanced`.
 
 ### Local webhook forwarding
 

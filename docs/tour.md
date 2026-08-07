@@ -90,7 +90,9 @@ would regret not looking.
 
 **Approving in honr surfaces the PR. It never merges it.** You merge on GitHub,
 like any other contribution. When the merge lands, a webhook moves the card to
-Done and tells any sibling still in Review to rebase.
+Done. Siblings still in Review are a no-op unless GitHub reports CONFLICTING —
+then they bounce to Backlog for reclaim and rebase. UNKNOWN retries; repeated
+overlapping conflicts escalate to Needs You.
 
 ## 6. Seeing the shape of the work
 
