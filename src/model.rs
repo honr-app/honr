@@ -709,6 +709,17 @@ pub fn normalize_cockpit_field(value: Option<String>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Board-owned OpenShell policy (Settings → OpenShell → Policies).
+///
+/// Specs reference these by id; create materializes `yaml` for OpenShell.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenShellPolicy {
+    pub id: String,
+    pub name: String,
+    /// Inline OpenShell policy YAML text.
+    pub yaml: String,
+}
+
 /// Named create-spec for OpenShell sandboxes. Board-state catalog entries;
 /// empty catalogs seed from compiled [`crate::schema::AgentConfig::default`]
 /// and embedded policy constants (not from host `honr.yaml` create knobs).
@@ -718,9 +729,13 @@ pub struct SandboxProfile {
     pub name: String,
     /// Passed to `openshell sandbox create --from`.
     pub image: String,
-    /// Inline OpenShell policy YAML text.
-    /// The supervisor writes a temp file from this at sandbox create.
-    pub policy: String,
+    /// Policies catalog id. Required on upsert; resolved to YAML at create.
+    #[serde(default)]
+    pub policy_id: String,
+    /// Pre-catalog boards stored inline YAML (or a host path) under `policy`.
+    /// One-shot load migration only — never written back.
+    #[serde(default, rename = "policy", skip_serializing)]
+    pub policy_inline_legacy: Option<String>,
     #[serde(default)]
     pub cpu: Option<String>,
     #[serde(default)]
@@ -740,7 +755,8 @@ pub struct SandboxProfile {
 pub struct SandboxProfileCreateDefaults {
     pub name: String,
     pub image: String,
-    pub policy: String,
+    /// Prefill: seeded minimal Policies catalog id.
+    pub policy_id: String,
     pub cpu: Option<String>,
     pub memory: Option<String>,
     pub engine: Option<String>,
@@ -760,7 +776,7 @@ pub fn sandbox_profile_create_defaults() -> SandboxProfileCreateDefaults {
     SandboxProfileCreateDefaults {
         name: "Default".into(),
         image: agents.image,
-        policy: crate::seed_policies::MINIMAL_SANDBOX_POLICY.to_string(),
+        policy_id: crate::seed_policies::MINIMAL_POLICY_ID.to_string(),
         cpu: None,
         memory: None,
         engine,
@@ -862,10 +878,11 @@ pub struct ResolvedSandboxCreate {
 }
 
 impl ResolvedSandboxCreate {
-    pub fn from_profile(p: &SandboxProfile) -> Self {
+    /// Build create knobs from a catalog profile + materialized policy YAML.
+    pub fn from_profile(p: &SandboxProfile, policy_yaml: &str) -> Self {
         Self {
             image: p.image.clone(),
-            policy: p.policy.clone(),
+            policy: policy_yaml.to_string(),
             cpu: p.cpu.clone(),
             memory: p.memory.clone(),
             engine: p
@@ -919,10 +936,10 @@ pub fn is_supported_agents_policy(policy: &str) -> bool {
 
 /// Turn `execution.agents.policy` into last-resort YAML content.
 ///
-/// Live policy is the board sandbox profile. This never reads a host policy
-/// file: inline YAML is returned as-is; `embedded` / empty / legacy
-/// `sandbox/policy.yaml` (and any other non-inline value) resolve to the
-/// minimal built-in default.
+/// Live policy is the board Policies catalog (referenced by sandbox specs).
+/// This never reads a host policy file: inline YAML is returned as-is;
+/// `embedded` / empty / legacy `sandbox/policy.yaml` (and any other non-inline
+/// value) resolve to the minimal built-in default.
 pub fn resolve_policy_yaml(path_or_yaml: &str) -> String {
     if is_inline_policy_yaml(path_or_yaml) {
         return path_or_yaml.to_string();
@@ -1294,9 +1311,52 @@ mod tests {
         openshell_policy::parse_sandbox_policy(policy).expect("minimal policy parses");
         let defaults = sandbox_profile_create_defaults();
         assert_eq!(defaults.name, "Default");
-        assert_eq!(defaults.policy, policy);
+        assert_eq!(
+            defaults.policy_id,
+            crate::seed_policies::MINIMAL_POLICY_ID
+        );
         assert!(defaults.cpu.is_none());
         assert!(defaults.memory.is_none());
+    }
+
+    #[test]
+    fn sandbox_profile_deserializes_legacy_inline_policy() {
+        let json = r#"{
+            "id": "default",
+            "name": "Default",
+            "image": "img:1",
+            "policy": "version: 1\n# keep-bytes\n"
+        }"#;
+        let p: SandboxProfile = serde_json::from_str(json).expect("legacy profile");
+        assert!(p.policy_id.is_empty());
+        assert_eq!(
+            p.policy_inline_legacy.as_deref(),
+            Some("version: 1\n# keep-bytes\n")
+        );
+        let wire = serde_json::to_value(&p).expect("serialize");
+        assert!(wire.get("policy").is_none(), "legacy field must not write back");
+        assert_eq!(wire.get("policy_id").and_then(|v| v.as_str()), Some(""));
+    }
+
+    #[test]
+    fn sandbox_profile_round_trips_policy_id() {
+        let p = SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "img:1".into(),
+            policy_id: "minimal".into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: None,
+            provider_names: Vec::new(),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("policy_id"));
+        assert!(!json.contains("\"policy\""));
+        let back: SandboxProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.policy_id, "minimal");
+        assert!(back.policy_inline_legacy.is_none());
     }
 
     #[test]

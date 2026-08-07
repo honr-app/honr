@@ -5,16 +5,17 @@ use super::codec::{
     META_AUTH_ALLOWED_USERS, META_AUTH_SEALED, META_COCKPIT_SANDBOX_PROFILE_ID,
     META_COCKPIT_SESSION, META_DEFAULT_SANDBOX_PROFILE_ID, META_GITHUB_APP_INSTALLATION_ID,
     META_GITHUB_APP_SEALED, META_JSON_IMPORTED, META_NEXT_ID, META_OPENSHELL_GATEWAY_ENDPOINT,
-    META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS, META_OPENSHELL_PROVIDER_TYPES,
-    META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES, META_SANDBOX_PROFILES, META_WEBHOOK_POLL,
-    META_WEBHOOK_POLL_PR_REVIEWS, META_WEBHOOK_POLL_TIPS, META_WORKSPACE_BINDING,
+    META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_POLICIES, META_OPENSHELL_PROVIDERS,
+    META_OPENSHELL_PROVIDER_TYPES, META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES, META_SANDBOX_PROFILES,
+    META_WEBHOOK_POLL, META_WEBHOOK_POLL_PR_REVIEWS, META_WEBHOOK_POLL_TIPS,
+    META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_sqlite_migrated, parse_database_url};
 use crate::model::{
-    AgentRuntimeConfig, CockpitSession, ItemId, OpenShellProviderDesired, SandboxProfile,
-    WebhookPollConfig, WorkItem, WorkspaceBinding,
+    AgentRuntimeConfig, CockpitSession, ItemId, OpenShellPolicy, OpenShellProviderDesired,
+    SandboxProfile, WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
@@ -64,6 +65,7 @@ impl SqliteBoardStore {
         }
         let stories = self.load_all_stories().await?;
         let sandbox_profiles = self.load_sandbox_profiles().await?;
+        let openshell_policies = self.load_openshell_policies().await?;
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
         let cockpit_sandbox_profile_id = self.load_cockpit_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
@@ -88,6 +90,7 @@ impl SqliteBoardStore {
             items,
             stories,
             sandbox_profiles,
+            openshell_policies,
             default_sandbox_profile_id,
             cockpit_sandbox_profile_id,
             workspace,
@@ -165,6 +168,9 @@ impl SqliteBoardStore {
         let profiles_json = serde_json::to_string(&state.sandbox_profiles)
             .map_err(|e| StoreError::Query(format!("serialize sandbox_profiles: {e}")))?;
         set_meta_tx(&mut tx, META_SANDBOX_PROFILES, &profiles_json).await?;
+        let policies_json = serde_json::to_string(&state.openshell_policies)
+            .map_err(|e| StoreError::Query(format!("serialize openshell_policies: {e}")))?;
+        set_meta_tx(&mut tx, META_OPENSHELL_POLICIES, &policies_json).await?;
         set_meta_tx(
             &mut tx,
             META_DEFAULT_SANDBOX_PROFILE_ID,
@@ -299,6 +305,17 @@ impl SqliteBoardStore {
             Some(raw) if raw.is_empty() || raw == "{}" => Ok(BTreeMap::new()),
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode sandbox_profiles: {e}"))),
+        }
+    }
+
+    async fn load_openshell_policies(
+        &self,
+    ) -> Result<BTreeMap<String, OpenShellPolicy>, StoreError> {
+        match self.meta_get(META_OPENSHELL_POLICIES).await? {
+            None => Ok(BTreeMap::new()),
+            Some(raw) if raw.is_empty() || raw == "{}" => Ok(BTreeMap::new()),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode openshell_policies: {e}"))),
         }
     }
 
@@ -1063,17 +1080,26 @@ mod tests {
         assert_eq!(stories[0].text, "kicked off");
         assert_eq!(store.get_next_id().await.unwrap(), 3);
 
-        // Full snapshot round-trip including sandbox profile catalog.
+        // Full snapshot round-trip including sandbox profile + policies catalog.
         let mut state = store.load_board_state().await.expect("load state");
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.next_id, 3);
+        state.openshell_policies.insert(
+            "minimal".into(),
+            crate::model::OpenShellPolicy {
+                id: "minimal".into(),
+                name: "Minimal".into(),
+                yaml: "version: 1\n# sqlite-roundtrip\n".into(),
+            },
+        );
         state.sandbox_profiles.insert(
             "default".into(),
             SandboxProfile {
                 id: "default".into(),
                 name: "Default".into(),
                 image: "img:1".into(),
-                policy: "version: 1\n# sqlite-roundtrip\n".into(),
+                policy_id: "minimal".into(),
+                policy_inline_legacy: None,
                 cpu: Some("2".into()),
                 memory: None,
                 engine: None,
@@ -1099,14 +1125,18 @@ mod tests {
             again.sandbox_profiles.get("default").unwrap().image,
             "img:1"
         );
+        assert_eq!(
+            again.sandbox_profiles.get("default").unwrap().policy_id,
+            "minimal"
+        );
         assert!(
             again
-                .sandbox_profiles
-                .get("default")
+                .openshell_policies
+                .get("minimal")
                 .unwrap()
-                .policy
+                .yaml
                 .contains("sqlite-roundtrip"),
-            "policy YAML must round-trip"
+            "policy YAML must round-trip via Policies catalog"
         );
         let ws = again.workspace.as_ref().expect("workspace round-trip");
         assert_eq!(ws.forge, "github");
