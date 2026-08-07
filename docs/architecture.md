@@ -31,7 +31,7 @@ UI / MCP / supervisor
 | `src/supervisor.rs` | Card dispatch, durable cockpit start/reconcile/stop, briefing, lease sweeping. |
 | `src/engine.rs` | Explicit registry of agent engines — unknown ids fail loud. |
 | Process boot | Database URL via `HONR_DATABASE_URL` (else `sqlite:honr.db`). Hierarchy is compile-time Project + Task. |
-| `sandbox/` | Container image; minimal create-form policy lives in `src/seed_policies.rs`. |
+| `sandbox/` | Container image; minimal create-form Policy seed lives in `src/seed_policies.rs` (board Policies catalog is live). |
 | `web/` | React UI + Playwright screenshot harness. |
 | `migrations/` | Versioned SQLx migrations for the board store. |
 

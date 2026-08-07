@@ -178,10 +178,10 @@ gh webhook forward \
 `pull_request_review` covers submitted review feedback → steer (see
 [PR review feedback](#pr-review-feedback)). One forwarder per repo at a time.
 For a polling fallback instead, see
-[Configuration](configuration.md#forge-and-webhooks).
+[Configuration](configuration.md#openshell--forge--github-app-provider).
 
 ## Next
 
 - [Troubleshooting](troubleshooting.md) — when a card stops moving
 - [Cockpit](cockpit.md) — a durable terminal seat with operator reach
-- [Configuration](configuration.md) — timeouts, concurrency, sandbox specs
+- [Configuration](configuration.md) — timeouts, concurrency, Policies, sandbox specs

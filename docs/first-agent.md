@@ -12,8 +12,8 @@ On an empty board, **Welcome to honr** embeds the same operator guide as
 **Help** (nav → Help). That guide is the named first-run path:
 
 1. **Connect MCP**
-2. **OpenShell + sandbox** — Connectivity, Providers, Sandbox specs, then
-   agents enabled
+2. **OpenShell + sandbox** — Connectivity, Providers, Policies, Sandbox specs,
+   then agents enabled
 3. **First Project loop**
 
 Work the checklist there; deep links land on Settings → OpenShell and Agent
@@ -120,7 +120,13 @@ provider on your Sandbox spec.
 **Check:** Sync reports success and the providers you expect are listed on the
 gateway.
 
-## 4. A sandbox image
+## 4. Policies and a sandbox image
+
+OpenShell allow-lists are named **Policies** on the board
+(**Settings → OpenShell → Policies**). A Sandbox spec picks one by id — image,
+resources, engine, and providers live on the spec; YAML lives on the Policy.
+[Configuration](configuration.md#policies) covers the split; live policy is
+board-owned and immutable on a running sandbox.
 
 Build or pull whatever your sandbox spec's image field names. For honr's own
 Rust toolchain image:
@@ -136,9 +142,10 @@ From the **repo root**, not `sandbox/` — `Cargo.lock` and
 and npm caches so crates.io never has to be reachable from a sandbox.
 
 Then confirm the board's **default** sandbox spec in
-**Settings → OpenShell → Sandbox specs** (Welcome/Help deep-links here). Specs
-live on the board; [Configuration](configuration.md#sandbox-specs) and
-[Sandbox](sandbox.md) cover resolution and policy.
+**Settings → OpenShell → Sandbox specs** (Welcome/Help deep-links here), and
+that it references the Policy you intend. Specs live on the board;
+[Configuration](configuration.md#sandbox-specs) and [Sandbox](sandbox.md) cover
+resolution.
 
 **Check:** `podman image ls | grep honr-sandbox`, and the default spec's image
 matches what you built.
@@ -173,6 +180,6 @@ silence; treat hangs as failure, not as "give it more time."
 ## Next
 
 - [Workflow](workflow.md) — steering cards day to day
-- [Configuration](configuration.md) — sandbox specs, engines, timeouts
+- [Configuration](configuration.md) — Policies, sandbox specs, engines, timeouts
 - [Sandbox](sandbox.md) — what actually happens inside a run
 - [Cockpit](cockpit.md) — a durable terminal seat with operator reach
