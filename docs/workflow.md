@@ -27,8 +27,16 @@ goes to Review with a proposal, and Approve creates the siblings.
 ## Which repo an agent clones
 
 Agents clone the repository named in the card's **intent**, **definition of
-done**, or **notes**. The supervisor leaves `/sandbox/repo` empty and lets the
-agent do it.
+done**, or **notes**. The supervisor never clones — agent-owns-clone.
+
+**Cold start** (brand-new sandbox): the supervisor clears `/sandbox/repo` and
+the agent clones into that empty workdir.
+
+**Reclaim** (live sandbox kept on the card): park resume and Needs You answer
+share one reuse path. The supervisor does not wipe `/sandbox/repo`; it refreshes
+an existing checkout in place, or ensures the directory without clearing caches
+when no checkout is present. The agent clones only if the workdir still has no
+repo.
 
 This is why `clone_repo` is required when you create a Project: it gets stamped
 into the Project intent and into the seeded Initial plan, so the first agent
