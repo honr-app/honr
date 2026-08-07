@@ -9967,9 +9967,9 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_profiles_seed_reads_policy_file_contents() {
+    fn sandbox_profiles_seed_uses_embedded_not_host_path() {
         let dir = std::env::temp_dir().join(format!(
-            "honr-test-sbx-seed-file-{}",
+            "honr-test-sbx-seed-no-host-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -9983,13 +9983,14 @@ mod tests {
         let b = Board::new(Schema::default(), dir.join("board.json"));
         let agents = AgentConfig {
             image: "from-file:1".into(),
+            // Host path is not a seed surface — resolve to embedded default.
             policy: path.to_string_lossy().into(),
             ..Default::default()
         };
         assert!(b.seed_sandbox_profiles_from(&agents));
         assert_eq!(
             b.get_sandbox_profile("default").expect("default").policy,
-            yaml
+            crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
