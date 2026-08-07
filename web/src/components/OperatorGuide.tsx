@@ -13,13 +13,55 @@ const CURSOR_MCP_JSON = `{
 const CLAUDE_MCP_ADD = `claude mcp add --transport http honr ${MCP_URL}`;
 
 /**
- * Reusable operator onboarding — MCP connect, OpenShell + sandbox setup,
- * then the first Project loop. Cursor / Claude snippets are secondary examples.
+ * Reusable operator onboarding — Quickstart (first Project loop), MCP connect,
+ * and OpenShell + sandbox setup. Cursor / Claude snippets are secondary examples.
  * Embed from Board empty state or Help; keep chrome (hero, nav) outside.
  */
 export function OperatorGuide() {
   return (
     <div className="operator-guide" data-testid="operator-guide">
+      <section
+        className="operator-guide-section"
+        aria-labelledby="operator-guide-quickstart-title"
+        data-testid="operator-guide-quickstart"
+      >
+        <h2 id="operator-guide-quickstart-title">Quickstart</h2>
+        <p className="dim">
+          The in-app first loop: create a Project, plan, Approve, then dispatch.
+          Agents stay idle until you enable them and dispatch.
+        </p>
+        <ol
+          className="operator-guide-steps"
+          data-testid="operator-guide-quickstart-steps"
+        >
+          <li>
+            Create a Project with required <code>clone_repo</code> (
+            <code>owner/name</code>) — via the board or{" "}
+            <code>create_project</code>. honr auto-seeds a claimable{" "}
+            <strong>Initial plan</strong> Task stamped with that planning clone
+            target.
+          </li>
+          <li>
+            <code>dispatch</code> the Initial plan — the agent clones{" "}
+            <code>clone_repo</code> and writes <code>plan.json</code>. Each
+            proposed task names its clone target in intent/DoD.
+          </li>
+          <li>
+            <strong>Approve</strong> — creates sibling Tasks under the Project
+            (never merges).
+          </li>
+          <li>
+            <code>dispatch</code> each Backlog Task (or turn on Project auto
+            mode).
+          </li>
+        </ol>
+        <p className="dim" data-testid="operator-guide-idle-note">
+          Agents stay idle until you enable them in Settings and dispatch. Name
+          the repo to clone in each Task&apos;s intent/DoD. After a report, card{" "}
+          <code>pull_request</code> drives resume remotes.
+        </p>
+      </section>
+
       <section
         className="operator-guide-section"
         aria-labelledby="operator-guide-mcp-title"
@@ -93,9 +135,9 @@ export function OperatorGuide() {
       >
         <h2 id="operator-guide-openshell-title">OpenShell + sandbox</h2>
         <p className="dim">
-          Before the first Project loop, configure the OpenShell gateway,
-          providers, a sandbox spec, and enable agents. honr does not discover
-          host credentials — paste them in Settings.
+          Before agents can run the Quickstart loop, configure the OpenShell
+          gateway, providers, a sandbox spec, and enable agents. honr does not
+          discover host credentials — paste them in Settings.
         </p>
         <ol
           className="operator-guide-steps"
@@ -148,39 +190,6 @@ export function OperatorGuide() {
             the file.
           </li>
         </ol>
-      </section>
-
-      <section
-        className="operator-guide-section"
-        aria-labelledby="operator-guide-loop-title"
-        data-testid="operator-guide-loop"
-      >
-        <h2 id="operator-guide-loop-title">First Project loop</h2>
-        <ol className="operator-guide-steps" data-testid="operator-guide-loop-steps">
-          <li>
-            <code>create_project</code> with required{" "}
-            <code>clone_repo</code> (<code>owner/name</code>) — auto-seeds a
-            claimable <strong>Initial plan</strong> Task stamped with that
-            planning clone target.
-          </li>
-          <li>
-            <code>dispatch</code> the Initial plan — the agent clones{" "}
-            <code>clone_repo</code> and writes <code>plan.json</code>. Each
-            proposed task names its clone target in intent/DoD.
-          </li>
-          <li>
-            <strong>Approve</strong> — creates sibling Tasks under the Project.
-          </li>
-          <li>
-            <code>dispatch</code> each Backlog Task (or turn on Project auto
-            mode).
-          </li>
-        </ol>
-        <p className="dim" data-testid="operator-guide-idle-note">
-          Agents stay idle until you enable them in Settings and dispatch. Name
-          the repo to clone in each Task&apos;s intent/DoD. After a report, card{" "}
-          <code>pull_request</code> drives resume remotes.
-        </p>
       </section>
     </div>
   );
