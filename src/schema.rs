@@ -194,7 +194,7 @@ pub struct AgentConfig {
     pub image: String,
     /// Seed / last-resort policy marker: `embedded` (default), empty, legacy
     /// `sandbox/policy.yaml`, or already-inline YAML. Not a host file path —
-    /// live policy is the board sandbox profile.
+    /// live policy is the board Policies catalog (referenced by sandbox specs).
     #[serde(default = "d_policy")]
     pub policy: String,
     /// Optional legacy remotes stanza. Card work remotes come from
@@ -295,7 +295,7 @@ impl AgentConfig {
     /// `Board::resolve_card_repo`). An incomplete install default only fails
     /// when a card has no `pr_url` and no yaml upstream.
     pub fn validate(&self) -> Result<(), String> {
-        // Live policy is the board sandbox profile. `agents.policy` is seed /
+        // Live policy is the board Policies catalog. `agents.policy` is seed /
         // YAML-fallback only — never a host path that must exist on disk.
         if crate::model::is_supported_agents_policy(&self.policy) {
             return Ok(());

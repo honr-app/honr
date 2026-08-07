@@ -111,18 +111,22 @@ board). Not required for the first sandboxed PR.
 Check: `GET /api/openshell/providers` → expected names, `gateway_reachable: true`,
 `gateway_synced: true`. GitHub: `token_status.configured: true`.
 
-### 3. Sandbox specs — Settings → OpenShell → Sandbox specs
+### 3. Policies + Sandbox specs — Settings → OpenShell
 
-Create at least one spec and mark it default.
+Policies are named OpenShell YAML allow-lists. Specs reference a policy by id
+(image / resources / engine / providers + `policy_id`).
 
-- `POST /api/sandbox-profiles` with `id`, `name`, `image`, `policy` (inline YAML),
+- `POST /api/openshell/policies` with `id` (optional), `name`, `yaml`
+- `GET /api/openshell/policies` → catalog; `create_default_policy_id` is the
+  seeded minimal row
+- `POST /api/sandbox-profiles` with `id`, `name`, `image`, `policy_id`,
   `engine` (e.g. `cursor`), `provider_names` (attach names that exist in
   Providers — instance names, not type ids).
 - `POST /api/sandbox-profiles/{id}/default`
 
 Create-form default policy is minimal (`network_policies: {}`). Add egress the
-work needs (Cursor hosts, GitHub, and for cockpit: host honr MCP with
-`protocol: mcp`). This repo’s checked-in starting point for a full seat is
+work needs under Policies (Cursor hosts, GitHub, and for cockpit: host honr MCP
+with `protocol: mcp`). This repo’s checked-in starting point for a full seat is
 `sandbox/cockpit-policy.yaml` — use it only when that matches the human’s
 intent; do not silently assume every install wants it.
 
@@ -168,9 +172,10 @@ halt when a run is wedged (park keeps sandbox + session).
 | GET | `/api/openshell/status` | Health |
 | GET/POST | `/api/openshell/providers` | Provider catalog |
 | POST | `/api/openshell/providers/sync` | Apply to gateway |
+| GET/POST | `/api/openshell/policies` | Policies catalog |
 | GET/PUT | `/api/github-app` | App credentials + installation |
 | POST | `/api/github-app/sync-token` | Mint GH_TOKEN |
-| GET/POST | `/api/sandbox-profiles` | Specs |
+| GET/POST | `/api/sandbox-profiles` | Specs (`policy_id`) |
 | POST | `/api/sandbox-profiles/{id}/default` | Set default |
 | GET/PUT | `/api/agent-runtime` | Engine / concurrency |
 | POST | `/api/items` | Create Project / Task |

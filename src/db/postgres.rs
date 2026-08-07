@@ -5,17 +5,18 @@ use super::codec::{
     META_COCKPIT_SANDBOX_PROFILE_ID, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
     META_NEXT_ID, META_OPENSHELL_GATEWAY_ENDPOINT, META_AUTH_ALLOWED_TEAMS,
     META_AUTH_ALLOWED_USERS, META_AUTH_SEALED, META_GITHUB_APP_INSTALLATION_ID,
-    META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_PROVIDERS,
-    META_OPENSHELL_PROVIDER_TYPES, META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES,
-    META_COCKPIT_SESSION, META_SANDBOX_PROFILES, META_WEBHOOK_POLL, META_WEBHOOK_POLL_PR_REVIEWS,
-    META_WEBHOOK_POLL_TIPS, META_WORKSPACE_BINDING,
+    META_GITHUB_APP_SEALED, META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_POLICIES,
+    META_OPENSHELL_PROVIDERS, META_OPENSHELL_PROVIDER_TYPES,
+    META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES, META_COCKPIT_SESSION, META_SANDBOX_PROFILES,
+    META_WEBHOOK_POLL, META_WEBHOOK_POLL_PR_REVIEWS, META_WEBHOOK_POLL_TIPS,
+    META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_postgres_migrated, parse_database_url};
 use crate::model::{
-    AgentRuntimeConfig, ItemId, OpenShellProviderDesired, CockpitSession, SandboxProfile,
-    WebhookPollConfig, WorkItem, WorkspaceBinding,
+    AgentRuntimeConfig, ItemId, OpenShellPolicy, OpenShellProviderDesired, CockpitSession,
+    SandboxProfile, WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
@@ -60,6 +61,7 @@ impl PostgresBoardStore {
         }
         let stories = self.load_all_stories().await?;
         let sandbox_profiles = self.load_sandbox_profiles().await?;
+        let openshell_policies = self.load_openshell_policies().await?;
         let default_sandbox_profile_id = self.load_default_sandbox_profile_id().await?;
         let cockpit_sandbox_profile_id = self.load_cockpit_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
@@ -84,6 +86,7 @@ impl PostgresBoardStore {
             items,
             stories,
             sandbox_profiles,
+            openshell_policies,
             default_sandbox_profile_id,
             cockpit_sandbox_profile_id,
             workspace,
@@ -161,6 +164,9 @@ impl PostgresBoardStore {
         let profiles_json = serde_json::to_string(&state.sandbox_profiles)
             .map_err(|e| StoreError::Query(format!("serialize sandbox_profiles: {e}")))?;
         set_meta_tx(&mut tx, META_SANDBOX_PROFILES, &profiles_json).await?;
+        let policies_json = serde_json::to_string(&state.openshell_policies)
+            .map_err(|e| StoreError::Query(format!("serialize openshell_policies: {e}")))?;
+        set_meta_tx(&mut tx, META_OPENSHELL_POLICIES, &policies_json).await?;
         set_meta_tx(
             &mut tx,
             META_DEFAULT_SANDBOX_PROFILE_ID,
@@ -298,6 +304,17 @@ impl PostgresBoardStore {
             Some(raw) if raw.is_empty() || raw == "{}" => Ok(BTreeMap::new()),
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode sandbox_profiles: {e}"))),
+        }
+    }
+
+    async fn load_openshell_policies(
+        &self,
+    ) -> Result<BTreeMap<String, OpenShellPolicy>, StoreError> {
+        match self.meta_get(META_OPENSHELL_POLICIES).await? {
+            None => Ok(BTreeMap::new()),
+            Some(raw) if raw.is_empty() || raw == "{}" => Ok(BTreeMap::new()),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode openshell_policies: {e}"))),
         }
     }
 

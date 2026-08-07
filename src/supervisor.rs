@@ -5795,11 +5795,26 @@ mod tests {
         let default_policy = "version: 1\n# default\n";
         let heavy_policy = "version: 1\n# heavy\n";
         board
+            .upsert_openshell_policy(crate::model::OpenShellPolicy {
+                id: "default-pol".into(),
+                name: "Default policy".into(),
+                yaml: default_policy.into(),
+            })
+            .unwrap();
+        board
+            .upsert_openshell_policy(crate::model::OpenShellPolicy {
+                id: "heavy-pol".into(),
+                name: "Heavy policy".into(),
+                yaml: heavy_policy.into(),
+            })
+            .unwrap();
+        board
             .upsert_sandbox_profile(SandboxProfile {
                 id: "default".into(),
                 name: "Default".into(),
                 image: "default-image:1".into(),
-                policy: default_policy.into(),
+                policy_id: "default-pol".into(),
+                policy_inline_legacy: None,
                 cpu: Some("2".into()),
                 memory: Some("4Gi".into()),
                 engine: None,
@@ -5811,7 +5826,8 @@ mod tests {
                 id: "heavy".into(),
                 name: "Heavy".into(),
                 image: "heavy-image:1".into(),
-                policy: heavy_policy.into(),
+                policy_id: "heavy-pol".into(),
+                policy_inline_legacy: None,
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
                 engine: None,
