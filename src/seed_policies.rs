@@ -14,13 +14,14 @@ version: 1
 
 filesystem_policy:
   include_workdir: true
-  # /opt/rust is the toolchain itself; /opt/cargo and /opt/npm-cache are the
-  # pre-warmed registries baked by sandbox/Containerfile. Cargo and npm both
-  # write to their caches during a build, so those two must be read_write —
-  # without them a build fails on permissions, which surfaces as a hang.
-  # /opt/cursor-agent and /opt/opencode are baked CLIs; read-only.
+  # /opt/rust is the toolchain itself; /opt/cargo (registry) and
+  # /opt/cargo-target (precompiled debug deps) plus /opt/npm-cache are baked by
+  # sandbox/Containerfile. Cargo and npm both write during a build, so those
+  # must be read_write — without them a build fails on permissions, which
+  # surfaces as a hang. /opt/cursor-agent and /opt/opencode are baked CLIs;
+  # read-only.
   read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust, /opt/cursor-agent, /opt/opencode]
-  read_write: [/sandbox, /tmp, /dev, /opt/cargo, /opt/npm-cache]
+  read_write: [/sandbox, /tmp, /dev, /opt/cargo, /opt/cargo-target, /opt/npm-cache]
 
 landlock:
   compatibility: best_effort

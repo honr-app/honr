@@ -95,8 +95,8 @@ docs-serve:
 	}
 	mdbook serve
 
-# Rebuild when Cargo.lock / web/package-lock.json change. New sandboxes pick
-# this up via --from; existing ones keep the create-time image.
+# Rebuild when Cargo.lock / src / web/package-lock.json change. New sandboxes
+# pick this up via --from; existing ones keep the create-time image.
 sandbox:
 	docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 

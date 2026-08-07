@@ -1242,6 +1242,14 @@ mod tests {
             worker.contains("/opt/rust/toolchains/**/bin/cargo"),
             "worker seed allows rustup toolchain cargo for github git deps"
         );
+        assert!(
+            worker.contains("/opt/cargo-target"),
+            "worker seed must allow write to the precompiled cargo target dir"
+        );
+        assert!(
+            cockpit_pol.contains("/opt/cargo-target"),
+            "cockpit policy must include the precompiled cargo target dir"
+        );
         openshell_policy::parse_sandbox_policy(&cockpit_pol).expect("cockpit-policy.yaml parses");
         openshell_policy::parse_sandbox_policy(worker).expect("embedded worker policy parses");
 

@@ -7,9 +7,11 @@ version: 1
 filesystem_policy:
   include_workdir: true
   # Same /opt layout as the worker image so one Containerfile serves both
-  # profiles; cockpit does not need write to cargo/npm caches for package fetch.
+  # profiles; cockpit does not need write to cargo/npm registries for package
+  # fetch. /opt/cargo-target is read_write so a cockpit build can update
+  # fingerprints against the precompiled debug tree.
   read_only: [/usr, /lib, /proc, /app, /etc, /var/log, /opt/rust, /opt/cursor-agent, /opt/opencode, /opt/cargo, /opt/npm-cache]
-  read_write: [/sandbox, /tmp, /dev]
+  read_write: [/sandbox, /tmp, /dev, /opt/cargo-target]
 
 landlock:
   compatibility: best_effort
