@@ -2046,6 +2046,8 @@ fn agent_env(engine: &str) -> Vec<(String, String)> {
         // Containerfile is not sufficient; it has to be passed explicitly.
         ("RUSTUP_HOME".into(), "/opt/rust".into()),
         ("CARGO_HOME".into(), "/opt/cargo".into()),
+        // Shared with the image warm step so agents reuse precompiled debug deps.
+        ("CARGO_TARGET_DIR".into(), "/opt/cargo-target".into()),
         ("NPM_CONFIG_CACHE".into(), "/opt/npm-cache".into()),
         (
             "PATH".into(),
@@ -4050,6 +4052,11 @@ mod tests {
         assert!(
             env.iter().all(|(k, _)| k != "BEADS_DIR"),
             "agent_env must not export BEADS_DIR: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "CARGO_TARGET_DIR" && v == "/opt/cargo-target"),
+            "agent_env must point at the image precompile dir: {env:?}"
         );
         let script = start_script(&repo_cfg(), "briefing", "claude", None).unwrap();
         assert!(

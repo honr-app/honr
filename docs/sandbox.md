@@ -63,22 +63,25 @@ not carry a separate issue-store CLI or database.
 
 The community base image has no Rust toolchain and the `sandbox` user has no
 sudo. For honr itself, [`sandbox/Containerfile`](https://github.com/honr-app/honr/blob/main/sandbox/Containerfile) bakes
-`cargo` / `clippy`, Cursor Agent (`agent`), OpenCode (`opencode`), and pre-warms
-cargo and npm caches so crates.io never needs to be reachable from an agent
-sandbox.
+`cargo` / `clippy`, Cursor Agent (`agent`), OpenCode (`opencode`), and pre-compiles
+the Rust dependency tree (plus npm `ci`) so crates.io never needs to be reachable
+from an agent sandbox. The warm step runs `cargo build --locked` and
+`cargo test --no-run --locked` into `CARGO_TARGET_DIR=/opt/cargo-target`; agents
+inherit that path and reuse the debug artifacts.
 
 ```bash
-# from the repo root; Cargo.lock and web/package-lock.json must be in context
+# from the repo root; Cargo.lock, src/, migrations/, and web/package-lock.json in context
 docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 # or: make sandbox
 ```
 
-The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock` changes
-materially, or when you need a newer Cursor/OpenCode CLI. Matching `/opt`
-entries (including `/opt/opencode`) belong in the worker **board** sandbox
-spec policy (Settings → OpenShell → Sandbox specs → `default`; seed text in
-`src/seed_policies.rs`). Live specs do not auto-pick up seed edits — paste
-policy updates (or recreate the spec) after changing the seed.
+The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock`, `src/`, or
+`migrations/` change materially, or when you need a newer Cursor/OpenCode CLI. Matching `/opt`
+entries (`/opt/cargo`, `/opt/cargo-target`, `/opt/npm-cache`, `/opt/opencode`, …)
+belong in the worker **board** sandbox spec policy (Settings → OpenShell →
+Sandbox specs → `default`; seed text in `src/seed_policies.rs`). Live specs do
+not auto-pick up seed edits — paste policy updates (or recreate the spec) after
+changing the seed, including `/opt/cargo-target` on `read_write`.
 
 Pass `--offline` in gate commands so a cache miss fails loudly instead of
 hanging on a denied fetch.
