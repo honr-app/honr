@@ -1,15 +1,18 @@
-//! Inject MCP client config + Bearer tokens into the cockpit sandbox.
+//! Inject MCP client config into sandboxes (cockpit + optional workers).
 //!
-//! Cockpit / supervisor mint JWTs (`honr-cockpit`) and write them under
-//! `/sandbox/.honr/mcp/` so agents inside the seat can call host `/mcp`
-//! without browser OAuth. Refresh tokens stay on disk in the sandbox only —
-//! never in browser JS.
+//! Catalog entries (`McpServerDesired`) render into Cursor/Claude/agy/OpenCode
+//! shapes under `/sandbox/.honr/mcp/`. Cockpit also mints JWTs for the shipped
+//! `honr` HTTP seat (`mcp_oauth`).
 
 use crate::mcp_oauth::{self, OpsMcpTokens};
+use crate::model::{
+    McpHttpAuth, McpServerDesired, McpTransport, HONR_MCP_SERVER_ID,
+};
 use crate::openshell::OpenShell;
 use crate::store::SharedBoard;
 
-use serde_json::json;
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,6 +30,11 @@ pub const COCKPIT_OPENCODE_CONFIG: &str = "/sandbox/.config/opencode/opencode.js
 
 /// Fallback principal when no browser session is available (supervisor reconcile).
 pub const COCKPIT_FALLBACK_SUB: &str = "cockpit";
+
+/// OpenShell MITM proxy + CA for stdio children (see OpenShell#886).
+const OPENSHELL_HTTPS_PROXY: &str = "http://10.200.0.1:3128";
+const OPENSHELL_CA_BUNDLE: &str = "/etc/openshell-tls/ca-bundle.pem";
+const OPENSHELL_CA_PEM: &str = "/etc/openshell-tls/openshell-ca.pem";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -46,7 +54,7 @@ impl From<String> for Error {
     }
 }
 
-/// Mint tokens for `sub` and write MCP config into `sandbox`.
+/// Mint tokens for `sub` and write MCP config into `sandbox` (cockpit).
 pub async fn provision_cockpit_mcp(
     board: &SharedBoard,
     os: &OpenShell,
@@ -63,67 +71,95 @@ pub async fn provision_cockpit_mcp(
             "minted cockpit access token failed resource verify".into(),
         ));
     }
-    inject_cockpit_mcp(os, sandbox, &tokens).await?;
+    let servers = mcp_servers_for_cockpit_inject(board);
+    inject_sandbox_mcp(os, sandbox, Some(&tokens), &servers).await?;
     Ok(tokens)
 }
 
-/// Write token.json, mcp.json, claude/opencode snippets, and env.sh into the sandbox.
-pub async fn inject_cockpit_mcp(
+/// Inject MCP config for a worker sandbox (no cockpit Bearer / host `/mcp`).
+///
+/// Always writes config files (possibly empty `mcpServers`) so Claude
+/// `--strict-mcp-config` has a valid path.
+pub async fn provision_worker_mcp(
+    board: &SharedBoard,
     os: &OpenShell,
     sandbox: &str,
-    tokens: &OpsMcpTokens,
+    resolved: &crate::model::ResolvedSandboxCreate,
+) -> Result<()> {
+    let servers = board.attach_mcp_servers_for_resolved(resolved, false);
+    inject_sandbox_mcp(os, sandbox, None, &servers).await
+}
+
+/// Cockpit inject list: profile attachments + shipped `honr` if missing.
+fn mcp_servers_for_cockpit_inject(board: &SharedBoard) -> Vec<McpServerDesired> {
+    let resolved = board.resolve_cockpit_sandbox_create();
+    let mut servers = board.attach_mcp_servers_for_resolved(&resolved, true);
+    if !servers.iter().any(|s| s.id == HONR_MCP_SERVER_ID) {
+        if let Some(honr) = board.get_mcp_server(HONR_MCP_SERVER_ID) {
+            servers.insert(0, honr);
+        }
+    }
+    servers
+}
+
+async fn inject_sandbox_mcp(
+    os: &OpenShell,
+    sandbox: &str,
+    tokens: Option<&OpsMcpTokens>,
+    servers: &[McpServerDesired],
 ) -> Result<()> {
     let staging = staging_dir()?;
     std::fs::create_dir_all(&staging)?;
 
-    let token_path = staging.join("token.json");
+    if let Some(tokens) = tokens {
+        let token_path = staging.join("token.json");
+        let token_doc = json!({
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "expires_at": tokens.expires_at,
+            "expires_in": tokens.expires_in,
+            "resource": tokens.resource,
+            "client_id": tokens.client_id,
+            "sub": tokens.sub,
+        });
+        std::fs::write(
+            &token_path,
+            serde_json::to_vec_pretty(&token_doc).map_err(|e| Error::Msg(e.to_string()))?,
+        )?;
+    }
+
+    let mcp_doc = mcp_json_document(tokens, servers);
+    let mcp_bytes = serde_json::to_vec_pretty(&mcp_doc).map_err(|e| Error::Msg(e.to_string()))?;
     let mcp_path = staging.join("mcp.json");
     let claude_path = staging.join("claude_mcp.json");
     let opencode_path = staging.join("opencode.jsonc");
     let env_path = staging.join("env.sh");
-
-    let token_doc = json!({
-        "access_token": tokens.access_token,
-        "refresh_token": tokens.refresh_token,
-        "expires_at": tokens.expires_at,
-        "expires_in": tokens.expires_in,
-        "resource": tokens.resource,
-        "client_id": tokens.client_id,
-        "sub": tokens.sub,
-    });
-    std::fs::write(
-        &token_path,
-        serde_json::to_vec_pretty(&token_doc).map_err(|e| Error::Msg(e.to_string()))?,
-    )?;
-
-    let mcp_doc = mcp_json_document(tokens);
-    let mcp_bytes = serde_json::to_vec_pretty(&mcp_doc).map_err(|e| Error::Msg(e.to_string()))?;
     std::fs::write(&mcp_path, &mcp_bytes)?;
-    // Same HTTP MCP shape for Claude Code's config reader.
+    // Same Cursor-shaped map for Claude Code's config reader.
     std::fs::write(&claude_path, &mcp_bytes)?;
-    // OpenCode uses a different schema (`mcp` map, `type: remote`).
-    let opencode_bytes = serde_json::to_vec_pretty(&opencode_jsonc_document(tokens))
+    let opencode_bytes = serde_json::to_vec_pretty(&opencode_jsonc_document(tokens, servers))
         .map_err(|e| Error::Msg(e.to_string()))?;
     std::fs::write(&opencode_path, &opencode_bytes)?;
 
-    let env_sh = format!(
-        "# honr cockpit MCP — sourced from ~/.bashrc when present\n\
-         export HONR_MCP_URL={url}\n\
-         export HONR_MCP_ACCESS_TOKEN={token}\n\
-         export HONR_MCP_CLIENT_ID={client}\n",
-        url = shell_single_quote(&tokens.resource),
-        token = shell_single_quote(&tokens.access_token),
-        client = shell_single_quote(&tokens.client_id),
-    );
+    let env_sh = match tokens {
+        Some(t) => format!(
+            "# honr sandbox MCP — sourced from ~/.bashrc when present\n\
+             export HONR_MCP_URL={url}\n\
+             export HONR_MCP_ACCESS_TOKEN={token}\n\
+             export HONR_MCP_CLIENT_ID={client}\n",
+            url = shell_single_quote(&t.resource),
+            token = shell_single_quote(&t.access_token),
+            client = shell_single_quote(&t.client_id),
+        ),
+        None => "# honr sandbox MCP (no cockpit Bearer)\n".to_string(),
+    };
     std::fs::write(&env_path, env_sh)?;
 
     // Ensure destination exists; upload takes a directory.
     let mkdir = os
         .exec(
             sandbox,
-            &format!(
-                "mkdir -p {COCKPIT_MCP_DIR} /sandbox/.cursor /sandbox/repo/.cursor /sandbox/.gemini/config /sandbox/.config/opencode 2>/dev/null || mkdir -p {COCKPIT_MCP_DIR}"
-            ),
+            &format!("mkdir -p {COCKPIT_MCP_DIR} /sandbox/.cursor /sandbox/.gemini/config /sandbox/.config/opencode"),
             std::time::Duration::from_secs(60),
         )
         .await?;
@@ -134,8 +170,14 @@ pub async fn inject_cockpit_mcp(
         )));
     }
 
-    os.upload(sandbox, token_path.to_str().unwrap(), COCKPIT_MCP_DIR)
+    if tokens.is_some() {
+        os.upload(
+            sandbox,
+            staging.join("token.json").to_str().unwrap(),
+            COCKPIT_MCP_DIR,
+        )
         .await?;
+    }
     os.upload(sandbox, mcp_path.to_str().unwrap(), COCKPIT_MCP_DIR)
         .await?;
     os.upload(sandbox, claude_path.to_str().unwrap(), COCKPIT_MCP_DIR)
@@ -145,61 +187,65 @@ pub async fn inject_cockpit_mcp(
     os.upload(sandbox, env_path.to_str().unwrap(), COCKPIT_MCP_DIR)
         .await?;
 
-    // Engine-specific installs + bashrc hook (best effort).
-    let place = format!(
-        r#"set -e
-chmod 600 {COCKPIT_MCP_DIR}/token.json {COCKPIT_MCP_DIR}/env.sh 2>/dev/null || true
-mkdir -p /sandbox/.cursor /sandbox/repo/.cursor /sandbox/.gemini/config /sandbox/.config/opencode 2>/dev/null || true
+    let out = os
+        .exec(
+            sandbox,
+            &format!(
+                r#"
+set -e
 cp -f {COCKPIT_MCP_DIR}/mcp.json /sandbox/.cursor/mcp.json 2>/dev/null || true
 cp -f {COCKPIT_MCP_DIR}/mcp.json /sandbox/repo/.cursor/mcp.json 2>/dev/null || true
 # Project-scoped Claude MCP (non-bare / discovery); --bare still needs --mcp-config.
 cp -f {COCKPIT_MCP_DIR}/claude_mcp.json /sandbox/repo/.mcp.json 2>/dev/null || true
 # Antigravity reads ~/.gemini/config/mcp_config.json (same HTTP MCP shape as Cursor).
 cp -f {COCKPIT_MCP_DIR}/mcp.json {COCKPIT_AGY_MCP_CONFIG} 2>/dev/null || true
-# OpenCode: merge `mcp.honr` into opencode.jsonc (remote + Bearer headers).
+# OpenCode: merge `mcp.*` into opencode.jsonc (remote + local).
 python3 - <<'PY'
 import json
 from pathlib import Path
-src = Path("{COCKPIT_MCP_DIR}/opencode.jsonc")
-dst = Path("{COCKPIT_OPENCODE_CONFIG}")
-frag = json.loads(src.read_text())
-doc = {{"$schema": "https://opencode.ai/config.json"}}
-if dst.exists() and dst.stat().st_size:
+p = Path("{COCKPIT_OPENCODE_CONFIG}")
+frag = json.loads(Path("{COCKPIT_MCP_DIR}/opencode.jsonc").read_text())
+doc = {{}}
+if p.exists():
     try:
-        doc = json.loads(dst.read_text())
+        doc = json.loads(p.read_text())
     except Exception:
-        pass
+        doc = {{}}
 if not isinstance(doc, dict):
-    doc = {{"$schema": "https://opencode.ai/config.json"}}
+    doc = {{}}
 mcp = doc.get("mcp") if isinstance(doc.get("mcp"), dict) else {{}}
 mcp.update(frag.get("mcp") or {{}})
 doc["mcp"] = mcp
-doc.setdefault("$schema", "https://opencode.ai/config.json")
-dst.parent.mkdir(parents=True, exist_ok=True)
-dst.write_text(json.dumps(doc, indent=2) + "\n")
+if "$schema" not in doc and "$schema" in frag:
+    doc["$schema"] = frag["$schema"]
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(doc, indent=2) + "\n")
 PY
-# Login shells: export Bearer for tools that read the env.
-touch /sandbox/.bashrc
 if ! grep -q 'honr/mcp/env.sh' /sandbox/.bashrc 2>/dev/null; then
-  printf '\n# honr cockpit MCP\n[ -f {COCKPIT_MCP_DIR}/env.sh ] && . {COCKPIT_MCP_DIR}/env.sh\n' >> /sandbox/.bashrc
+  printf '\n# honr MCP\n[ -f %s/env.sh ] && . %s/env.sh\n' {COCKPIT_MCP_DIR} {COCKPIT_MCP_DIR} >> /sandbox/.bashrc
 fi
+true
 "#
-    );
-    let _ = os
-        .exec(sandbox, &place, std::time::Duration::from_secs(60))
+            ),
+            std::time::Duration::from_secs(60),
+        )
         .await?;
-
-    let _ = std::fs::remove_dir_all(&staging);
+    if !out.ok() {
+        return Err(Error::Msg(format!(
+            "place mcp failed: {}",
+            out.stderr.trim()
+        )));
+    }
+    let _ = staging;
     Ok(())
 }
 
-/// Best-effort wipe of injected MCP material (before Stop deletes the box).
 pub async fn clear_cockpit_mcp(os: &OpenShell, sandbox: &str) -> Result<()> {
     let out = os
         .exec(
             sandbox,
             &format!(
-                r#"set +e
+                r#"
 rm -rf {COCKPIT_MCP_DIR} /sandbox/.cursor/mcp.json /sandbox/repo/.cursor/mcp.json {COCKPIT_AGY_MCP_CONFIG} 2>/dev/null
 python3 - <<'PY'
 import json
@@ -214,11 +260,12 @@ except Exception:
 mcp = doc.get("mcp")
 if isinstance(mcp, dict):
     mcp.pop("honr", None)
-    if mcp:
-        doc["mcp"] = mcp
-    else:
-        doc.pop("mcp", None)
-    p.write_text(json.dumps(doc, indent=2) + "\n")
+    # Drop catalog keys we may have written; leave operator-owned entries.
+    for k in list(mcp.keys()):
+        if k.startswith("honr-") or k == "honr":
+            mcp.pop(k, None)
+    doc["mcp"] = mcp
+p.write_text(json.dumps(doc, indent=2) + "\n")
 PY
 true
 "#
@@ -252,35 +299,167 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Build JSON bodies for tests without uploading.
-pub fn mcp_json_document(tokens: &OpsMcpTokens) -> serde_json::Value {
-    json!({
-        "mcpServers": {
-            "honr": {
-                "type": "http",
-                "url": tokens.resource,
-                "headers": {
-                    "Authorization": format!("Bearer {}", tokens.access_token)
-                }
-            }
+/// Build Cursor/Claude/agy JSON bodies (testable without upload).
+pub fn mcp_json_document(
+    tokens: Option<&OpsMcpTokens>,
+    servers: &[McpServerDesired],
+) -> serde_json::Value {
+    let mut map = Map::new();
+    for s in servers {
+        if let Some(entry) = render_cursor_entry(s, tokens) {
+            map.insert(s.id.clone(), entry);
         }
+    }
+    json!({ "mcpServers": Value::Object(map) })
+}
+
+/// OpenCode `opencode.jsonc` fragment (`mcp` map).
+pub fn opencode_jsonc_document(
+    tokens: Option<&OpsMcpTokens>,
+    servers: &[McpServerDesired],
+) -> serde_json::Value {
+    let mut map = Map::new();
+    for s in servers {
+        if let Some(entry) = render_opencode_entry(s, tokens) {
+            map.insert(s.id.clone(), entry);
+        }
+    }
+    json!({
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": Value::Object(map)
     })
 }
 
-/// OpenCode `opencode.jsonc` fragment (`mcp` map, remote HTTP + headers).
-pub fn opencode_jsonc_document(tokens: &OpsMcpTokens) -> serde_json::Value {
-    json!({
-        "$schema": "https://opencode.ai/config.json",
-        "mcp": {
-            "honr": {
-                "type": "remote",
-                "url": tokens.resource,
-                "headers": {
-                    "Authorization": format!("Bearer {}", tokens.access_token)
-                }
+fn render_cursor_entry(server: &McpServerDesired, tokens: Option<&OpsMcpTokens>) -> Option<Value> {
+    match &server.transport {
+        McpTransport::Http { url, auth } => {
+            let url = resolve_http_url(url, auth, tokens)?;
+            let mut entry = Map::new();
+            entry.insert("type".into(), json!("http"));
+            entry.insert("url".into(), json!(url));
+            if let Some(headers) = http_headers(auth, tokens) {
+                entry.insert("headers".into(), headers);
             }
+            if !server.env.is_empty() {
+                entry.insert("env".into(), json!(server.env));
+            }
+            Some(Value::Object(entry))
         }
-    })
+        McpTransport::Stdio {
+            command,
+            args,
+            cwd,
+        } => {
+            let mut entry = Map::new();
+            entry.insert("command".into(), json!(command));
+            entry.insert("args".into(), json!(args));
+            let env = stdio_env(&server.env);
+            entry.insert("env".into(), json!(env));
+            if let Some(c) = cwd {
+                entry.insert("cwd".into(), json!(c));
+            }
+            Some(Value::Object(entry))
+        }
+    }
+}
+
+fn render_opencode_entry(server: &McpServerDesired, tokens: Option<&OpsMcpTokens>) -> Option<Value> {
+    match &server.transport {
+        McpTransport::Http { url, auth } => {
+            let url = resolve_http_url(url, auth, tokens)?;
+            let mut entry = Map::new();
+            entry.insert("type".into(), json!("remote"));
+            entry.insert("url".into(), json!(url));
+            if let Some(headers) = http_headers(auth, tokens) {
+                entry.insert("headers".into(), headers);
+            }
+            Some(Value::Object(entry))
+        }
+        McpTransport::Stdio {
+            command,
+            args,
+            cwd,
+        } => {
+            let mut entry = Map::new();
+            entry.insert("type".into(), json!("local"));
+            let mut cmdline = vec![command.clone()];
+            cmdline.extend(args.iter().cloned());
+            entry.insert("command".into(), json!(cmdline));
+            let env = stdio_env(&server.env);
+            entry.insert("environment".into(), json!(env));
+            if let Some(c) = cwd {
+                entry.insert("cwd".into(), json!(c));
+            }
+            Some(Value::Object(entry))
+        }
+    }
+}
+
+fn resolve_http_url(
+    url: &str,
+    auth: &McpHttpAuth,
+    tokens: Option<&OpsMcpTokens>,
+) -> Option<String> {
+    let t = url.trim();
+    if !t.is_empty() {
+        return Some(t.to_string());
+    }
+    if matches!(auth, McpHttpAuth::CockpitBearer) {
+        if let Some(tok) = tokens {
+            return Some(tok.resource.clone());
+        }
+        return Some(mcp_oauth::cockpit_mcp_resource());
+    }
+    None
+}
+
+fn http_headers(auth: &McpHttpAuth, tokens: Option<&OpsMcpTokens>) -> Option<Value> {
+    match auth {
+        McpHttpAuth::None => None,
+        McpHttpAuth::CockpitBearer => {
+            let access = tokens?.access_token.as_str();
+            Some(json!({ "Authorization": format!("Bearer {access}") }))
+        }
+        McpHttpAuth::BearerEnv { env } => {
+            // Engines expand env in headers inconsistently; document as literal
+            // placeholder — providers inject the real value into the process env.
+            Some(json!({ "Authorization": format!("Bearer ${{{env}}}") }))
+        }
+    }
+}
+
+fn stdio_env(extra: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    // Cursor (and some other clients) replace the process environment with the
+    // MCP `env` map instead of merging. Without PATH/HOME, relative commands
+    // like `uv` fail with FileNotFoundError and the client reports
+    // "Connection closed" / "MCP is not connected".
+    let mut env = BTreeMap::new();
+    env.insert(
+        "PATH".into(),
+        "/usr/local/bin:/usr/bin:/bin:/sandbox/.local/bin".into(),
+    );
+    env.insert("HOME".into(), "/sandbox".into());
+    env.insert("USER".into(), "sandbox".into());
+    env.insert("HTTPS_PROXY".into(), OPENSHELL_HTTPS_PROXY.into());
+    env.insert("HTTP_PROXY".into(), OPENSHELL_HTTPS_PROXY.into());
+    env.insert("https_proxy".into(), OPENSHELL_HTTPS_PROXY.into());
+    env.insert("http_proxy".into(), OPENSHELL_HTTPS_PROXY.into());
+    env.insert("ALL_PROXY".into(), OPENSHELL_HTTPS_PROXY.into());
+    env.insert("NO_PROXY".into(), "127.0.0.1,localhost,::1".into());
+    env.insert("no_proxy".into(), "127.0.0.1,localhost,::1".into());
+    env.insert("SSL_CERT_FILE".into(), OPENSHELL_CA_BUNDLE.into());
+    env.insert("REQUESTS_CA_BUNDLE".into(), OPENSHELL_CA_BUNDLE.into());
+    env.insert("NODE_EXTRA_CA_CERTS".into(), OPENSHELL_CA_PEM.into());
+    for (k, v) in extra {
+        env.insert(k.clone(), v.clone());
+    }
+    // OpenShell metadata helper: keep IP in lockstep when only HOST is set.
+    if env.contains_key("GCE_METADATA_HOST") && !env.contains_key("GCE_METADATA_IP") {
+        if let Some(host) = env.get("GCE_METADATA_HOST").cloned() {
+            env.insert("GCE_METADATA_IP".into(), host);
+        }
+    }
+    env
 }
 
 #[cfg(test)]
@@ -300,7 +479,8 @@ mod tests {
             client_id: mcp_oauth::COCKPIT_CLIENT_ID.into(),
             sub: "admin".into(),
         };
-        let doc = mcp_json_document(&tokens);
+        let honr = McpServerDesired::shipped_honr();
+        let doc = mcp_json_document(Some(&tokens), std::slice::from_ref(&honr));
         assert_eq!(
             doc["mcpServers"]["honr"]["headers"]["Authorization"],
             "Bearer tok-access"
@@ -309,7 +489,7 @@ mod tests {
             doc["mcpServers"]["honr"]["url"],
             "http://host.docker.internal:8080/mcp"
         );
-        let oc = opencode_jsonc_document(&tokens);
+        let oc = opencode_jsonc_document(Some(&tokens), std::slice::from_ref(&honr));
         assert_eq!(oc["mcp"]["honr"]["type"], "remote");
         assert_eq!(
             oc["mcp"]["honr"]["headers"]["Authorization"],
@@ -317,8 +497,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_json_renders_stdio_with_proxy_env() {
+        let srv = McpServerDesired {
+            id: "cnv".into(),
+            name: "CNV context".into(),
+            transport: McpTransport::Stdio {
+                command: "uv".into(),
+                args: vec![
+                    "tool".into(),
+                    "run".into(),
+                    "--from".into(),
+                    "context-server@latest".into(),
+                    "context-server".into(),
+                    "serve".into(),
+                    "--db".into(),
+                    "/tmp/spike.db".into(),
+                ],
+                cwd: None,
+            },
+            policy_fragment_yaml: None,
+            provider_names: vec!["gcp-adc".into()],
+            env: BTreeMap::from([("GCE_METADATA_HOST".into(), "127.0.0.1:8174".into())]),
+            audience: crate::model::McpAudience::Both,
+            shipped: false,
+        };
+        let doc = mcp_json_document(None, std::slice::from_ref(&srv));
+        let entry = &doc["mcpServers"]["cnv"];
+        assert_eq!(entry["command"], "uv");
+        assert_eq!(entry["env"]["HTTPS_PROXY"], OPENSHELL_HTTPS_PROXY);
+        assert_eq!(entry["env"]["PATH"], "/usr/local/bin:/usr/bin:/bin:/sandbox/.local/bin");
+        assert_eq!(entry["env"]["HOME"], "/sandbox");
+        assert_eq!(entry["env"]["GCE_METADATA_HOST"], "127.0.0.1:8174");
+        assert_eq!(entry["env"]["GCE_METADATA_IP"], "127.0.0.1:8174");
+        let oc = opencode_jsonc_document(None, std::slice::from_ref(&srv));
+        assert_eq!(oc["mcp"]["cnv"]["type"], "local");
+        assert!(oc["mcp"]["cnv"]["command"].as_array().unwrap().len() > 1);
+    }
+
     #[tokio::test]
-    async fn inject_cockpit_mcp_mkdir_and_uploads_via_mock() {
+    async fn inject_sandbox_mcp_mkdir_and_uploads_via_mock() {
         let seen = Arc::new(parking_lot::Mutex::new(Vec::<Vec<String>>::new()));
         let seen_c = seen.clone();
         let os = OpenShell::mock(
@@ -341,12 +559,15 @@ mod tests {
             client_id: mcp_oauth::COCKPIT_CLIENT_ID.into(),
             sub: "cockpit".into(),
         };
-        inject_cockpit_mcp(&os, "honr-cockpit", &tokens)
+        let honr = McpServerDesired::shipped_honr();
+        inject_sandbox_mcp(&os, "honr-cockpit", Some(&tokens), std::slice::from_ref(&honr))
             .await
             .expect("inject");
         let calls = seen.lock().clone();
         assert!(
-            calls.iter().any(|a| a.windows(2).any(|w| w[0] == "exec" || a.contains(&"sandbox".into()))),
+            calls
+                .iter()
+                .any(|a| a.windows(2).any(|w| w[0] == "exec" || a.contains(&"sandbox".into()))),
             "expected sandbox cockpit: {calls:?}"
         );
         // mkdir + uploads (token/mcp/claude/opencode/env) + place script
@@ -354,7 +575,10 @@ mod tests {
             .iter()
             .filter(|a| a.iter().any(|s| s == "upload"))
             .count();
-        assert!(uploads >= 5, "expected >=5 uploads, got {uploads}: {calls:?}");
+        assert!(
+            uploads >= 5,
+            "expected >=5 uploads, got {uploads}: {calls:?}"
+        );
         let place = calls
             .iter()
             .rev()
@@ -366,8 +590,7 @@ mod tests {
             "must install Antigravity mcp_config.json: {script}"
         );
         assert!(
-            script.contains(COCKPIT_OPENCODE_CONFIG)
-                || script.contains("opencode.jsonc"),
+            script.contains(COCKPIT_OPENCODE_CONFIG) || script.contains("opencode.jsonc"),
             "must install OpenCode mcp config: {script}"
         );
     }

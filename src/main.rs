@@ -17,6 +17,7 @@ mod provider_types;
 mod cockpit_attach;
 mod cockpit_chat;
 mod cockpit_mcp;
+mod mcp_policy;
 mod secrets;
 mod schema;
 mod seed_policies;

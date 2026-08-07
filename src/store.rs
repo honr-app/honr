@@ -39,6 +39,9 @@ pub struct BoardState {
     /// reference these via `SandboxProfile.policy_id`.
     #[serde(default)]
     pub openshell_policies: BTreeMap<String, OpenShellPolicy>,
+    /// Board-owned MCP server catalog (Settings → OpenShell → MCP servers).
+    #[serde(default)]
+    pub mcp_servers: BTreeMap<String, McpServerDesired>,
     /// Global default profile id. Projects may override via `sandbox_profile_id`.
     #[serde(default)]
     pub default_sandbox_profile_id: Option<String>,
@@ -117,6 +120,7 @@ impl BoardState {
             stories: self.stories.clone(),
             sandbox_profiles: self.sandbox_profiles.clone(),
             openshell_policies: self.openshell_policies.clone(),
+            mcp_servers: self.mcp_servers.clone(),
             default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
             cockpit_sandbox_profile_id: self.cockpit_sandbox_profile_id.clone(),
             workspace: self.workspace.clone(),
@@ -616,6 +620,10 @@ impl Board {
             tracing::info!("seeded minimal OpenShell policy");
             board.flush();
         }
+        if board.ensure_shipped_mcp_servers() {
+            tracing::info!("seeded shipped MCP servers");
+            board.flush();
+        }
         if board.migrate_github_app_provider_name() {
             tracing::info!("migrated GitHub App provider attach name github → github-app");
             board.flush();
@@ -691,6 +699,10 @@ impl Board {
         // invent default/cockpit entries on boot.
         if board.ensure_minimal_policy() {
             tracing::info!("seeded minimal OpenShell policy");
+            board.flush();
+        }
+        if board.ensure_shipped_mcp_servers() {
+            tracing::info!("seeded shipped MCP servers");
             board.flush();
         }
         if board.migrate_github_app_provider_name() {
@@ -2968,6 +2980,138 @@ impl Board {
         true
     }
 
+    /// Seed shipped MCP catalog rows (honr HTTP seat) when missing.
+    /// Does not overwrite operator-edited entries.
+    pub fn ensure_shipped_mcp_servers(&self) -> bool {
+        let mut s = self.state.write();
+        let mut added = false;
+        let honr = McpServerDesired::shipped_honr();
+        if !s.mcp_servers.contains_key(&honr.id) {
+            s.mcp_servers.insert(honr.id.clone(), honr);
+            added = true;
+        }
+        drop(s);
+        if added {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        added
+    }
+
+    pub fn list_mcp_servers(&self) -> Vec<McpServerDesired> {
+        self.ensure_shipped_mcp_servers();
+        self.state.read().mcp_servers.values().cloned().collect()
+    }
+
+    pub fn get_mcp_server(&self, id: &str) -> Option<McpServerDesired> {
+        self.ensure_shipped_mcp_servers();
+        self.state.read().mcp_servers.get(id).cloned()
+    }
+
+    /// Insert or replace an MCP server catalog entry. Empty `id` means create:
+    /// slug from `name` with `-2`, `-3`, … on collision.
+    pub fn upsert_mcp_server(
+        &self,
+        server: McpServerDesired,
+    ) -> Result<McpServerDesired, String> {
+        let mut server = server.normalized()?;
+        if let Some(ref frag) = server.policy_fragment_yaml {
+            // Validate fragment parses / merges against a trivial base.
+            crate::mcp_policy::merge_policy_fragments("version: 1\nnetwork_policies: {}\n", [frag])
+                .map_err(|e| format!("policy_fragment_yaml: {e}"))?;
+        }
+        let mut s = self.state.write();
+        let id = {
+            let trimmed = server.id.trim();
+            if trimmed.is_empty() {
+                let base = crate::model::slugify_sandbox_profile_id(&server.name);
+                Self::allocate_unique_mcp_server_id(&s.mcp_servers, &base)
+            } else {
+                trimmed.to_string()
+            }
+        };
+        server.id = id.clone();
+        s.mcp_servers.insert(id, server.clone());
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(server)
+    }
+
+    fn allocate_unique_mcp_server_id(
+        map: &BTreeMap<String, McpServerDesired>,
+        base: &str,
+    ) -> String {
+        if !map.contains_key(base) {
+            return base.to_string();
+        }
+        let mut n = 2u32;
+        loop {
+            let candidate = format!("{base}-{n}");
+            if !map.contains_key(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    pub fn delete_mcp_server(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.write();
+        if !s.mcp_servers.contains_key(id) {
+            return Err(format!("no mcp server `{id}`"));
+        }
+        if s.mcp_servers.get(id).is_some_and(|m| m.shipped) {
+            return Err(format!("cannot delete shipped mcp server `{id}`"));
+        }
+        for p in s.sandbox_profiles.values() {
+            if p.mcp_server_ids.iter().any(|x| x == id) {
+                return Err(format!(
+                    "mcp server `{id}` is attached to sandbox spec `{}`",
+                    p.id
+                ));
+            }
+        }
+        s.mcp_servers.remove(id);
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// MCP servers attached for a resolved create, filtered by audience.
+    /// Unknown ids are dropped; order follows the profile list.
+    pub fn attach_mcp_servers_for_resolved(
+        &self,
+        resolved: &ResolvedSandboxCreate,
+        for_cockpit: bool,
+    ) -> Vec<McpServerDesired> {
+        self.ensure_shipped_mcp_servers();
+        let s = self.state.read();
+        resolved
+            .mcp_server_ids
+            .iter()
+            .filter_map(|id| s.mcp_servers.get(id).cloned())
+            .filter(|m| {
+                if for_cockpit {
+                    m.audience.allows_cockpit()
+                } else {
+                    m.audience.allows_worker()
+                }
+            })
+            .filter(|m| {
+                // Workers must never receive cockpit Bearer host /mcp.
+                if !for_cockpit {
+                    !matches!(
+                        m.transport,
+                        McpTransport::Http {
+                            auth: McpHttpAuth::CockpitBearer,
+                            ..
+                        }
+                    )
+                } else {
+                    true
+                }
+            })
+            .collect()
+    }
+
     pub fn list_openshell_policies(&self) -> Vec<OpenShellPolicy> {
         let s = self.state.read();
         s.openshell_policies.values().cloned().collect()
@@ -3097,9 +3241,20 @@ impl Board {
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty())
             .collect();
+        let mcp_server_ids: Vec<String> = profile
+            .mcp_server_ids
+            .into_iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect();
         let mut s = self.state.write();
         if !s.openshell_policies.contains_key(&policy_id) {
             return Err(format!("no policy `{policy_id}`"));
+        }
+        for mid in &mcp_server_ids {
+            if !s.mcp_servers.contains_key(mid) {
+                return Err(format!("no mcp server `{mid}`"));
+            }
         }
         let id = {
             let trimmed = profile.id.trim();
@@ -3120,6 +3275,7 @@ impl Board {
             memory,
             engine,
             provider_names,
+            mcp_server_ids,
         };
         let first = s.sandbox_profiles.is_empty();
         s.sandbox_profiles.insert(stored.id.clone(), stored.clone());
@@ -3329,17 +3485,16 @@ impl Board {
     /// Order: explicit `cockpit_sandbox_profile_id` → `default_sandbox_profile_id`
     /// → minimal compiled last-resort ([`ResolvedSandboxCreate::from_agents`]).
     pub fn resolve_cockpit_sandbox_create(&self) -> ResolvedSandboxCreate {
+        self.ensure_shipped_mcp_servers();
         let s = self.state.read();
         if let Some(ref cid) = s.cockpit_sandbox_profile_id {
             if let Some(p) = s.sandbox_profiles.get(cid) {
-                let yaml = Self::policy_yaml_for_profile(&s, p);
-                return ResolvedSandboxCreate::from_profile(p, &yaml);
+                return Self::materialize_resolved(&s, p, true);
             }
         }
         if let Some(ref did) = s.default_sandbox_profile_id {
             if let Some(p) = s.sandbox_profiles.get(did) {
-                let yaml = Self::policy_yaml_for_profile(&s, p);
-                return ResolvedSandboxCreate::from_profile(p, &yaml);
+                return Self::materialize_resolved(&s, p, true);
             }
         }
         drop(s);
@@ -3372,6 +3527,7 @@ impl Board {
     /// → compiled [`AgentConfig::default`] + minimal policy (last resort).
     /// Missing catalog entries fall through. Do not weaken this order.
     pub fn resolve_sandbox_create(&self, item_id: ItemId) -> ResolvedSandboxCreate {
+        self.ensure_shipped_mcp_servers();
         let item = match self.get(item_id) {
             Some(i) => i,
             None => return ResolvedSandboxCreate::from_agents(&AgentConfig::default()),
@@ -3386,18 +3542,80 @@ impl Board {
         let s = self.state.read();
         if let Some(ref oid) = override_id {
             if let Some(p) = s.sandbox_profiles.get(oid) {
-                let yaml = Self::policy_yaml_for_profile(&s, p);
-                return ResolvedSandboxCreate::from_profile(p, &yaml);
+                return Self::materialize_resolved(&s, p, false);
             }
         }
         if let Some(ref did) = s.default_sandbox_profile_id {
             if let Some(p) = s.sandbox_profiles.get(did) {
-                let yaml = Self::policy_yaml_for_profile(&s, p);
-                return ResolvedSandboxCreate::from_profile(p, &yaml);
+                return Self::materialize_resolved(&s, p, false);
             }
         }
         drop(s);
         ResolvedSandboxCreate::from_agents(&AgentConfig::default())
+    }
+
+    /// Profile → resolved create: audience-filter MCP ids, merge policy fragments,
+    /// union provider names from attached MCP servers.
+    fn materialize_resolved(
+        s: &BoardState,
+        p: &SandboxProfile,
+        for_cockpit: bool,
+    ) -> ResolvedSandboxCreate {
+        let base_yaml = Self::policy_yaml_for_profile(s, p);
+        let servers: Vec<&McpServerDesired> = p
+            .mcp_server_ids
+            .iter()
+            .filter_map(|id| s.mcp_servers.get(id))
+            .filter(|m| {
+                if for_cockpit {
+                    m.audience.allows_cockpit()
+                } else {
+                    m.audience.allows_worker()
+                        && !matches!(
+                            m.transport,
+                            McpTransport::Http {
+                                auth: McpHttpAuth::CockpitBearer,
+                                ..
+                            }
+                        )
+                }
+            })
+            .collect();
+        let fragments: Vec<&str> = servers
+            .iter()
+            .filter_map(|m| m.policy_fragment_yaml.as_deref())
+            .filter(|f| !f.trim().is_empty())
+            .collect();
+        // No fragments → keep catalog YAML bytes exact (comments / spacing).
+        let policy = if fragments.is_empty() {
+            base_yaml
+        } else {
+            match crate::mcp_policy::merge_policy_fragments(&base_yaml, fragments) {
+                Ok(y) => y,
+                Err(e) => {
+                    tracing::warn!(
+                        profile = %p.id,
+                        error = %e,
+                        "mcp policy fragment merge failed; using base policy"
+                    );
+                    base_yaml
+                }
+            }
+        };
+        let mut providers = p.provider_names.clone();
+        for m in &servers {
+            for n in &m.provider_names {
+                let n = n.trim();
+                if !n.is_empty() && !providers.iter().any(|x| x == n) {
+                    providers.push(n.to_string());
+                }
+            }
+        }
+        let mut resolved = ResolvedSandboxCreate::from_profile(p, &policy);
+        resolved.providers = providers;
+        resolved.mcp_server_ids = servers.iter().map(|m| m.id.clone()).collect();
+        resolved.policy = policy;
+        resolved
     }
 
     /// Engine for a card at claim/run: sandbox profile engine, else Agent runtime.
@@ -9933,6 +10151,7 @@ mod tests {
             memory: Some("4Gi".into()),
             engine: Some("cursor".into()),
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         })
         .expect("upsert profile")
     }
@@ -10890,6 +11109,7 @@ mod tests {
                 memory: Some("16Gi".into()),
                 engine: None,
                 provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
             })
             .expect("upsert heavy");
         b.set_default_sandbox_profile(&heavy.id)
@@ -10964,6 +11184,7 @@ mod tests {
             memory: None,
             engine: Some("cursor".into()),
             provider_names: vec!["vertex".into(), "missing".into()],
+            mcp_server_ids: Vec::new(),
         })
         .unwrap();
         assert_eq!(
@@ -10990,6 +11211,7 @@ mod tests {
             memory: None,
             engine: None,
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         })
         .unwrap();
 
@@ -11036,6 +11258,7 @@ mod tests {
             memory: None,
             engine: None,
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         })
         .unwrap();
         b.set_default_sandbox_profile("ci").unwrap();
@@ -11130,6 +11353,7 @@ mod tests {
             memory: None,
             engine: None,
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -11148,6 +11372,7 @@ mod tests {
             memory: Some("8Gi".into()),
             engine: None,
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         })
         .unwrap();
         b.set_project_sandbox_profile(project.id, Some("alt".into()))
@@ -11185,6 +11410,7 @@ mod tests {
             memory: None,
             engine: Some("agy".into()),
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -11240,6 +11466,7 @@ mod tests {
             memory: None,
             engine: None,
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -11279,6 +11506,7 @@ mod tests {
                 memory: None,
                 engine: None,
                 provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
             })
             .expect("create from name");
         assert_eq!(created.id, "heavy-ci");
@@ -11296,6 +11524,7 @@ mod tests {
                 memory: None,
                 engine: None,
                 provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
             })
             .expect("create colliding slug");
         assert_eq!(again.id, "default-2");
@@ -11312,6 +11541,7 @@ mod tests {
                 memory: None,
                 engine: None,
                 provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
             })
             .expect("create punctuation name");
         assert_eq!(punct.id, "profile");
@@ -11351,6 +11581,7 @@ mod tests {
                     memory: None,
                     engine: None,
                     provider_names: Vec::new(),
+                    mcp_server_ids: Vec::new(),
                 },
             );
         }
@@ -11405,6 +11636,7 @@ mod tests {
             memory: None,
             engine: None,
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         })
         .expect("profile");
 
@@ -11417,6 +11649,94 @@ mod tests {
         b.delete_sandbox_profile("default").expect("drop profile");
         b.delete_openshell_policy(&created.id).expect("delete free");
         assert!(b.get_openshell_policy(&created.id).is_none());
+    }
+
+    #[test]
+    fn mcp_server_catalog_merges_policy_fragment_and_providers() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-mcp-catalog-{}.json",
+                std::process::id()
+            )),
+        );
+        ensure_seed_policy(&b);
+        assert!(b.ensure_shipped_mcp_servers());
+        assert!(!b.ensure_shipped_mcp_servers());
+        b.upsert_openshell_provider(OpenShellProviderDesired {
+            name: "gcp-adc".into(),
+            provider_type: "google-cloud".into(),
+            config: Default::default(),
+            credentials_sealed: None,
+            credential_keys: Vec::new(),
+            refresh: None,
+        });
+        let frag = r#"
+network_policies:
+  hf:
+    name: hf
+    endpoints:
+      - { host: huggingface.co, port: 443, access: full, tls: skip }
+"#;
+        b.upsert_mcp_server(McpServerDesired {
+            id: "cnv".into(),
+            name: "CNV".into(),
+            transport: McpTransport::Stdio {
+                command: "uv".into(),
+                args: vec!["tool".into(), "run".into()],
+                cwd: None,
+            },
+            policy_fragment_yaml: Some(frag.into()),
+            provider_names: vec!["gcp-adc".into()],
+            env: Default::default(),
+            audience: McpAudience::Both,
+            shipped: false,
+        })
+        .expect("upsert mcp");
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "img:1".into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("cursor".into()),
+            provider_names: Vec::new(),
+            mcp_server_ids: vec!["cnv".into()],
+        })
+        .expect("profile");
+        let resolved = b.resolve_cockpit_sandbox_create();
+        assert!(resolved.policy.contains("huggingface.co"));
+        assert_eq!(resolved.providers, vec!["gcp-adc".to_string()]);
+        assert_eq!(resolved.mcp_server_ids, vec!["cnv".to_string()]);
+        let worker = {
+            let project = b
+                .create(None, "P", "why", None, Origin::Human, true, None)
+                .unwrap();
+            b.resolve_sandbox_create(project.id)
+        };
+        assert_eq!(worker.mcp_server_ids, vec!["cnv".to_string()]);
+        // Cockpit Bearer honr must not attach to workers even if listed.
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "img:1".into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("cursor".into()),
+            provider_names: Vec::new(),
+            mcp_server_ids: vec!["honr".into(), "cnv".into()],
+        })
+        .expect("profile");
+        let worker2 = b.resolve_sandbox_create(
+            b.create(None, "P2", "why", None, Origin::Human, true, None)
+                .unwrap()
+                .id,
+        );
+        assert_eq!(worker2.mcp_server_ids, vec!["cnv".to_string()]);
     }
 
     #[test]

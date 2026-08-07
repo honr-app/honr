@@ -2,7 +2,8 @@
 //! the pixels and the agent API can't drift apart.
 
 use crate::model::{
-    AgentRuntimeConfig, CockpitSession, ItemId, OpenShellPolicy, OpenShellProviderDesired,
+    AgentRuntimeConfig, CockpitSession, ItemId, McpServerDesired, OpenShellPolicy,
+    OpenShellProviderDesired,
     OpenShellProviderRefreshDesired, OpenShellProviderTypeDesired, SandboxProfile,
     SandboxProfileCreateDefaults, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
@@ -148,6 +149,14 @@ pub fn routes() -> Router<SharedBoard> {
         .route(
             "/openshell/policies/{id}",
             get(get_openshell_policy).delete(delete_openshell_policy),
+        )
+        .route(
+            "/openshell/mcp-servers",
+            get(list_mcp_servers).post(upsert_mcp_server),
+        )
+        .route(
+            "/openshell/mcp-servers/{id}",
+            get(get_mcp_server).delete(delete_mcp_server),
         )
         .route("/github-app", get(get_github_app).put(put_github_app))
         .route("/github-app/sync-token", post(sync_github_app_token))
@@ -1459,6 +1468,8 @@ pub struct UpsertSandboxProfileReq {
     pub engine: Option<String>,
     #[serde(default)]
     pub provider_names: Vec<String>,
+    #[serde(default)]
+    pub mcp_server_ids: Vec<String>,
 }
 
 async fn upsert_sandbox_profile(
@@ -1476,6 +1487,7 @@ async fn upsert_sandbox_profile(
             memory: req.memory,
             engine: req.engine,
             provider_names: req.provider_names,
+            mcp_server_ids: req.mcp_server_ids,
         })
         .map_err(ApiError)?,
     ))
@@ -1568,6 +1580,75 @@ async fn delete_openshell_policy(
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
     b.delete_openshell_policy(&id).map_err(ApiError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Serialize)]
+pub struct McpServersOut {
+    pub servers: Vec<McpServerDesired>,
+}
+
+async fn list_mcp_servers(AxState(b): AxState<SharedBoard>) -> Json<McpServersOut> {
+    Json(McpServersOut {
+        servers: b.list_mcp_servers(),
+    })
+}
+
+async fn get_mcp_server(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> ApiResult<McpServerDesired> {
+    b.get_mcp_server(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError(format!("no mcp server `{id}`")))
+}
+
+#[derive(Deserialize)]
+pub struct UpsertMcpServerReq {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub transport: crate::model::McpTransport,
+    #[serde(default)]
+    pub policy_fragment_yaml: Option<String>,
+    #[serde(default)]
+    pub provider_names: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub audience: crate::model::McpAudience,
+}
+
+async fn upsert_mcp_server(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<UpsertMcpServerReq>,
+) -> ApiResult<McpServerDesired> {
+    let existing_shipped = req
+        .id
+        .as_deref()
+        .and_then(|id| b.get_mcp_server(id))
+        .map(|s| s.shipped)
+        .unwrap_or(false);
+    Ok(Json(
+        b.upsert_mcp_server(McpServerDesired {
+            id: req.id.unwrap_or_default(),
+            name: req.name,
+            transport: req.transport,
+            policy_fragment_yaml: req.policy_fragment_yaml,
+            provider_names: req.provider_names,
+            env: req.env,
+            audience: req.audience,
+            shipped: existing_shipped,
+        })
+        .map_err(ApiError)?,
+    ))
+}
+
+async fn delete_mcp_server(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    b.delete_mcp_server(&id).map_err(ApiError)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

@@ -3,6 +3,10 @@ import type {
   AuthSettings,
   AuthStatus,
   GitHubAppSettings,
+  McpAudience,
+  McpServerDesired,
+  McpServersOut,
+  McpTransport,
   OpenShellPoliciesOut,
   OpenShellPolicy,
   OpenShellProviderView,
@@ -174,6 +178,7 @@ export const api = {
     memory?: string | null;
     engine?: string | null;
     provider_names?: string[];
+    mcp_server_ids?: string[];
   }): Promise<SandboxProfile> => post("/sandbox-profiles", profile),
   deleteSandboxProfile: (id: string): Promise<{ ok: boolean }> =>
     del(`/sandbox-profiles/${encodeURIComponent(id)}`),
@@ -234,6 +239,24 @@ export const api = {
   }): Promise<OpenShellPolicy> => post("/openshell/policies", body),
   deleteOpenShellPolicy: (id: string): Promise<{ ok: boolean }> =>
     del(`/openshell/policies/${encodeURIComponent(id)}`),
+
+  listMcpServers: (): Promise<McpServersOut> =>
+    fetch("/api/openshell/mcp-servers", fetchOpts).then(jsonOrThrow),
+  getMcpServer: (id: string): Promise<McpServerDesired> =>
+    fetch(`/api/openshell/mcp-servers/${encodeURIComponent(id)}`, fetchOpts).then(
+      jsonOrThrow,
+    ),
+  upsertMcpServer: (body: {
+    id?: string;
+    name: string;
+    transport: McpTransport;
+    policy_fragment_yaml?: string | null;
+    provider_names?: string[];
+    env?: Record<string, string>;
+    audience?: McpAudience;
+  }): Promise<McpServerDesired> => post("/openshell/mcp-servers", body),
+  deleteMcpServer: (id: string): Promise<{ ok: boolean }> =>
+    del(`/openshell/mcp-servers/${encodeURIComponent(id)}`),
 
   listOpenShellProviders: (): Promise<OpenShellProvidersOut> =>
     fetch("/api/openshell/providers", fetchOpts).then(jsonOrThrow),

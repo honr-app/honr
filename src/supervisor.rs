@@ -22,9 +22,10 @@ use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_COCKPIT, LABEL_ITEM
 use crate::schema::{AgentConfig, ExecutionConfig};
 use crate::store::{ClaimGrant, SharedBoard};
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// Where the agent works inside the sandbox. `/sandbox` is $HOME and writable;
@@ -891,7 +892,7 @@ async fn exec_with_infra_retry(
 
 /// Create returns as soon as the bootstrap command exits; the supervisor relay
 /// can still be bouncing. Poll until `list` reports Ready before upload/exec.
-async fn wait_until_sandbox_ready(os: &OpenShell, name: &str) -> anyhow::Result<()> {
+pub(crate) async fn wait_until_sandbox_ready(os: &OpenShell, name: &str) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         match os.list().await {
@@ -971,6 +972,20 @@ async fn run_inside(
         .await?;
         with_board_cancel(board, id, wait_until_sandbox_ready(os, name)).await?;
         beat(0.01)?;
+        // Catalog MCP (stdio/HTTP remote) + empty Claude mcp-config stub.
+        let resolved_mcp = board.resolve_sandbox_create(id);
+        if let Err(e) = with_board_cancel(board, id, async {
+            crate::cockpit_mcp::provision_worker_mcp(board, os, name, &resolved_mcp)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await
+        {
+            if is_supervisor_cancel(&e.to_string()) {
+                return Err(e);
+            }
+            tracing::warn!("#{id}: worker MCP inject failed (continuing): {e}");
+        }
 
         let _ =
             with_board_cancel(board, id, ensure_report_schema_in_sandbox(os, name, short)).await;
@@ -3019,7 +3034,51 @@ where
     }
 }
 
+/// In-flight cockpit sandbox deletes. OpenShell delete is slow (~tens of
+/// seconds); awaiting it on the seat loop blocked Start. Dedup so inventory
+/// ticks do not stack concurrent deletes for the same name.
+fn cockpit_delete_inflight() -> &'static parking_lot::Mutex<HashSet<String>> {
+    static INFLIGHT: OnceLock<parking_lot::Mutex<HashSet<String>>> = OnceLock::new();
+    INFLIGHT.get_or_init(|| parking_lot::Mutex::new(HashSet::new()))
+}
+
+/// True when Board still wants this cockpit sandbox (Running/Parked session).
+fn cockpit_session_wants_sandbox(board: &SharedBoard, name: &str) -> bool {
+    let session = board.cockpit_session();
+    let branch_prefix = board.effective_agents().branch_prefix;
+    should_keep_cockpit_sandbox(session.as_ref(), name, &branch_prefix)
+}
+
+/// Delete a cockpit sandbox in the background, skipping if Start raced back in.
+fn spawn_reap_cockpit_sandbox(os: OpenShell, board: SharedBoard, name: String) {
+    {
+        let mut g = cockpit_delete_inflight().lock();
+        if !g.insert(name.clone()) {
+            return;
+        }
+    }
+    tokio::spawn(async move {
+        // Stop → Start can land while we were queued; never delete under a live session.
+        if cockpit_session_wants_sandbox(&board, &name) {
+            tracing::info!("cockpit: skip reap of {name}; session wants sandbox again");
+        } else {
+            tracing::info!("cockpit: deleting sandbox {name}");
+            let _ = os.delete(&name).await;
+            if cockpit_session_wants_sandbox(&board, &name) {
+                tracing::warn!(
+                    "cockpit: deleted {name} while session wanted it; seat loop will recreate"
+                );
+            }
+        }
+        cockpit_delete_inflight().lock().remove(&name);
+    });
+}
+
 /// Reap or keep cockpit sandboxes from inventory. Does not start/adopt agents.
+///
+/// Deletes are spawned — awaiting gateway delete here used to stall the seat
+/// loop for ~45s, so a Start clicked during Stop never got a turn until teardown
+/// finished.
 async fn reconcile_cockpit_inventory(os: &OpenShell, board: &SharedBoard) {
     let Ok(cockpit_boxes) = os.list_cockpit().await else {
         tracing::warn!("could not list cockpit sandboxes; skipping cockpit inventory");
@@ -3034,13 +3093,17 @@ async fn reconcile_cockpit_inventory(os: &OpenShell, board: &SharedBoard) {
                 sb.name,
                 session.as_ref().map(|s| s.status),
             );
-            let _ = os.delete(&sb.name).await;
+            spawn_reap_cockpit_sandbox(os.clone(), board.clone(), sb.name);
         }
     }
 }
 
 /// Materialize / adopt the cockpit when Board says Running.
-async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<()> {
+///
+/// Returns `(sandbox_name, hold_result)`. Caller must release the seat-loop
+/// `supervising` flag **before** [`finalize_cockpit`] — finalize may wait on a
+/// slow gateway delete, and Stop→Start must be able to spawn a new seat meanwhile.
+async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<(String, anyhow::Result<()>)> {
     let os = board.openshell_client();
     ensure_cockpit_running(&board)?;
 
@@ -3070,11 +3133,8 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<()> {
                 .unwrap_or(default_name);
             if let Some(prev) = other {
                 if prev != new_name {
-                    let _ = with_cockpit_cancel(&board, async {
-                        let _ = os.delete(&prev).await;
-                        Ok(())
-                    })
-                    .await;
+                    // Background: do not block seat cancel on gateway delete.
+                    spawn_reap_cockpit_sandbox(os.clone(), board.clone(), prev.clone());
                 }
             }
             ensure_cockpit_running(&board)?;
@@ -3082,14 +3142,17 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<()> {
                 with_cockpit_cancel(&board, async { Ok(is_sandbox_live(&os, &new_name).await) })
                     .await?;
             if live {
+                // Reuse: sandbox already answers exec — safe to publish env now.
                 board
                     .update_cockpit_session(Some(new_name.clone()), None)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 (new_name, true)
             } else {
-                // Fresh sandbox ⇒ fresh conversation (resume needs the old box).
+                // Fresh create: clear conversation now, but do **not** publish
+                // `environment` until Ready — Cockpit attach keys off that field
+                // and will hammer exec with "sandbox is not ready" otherwise.
                 board
-                    .update_cockpit_session(Some(new_name.clone()), Some(String::new()))
+                    .update_cockpit_session(None, Some(String::new()))
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 (new_name, false)
             }
@@ -3098,8 +3161,37 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<()> {
 
     let spec = sandbox_spec_for_cockpit(&name, &resolved, &attach, &engine);
     let result = run_cockpit_inside(&board, &os, &agents, &name, &spec, &engine, is_reused).await;
-    finalize_cockpit(&os, &board, &name, &result).await;
-    result
+    Ok((name, result))
+}
+
+/// Wait until a cockpit sandbox name is free to create.
+///
+/// Stop reaps asynchronously; Start must not race `create` against an in-flight
+/// gateway delete (or a still-live survivor).
+async fn wait_cockpit_name_free(
+    board: &SharedBoard,
+    os: &OpenShell,
+    name: &str,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    let mut kicked = false;
+    loop {
+        ensure_cockpit_running(board)?;
+        let inflight = cockpit_delete_inflight().lock().contains(name);
+        let live = is_sandbox_live(os, name).await;
+        if !inflight && !live {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("cockpit sandbox {name} still present after stop");
+        }
+        if live && !inflight && !kicked {
+            // Orphan left after a failed/skipped reap — kick one delete.
+            spawn_reap_cockpit_sandbox(os.clone(), board.clone(), name.to_string());
+            kicked = true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 async fn run_cockpit_inside(
@@ -3114,11 +3206,7 @@ async fn run_cockpit_inside(
     let short = Duration::from_secs(180);
 
     if !is_reused {
-        let _ = with_cockpit_cancel(board, async {
-            let _ = os.delete(&spec.name).await;
-            Ok(())
-        })
-        .await;
+        with_cockpit_cancel(board, wait_cockpit_name_free(board, os, name)).await?;
         with_cockpit_cancel(board, async { os.create(spec).await.map_err(Into::into) }).await?;
         with_cockpit_cancel(board, wait_until_sandbox_ready(os, name)).await?;
         let _ = with_cockpit_cancel(
@@ -3126,6 +3214,14 @@ async fn run_cockpit_inside(
             exec_with_infra_retry(os, name, &empty_workdir_script(), short, "cockpit workdir"),
         )
         .await?;
+        // Publish environment only once the box can take attach/MCP exec.
+        board
+            .update_cockpit_session(Some(name.to_string()), None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        tracing::info!("cockpit: environment {name} published (sandbox Ready)");
+    } else {
+        // Reused boxes can still be mid-relay settle after a quick Stop/Start.
+        with_cockpit_cancel(board, wait_until_sandbox_ready(os, name)).await?;
     }
 
     // Inject MCP Bearer + mcp.json so Cockpit's interactive `agent` (and any
@@ -3210,10 +3306,23 @@ async fn finalize_cockpit(
             tracing::info!("cockpit: parked; stopped agent in {name}, sandbox kept");
         }
         Err(e) if is_cockpit_stopped(&e.to_string()) => {
+            // Stop cleared the session; Start may have already created a new one.
+            // Do not stop_agent/delete under a session that wants this box.
+            if cockpit_session_wants_sandbox(board, name) {
+                tracing::info!(
+                    "cockpit: stop cleanup skipped for {name}; session active again"
+                );
+                return;
+            }
             stop_agent(os, name).await;
-            let _ = os.delete(name).await;
-            reconcile_cockpit_inventory(os, board).await;
-            tracing::info!("cockpit: stopped; deleted sandbox {name}");
+            if cockpit_session_wants_sandbox(board, name) {
+                tracing::info!(
+                    "cockpit: stop cleanup skipped for {name} after stop_agent; session active again"
+                );
+                return;
+            }
+            spawn_reap_cockpit_sandbox(os.clone(), board.clone(), name.to_string());
+            tracing::info!("cockpit: stopped; reaping sandbox {name}");
         }
         Err(e) => {
             stop_agent(os, name).await;
@@ -3325,22 +3434,48 @@ async fn cockpit_seat_loop(board: SharedBoard, _cfg: ExecutionConfig) {
         let board2 = board.clone();
         let flag = supervising.clone();
         tokio::spawn(async move {
-            match run_cockpit_seat(board2).await {
-                Ok(()) => tracing::info!("cockpit: run completed"),
+            let os = board2.openshell_client();
+            match run_cockpit_seat(board2.clone()).await {
+                Ok((name, result)) => {
+                    match &result {
+                        Ok(()) => tracing::info!("cockpit: run completed"),
+                        Err(e)
+                            if is_cockpit_parked(&e.to_string())
+                                || is_cockpit_stopped(&e.to_string()) =>
+                        {
+                            tracing::info!("cockpit: {e}");
+                        }
+                        Err(e) if is_supervisor_detach(&e.to_string()) => {
+                            tracing::info!("cockpit: supervisor detached ({e})");
+                        }
+                        Err(e) if is_infrastructure(&e.to_string()) => {
+                            tracing::warn!("cockpit: infrastructure failure: {e}");
+                        }
+                        Err(e) => tracing::error!("cockpit failed: {e}"),
+                    }
+                    // Release before finalize: gateway delete must not block Stop→Start.
+                    flag.store(false, Ordering::Relaxed);
+                    finalize_cockpit(&os, &board2, &name, &result).await;
+                }
                 Err(e)
                     if is_cockpit_parked(&e.to_string()) || is_cockpit_stopped(&e.to_string()) =>
                 {
                     tracing::info!("cockpit: {e}");
+                    flag.store(false, Ordering::Relaxed);
                 }
                 Err(e) if is_supervisor_detach(&e.to_string()) => {
                     tracing::info!("cockpit: supervisor detached ({e})");
+                    flag.store(false, Ordering::Relaxed);
                 }
                 Err(e) if is_infrastructure(&e.to_string()) => {
                     tracing::warn!("cockpit: infrastructure failure: {e}");
+                    flag.store(false, Ordering::Relaxed);
                 }
-                Err(e) => tracing::error!("cockpit failed: {e}"),
+                Err(e) => {
+                    tracing::error!("cockpit failed: {e}");
+                    flag.store(false, Ordering::Relaxed);
+                }
             }
-            flag.store(false, Ordering::Relaxed);
         });
     }
 }
@@ -4437,6 +4572,27 @@ mod tests {
     }
 
     #[test]
+    fn cockpit_session_wants_sandbox_true_after_stop_start_race() {
+        // Mirrors finalize_cockpit: Stop cleared session, Start created again
+        // before the slow gateway delete ran — must not reap under the new session.
+        let b = test_board();
+        assert!(
+            !cockpit_session_wants_sandbox(&b, "honr-cockpit"),
+            "absent session does not want sandbox"
+        );
+        b.create_cockpit_session(None, None).expect("start");
+        assert!(
+            cockpit_session_wants_sandbox(&b, "honr-cockpit"),
+            "fresh Start keeps singleton name even before environment is set"
+        );
+        b.stop_cockpit_session().expect("stop");
+        assert!(!cockpit_session_wants_sandbox(&b, "honr-cockpit"));
+        b.create_cockpit_session(Some("honr-cockpit".into()), None)
+            .expect("start again");
+        assert!(cockpit_session_wants_sandbox(&b, "honr-cockpit"));
+    }
+
+    #[test]
     fn cockpit_sandbox_spec_uses_cockpit_label_not_card_item() {
         let resolved = crate::model::ResolvedSandboxCreate {
             image: "honr-sandbox:latest".into(),
@@ -4446,6 +4602,7 @@ mod tests {
             engine: Some("agy".into()),
             profile_id: Some("cockpit".into()),
             providers: Vec::new(),
+            mcp_server_ids: Vec::new(),
         };
         let spec = sandbox_spec_for_cockpit("honr-cockpit", &resolved, &[], "agy");
         assert_eq!(spec.name, "honr-cockpit");
@@ -5819,6 +5976,7 @@ mod tests {
                 memory: Some("4Gi".into()),
                 engine: None,
                 provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
             })
             .unwrap();
         board
@@ -5832,6 +5990,7 @@ mod tests {
                 memory: Some("16Gi".into()),
                 engine: None,
                 provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
             })
             .unwrap();
         board.set_default_sandbox_profile("default").unwrap();
@@ -6007,6 +6166,7 @@ mod tests {
             engine: None,
             profile_id: Some("default".into()),
             providers: vec!["vertex".into(), "missing".into()],
+            mcp_server_ids: Vec::new(),
         };
         let attach = board.attach_providers_for_resolved(&resolved);
         let spec = sandbox_spec_for_card(1, "honr-card-1-a1", &resolved, &attach);

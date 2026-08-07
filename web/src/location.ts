@@ -23,6 +23,7 @@ const OPENSHELL_TABS = new Set<string>([
   "providers",
   "provider-types",
   "policies",
+  "mcp-servers",
   "profiles",
 ]);
 

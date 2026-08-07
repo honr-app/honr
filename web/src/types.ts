@@ -65,6 +65,35 @@ export interface OpenShellPoliciesOut {
   create_default_policy_id: string;
 }
 
+/** MCP server audience — which sandboxes may receive the inject. */
+export type McpAudience = "cockpit" | "worker" | "both";
+
+export type McpHttpAuth =
+  | { kind: "none" }
+  | { kind: "cockpit_bearer" }
+  | { kind: "bearer_env"; env: string };
+
+export type McpTransport =
+  | { kind: "http"; url: string; auth?: McpHttpAuth }
+  | { kind: "stdio"; command: string; args?: string[]; cwd?: string | null };
+
+/** Board catalog MCP server (Settings → OpenShell → MCP servers). */
+export interface McpServerDesired {
+  id: string;
+  name: string;
+  transport: McpTransport;
+  policy_fragment_yaml?: string | null;
+  provider_names?: string[];
+  env?: Record<string, string>;
+  audience?: McpAudience;
+  shipped?: boolean;
+}
+
+/** GET /api/openshell/mcp-servers */
+export interface McpServersOut {
+  servers: McpServerDesired[];
+}
+
 /** Named OpenShell create-spec from the board catalog (Settings → OpenShell → Sandbox specs). */
 export interface SandboxProfile {
   id: string;
@@ -78,6 +107,8 @@ export interface SandboxProfile {
   engine?: string | null;
   /** Providers to attach on sandbox create (`[]` = none). */
   provider_names?: string[];
+  /** MCP server catalog ids to attach (`[]` = none; cockpit still injects shipped honr). */
+  mcp_server_ids?: string[];
 }
 
 /** Prefill for Settings → Sandbox specs → Create. */

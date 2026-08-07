@@ -928,8 +928,9 @@ assert(
     openshellHtml.includes("data-testid=\"openshell-tab-providers\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-provider-types\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-policies\"") &&
+    openshellHtml.includes("data-testid=\"openshell-tab-mcp-servers\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-profiles\""),
-  "OpenShell tabs: Connectivity / Providers / Provider types / Policies / Sandbox specs",
+  "OpenShell tabs: Connectivity / Providers / Provider types / Policies / MCP servers / Sandbox specs",
 );
 
 const openshellUnhealthyHtml = renderToString(
@@ -1273,6 +1274,16 @@ const openshellPoliciesTabHtml = renderToString(
 assert(openshellPoliciesTabHtml.includes("data-testid=\"openshell-policies-slot\""), "Policies tab hosts policies slot");
 assert(!openshellPoliciesTabHtml.includes("data-testid=\"openshell-profiles-slot\""), "Profiles slot hidden on Policies tab");
 
+const openshellMcpTabHtml = renderToString(
+  React.createElement(OpenShellPanelView, {
+    ...openshellPanelProps,
+    activeTab: "mcp-servers",
+    status: { healthy: true, summary: "ok", not_configured: false },
+    mcpServers: React.createElement("div", { "data-testid": "openshell-mcp-servers-slot" }, "mcp"),
+  }),
+);
+assert(openshellMcpTabHtml.includes("data-testid=\"openshell-mcp-servers-slot\""), "MCP servers tab hosts slot");
+
 const fixturePolicies = [
   {
     id: "minimal",
@@ -1506,6 +1517,15 @@ const sandboxPanelBase = {
       gateway_synced: true,
     },
   ],
+  availableMcpServers: [
+    {
+      id: "honr",
+      name: "honr",
+      transport: { kind: "http", url: "", auth: { kind: "cockpit_bearer" } },
+      audience: "cockpit",
+      shipped: true,
+    },
+  ],
   selectedId: "default",
   editingId: null,
   draft: {
@@ -1517,6 +1537,7 @@ const sandboxPanelBase = {
     memory: "",
     engine: "cursor",
     provider_names: [],
+    mcp_server_ids: [],
   },
   onSelect: () => {},
   onDraftChange: () => {},
@@ -1581,10 +1602,12 @@ const createFormHtml = renderToString(
       memory: "",
       engine: "cursor",
       provider_names: ["vertex"],
+      mcp_server_ids: [],
     },
   }),
 );
 assert(createFormHtml.includes("data-testid=\"sandbox-profile-form\""), "Create/edit form should render");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-mcp-servers\""), "Create form attaches MCP servers");
 assert(!createFormHtml.includes("data-testid=\"sandbox-field-id\""),
   "Create form must not require an Id field (server slugs from name)");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-name\""), "Create form should include name");
@@ -1613,6 +1636,7 @@ const editFormHtml = renderToString(
       memory: "",
       engine: "cursor",
       provider_names: ["vertex"],
+      mcp_server_ids: ["honr"],
     },
   }),
 );
@@ -1896,6 +1920,12 @@ assert.deepStrictEqual(parseChromeLocation("/settings/openshell/policies"), {
   settingsSection: "openshell",
   openShellTab: "policies",
 });
+assert.deepStrictEqual(parseChromeLocation("/settings/openshell/mcp-servers"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "mcp-servers",
+});
 assert.deepStrictEqual(parseChromeLocation("/settings/openshell/profiles"), {
   view: "settings",
   cardId: null,
@@ -2015,6 +2045,15 @@ assert.strictEqual(
     openShellTab: "policies",
   }),
   "/settings/openshell/policies",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "openshell",
+    openShellTab: "mcp-servers",
+  }),
+  "/settings/openshell/mcp-servers",
 );
 assert.strictEqual(
   formatChromePath({
