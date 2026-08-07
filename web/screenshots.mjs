@@ -42,9 +42,9 @@ mkdirSync(SCRATCH, { recursive: true });
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 
-// A scratch honr: same level schema, no agents, its own state file.
-const yaml = execSync(`sed 's/^    enabled: true/    enabled: false/' ${ROOT}honr.yaml`).toString();
-writeFileSync(`${SCRATCH}/honr.yaml`, yaml);
+// A scratch honr: fixture board in its own state dir. Dispatch starts with the
+// process (honr.yaml is retired); without OpenShell nothing claims cards, so
+// the shoot stays deterministic.
 writeFileSync(`${SCRATCH}/honr.json`, execSync(`node ${ROOT}web/ui-fixture.mjs`).toString());
 mkdirSync(`${SCRATCH}/web`, { recursive: true });
 execSync(`cp -R ${ROOT}web/dist ${SCRATCH}/web/dist`);
