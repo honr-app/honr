@@ -4701,6 +4701,83 @@ facts are pasted, then unpark";
         Ok(touched)
     }
 
+    /// Inverse of [`Self::cut_scope`]: restore a retired root (archived Project
+    /// or mid-tree cut) and its Retired subtree from history.
+    ///
+    /// Prior Claimed/Running/Splitting/NeedsHuman become Backlog (or Shaping
+    /// when a leaf lacks DoD). Leases and `awaiting_dispatch` stay cleared.
+    #[allow(dead_code)] // REST/MCP transports land in the follow-up card
+    pub fn unarchive_scope(&self, id: ItemId, reason: Option<String>) -> Result<Vec<ItemId>, String> {
+        let root = self
+            .get(id)
+            .ok_or_else(|| format!("no work item #{id}"))?;
+        if root.state != State::Retired {
+            return Err(format!("#{id} is not retired (state={:?})", root.state));
+        }
+
+        // Pre-order walk, then reverse so deepest nodes restore first — parents
+        // then see non-retired children when `has_children` / DoD checks run.
+        let mut stack = vec![id];
+        let mut order = Vec::new();
+        while let Some(cur) = stack.pop() {
+            order.push(cur);
+            stack.extend(self.children_of(cur));
+        }
+        order.reverse();
+
+        let reason = reason.or_else(|| Some("unarchived".into()));
+        let mut touched = Vec::new();
+        for cur in order {
+            let item = match self.get(cur) {
+                Some(i) if i.state == State::Retired => i,
+                _ => continue,
+            };
+            let prior = item
+                .history
+                .iter()
+                .rev()
+                .find(|t| t.to == State::Retired)
+                .map(|t| t.from)
+                .unwrap_or(State::Backlog);
+            // Structural children (including still-retired siblings further up
+            // the walk) decide leaf vs container for the in-flight remap.
+            let has_children = !self.children_of(cur).is_empty();
+            let has_dod = item.definition_of_done.is_some();
+            let target = machine::unarchive_target(prior, has_children, has_dod);
+
+            self.transition(cur, target, "human", reason.clone())
+                .map_err(|e| e.to_string())?;
+
+            // Retired already cleared these; re-assert so restore never revives
+            // a lease or auto-dispatch bit from a partial path.
+            {
+                let mut s = self.state.write();
+                if let Some(it) = s.items.get_mut(&cur) {
+                    it.lease = None;
+                    it.run_deadline_at = None;
+                    it.awaiting_dispatch = false;
+                }
+            }
+
+            touched.push(cur);
+        }
+
+        // Match cut_scope's parent-first return order.
+        touched.reverse();
+
+        if let Some(t) = self.get(id) {
+            self.story(
+                id,
+                format!(
+                    "Scope unarchived: {} restored ({} items).",
+                    t.title,
+                    touched.len()
+                ),
+            );
+        }
+        Ok(touched)
+    }
+
     /// Delete item — removes the item (and its subtree) permanently from the board.
     pub fn delete_item(&self, id: ItemId) -> Result<(), String> {
         // Build the client before taking the write lock — openshell_client reads
@@ -7781,6 +7858,158 @@ mod tests {
                 .iter()
                 .any(|g| g.id == keep.id && !g.archived),
             "active Project still listed"
+        );
+    }
+
+    #[test]
+    fn unarchive_scope_round_trips_archived_project() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-unarchive-roundtrip-{}.json",
+                std::process::id()
+            )),
+        );
+        let archive = b
+            .create(None, "Archive me", "why", None, Origin::Human, true, None)
+            .expect("archive");
+        let _ = b.transition(archive.id, State::Shaping, "t", None);
+        let seed = b.initial_plan_of(archive.id).expect("seed");
+
+        b.cut_scope(archive.id, Some("archived".into()))
+            .expect("cut");
+        assert!(
+            b.snapshot()
+                .goals
+                .iter()
+                .find(|g| g.id == archive.id)
+                .expect("goal")
+                .archived
+        );
+        assert!(b.digest().goals.iter().all(|g| g.goal_id != archive.id));
+
+        let touched = b
+            .unarchive_scope(archive.id, Some("restored".into()))
+            .expect("unarchive");
+        assert!(touched.contains(&archive.id));
+        assert!(touched.contains(&seed.id));
+
+        let restored = b.get(archive.id).unwrap();
+        assert_eq!(restored.state, State::Shaping);
+        assert!(restored.lease.is_none());
+        assert!(!restored.awaiting_dispatch);
+
+        let snap = b.snapshot();
+        let goal = snap
+            .goals
+            .iter()
+            .find(|g| g.id == archive.id)
+            .expect("goal back in snapshot");
+        assert!(
+            !goal.archived,
+            "unarchived Project must not be marked archived"
+        );
+        assert!(
+            b.digest().goals.iter().any(|g| g.goal_id == archive.id),
+            "unarchived Project must reappear in digest"
+        );
+    }
+
+    #[test]
+    fn unarchive_scope_remaps_in_flight_prior_to_backlog() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-unarchive-inflight-{}.json",
+                std::process::id()
+            )),
+        );
+        let (project, _seed) = project_with_initial_plan(&b, "In flight");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        let leaf = b
+            .create(
+                Some(project.id),
+                "Running leaf",
+                "do",
+                Some("tests green".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("leaf");
+        let _ = b.transition(leaf.id, State::Shaping, "t", None);
+        let _ = b.transition(leaf.id, State::Backlog, "t", None);
+        let _ = b.transition(leaf.id, State::Claimed, "t", None);
+        let _ = b.transition(leaf.id, State::Running, "t", None);
+
+        b.cut_scope(project.id, Some("archived".into()))
+            .expect("cut");
+        assert_eq!(b.get(leaf.id).unwrap().state, State::Retired);
+
+        b.unarchive_scope(project.id, None).expect("unarchive");
+        let leaf_after = b.get(leaf.id).unwrap();
+        assert_eq!(
+            leaf_after.state,
+            State::Backlog,
+            "Running prior must remap to Backlog, not revive Running"
+        );
+        assert!(leaf_after.lease.is_none());
+        assert!(!leaf_after.awaiting_dispatch);
+    }
+
+    #[test]
+    fn unarchive_scope_rejects_non_retired_root() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-unarchive-reject-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(None, "Active", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let err = b.unarchive_scope(project.id, None).unwrap_err();
+        assert!(
+            err.contains("not retired"),
+            "expected non-retired rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn unarchive_scope_leaf_without_dod_lands_in_shaping() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-unarchive-shaping-{}.json",
+                std::process::id()
+            )),
+        );
+        let (project, _seed) = project_with_initial_plan(&b, "No DoD");
+        let _ = b.transition(project.id, State::Shaping, "t", None);
+        // Claim path requires DoD to reach Backlog; force an in-flight prior
+        // via history by claiming a leaf that later loses DoD before cut — or
+        // cut a NeedsHuman leaf. NeedsHuman can be reached from Shaping.
+        let leaf = b
+            .create(
+                Some(project.id),
+                "Ambiguous",
+                "unclear",
+                None,
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("leaf");
+        let _ = b.transition(leaf.id, State::Shaping, "t", None);
+        let _ = b.transition(leaf.id, State::NeedsHuman, "t", None);
+
+        b.cut_scope(leaf.id, Some("paused".into())).expect("cut");
+        b.unarchive_scope(leaf.id, None).expect("unarchive");
+        assert_eq!(
+            b.get(leaf.id).unwrap().state,
+            State::Shaping,
+            "in-flight leaf without DoD must land in Shaping"
         );
     }
 
