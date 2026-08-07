@@ -4212,8 +4212,7 @@ mod tests {
         let containerfile =
             std::fs::read_to_string(root.join("sandbox/Containerfile")).expect("Containerfile");
         let policy = crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY;
-        let cockpit_policy = std::fs::read_to_string(root.join("sandbox/cockpit-policy.yaml"))
-            .expect("cockpit-policy.yaml");
+        let cockpit_policy = crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY;
         let supervisor_src =
             std::fs::read_to_string(root.join("src/supervisor.rs")).expect("supervisor.rs");
         // Only the production module — this test's own source mentions the
@@ -4235,7 +4234,7 @@ mod tests {
         assert!(
             !cockpit_policy.contains("/usr/local/bin/bd")
                 && !cockpit_policy.to_lowercase().contains("beads"),
-            "cockpit-policy.yaml must not allowlist bd/beads"
+            "embedded cockpit seed policy must not allowlist bd/beads"
         );
         assert!(
             !prod.contains("sync_beads_into_sandbox") && !prod.contains("BEADS_SANDBOX_DIR"),
