@@ -1,10 +1,10 @@
 # Your first agent
 
-The shortest path from a board with agents off to one real sandboxed run that
-opens a pull request.
+The shortest path from an empty board to one real sandboxed run that opens a
+pull request.
 
-> **This spends real money and opens pull requests.** Work through it once,
-> deliberately, on a repo you do not mind receiving a small PR against.
+> **This spends real money and opens pull requests.** Do this once on a repo
+> you do not mind receiving a small PR against.
 
 ## Start in the product
 
@@ -12,8 +12,7 @@ On an empty board, **Welcome to honr** embeds the same operator guide as
 **Help** (nav → Help). That guide is the named first-run path:
 
 1. **Connect MCP**
-2. **OpenShell + sandbox** — Connectivity, Providers, Policies, Sandbox specs,
-   then agents enabled
+2. **OpenShell + sandbox** — Connectivity, Providers, Policies, Sandbox specs
 3. **First Project loop**
 
 Work the checklist there; deep links land on Settings → OpenShell and Agent
@@ -80,13 +79,12 @@ openshell status   # expect Connected + Authenticated
 Then tell honr how to reach it, in **Settings → OpenShell → Connectivity**
 (Welcome/Help deep-links here):
 
-- **Gateway endpoint** — often `https://127.0.0.1:17670`. Deliberately not
-  honr's `8080`; your install may differ.
-- **mTLS PEMs** — CA, client cert, client key. Paste them in. They are sealed
-  into the board database with `~/.config/honr/master.key`, and the API never
-  hands private key material back. honr will not go looking for them on disk:
-  it assumes nothing about what is on the host, so configuration is uploaded
-  rather than discovered.
+- **Gateway endpoint** — often `https://127.0.0.1:17670` (not honr's `8080`;
+  your install may differ).
+- **mTLS PEMs** — CA, client cert, client key. Paste them in. They are stored
+  encrypted in the board database (`~/.config/honr/master.key`). The API does
+  not return private keys. honr does not read them from disk — upload them in
+  Settings.
 
 **Settings** (stored on the board) is the live source of truth for gateway
 endpoint and sealed PEMs — same split as [Configuration](configuration.md).
@@ -95,9 +93,9 @@ endpoint and sealed PEMs — same split as [Configuration](configuration.md).
 
 ## 3. Providers
 
-**Settings → OpenShell → Providers** holds the desired provider list, with
-credentials sealed. That list is the source of truth; **Sync** applies it to the
-gateway. Providers marked **attach** are passed when a sandbox is created.
+**Settings → OpenShell → Providers** is the credential list on the board.
+**Sync** applies it to the gateway. Which providers attach on create is chosen
+per Sandbox spec.
 
 For inference, point OpenShell's local router at your model:
 
@@ -125,8 +123,8 @@ gateway.
 OpenShell allow-lists are named **Policies** on the board
 (**Settings → OpenShell → Policies**). A Sandbox spec picks one by id — image,
 resources, engine, and providers live on the spec; YAML lives on the Policy.
-[Configuration](configuration.md#policies) covers the split; live policy is
-board-owned and immutable on a running sandbox.
+[Configuration](configuration.md#policies) covers the split; a running sandbox
+keeps the policy it was created with.
 
 Build or pull whatever your sandbox spec's image field names. For honr's own
 Rust toolchain image:
@@ -152,8 +150,8 @@ matches what you built.
 
 ## 5. Agent runtime (optional tune)
 
-Dispatch starts with the process. Tune concurrency / timeouts / sweep under
-**Settings → Agent runtime** if you want ([Configuration](configuration.md)).
+Tune concurrency / timeouts / sweep under **Settings → Agent runtime** if you
+want ([Configuration](configuration.md)).
 
 **Check:** OpenShell readiness on Welcome shows Gateway/mTLS and Sandbox spec
 ready.
@@ -182,4 +180,4 @@ silence; treat hangs as failure, not as "give it more time."
 - [Workflow](workflow.md) — steering cards day to day
 - [Configuration](configuration.md) — Policies, sandbox specs, engines, timeouts
 - [Sandbox](sandbox.md) — what actually happens inside a run
-- [Cockpit](cockpit.md) — a durable terminal seat with operator reach
+- [Cockpit](cockpit.md) — a durable terminal with operator reach

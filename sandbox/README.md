@@ -20,12 +20,13 @@ them at create time.
 
 ## Cockpit network policy (board Policies)
 
-The **cockpit** control-plane seat uses the same catalog: a Policy for egress
-(host honr MCP on `host.docker.internal` / `127.0.0.1` / `localhost` port 8080,
-inference, and GitHub App `GH_TOKEN`) and a Sandbox spec that selects that
-policy. Package registries typically stay on the worker Policy.
+The **cockpit** sandbox uses the same catalog: a Policy for egress (host honr
+MCP on `host.docker.internal` / `127.0.0.1` / `localhost` port 8080, inference,
+and GitHub App `GH_TOKEN`) and a Sandbox spec that selects that policy. Package
+registries typically stay on the worker Policy.
 
-`sandbox/cockpit-policy.yaml` is a checked-in starting point for a full seat;
+`sandbox/cockpit-policy.yaml` is a checked-in starting point for a full cockpit
+policy;
 paste or adapt it under Settings → OpenShell → Policies when that matches the
 install, then attach it from the cockpit Sandbox spec.
 

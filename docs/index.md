@@ -3,9 +3,8 @@
 **honr** is a board you point at a repository. You describe what you want; it
 runs coding agents in sandboxes; pull requests come back for you to merge.
 
-The difference from a task tracker is that the board is not a report of work
-happening elsewhere. It *is* the work. Moving a card starts an agent. Answering
-a question unblocks one. Approving a plan creates the tasks.
+Moving a card starts an agent. Answering a question unblocks one. Approving a
+plan creates the tasks.
 
 ![The honr board: Backlog, Running, Needs You, Review, Done](images/desktop-board.png)
 
@@ -17,7 +16,8 @@ a question unblocks one. Approving a plan creates the tasks.
 3. Agents claim cards, work in isolated sandboxes, and open pull requests.
 4. Cards that need a decision stop and wait in **Needs You** — costing nothing
    while they do.
-5. You review the PRs and merge on GitHub. honr never merges anything.
+5. You review the PRs and merge on GitHub. Approving in honr shows the PR; it
+   does not merge.
 
 The [Tour](tour.md) walks that loop with screenshots and needs nothing
 installed.
@@ -28,12 +28,12 @@ honr is for someone who wants several agents working a repository at once, and
 wants one place to steer them from. It assumes you are comfortable reviewing
 pull requests and running a service on your own machine.
 
-It is **not** a hosted product, and it is not an IDE assistant. There is no
-autonomy setting that merges code for you — that boundary is deliberate and
-[not moving](invariants.md).
+It is **not** a hosted product, and it is not an IDE assistant. You merge on
+GitHub — that boundary is fixed ([Invariants](invariants.md)).
 
-You can run the board with agents switched off: no Docker, no gateway, no
-credentials, no spend. That is the default, and it is the right way to start.
+You can run the board without OpenShell or credentials and explore Projects and
+Plans. Agents only run after you connect a gateway, add a sandbox spec, and
+dispatch a card.
 
 ## Start here
 

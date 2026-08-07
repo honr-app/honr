@@ -4,21 +4,19 @@ Orientation for the **operator** agent sitting with the human. If you are an
 agent honr dispatched to work on a card, you already have a briefing — ignore
 this file.
 
-**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`) — the cockpit
-seat (operator tools only; no worker verbs). Do not implement product work by
-editing this tree; shape Projects/Plans, triage Needs You / Review, let
-sandboxed workers open PRs. See
-[`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc).
+**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`) — operator
+tools only; no worker verbs. Do not implement product work by editing this tree;
+shape Projects/Plans, triage Needs You / Review, let sandboxed workers open PRs.
+See [`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc).
 
 Start with [`docs/index.md`](docs/index.md) and
 [`docs/concepts.md`](docs/concepts.md).
 
 ## What this is
 
-An agent orchestrator that dispatches work against **its own source**. The
-board is a control plane: moving a card *is* an action. honr claims a card,
-runs a Claude Code agent in an OpenShell sandbox, and the agent opens a
-same-repo PR (`honr/card-*` → `main`) that a human merges.
+An agent orchestrator that dispatches work against **its own source**. Moving a
+card *is* an action. honr claims a card, runs an agent in an OpenShell sandbox,
+and the agent opens a same-repo PR (`honr/card-*` → `main`) that a human merges.
 
 ## The invariants worth protecting
 
@@ -27,15 +25,14 @@ same-repo PR (`honr/card-*` → `main`) that a human merges.
 yourself encoding a rule in `api.rs` or `mcp.rs`, it belongs in `machine.rs` or
 `store.rs` instead.
 
-**The agent is material, not a participant.** It gets no network path to honr.
-The supervisor calls `claim`/`heartbeat`/`report` on its behalf. An agent that
-could reach honr's MCP could approve its own review.
+**Workers cannot reach honr.** The card agent gets no network path to honr. The
+supervisor calls `claim`/`heartbeat`/`report` on its behalf. An agent that
+could reach the board’s MCP could approve its own review.
 
-**Liveness is observed, never self-reported.** It is parsed from the agent's
-output stream. Do not add a timer-based keepalive — it would assert liveness
-without evidence and throw away the property that makes the signal trustworthy.
+**Liveness is observed.** It is parsed from the agent's output stream. Do not
+add a timer-based keepalive — it would assert liveness without evidence.
 
-**Merging is human.** Approving in honr surfaces the PR. It never merges.
+**Merging is human.** Approving in honr surfaces the PR. It does not merge.
 
 **Feature branches are writable; `main` is human-gated.** The GitHub ruleset
 keeps the default branch owner-only. Agents use the App installation on
@@ -48,14 +45,11 @@ Comments explain **why**, not what. The existing code reads like prose and
 argues with itself where a decision was close; match that. A comment that
 restates the line below it is noise.
 
-**Write the current contract, not the archaeology.** Docs, UI copy, MCP
-descriptions, briefings, and comments must make sense to a reader who never
-saw the previous design. Prefer “Initial plan finishes with `plan.json`;
-Approve creates Tasks” over “plan.json only (no docs PR)” / “Task.repo is
-retired” / “not X anymore.” Negating a removed path is decision memory dumped
-into the product — fix it when you notice it. Bug-history *why* notes that
-justify a still-present invariant (“this race used to bounce cards”) are fine;
-teaching the product by arguing with the past is not.
+**Describe how it works now.** Docs, UI copy, MCP descriptions, briefings, and
+comments must make sense to a reader who never saw the previous design. Prefer
+“Initial plan finishes with `plan.json`; Approve creates Tasks” over arguing
+with removed designs. Bug-history *why* notes that justify a still-present
+invariant are fine; teaching the product by arguing with the past is not.
 
 Tests live next to what they test. `machine.rs` holds the lifecycle
 invariants; other modules test the things that break silently — argv shape,
@@ -65,7 +59,8 @@ failure it prevents over one that names the function it calls.
 Before you finish: `cargo test` and `cargo clippy --all-targets -- -D warnings`
 must both be clean. Both run `--offline` inside a sandbox.
 
-`git add -A` has committed unintended local state here before. Stage deliberately.
+Stage specific paths. `git add -A` has committed unintended local state here
+before.
 
 ## Things that will waste your time if you don't know them
 
@@ -98,8 +93,8 @@ do not treat a stale local `main` as truth.
 | `src/store.rs` | The board — the only write path |
 | `src/supervisor.rs` | Dispatch, per-card lifecycle, briefing, lease sweeping |
 | `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board mTLS); every call has a deadline |
-| `src/cockpit_chat.rs` | Host-mediated cockpit chat bridge (prompt → sandbox seat → SSE) |
-| `src/mcp.rs` | Ops-seat operator tools; host seat keeps worker verbs |
+| `src/cockpit_chat.rs` | Host-mediated cockpit chat bridge (prompt → sandbox → SSE) |
+| `src/mcp.rs` | Operator MCP tools; supervisor keeps worker verbs |
 | `sandbox/` | Containerfile, network policy |
 | `web/` | React UI + `npm run shots` screenshot harness |
 | `docs/sandbox.md` | How a sandboxed run works and the gotchas that matter. Read before touching `sandbox/`. |
@@ -119,4 +114,3 @@ session a confident "it's fine" was based on a log that was not capturing
 anything.
 
 State corrections plainly and move on. Do not narrate the mistake at length.
-

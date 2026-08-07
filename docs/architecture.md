@@ -26,7 +26,7 @@ UI / MCP / supervisor
 | `src/machine.rs` | Legal transitions and lifecycle invariants, for cards and the cockpit session. |
 | `src/store.rs` | The board: state, persistence, event bus, derived reads. |
 | `src/api.rs` `src/sse.rs` `src/cockpit_chat.rs` | The human face — REST, board SSE, cockpit chat bridge. |
-| `src/mcp.rs` | Operator seat tools; the host seat keeps worker verbs. |
+| `src/mcp.rs` | Operator MCP tools; the supervisor keeps worker verbs. |
 | `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board endpoint + sealed mTLS); every call has a deadline. |
 | `src/supervisor.rs` | Card dispatch, durable cockpit start/reconcile/stop, briefing, lease sweeping. |
 | `src/engine.rs` | Explicit registry of agent engines — unknown ids fail loud. |
@@ -49,10 +49,10 @@ The supervisor:
 6. Sweeps expired leases, and on startup reconciles live sandboxes so a honr
    restart does not orphan a running agent.
 
-Separately, when a Board **cockpit session** exists, the supervisor materializes
-it: create or reuse the cockpit-spec sandbox (`honr.cockpit` label), start the
-agent detached, reconcile across restart (keeping sandbox and conversation, like
-park), and stop cleanly when the session is cleared. That path never touches
+Separately, when a Board **cockpit session** exists, the supervisor creates or
+reuses the cockpit-spec sandbox (`honr.cockpit` label), starts the agent
+detached, reconciles across restart (keeping sandbox and conversation, like
+park), and stops cleanly when the session is cleared. That path never touches
 claim / heartbeat / report / split or the card dispatch queue — the Board's
 `cockpit_session` fields stay authoritative.
 
@@ -63,8 +63,8 @@ of worker verbs on the live path.
 
 | Face | Transport | Audience |
 |---|---|---|
-| Operator seat (operator tools only) | MCP streamable HTTP at `/mcp` | Chat and cockpit agents (OAuth) |
-| Host seat (operator + worker verbs) | `Operator::host`, in-process | Supervisor/host tooling and tests |
+| Operator MCP (operator tools only) | MCP streamable HTTP at `/mcp` | Chat and cockpit agents (OAuth) |
+| Host operator (operator + worker verbs) | `Operator::host`, in-process | Supervisor/host tooling and tests |
 | Human UI | REST + board SSE | React app; one-tap answers and approvals |
 | Agent bootstrap guide | `GET /llms.txt` (no auth) | Operator agents on a fresh board |
 | Cockpit terminal | `GET`/WS `/api/cockpit-attach` | xterm → `ExecSandboxInteractive` |

@@ -1,13 +1,11 @@
 # Quickstart
 
-Get the board running on your machine in a few minutes, with agents off. No
-Docker, no gateway, no credentials, no spend.
+Get the board running on your machine in a few minutes, without OpenShell or
+credentials. Nothing dispatches until you set those up and start a card.
 
-Agents being off by default is deliberate: the control plane should run on a
-laptop that only needs to show and shape work. When you are ready for sandboxed
-runs, start from the empty-board **Welcome** guide (or **Help**) — OpenShell +
-sandbox before the Project loop — then the prose checklist on
-[Your first agent](first-agent.md).
+When you are ready for sandboxed runs, use the empty-board **Welcome** guide
+(or **Help**) — OpenShell + sandbox before the Project loop — then the checklist
+on [Your first agent](first-agent.md).
 
 **You need:** a current Rust stable toolchain, and a recent Node.js if you want
 to build the UI.
@@ -38,13 +36,12 @@ Pick any username and password; it is stored locally, in your board database.
 
 ## 3. Make something
 
-The board starts empty, so make it not be. Create a **Project**, give it an
-intent, and point it at a repository (`owner/name` — this is the repo the
-planning agent will clone).
+The board starts empty. Create a **Project**, give it an intent, and point it at
+a repository (`owner/name` — the repo the planning agent will clone).
 
-honr seeds a claimable **Initial plan** Task under it automatically. You now
-have a Project, a Task, and a board that looks like the one in the
-[Tour](tour.md) — minus anything running, because agents are off.
+honr creates an **Initial plan** Task under it automatically. You now have a
+Project, a Task, and a board that looks like the one in the [Tour](tour.md) —
+minus anything running, because nothing has been dispatched yet.
 
 Click into the card. The detail drawer shows **why this exists** (the chain up
 to its Project), its definition of done, and the Proposed Tasks section that an
@@ -68,9 +65,9 @@ curl -sS http://127.0.0.1:8080/llms.txt
 `GET /llms.txt` needs no auth. Source lives at [`llms.txt`](../llms.txt) in the
 repo; Vite’s `:5173` proxy forwards the same path in `make dev-ui`.
 
-`/mcp` is the **operator surface**: shape Projects, triage, dispatch, park,
-steer, approve. Worker verbs (`claim`, `heartbeat`, `report`, …) are not there —
-those belong to the supervisor.
+`/mcp` is for operators: create Projects, triage, dispatch, park, steer,
+approve. Worker verbs (`claim`, `heartbeat`, `report`, …) stay with the
+supervisor.
 
 **Cursor** — project config is already in [`.cursor/mcp.json`](https://github.com/honr-app/honr/blob/main/.cursor/mcp.json):
 
