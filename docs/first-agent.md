@@ -140,7 +140,8 @@ matches what you built.
 
 ## 5. Turn agents on
 
-Enable agents in **Settings → Agent runtime**, or set them in `honr.yaml`:
+Enable agents in **Settings → Agent runtime**, or set the process boot gate in
+`honr.yaml`:
 
 ```yaml
 # honr.yaml
@@ -149,10 +150,11 @@ execution:
     enabled: true
 ```
 
-Board Settings is the live source of truth once saved; YAML seeds empty state
-([Configuration](configuration.md)). If the process started with agents
-disabled, **restart honr** after enabling so the dispatch loop starts. YAML is
-read once at startup; there is no hot reload from the file alone.
+Board Settings is the live source of truth for Agent runtime once saved
+([Configuration](configuration.md)). `honr.yaml` `agents.enabled` is the
+startup gate (and the seed for a fresh board's runtime toggle). If the process
+started with agents disabled, **restart honr** after enabling so the dispatch
+loop starts.
 
 > Put `enabled: false` back before you commit YAML. It has been committed as
 > `true` once already, swept in by `git add -A`, which makes a fresh clone spend

@@ -167,7 +167,7 @@ export interface AuthSettings {
   has_client_secret: boolean;
 }
 
-/** Settings → Agent runtime (process knobs; seeded from honr.yaml). */
+/** Settings → Agent runtime (process knobs; empty boards seed from compiled defaults). */
 export interface AgentRuntimeConfig {
   enabled: boolean;
   engine: string;

@@ -8,16 +8,13 @@ Card context is briefing-only (`/sandbox/.honr` contracts); see
 
 ## Worker network policy (board profile)
 
-The **card-worker** network policy is **not** a file in this directory. It lives
-on the board sandbox profile (`default`): Settings → OpenShell → Profiles, or
-`GET`/`POST /api/sandbox-profiles`. That YAML is what OpenShell gets at
-`sandbox create`.
+The **card-worker** network policy lives on the board sandbox profile
+(`default`): Settings → OpenShell → Profiles, or `GET`/`POST
+/api/sandbox-profiles`. That YAML is what OpenShell gets at `sandbox create`.
 
-Empty boards seed `default` from the built-in string in
-`src/seed_policies.rs` (`policy: embedded` in `honr.yaml`). After seed, edit the
-**profile on the board** — changing source or docs does not change live
-sandboxes. Policy filesystem/process sections are immutable on a live sandbox;
-set them at create time.
+Empty boards seed `default` from the embedded string in `src/seed_policies.rs`.
+After seed, edit the **profile on the board**. Policy filesystem/process
+sections are immutable on a live sandbox; set them at create time.
 
 ## Cockpit network policy (board profile)
 
@@ -29,7 +26,9 @@ on the worker identity.
 
 Empty boards seed `cockpit` from `DEFAULT_COCKPIT_SANDBOX_POLICY` in
 `src/seed_policies.rs` (lighter cpu/memory than the worker default). After
-seed, the board profile is authoritative — edit there, not a host YAML path.
+seed, edit the board profile. `cockpit-policy.yaml` in this directory is a
+checked-in mirror of that constant for humans reading the tree; seed uses the
+compiled constant.
 
 ## `Containerfile`
 
@@ -48,8 +47,9 @@ docker build -f sandbox/Containerfile -t honr-sandbox:latest .
 Rebuild when `Cargo.lock`, `src/`, or `migrations/` change materially. Matching
 `/opt` entries (`/opt/cargo`, `/opt/cargo-target`, `/opt/npm-cache`, …) belong in
 the worker **board** profile policy (and the embedded seed in
-`src/seed_policies.rs`). Live profiles do not auto-pick up seed edits — add
-`/opt/cargo-target` to `read_write` if the catalog already exists.
+`src/seed_policies.rs`). When the catalog already exists, add
+`/opt/cargo-target` to `read_write` on the board profile after an image layout
+change.
 
 Claude / OpenCode auth goes through OpenShell `inference.local` (see
 [`docs/sandbox.md`](../docs/sandbox.md)) — no in-sandbox metadata shim.
