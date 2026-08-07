@@ -76,6 +76,10 @@ pub struct BoardState {
     /// Last-seen default-branch tip SHAs keyed by `owner/name` (poll path).
     #[serde(default)]
     pub webhook_poll_tips: BTreeMap<String, String>,
+    /// Last-seen PR review ids keyed by `owner/name#number` (poll path).
+    /// First observation seeds without applying historical reviews.
+    #[serde(default)]
+    pub webhook_poll_pr_reviews: BTreeMap<String, u64>,
     /// Durable control-plane cockpit (sandbox + conversation + hold).
     /// Singleton — not a WorkItem; reconnect reads this, not a chatbot shim.
     #[serde(default)]
@@ -114,6 +118,7 @@ impl BoardState {
             openshell_providers: self.openshell_providers.clone(),
             webhook_poll: self.webhook_poll.clone(),
             webhook_poll_tips: self.webhook_poll_tips.clone(),
+            webhook_poll_pr_reviews: self.webhook_poll_pr_reviews.clone(),
             cockpit_session: self.cockpit_session.clone(),
             agent_logs: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
@@ -2094,6 +2099,30 @@ impl Board {
         {
             let mut s = self.state.write();
             s.webhook_poll_tips.insert(repo, sha);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Poll cursor key for a PR: `owner/name#number`.
+    pub fn webhook_poll_pr_review_key(owner_repo: &str, number: u64) -> String {
+        format!("{}#{number}", owner_repo.trim())
+    }
+
+    /// Last-seen GitHub PR review id for `owner/name#number` (poll path).
+    pub fn webhook_poll_pr_review_cursor(&self, owner_repo: &str, number: u64) -> Option<u64> {
+        let key = Self::webhook_poll_pr_review_key(owner_repo, number);
+        self.state.read().webhook_poll_pr_reviews.get(&key).copied()
+    }
+
+    /// Record the highest observed PR review id after a successful poll.
+    pub fn set_webhook_poll_pr_review_cursor(&self, owner_repo: &str, number: u64, review_id: u64) {
+        let key = Self::webhook_poll_pr_review_key(owner_repo, number);
+        if key.starts_with('#') || owner_repo.trim().is_empty() {
+            return;
+        }
+        {
+            let mut s = self.state.write();
+            s.webhook_poll_pr_reviews.insert(key, review_id);
         }
         self.dirty.store(true, Ordering::Relaxed);
     }
@@ -4690,7 +4719,6 @@ facts are pasted, then unpark";
     /// True when a submitted GitHub PR review should steer the matching card.
     /// `CHANGES_REQUESTED` and `COMMENT`/`COMMENTED` share one Board path;
     /// `APPROVED` / dismissed (and anything else) are no-ops.
-    #[allow(dead_code)] // webhook + poll cards call this; Board owns the rule
     pub fn is_actionable_pr_review_state(state: &str) -> bool {
         matches!(
             state.trim().to_ascii_uppercase().as_str(),
@@ -4730,7 +4758,6 @@ facts are pasted, then unpark";
     }
 
     /// Same as [`Self::apply_pr_review_feedback`] with an explicit history actor.
-    #[allow(dead_code)] // wired by poll-pr-review-feedback card
     pub fn apply_pr_review_feedback_by(
         &self,
         pr_url: &str,
