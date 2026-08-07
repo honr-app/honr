@@ -95,6 +95,11 @@ export interface WebhookPollConfig {
   enabled: boolean;
   /** Seconds between ticks (server clamps to ≥ 15). */
   interval_secs: number;
+  /**
+   * OpenShell provider that supplies the host poll token.
+   * Required when enabled — `github-app` (mint) or a `GH_TOKEN` provider.
+   */
+  provider_name?: string | null;
 }
 
 /** Presence flags for sealed OpenShell mTLS material (never returns PEMs). */
@@ -139,7 +144,7 @@ export interface GitHubAppTokenStatus {
   error?: string | null;
 }
 
-/** Settings → GitHub App (installation-token material). */
+/** Compatibility view for `/api/github-app` (material lives on provider `github-app`). */
 export interface GitHubAppSettings {
   /** Non-secret — returned on GET when configured. */
   app_id?: string | null;

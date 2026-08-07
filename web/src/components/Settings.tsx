@@ -4,7 +4,8 @@ import type { SettingsSection } from "../location.js";
 import type {
   AgentRuntimeConfig,
   AuthSettings,
-  GitHubAppSettings,
+  GitHubAppTokenStatus,
+  OpenShellProviderView,
   WebhookPollConfig,
   WorkspaceBinding,
 } from "../types.js";
@@ -29,7 +30,6 @@ export type { SettingsSection } from "../location.js";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "openshell", label: "OpenShell" },
-  { id: "github-app", label: "GitHub App" },
   { id: "access", label: "Access" },
   // Nav label is Forge — "Workspace" implied a single work repo (upstream/fork).
   { id: "workspace", label: "Forge" },
@@ -43,7 +43,35 @@ const emptyWorkspace = (): WorkspaceBinding => ({
 const emptyWebhookPoll = (): WebhookPollConfig => ({
   enabled: false,
   interval_secs: 60,
+  provider_name: null,
 });
+
+/** Providers Forge can mint/read a host GitHub token from. */
+export function forgePollCredentialOptions(
+  providers: OpenShellProviderView[],
+): OpenShellProviderView[] {
+  return providers.filter(
+    (p) =>
+      p.type === "github-app" ||
+      p.name === "github-app" ||
+      p.type === "github" ||
+      (p.credential_keys ?? []).some((k) => k === "GH_TOKEN" || k === "GITHUB_TOKEN"),
+  );
+}
+
+export function forgePollCredentialReady(
+  provider: OpenShellProviderView | undefined,
+  githubAppConfigured: boolean,
+): boolean {
+  if (!provider) return false;
+  if (provider.type === "github-app" || provider.name === "github-app") {
+    return githubAppConfigured;
+  }
+  return !!(
+    provider.has_credentials &&
+    (provider.credential_keys ?? []).some((k) => k === "GH_TOKEN" || k === "GITHUB_TOKEN")
+  );
+}
 
 const emptyAgentRuntime = (): AgentRuntimeConfig => ({
   engine: "cursor",
@@ -55,7 +83,8 @@ const emptyAgentRuntime = (): AgentRuntimeConfig => ({
 });
 
 /**
- * Settings shell — OpenShell, GitHub App, Forge, Agent runtime.
+ * Settings shell — OpenShell (incl. shipped github-app provider on
+ * Providers), Access, Forge, Agent runtime.
  * Section / OpenShell tab may be controlled by the URL location contract.
  */
 export function Settings({
@@ -84,10 +113,9 @@ export function Settings({
         <p className="settings-lede">
           Control-plane preferences. Forge holds provider and webhook poll. Each
           card’s <code>pull_request</code> (after report) holds work remotes.
-          OpenShell holds Connectivity, Providers, and Sandbox specs (providers
-          attach per spec). GitHub App holds sealed App credentials for
-          installation tokens. Agent runtime holds concurrency, timeouts, and
-          the fallback engine.
+          OpenShell holds Connectivity, Providers (including GitHub Application
+          Access Token), and Sandbox specs. Agent runtime holds concurrency,
+          timeouts, and the fallback engine.
         </p>
       </header>
 
@@ -114,8 +142,6 @@ export function Settings({
               activeTab={openShellTab}
               onTabChange={onOpenShellTabChange}
             />
-          ) : section === "github-app" ? (
-            <GitHubAppPanel />
           ) : section === "access" ? (
             <AccessPanel />
           ) : section === "workspace" ? (
@@ -337,387 +363,13 @@ function AccessPanel() {
   );
 }
 
-/** Presentational GitHub App form — exported for UI tests without fetch. */
-export function GitHubAppPanelView({
-  appId,
-  clientId,
-  privateKeyPem,
-  webhookSecret,
-  clientSecret,
-  installationId,
-  installations,
-  tokenStatus,
-  status,
-  busy,
-  error,
-  savedHint,
-  onAppIdChange,
-  onClientIdChange,
-  onPrivateKeyPemChange,
-  onWebhookSecretChange,
-  onClientSecretChange,
-  onInstallationIdChange,
-  onSave,
-  onClear,
-  onSyncToken,
-}: {
-  appId: string;
-  clientId: string;
-  privateKeyPem: string;
-  webhookSecret: string;
-  clientSecret: string;
-  installationId: string;
-  installations: NonNullable<GitHubAppSettings["installations"]>;
-  tokenStatus?: GitHubAppSettings["token_status"];
-  status?: GitHubAppSettings["status"];
-  busy?: boolean;
-  error?: string | null;
-  savedHint?: string | null;
-  onAppIdChange: (next: string) => void;
-  onClientIdChange: (next: string) => void;
-  onPrivateKeyPemChange: (next: string) => void;
-  onWebhookSecretChange: (next: string) => void;
-  onClientSecretChange: (next: string) => void;
-  onInstallationIdChange: (next: string) => void;
-  onSave: () => void;
-  onClear: () => void;
-  onSyncToken: () => void;
-}) {
-  const statusLabel = status?.complete
-    ? "Configured (encrypted in board DB)"
-    : status?.app_id || status?.private_key
-      ? "Incomplete"
-      : "Not configured";
-  const tokenLabel = !tokenStatus?.configured
-    ? "Pick an installation, then Mint / sync"
-    : tokenStatus.error
-      ? `Error: ${tokenStatus.error}`
-      : tokenStatus.expires_at
-        ? `OK until ${tokenStatus.expires_at}`
-        : tokenStatus.provider_attached
-          ? "Provider attached"
-          : "Configured — sync to gateway";
-
-  return (
-    <section aria-labelledby="github-app-title" data-testid="github-app-panel">
-      <h2 id="github-app-title">GitHub App</h2>
-      <p className="dim">
-        Sealed App credentials mint short-lived{" "}
-        <strong>installation tokens</strong> into the OpenShell{" "}
-        <code>github</code> provider (no PAT paste). Also used for Sign in with
-        GitHub. Private key / secrets stay in the board DB under{" "}
-        <code>~/.config/honr/master.key</code>.
-      </p>
-
-      {error && <div className="err">{error}</div>}
-      {savedHint && (
-        <p className="dim" data-testid="github-app-saved-hint">
-          {savedHint}
-        </p>
-      )}
-
-      <div className="openshell-health" data-testid="github-app-status">
-        <div className="openshell-health-row">
-          <span className="dim">Credentials</span>
-          <strong data-testid="github-app-status-label">{statusLabel}</strong>
-        </div>
-        <div className="openshell-health-row">
-          <span className="dim">Sandbox token</span>
-          <strong data-testid="github-app-token-label">{tokenLabel}</strong>
-        </div>
-        {status?.complete && (
-          <div className="openshell-health-row">
-            <span className="dim">Webhook secret</span>
-            <strong data-testid="github-app-webhook-flag">
-              {status.webhook_secret ? "Set" : "Not set"}
-            </strong>
-          </div>
-        )}
-      </div>
-
-      <form
-        className="sandbox-profile-form workspace-form"
-        data-testid="github-app-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          onSave();
-        }}
-      >
-        <label>
-          App ID
-          <input
-            className="search-input"
-            value={appId}
-            disabled={busy}
-            placeholder="123456"
-            onChange={(e) => onAppIdChange(e.target.value)}
-            data-testid="github-app-field-app-id"
-          />
-        </label>
-        <label>
-          Private key (PEM)
-          <textarea
-            className="search-input"
-            rows={6}
-            value={privateKeyPem}
-            disabled={busy}
-            placeholder={
-              status?.private_key
-                ? "Configured — paste to replace"
-                : "-----BEGIN RSA PRIVATE KEY-----"
-            }
-            onChange={(e) => onPrivateKeyPemChange(e.target.value)}
-            data-testid="github-app-field-private-key"
-          />
-        </label>
-        <label>
-          Installation (sandbox git)
-          <select
-            className="search-input"
-            value={installationId}
-            disabled={busy}
-            onChange={(e) => onInstallationIdChange(e.target.value)}
-            data-testid="github-app-field-installation"
-          >
-            <option value="">Select installation…</option>
-            {installationId &&
-              !installations.some((i) => String(i.id) === installationId) && (
-                <option value={installationId}>
-                  Installation {installationId}
-                </option>
-              )}
-            {installations.map((inst) => (
-              <option key={inst.id} value={String(inst.id)}>
-                {inst.account_login || "unknown"} ({inst.id})
-              </option>
-            ))}
-          </select>
-          <span className="dim sandbox-field-hint">
-            Installation that mints sandbox <code>GH_TOKEN</code> into the
-            OpenShell <code>github</code> provider.
-          </span>
-        </label>
-        <label>
-          Webhook secret
-          <input
-            className="search-input"
-            type="password"
-            autoComplete="off"
-            value={webhookSecret}
-            disabled={busy}
-            placeholder={
-              status?.webhook_secret ? "Configured — paste to replace" : "optional"
-            }
-            onChange={(e) => onWebhookSecretChange(e.target.value)}
-            data-testid="github-app-field-webhook-secret"
-          />
-        </label>
-        <label>
-          Client ID
-          <input
-            className="search-input"
-            value={clientId}
-            disabled={busy}
-            placeholder="Iv1.… (optional, for user OAuth)"
-            onChange={(e) => onClientIdChange(e.target.value)}
-            data-testid="github-app-field-client-id"
-          />
-        </label>
-        <label>
-          Client secret
-          <input
-            className="search-input"
-            type="password"
-            autoComplete="off"
-            value={clientSecret}
-            disabled={busy}
-            placeholder={
-              status?.client_secret
-                ? "Configured — paste to replace"
-                : "optional"
-            }
-            onChange={(e) => onClientSecretChange(e.target.value)}
-            data-testid="github-app-field-client-secret"
-          />
-        </label>
-        <div className="btns">
-          <button type="submit" className="primary" disabled={busy} data-testid="github-app-save">
-            Save
-          </button>
-          <button
-            type="button"
-            disabled={busy || !status?.complete || !installationId}
-            onClick={onSyncToken}
-            data-testid="github-app-sync-token"
-          >
-            Mint / sync token
-          </button>
-          <button
-            type="button"
-            disabled={busy || !status?.complete}
-            onClick={onClear}
-            data-testid="github-app-clear"
-          >
-            Clear
-          </button>
-        </div>
-      </form>
-    </section>
-  );
-}
-
-function GitHubAppPanel() {
-  const [appId, setAppId] = useState("");
-  const [clientId, setClientId] = useState("");
-  const [privateKeyPem, setPrivateKeyPem] = useState("");
-  const [webhookSecret, setWebhookSecret] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [installationId, setInstallationId] = useState("");
-  const [installations, setInstallations] = useState<
-    NonNullable<GitHubAppSettings["installations"]>
-  >([]);
-  const [tokenStatus, setTokenStatus] =
-    useState<GitHubAppSettings["token_status"]>();
-  const [status, setStatus] = useState<GitHubAppSettings["status"]>();
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [savedHint, setSavedHint] = useState<string | null>(null);
-
-  const applySaved = useCallback((cfg: GitHubAppSettings) => {
-    setAppId(cfg.app_id ?? "");
-    setClientId(cfg.client_id ?? "");
-    setStatus(cfg.status);
-    setInstallationId(
-      cfg.installation_id != null ? String(cfg.installation_id) : "",
-    );
-    setInstallations(cfg.installations ?? []);
-    setTokenStatus(cfg.token_status);
-    setPrivateKeyPem("");
-    setWebhookSecret("");
-    setClientSecret("");
-  }, []);
-
-  const refresh = useCallback(() => {
-    setBusy(true);
-    return api
-      .getGitHubApp()
-      .then((cfg) => {
-        applySaved(cfg);
-        setError(null);
-      })
-      .catch((e) => setError(String(e)))
-      .finally(() => {
-        setBusy(false);
-        setLoading(false);
-      });
-  }, [applySaved]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  const put = (body: GitHubAppSettings, hint: string) => {
-    setBusy(true);
-    setError(null);
-    setSavedHint(null);
-    api
-      .putGitHubApp(body)
-      .then((saved) => {
-        applySaved(saved);
-        setSavedHint(hint);
-      })
-      .catch((e) => setError(String(e)))
-      .finally(() => setBusy(false));
-  };
-
-  return (
-    <GitHubAppPanelView
-      appId={appId}
-      clientId={clientId}
-      privateKeyPem={privateKeyPem}
-      webhookSecret={webhookSecret}
-      clientSecret={clientSecret}
-      installationId={installationId}
-      installations={installations}
-      tokenStatus={tokenStatus}
-      status={status}
-      busy={busy || loading}
-      error={error}
-      savedHint={savedHint}
-      onAppIdChange={(next) => {
-        setSavedHint(null);
-        setAppId(next);
-      }}
-      onClientIdChange={(next) => {
-        setSavedHint(null);
-        setClientId(next);
-      }}
-      onPrivateKeyPemChange={(next) => {
-        setSavedHint(null);
-        setPrivateKeyPem(next);
-      }}
-      onWebhookSecretChange={(next) => {
-        setSavedHint(null);
-        setWebhookSecret(next);
-      }}
-      onClientSecretChange={(next) => {
-        setSavedHint(null);
-        setClientSecret(next);
-      }}
-      onInstallationIdChange={(next) => {
-        setSavedHint(null);
-        setInstallationId(next);
-      }}
-      onSave={() => {
-        const body: GitHubAppSettings = {
-          app_id: appId.trim() || null,
-          // Empty string clears; omit would leave the sealed value unchanged.
-          client_id: clientId.trim(),
-        };
-        if (privateKeyPem.trim()) body.private_key_pem = privateKeyPem;
-        if (webhookSecret.trim()) body.webhook_secret = webhookSecret;
-        if (clientSecret.trim()) body.client_secret = clientSecret;
-        if (installationId.trim()) {
-          body.installation_id = Number(installationId);
-        } else {
-          body.clear_installation_id = true;
-        }
-        put(
-          body,
-          "Saved. Sealed credentials and synced installation token to OpenShell when ready.",
-        );
-      }}
-      onSyncToken={() => {
-        setBusy(true);
-        setError(null);
-        setSavedHint(null);
-        const saveFirst: GitHubAppSettings = {};
-        if (installationId.trim()) {
-          saveFirst.installation_id = Number(installationId);
-        }
-        const chain = installationId.trim()
-          ? api.putGitHubApp(saveFirst).then(() => api.syncGitHubAppToken())
-          : api.syncGitHubAppToken();
-        chain
-          .then((saved) => {
-            applySaved(saved);
-            setSavedHint("Installation token minted and synced to OpenShell provider github.");
-          })
-          .catch((e) => setError(String(e)))
-          .finally(() => setBusy(false));
-      }}
-      onClear={() => {
-        put({ clear: true }, "Cleared sealed GitHub App credentials.");
-      }}
-    />
-  );
-}
-
 /** Presentational Forge form — exported for UI tests without fetch. */
 export function WorkspacePanelView({
   draft,
   poll,
+  credentialOptions = [],
+  githubAppConfigured = false,
+  githubAppTokenStatus,
   busy,
   error,
   savedHint,
@@ -727,6 +379,11 @@ export function WorkspacePanelView({
 }: {
   draft: WorkspaceBinding;
   poll: WebhookPollConfig;
+  /** OpenShell providers that can supply a host poll token. */
+  credentialOptions?: OpenShellProviderView[];
+  /** True when shipped github-app has App id + key + installation. */
+  githubAppConfigured?: boolean;
+  githubAppTokenStatus?: GitHubAppTokenStatus;
   busy?: boolean;
   error?: string | null;
   savedHint?: string | null;
@@ -734,12 +391,47 @@ export function WorkspacePanelView({
   onPollChange: (next: WebhookPollConfig) => void;
   onSave: () => void;
 }) {
+  const selectedName = (poll.provider_name ?? "").trim();
+  const selected = credentialOptions.find((p) => p.name === selectedName);
+  const selectedReady = forgePollCredentialReady(selected, githubAppConfigured);
+  const hasCandidates = credentialOptions.length > 0;
+  const tokenError = githubAppTokenStatus?.error?.trim();
+
+  let authLabel = "credential not selected";
+  let authClass = "openshell-health-bad";
+  let authDetail =
+    "Choose which OpenShell provider supplies the host poll token. Nothing is inferred.";
+  if (!hasCandidates) {
+    authLabel = "no GitHub credentials";
+    authDetail =
+      "Create a provider under OpenShell → Providers: either shipped type github-app (App ID, private key, installation — mints GH_TOKEN) or type github with a pasted GH_TOKEN (PAT). Then select it here.";
+  } else if (selectedName && !selected) {
+    authLabel = "selected provider missing";
+    authDetail = `Provider “${selectedName}” is not on the board anymore. Pick another credential or recreate it under OpenShell → Providers.`;
+  } else if (selected && selectedReady) {
+    authLabel = `${selected.name} ready`;
+    authClass = "openshell-health-ok";
+    authDetail =
+      selected.type === "github-app" || selected.name === "github-app"
+        ? "App installation token will be minted on each poll tick when needed."
+        : "Sealed GH_TOKEN on this provider will be used for poll REST calls.";
+  } else if (selected && !selectedReady) {
+    authLabel = `${selected.name} not ready`;
+    authDetail =
+      selected.type === "github-app" || selected.name === "github-app"
+        ? "Finish github-app: App ID, private key, and installation under OpenShell → Providers."
+        : "This provider has no sealed GH_TOKEN yet — edit it under OpenShell → Providers and paste a token.";
+  }
+
   return (
     <section aria-labelledby="workspace-title" data-testid="workspace-panel">
       <h2 id="workspace-title">Forge</h2>
       <p className="dim">
         Forge provider and webhook poll. Work remotes live on each card’s{" "}
         <code>pull_request</code> (url / base / head) after the agent reports.
+        Polling needs an explicit GitHub credential provider — App-minted{" "}
+        <code>github-app</code> or a normal <code>github</code> /{" "}
+        <code>GH_TOKEN</code> row.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -748,6 +440,30 @@ export function WorkspacePanelView({
           {savedHint}
         </p>
       )}
+
+      <div className="openshell-health" data-testid="workspace-poll-auth">
+        <div className="openshell-health-row">
+          <span>Poll credential</span>
+          <strong className={authClass} data-testid="workspace-poll-auth-label">
+            {authLabel}
+          </strong>
+        </div>
+        <p className="dim" data-testid="workspace-poll-auth-detail">
+          {authDetail}{" "}
+          <a href="/settings/openshell/providers">OpenShell → Providers</a>
+        </p>
+        {poll.enabled && (!selectedName || !selectedReady) && (
+          <p className="err" data-testid="workspace-poll-auth-warn">
+            Polling is enabled but will skip until you select a ready credential
+            and save.
+          </p>
+        )}
+        {selected?.type === "github-app" && tokenError && (
+          <p className="err" data-testid="workspace-poll-auth-error">
+            Last mint error: {tokenError}
+          </p>
+        )}
+      </div>
 
       <form
         className="sandbox-profile-form workspace-form"
@@ -758,7 +474,7 @@ export function WorkspacePanelView({
         }}
       >
         <label>
-          Provider
+          Forge
           <select
             className="search-input"
             value={draft.forge}
@@ -787,6 +503,41 @@ export function WorkspacePanelView({
             Poll GitHub on an interval (in addition to webhooks)
           </label>
           <label>
+            Credential provider
+            <select
+              className="search-input"
+              value={selectedName}
+              disabled={busy || !hasCandidates}
+              onChange={(e) =>
+                onPollChange({
+                  ...poll,
+                  provider_name: e.target.value.trim() || null,
+                })
+              }
+              data-testid="workspace-poll-credential"
+            >
+              <option value="">
+                {hasCandidates
+                  ? "Select a credential…"
+                  : "No GitHub credentials yet — create one first"}
+              </option>
+              {credentialOptions.map((p) => {
+                const ready = forgePollCredentialReady(p, githubAppConfigured);
+                return (
+                  <option key={p.name} value={p.name}>
+                    {p.name} ({p.type})
+                    {ready ? "" : " — not ready"}
+                  </option>
+                );
+              })}
+            </select>
+            <span className="dim sandbox-field-hint">
+              Required when polling is on. Use <code>github-app</code> for
+              App-minted tokens, or a <code>github</code> provider with a
+              pasted <code>GH_TOKEN</code>.
+            </span>
+          </label>
+          <label>
             Interval (seconds)
             <input
               className="search-input"
@@ -804,8 +555,8 @@ export function WorkspacePanelView({
               data-testid="workspace-poll-interval"
             />
             <span className="dim sandbox-field-hint">
-              Minimum 15s. Uses the GitHub App installation token. Completes
-              merged Review cards and advances main when the tip moves.
+              Minimum 15s. Completes merged Review cards and advances main when
+              the tip moves.
             </span>
           </label>
         </fieldset>
@@ -823,6 +574,10 @@ export function WorkspacePanelView({
 function WorkspacePanel() {
   const [draft, setDraft] = useState<WorkspaceBinding>(emptyWorkspace);
   const [poll, setPoll] = useState<WebhookPollConfig>(emptyWebhookPoll);
+  const [providers, setProviders] = useState<OpenShellProviderView[]>([]);
+  const [githubAppConfigured, setGithubAppConfigured] = useState(false);
+  const [githubAppTokenStatus, setGithubAppTokenStatus] =
+    useState<GitHubAppTokenStatus>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -830,15 +585,24 @@ function WorkspacePanel() {
 
   const refresh = useCallback(() => {
     setLoading(true);
-    return Promise.all([api.getWorkspace(), api.getWebhookPoll()])
-      .then(([ws, wp]) => {
+    return Promise.all([
+      api.getWorkspace(),
+      api.getWebhookPoll(),
+      api.listOpenShellProviders().catch(() => ({ providers: [], gateway_reachable: false })),
+      api.getGitHubApp().catch(() => null),
+    ])
+      .then(([ws, wp, os, gh]) => {
         setDraft({
           forge: ws.forge || "github",
         });
         setPoll({
           enabled: !!wp.enabled,
           interval_secs: wp.interval_secs || 60,
+          provider_name: wp.provider_name?.trim() || null,
         });
+        setProviders(os.providers ?? []);
+        setGithubAppConfigured(!!gh?.token_status?.configured);
+        setGithubAppTokenStatus(gh?.token_status);
         setError(null);
       })
       .catch((e) => setError(String(e)))
@@ -862,6 +626,9 @@ function WorkspacePanel() {
     <WorkspacePanelView
       draft={draft}
       poll={poll}
+      credentialOptions={forgePollCredentialOptions(providers)}
+      githubAppConfigured={githubAppConfigured}
+      githubAppTokenStatus={githubAppTokenStatus}
       busy={busy}
       error={error}
       savedHint={savedHint}
@@ -883,6 +650,7 @@ function WorkspacePanel() {
         const pollBody: WebhookPollConfig = {
           enabled: poll.enabled,
           interval_secs: Math.max(15, Number(poll.interval_secs) || 60),
+          provider_name: poll.provider_name?.trim() || null,
         };
         Promise.all([api.putWorkspace(body), api.putWebhookPoll(pollBody)])
           .then(([saved, savedPoll]) => {
@@ -892,8 +660,10 @@ function WorkspacePanel() {
             setPoll({
               enabled: !!savedPoll.enabled,
               interval_secs: savedPoll.interval_secs || 60,
+              provider_name: savedPoll.provider_name?.trim() || null,
             });
             setSavedHint("Saved. Forge and poll settings update board state.");
+            return refresh();
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));

@@ -1,19 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import type {
+  GitHubAppInstallation,
   OpenShellProviderTypeEntry,
   OpenShellProviderView,
   OpenShellProviderWrite,
 } from "../types.js";
 
-/** Fixed OpenShell provider name filled by Settings → GitHub App. */
-const GITHUB_APP_PROVIDER_NAME = "github";
+/** Shipped App-minted provider instance / type id. */
+export const GITHUB_APP_PROVIDER_NAME = "github-app";
+export const GITHUB_APP_PROVIDER_TYPE = "github-app";
+const CRED_PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY";
+const CONFIG_INSTALLATION_ID = "GITHUB_INSTALLATION_ID";
 
 /** Gateway builtin without board YAML — keep project/location fields. */
 const VERTEX_FORM_KEYS = ["VERTEX_AI_PROJECT_ID", "VERTEX_AI_LOCATION"];
 
-function isGitHubAppManagedProvider(name: string, type?: string): boolean {
-  return name.trim() === GITHUB_APP_PROVIDER_NAME && (type == null || type === "github");
+function isGitHubAppType(type?: string): boolean {
+  return (type ?? "").trim() === GITHUB_APP_PROVIDER_TYPE;
 }
 
 function formConfigKeysForType(
@@ -22,6 +26,23 @@ function formConfigKeysForType(
 ): string[] {
   if (profile?.form_config_keys?.length) return profile.form_config_keys;
   if (typeId === "google-vertex-ai") return VERTEX_FORM_KEYS;
+  return [];
+}
+
+/** Credential fields shown in the form (mint-managed GH_TOKEN omitted for github-app). */
+function formCredentialKeys(
+  typeId: string,
+  profile?: OpenShellProviderTypeEntry,
+): string[] {
+  if (isGitHubAppType(typeId)) {
+    return [CRED_PRIVATE_KEY];
+  }
+  if (profile?.credential_env_vars?.length) {
+    return profile.credential_env_vars;
+  }
+  if (typeId === "github") {
+    return ["GH_TOKEN"];
+  }
   return [];
 }
 
@@ -40,6 +61,8 @@ export function OpenShellProvidersPanelView({
   onEdit,
   onDelete,
   onSync,
+  installations = [],
+  onRefreshInstallations,
 }: {
   providers: OpenShellProviderView[];
   gatewayReachable: boolean;
@@ -54,38 +77,39 @@ export function OpenShellProvidersPanelView({
   onEdit: (p: OpenShellProviderView) => void;
   onDelete: (name: string) => void;
   onSync: () => void;
+  installations?: GitHubAppInstallation[];
+  onRefreshInstallations?: () => void;
 }) {
   const typeOptions = profiles.length
     ? profiles.map((p) => ({ id: p.id, label: p.display_name || p.id }))
     : [
+        { id: "github-app", label: "GitHub Application Access Token" },
         { id: "github", label: "github" },
         { id: "google-vertex-ai", label: "google-vertex-ai" },
         { id: "cursor-agent", label: "cursor-agent" },
         { id: "antigravity", label: "antigravity" },
       ];
-  // Prefer a non-App type for "Add" — github/GH_TOKEN is owned by GitHub App.
   const defaultAddType =
-    typeOptions.find((t) => t.id !== "github")?.id ??
+    typeOptions.find((t) => t.id === "google-vertex-ai")?.id ??
+    typeOptions.find((t) => t.id !== GITHUB_APP_PROVIDER_TYPE)?.id ??
     typeOptions[0]?.id ??
     "google-vertex-ai";
   const selectedProfile = draft
     ? profiles.find((p) => p.id === draft.type)
     : undefined;
-  const draftManaged = draft
-    ? isGitHubAppManagedProvider(draft.name, draft.type)
-    : false;
-  // App-managed github is always GH_TOKEN only (never GITHUB_TOKEN).
-  const credKeys = draftManaged
-    ? ["GH_TOKEN"]
-    : selectedProfile?.credential_env_vars?.length
-      ? selectedProfile.credential_env_vars
-      : draft?.type === "github"
-        ? ["GH_TOKEN"]
-        : [];
-  const configKeys = draft
-    ? formConfigKeysForType(draft.type, selectedProfile)
+  const draftIsGitHubApp = draft ? isGitHubAppType(draft.type) : false;
+  const credKeys = draft
+    ? formCredentialKeys(draft.type, selectedProfile)
     : [];
-  const knownConfig = new Set(configKeys);
+  const configKeys = draft
+    ? formConfigKeysForType(draft.type, selectedProfile).filter(
+        (k) => !(draftIsGitHubApp && k === CONFIG_INSTALLATION_ID && installations.length > 0),
+      )
+    : [];
+  const knownConfig = new Set([
+    ...configKeys,
+    ...(draftIsGitHubApp ? [CONFIG_INSTALLATION_ID] : []),
+  ]);
   const extraConfigEntries = Object.entries(draft?.config ?? {}).filter(
     ([k]) => !knownConfig.has(k),
   );
@@ -103,9 +127,9 @@ export function OpenShellProvidersPanelView({
           applies to the gateway when reachable; Sync all imports missing
           provider types, applies credentials, and attaches listed providers to
           a running cockpit seat. Which providers attach on create is chosen per{" "}
-          <strong>Sandbox spec</strong>, not here. Provider <code>github</code>{" "}
-          is owned by Settings → GitHub App (<code>GH_TOKEN</code>); do not
-          manage those credentials by hand.
+          <strong>Sandbox spec</strong>. Ship type{" "}
+          <code>{GITHUB_APP_PROVIDER_TYPE}</code> mints sandbox{" "}
+          <code>GH_TOKEN</code> from a GitHub App.
         </p>
       </div>
 
@@ -154,66 +178,68 @@ export function OpenShellProvidersPanelView({
       ) : (
         <ul className="openshell-provider-list" data-testid="openshell-provider-list">
           {providers.map((p) => {
-            const managed = isGitHubAppManagedProvider(p.name, p.type);
-            const secretKeys =
-              (p.credential_keys ?? []).length > 0
-                ? (p.credential_keys ?? [])
-                : managed
-                  ? ["GH_TOKEN"]
-                  : [];
+            const secretKeys = (p.credential_keys ?? []).filter(
+              (k) => k !== "GH_TOKEN" || p.type !== GITHUB_APP_PROVIDER_TYPE,
+            );
+            const displaySecrets =
+              p.type === GITHUB_APP_PROVIDER_TYPE
+                ? [
+                    ...secretKeys.filter((k) => k !== "GH_TOKEN"),
+                    ...(p.credential_keys?.includes("GH_TOKEN")
+                      ? ["GH_TOKEN (minted)"]
+                      : []),
+                  ]
+                : secretKeys;
             return (
-            <li key={p.name} className="openshell-provider-row" data-testid={`openshell-provider-${p.name}`}>
-              <div className="openshell-provider-main">
-                <strong>{p.name}</strong>
-                <span className="dim">{p.type}</span>
-                <span
-                  className={
-                    p.gateway_synced === true
-                      ? "openshell-health-ok"
-                      : p.gateway_synced === false
-                        ? "openshell-health-bad"
-                        : "dim"
-                  }
-                  data-testid={`openshell-provider-sync-${p.name}`}
-                >
-                  {p.gateway_synced === true
-                    ? "on gateway"
-                    : p.gateway_synced === false
-                      ? "not on gateway"
-                      : "sync unknown"}
-                </span>
-              </div>
-              <div
-                className="openshell-provider-meta dim"
-                data-testid={
-                  managed ? `openshell-provider-managed-${p.name}` : undefined
-                }
+              <li
+                key={p.name}
+                className="openshell-provider-row"
+                data-testid={`openshell-provider-${p.name}`}
               >
-                {p.has_credentials || p.has_refresh || managed
-                  ? `secrets: ${secretKeys.join(", ") || "refresh"}${
-                      managed ? " · GitHub App" : ""
-                    }`
-                  : "no secrets"}
-              </div>
-              <div className="btns">
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => onEdit(p)}
-                  data-testid={`openshell-provider-edit-${p.name}`}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => onDelete(p.name)}
-                  data-testid={`openshell-provider-delete-${p.name}`}
-                >
-                  Delete
-                </button>
-              </div>
-            </li>
+                <div className="openshell-provider-main">
+                  <strong>{p.name}</strong>
+                  <span className="dim">{p.type}</span>
+                  <span
+                    className={
+                      p.gateway_synced === true
+                        ? "openshell-health-ok"
+                        : p.gateway_synced === false
+                          ? "openshell-health-bad"
+                          : "dim"
+                    }
+                    data-testid={`openshell-provider-sync-${p.name}`}
+                  >
+                    {p.gateway_synced === true
+                      ? "on gateway"
+                      : p.gateway_synced === false
+                        ? "not on gateway"
+                        : "sync unknown"}
+                  </span>
+                </div>
+                <div className="openshell-provider-meta dim">
+                  {p.has_credentials || p.has_refresh
+                    ? `secrets: ${displaySecrets.join(", ") || "refresh"}`
+                    : "no secrets"}
+                </div>
+                <div className="btns">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onEdit(p)}
+                    data-testid={`openshell-provider-edit-${p.name}`}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onDelete(p.name)}
+                    data-testid={`openshell-provider-delete-${p.name}`}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </li>
             );
           })}
         </ul>
@@ -233,7 +259,7 @@ export function OpenShellProvidersPanelView({
             <input
               className="search-input"
               value={draft.name}
-              disabled={busy || draftManaged}
+              disabled={busy}
               onChange={(e) => onDraftChange({ ...draft, name: e.target.value })}
               data-testid="openshell-provider-field-name"
             />
@@ -243,8 +269,18 @@ export function OpenShellProvidersPanelView({
             <select
               className="search-input"
               value={draft.type}
-              disabled={busy || draftManaged}
-              onChange={(e) => onDraftChange({ ...draft, type: e.target.value })}
+              disabled={busy}
+              onChange={(e) => {
+                const type = e.target.value;
+                onDraftChange({
+                  ...draft,
+                  type,
+                  name:
+                    isGitHubAppType(type) && !draft.name.trim()
+                      ? GITHUB_APP_PROVIDER_NAME
+                      : draft.name,
+                });
+              }}
               data-testid="openshell-provider-field-type"
             >
               {typeOptions.map((t) => (
@@ -261,14 +297,9 @@ export function OpenShellProvidersPanelView({
                 className="search-input"
                 type="password"
                 autoComplete="off"
-                placeholder={
-                  draftManaged
-                    ? "set by Settings → GitHub App (Mint / sync)"
-                    : "write-only — leave blank to keep existing"
-                }
+                placeholder="write-only — leave blank to keep existing"
                 value={draft.credentials?.[key] ?? ""}
-                disabled={busy || draftManaged}
-                readOnly={draftManaged}
+                disabled={busy}
                 onChange={(e) =>
                   onDraftChange({
                     ...draft,
@@ -277,16 +308,6 @@ export function OpenShellProvidersPanelView({
                 }
                 data-testid={`openshell-provider-cred-${key}`}
               />
-              {draftManaged && (
-                <span
-                  className="dim sandbox-field-hint"
-                  data-testid="openshell-provider-app-managed-note"
-                >
-                  Passed into the sandbox as <code>{key}</code>. Value comes
-                  from the App installation token — mint under Settings → GitHub
-                  App.
-                </span>
-              )}
             </label>
           ))}
           {configKeys.map((key) => (
@@ -306,6 +327,80 @@ export function OpenShellProvidersPanelView({
               />
             </label>
           ))}
+          {draftIsGitHubApp && (
+            <>
+              <label>
+                {CONFIG_INSTALLATION_ID}
+                {installations.length > 0 ? (
+                  <select
+                    className="search-input"
+                    value={draft.config?.[CONFIG_INSTALLATION_ID] ?? ""}
+                    disabled={busy}
+                    onChange={(e) =>
+                      onDraftChange({
+                        ...draft,
+                        config: {
+                          ...(draft.config ?? {}),
+                          [CONFIG_INSTALLATION_ID]: e.target.value,
+                        },
+                      })
+                    }
+                    data-testid="openshell-provider-config-GITHUB_INSTALLATION_ID"
+                  >
+                    <option value="">Select installation…</option>
+                    {installations.map((inst) => (
+                      <option key={inst.id} value={String(inst.id)}>
+                        {inst.account_login} ({inst.account_type || "account"}) #
+                        {inst.id}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="search-input"
+                    value={draft.config?.[CONFIG_INSTALLATION_ID] ?? ""}
+                    disabled={busy}
+                    placeholder="numeric installation id"
+                    onChange={(e) =>
+                      onDraftChange({
+                        ...draft,
+                        config: {
+                          ...(draft.config ?? {}),
+                          [CONFIG_INSTALLATION_ID]: e.target.value,
+                        },
+                      })
+                    }
+                    data-testid="openshell-provider-config-GITHUB_INSTALLATION_ID"
+                  />
+                )}
+                <span className="dim sandbox-field-hint">
+                  Install the App on GitHub, then Refresh installations and pick
+                  one. Save/Sync mints <code>GH_TOKEN</code>.
+                </span>
+              </label>
+              <div className="btns" style={{ marginTop: 0 }}>
+                <a
+                  className="button-link"
+                  href="https://github.com/settings/installations"
+                  target="_blank"
+                  rel="noreferrer"
+                  data-testid="github-app-install-link"
+                >
+                  Install / manage on GitHub
+                </a>
+                {onRefreshInstallations && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={onRefreshInstallations}
+                    data-testid="github-app-refresh-installations"
+                  >
+                    Refresh installations
+                  </button>
+                )}
+              </div>
+            </>
+          )}
           {extraConfigEntries.map(([key, value]) => (
             <label key={`extra-${key}`}>
               {key} (extra)
@@ -361,6 +456,7 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+  const [installations, setInstallations] = useState<GitHubAppInstallation[]>([]);
 
   const refresh = useCallback(() => {
     return api
@@ -373,6 +469,15 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
       .catch((e) => setError(String(e)));
   }, []);
 
+  const refreshInstallations = useCallback(() => {
+    return api
+      .getGitHubApp()
+      .then((cfg) => {
+        setInstallations(cfg.installations ?? []);
+      })
+      .catch((e) => setError(String(e)));
+  }, []);
+
   useEffect(() => {
     refresh();
     api
@@ -380,6 +485,12 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
       .then(setProfiles)
       .catch(() => setProfiles([]));
   }, [refresh]);
+
+  useEffect(() => {
+    if (draft && isGitHubAppType(draft.type)) {
+      void refreshInstallations();
+    }
+  }, [draft?.type, refreshInstallations]);
 
   const stripEmptyCreds = (body: OpenShellProviderWrite): OpenShellProviderWrite => {
     const credentials = Object.fromEntries(
@@ -402,6 +513,11 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
       error={error}
       hint={hint}
       draft={draft}
+      installations={installations}
+      onRefreshInstallations={() => {
+        setBusy(true);
+        refreshInstallations().finally(() => setBusy(false));
+      }}
       onDraftChange={setDraft}
       onCancelEdit={() => {
         setDraft(null);
@@ -446,6 +562,7 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
           .finally(() => setBusy(false));
       }}
       onDelete={(name) => {
+        if (!window.confirm(`Delete provider ${name}?`)) return;
         setBusy(true);
         setError(null);
         setHint(null);
@@ -469,7 +586,9 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
         api
           .syncOpenShellProviders()
           .then((out) => {
-            const errBits = out.errors.map((e) => `${e.name}: ${e.error}`).join("; ");
+            const errBits = out.errors
+              .map((e) => `${e.name}: ${e.error}`)
+              .join("; ");
             setHint(
               errBits
                 ? `Synced ${out.applied.length}; errors: ${errBits}`

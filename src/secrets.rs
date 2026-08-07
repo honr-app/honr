@@ -354,6 +354,9 @@ pub fn mtls_status_from_sealed(sealed: Option<&str>) -> OpenShellMtlsStatus {
     }
 }
 
+/// Seal a legacy board-level App blob (migration fixtures / round-trip tests).
+/// Live material is sealed on the `github-app` provider credentials map.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn seal_github_app(bundle: &GitHubAppBundle) -> Result<String, SecretsError> {
     bundle.validate_for_seal()?;
     let json = serde_json::to_vec(bundle)?;

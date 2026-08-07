@@ -601,6 +601,14 @@ impl Board {
         }
         // Sandbox specs are operator-owned (Settings → Sandbox specs). Do not
         // invent default/cockpit entries on boot.
+        if board.migrate_github_app_provider_name() {
+            tracing::info!("migrated GitHub App provider attach name github → github-app");
+            board.flush();
+        }
+        if board.migrate_github_app_sealed_into_provider() {
+            tracing::info!("migrated GitHub App sealed credentials onto provider github-app");
+            board.flush();
+        }
         if board.prune_sandbox_attach_names() {
             tracing::info!("pruned sandbox attach names that are not in Providers");
             board.flush();
@@ -660,6 +668,14 @@ impl Board {
         }
         // Sandbox specs are operator-owned (Settings → Sandbox specs). Do not
         // invent default/cockpit entries on boot.
+        if board.migrate_github_app_provider_name() {
+            tracing::info!("migrated GitHub App provider attach name github → github-app");
+            board.flush();
+        }
+        if board.migrate_github_app_sealed_into_provider() {
+            tracing::info!("migrated GitHub App sealed credentials onto provider github-app");
+            board.flush();
+        }
         if board.prune_sandbox_attach_names() {
             tracing::info!("pruned sandbox attach names that are not in Providers");
             board.flush();
@@ -1897,6 +1913,177 @@ impl Board {
     // Settings (minimal defaults). Cockpit uses the global default unless an
     // explicit cockpit profile id is set.
 
+    /// Rename App-managed OpenShell provider `github` → `github-app`, rewrite
+    /// type builtin `github` → shipped `github-app`, and rewrite sandbox
+    /// `provider_names` so attaches survive the product rename.
+    ///
+    /// Returns true when durable state changed.
+    pub fn migrate_github_app_provider_name(&self) -> bool {
+        use crate::github_app::{
+            LEGACY_BUILTIN_TYPE, LEGACY_PROVIDER_NAME, PROVIDER_NAME, PROVIDER_TYPE,
+        };
+
+        let changed = {
+            let mut s = self.state.write();
+            let mut changed = false;
+
+            let has_new = s
+                .openshell_providers
+                .iter()
+                .any(|p| p.name == PROVIDER_NAME);
+            let legacy_idx = s.openshell_providers.iter().position(|p| {
+                p.name == LEGACY_PROVIDER_NAME
+                    && (p.provider_type == LEGACY_BUILTIN_TYPE
+                        || p.provider_type == PROVIDER_TYPE)
+            });
+
+            if let Some(idx) = legacy_idx {
+                if has_new {
+                    // Prefer the already-renamed row; drop the legacy duplicate.
+                    s.openshell_providers.remove(idx);
+                    changed = true;
+                } else {
+                    s.openshell_providers[idx].name = PROVIDER_NAME.into();
+                    s.openshell_providers[idx].provider_type = PROVIDER_TYPE.into();
+                    changed = true;
+                }
+            }
+
+            for p in &mut s.openshell_providers {
+                if p.name == PROVIDER_NAME && p.provider_type == LEGACY_BUILTIN_TYPE {
+                    p.provider_type = PROVIDER_TYPE.into();
+                    changed = true;
+                }
+            }
+
+            for profile in s.sandbox_profiles.values_mut() {
+                let mut rewritten = false;
+                for name in &mut profile.provider_names {
+                    if name == LEGACY_PROVIDER_NAME {
+                        *name = PROVIDER_NAME.into();
+                        rewritten = true;
+                    }
+                }
+                if rewritten {
+                    profile.provider_names.sort();
+                    profile.provider_names.dedup();
+                    changed = true;
+                }
+            }
+            changed
+        };
+        if changed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        changed
+    }
+
+    /// Move legacy board `github_app_sealed` / `github_app_installation_id`
+    /// into the `github-app` OpenShell provider row, then clear the legacy fields.
+    ///
+    /// Returns true when durable state changed.
+    pub fn migrate_github_app_sealed_into_provider(&self) -> bool {
+        use crate::github_app::{
+            CONFIG_APP_ID, CONFIG_INSTALLATION_ID, CRED_CLIENT_ID, CRED_CLIENT_SECRET,
+            CRED_PRIVATE_KEY, CRED_WEBHOOK_SECRET, CREDENTIAL_KEY, PROVIDER_NAME, PROVIDER_TYPE,
+        };
+        use crate::secrets::{open_string_map, seal_string_map};
+
+        let legacy_sealed = self.github_app_sealed();
+        let legacy_install = {
+            let s = self.state.read();
+            s.github_app_installation_id
+        };
+        if legacy_sealed.is_none() && legacy_install.is_none() {
+            return false;
+        }
+
+        let bundle =
+            crate::secrets::github_app_view_from_sealed(legacy_sealed.as_deref());
+
+        let existing = self
+            .openshell_providers()
+            .into_iter()
+            .find(|p| p.name == PROVIDER_NAME);
+        let refresh = existing.as_ref().and_then(|e| e.refresh.clone());
+
+        let mut config = existing
+            .as_ref()
+            .map(|e| e.config.clone())
+            .unwrap_or_default();
+        if let Some(ref b) = bundle {
+            if !b.app_id.trim().is_empty() {
+                config.insert(CONFIG_APP_ID.into(), b.app_id.trim().to_string());
+            }
+        }
+        if let Some(id) = legacy_install.filter(|&n| n > 0) {
+            config.insert(CONFIG_INSTALLATION_ID.into(), id.to_string());
+        }
+
+        let mut map = existing
+            .as_ref()
+            .and_then(|e| e.credentials_sealed.as_deref())
+            .and_then(|s| open_string_map(s).ok())
+            .unwrap_or_default();
+        if let Some(b) = bundle {
+            if !b.private_key_pem.trim().is_empty() {
+                map.insert(CRED_PRIVATE_KEY.into(), b.private_key_pem);
+            }
+            if !b.webhook_secret.is_empty() {
+                map.insert(CRED_WEBHOOK_SECRET.into(), b.webhook_secret);
+            }
+            if !b.client_id.trim().is_empty() {
+                map.insert(CRED_CLIENT_ID.into(), b.client_id.trim().to_string());
+            }
+            if !b.client_secret.is_empty() {
+                map.insert(CRED_CLIENT_SECRET.into(), b.client_secret);
+            }
+        }
+
+        let credentials_sealed = if map.is_empty() {
+            existing
+                .as_ref()
+                .and_then(|e| e.credentials_sealed.clone())
+        } else {
+            match seal_string_map(&map) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "migrate github-app sealed into provider: seal failed");
+                    return false;
+                }
+            }
+        };
+        let mut credential_keys: Vec<String> = map.keys().cloned().collect();
+        if credential_keys.is_empty() {
+            if let Some(ref e) = existing {
+                credential_keys = e.credential_keys.clone();
+            }
+        }
+        let _ = CREDENTIAL_KEY; // minted token key preserved when already in map
+        credential_keys.sort();
+        credential_keys.dedup();
+
+        self.upsert_openshell_provider(
+            OpenShellProviderDesired {
+                name: PROVIDER_NAME.into(),
+                provider_type: PROVIDER_TYPE.into(),
+                config,
+                credentials_sealed,
+                credential_keys,
+                refresh,
+            }
+            .normalized(),
+        );
+
+        {
+            let mut s = self.state.write();
+            s.github_app_sealed = None;
+            s.github_app_installation_id = None;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        true
+    }
+
     /// Drop attach names that are not in the Providers catalog.
     /// Keeps Sandbox specs honest — no ghost attach wishlist.
     pub fn prune_sandbox_attach_names(&self) -> bool {
@@ -2099,39 +2286,198 @@ impl Board {
             .filter(|s| !s.is_empty())
     }
 
-    /// Replace or clear the sealed GitHub App blob. `None` / empty clears.
-    pub fn set_github_app_sealed(&self, sealed: Option<String>) -> Option<String> {
-        let stored = sealed
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        {
-            let mut s = self.state.write();
-            s.github_app_sealed = stored.clone();
-        }
-        self.dirty.store(true, Ordering::Relaxed);
-        stored
-    }
-
     pub fn github_app_status(&self) -> crate::secrets::GitHubAppStatus {
-        crate::secrets::github_app_status_from_sealed(self.github_app_sealed().as_deref())
+        crate::github_app::status_from_board(self)
     }
 
-    /// Decrypt sealed GitHub App credentials (in-process only).
+    /// App credentials from the `github-app` provider row (legacy board seal fallback).
     pub fn github_app_bundle(&self) -> Option<crate::secrets::GitHubAppBundle> {
+        if let Some(b) = crate::github_app::bundle_from_provider(self) {
+            return Some(b);
+        }
         crate::secrets::github_app_view_from_sealed(self.github_app_sealed().as_deref())
     }
 
     pub fn github_app_installation_id(&self) -> Option<u64> {
+        if let Some(id) = crate::github_app::installation_id_from_provider(self) {
+            return Some(id);
+        }
         self.state.read().github_app_installation_id
     }
 
     pub fn set_github_app_installation_id(&self, id: Option<u64>) {
+        use crate::github_app::{CONFIG_INSTALLATION_ID, PROVIDER_NAME, PROVIDER_TYPE};
+        let existing = self
+            .openshell_providers()
+            .into_iter()
+            .find(|p| p.name == PROVIDER_NAME);
+        let mut config = existing
+            .as_ref()
+            .map(|e| e.config.clone())
+            .unwrap_or_default();
+        match id.filter(|&n| n > 0) {
+            Some(n) => {
+                config.insert(CONFIG_INSTALLATION_ID.into(), n.to_string());
+            }
+            None => {
+                config.remove(CONFIG_INSTALLATION_ID);
+            }
+        }
+        self.upsert_openshell_provider(
+            OpenShellProviderDesired {
+                name: PROVIDER_NAME.into(),
+                provider_type: existing
+                    .as_ref()
+                    .map(|e| e.provider_type.clone())
+                    .unwrap_or_else(|| PROVIDER_TYPE.into()),
+                config,
+                credentials_sealed: existing.as_ref().and_then(|e| e.credentials_sealed.clone()),
+                credential_keys: existing
+                    .as_ref()
+                    .map(|e| e.credential_keys.clone())
+                    .unwrap_or_default(),
+                refresh: existing.and_then(|e| e.refresh),
+            }
+            .normalized(),
+        );
+        // Clear legacy field if still set.
         {
             let mut s = self.state.write();
-            s.github_app_installation_id = id.filter(|&n| n > 0);
+            if s.github_app_installation_id.is_some() {
+                s.github_app_installation_id = None;
+            }
+        }
+        // Force remint on next ensure.
+        *self.github_app_token_cache.lock() = crate::github_app::TokenCache::default();
+    }
+
+    /// Write App bundle fields onto the `github-app` provider sealed map + config.
+    pub fn set_github_app_bundle(
+        &self,
+        bundle: &crate::secrets::GitHubAppBundle,
+    ) -> Result<(), String> {
+        use crate::github_app::{
+            CONFIG_APP_ID, CRED_CLIENT_ID, CRED_CLIENT_SECRET, CRED_PRIVATE_KEY,
+            CRED_WEBHOOK_SECRET, PROVIDER_NAME, PROVIDER_TYPE,
+        };
+        use crate::secrets::{open_string_map, seal_string_map};
+
+        bundle
+            .validate_for_seal()
+            .map_err(|e| format!("GitHub App: {e}"))?;
+
+        let existing = self
+            .openshell_providers()
+            .into_iter()
+            .find(|p| p.name == PROVIDER_NAME);
+        let mut config = existing
+            .as_ref()
+            .map(|e| e.config.clone())
+            .unwrap_or_default();
+        config.insert(CONFIG_APP_ID.into(), bundle.app_id.trim().to_string());
+
+        let mut map = existing
+            .as_ref()
+            .and_then(|e| e.credentials_sealed.as_deref())
+            .and_then(|s| open_string_map(s).ok())
+            .unwrap_or_default();
+        map.insert(CRED_PRIVATE_KEY.into(), bundle.private_key_pem.clone());
+        if bundle.webhook_secret.is_empty() {
+            map.remove(CRED_WEBHOOK_SECRET);
+        } else {
+            map.insert(CRED_WEBHOOK_SECRET.into(), bundle.webhook_secret.clone());
+        }
+        if bundle.client_id.trim().is_empty() {
+            map.remove(CRED_CLIENT_ID);
+        } else {
+            map.insert(CRED_CLIENT_ID.into(), bundle.client_id.trim().to_string());
+        }
+        if bundle.client_secret.is_empty() {
+            map.remove(CRED_CLIENT_SECRET);
+        } else {
+            map.insert(CRED_CLIENT_SECRET.into(), bundle.client_secret.clone());
+        }
+
+        let credential_keys: Vec<String> = map.keys().cloned().collect();
+        let credentials_sealed = Some(
+            seal_string_map(&map).map_err(|e| format!("seal GitHub App credentials: {e}"))?,
+        );
+
+        self.upsert_openshell_provider(
+            OpenShellProviderDesired {
+                name: PROVIDER_NAME.into(),
+                provider_type: PROVIDER_TYPE.into(),
+                config,
+                credentials_sealed,
+                credential_keys,
+                refresh: existing.and_then(|e| e.refresh),
+            }
+            .normalized(),
+        );
+        // Drop legacy board seal once material lives on the provider.
+        if self.state.read().github_app_sealed.is_some() {
+            let mut s = self.state.write();
+            s.github_app_sealed = None;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Clear App material from the provider row (and legacy board fields).
+    pub fn clear_github_app(&self) {
+        use crate::github_app::{
+            CONFIG_APP_ID, CONFIG_INSTALLATION_ID, CRED_CLIENT_ID, CRED_CLIENT_SECRET,
+            CRED_PRIVATE_KEY, CRED_WEBHOOK_SECRET, CREDENTIAL_KEY, PROVIDER_NAME,
+        };
+        use crate::secrets::{open_string_map, seal_string_map};
+
+        if let Some(existing) = self
+            .openshell_providers()
+            .into_iter()
+            .find(|p| p.name == PROVIDER_NAME)
+        {
+            let mut config = existing.config;
+            config.remove(CONFIG_APP_ID);
+            config.remove(CONFIG_INSTALLATION_ID);
+            let mut map = existing
+                .credentials_sealed
+                .as_deref()
+                .and_then(|s| open_string_map(s).ok())
+                .unwrap_or_default();
+            for k in [
+                CRED_PRIVATE_KEY,
+                CRED_WEBHOOK_SECRET,
+                CRED_CLIENT_ID,
+                CRED_CLIENT_SECRET,
+                CREDENTIAL_KEY,
+                "GITHUB_TOKEN",
+            ] {
+                map.remove(k);
+            }
+            let credential_keys: Vec<String> = map.keys().cloned().collect();
+            let credentials_sealed = if map.is_empty() {
+                None
+            } else {
+                seal_string_map(&map).ok()
+            };
+            self.upsert_openshell_provider(
+                OpenShellProviderDesired {
+                    name: PROVIDER_NAME.into(),
+                    provider_type: existing.provider_type,
+                    config,
+                    credentials_sealed,
+                    credential_keys,
+                    refresh: existing.refresh,
+                }
+                .normalized(),
+            );
+        }
+        {
+            let mut s = self.state.write();
+            s.github_app_sealed = None;
+            s.github_app_installation_id = None;
         }
         self.dirty.store(true, Ordering::Relaxed);
-        // Force remint on next ensure.
         *self.github_app_token_cache.lock() = crate::github_app::TokenCache::default();
     }
 
@@ -9181,6 +9527,90 @@ mod tests {
             b.resolve_cockpit_sandbox_create().profile_id.as_deref(),
             Some("default")
         );
+    }
+
+    #[test]
+    fn migrate_github_app_provider_name_rewrites_row_and_attaches() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-ghapp-rename-{}",
+                std::process::id()
+            )),
+        );
+        upsert_test_profile(&b, "default", "Default", AgentConfig::default().image.as_str());
+        b.upsert_openshell_provider(OpenShellProviderDesired {
+            name: "github".into(),
+            provider_type: "github".into(),
+            config: BTreeMap::new(),
+            credentials_sealed: None,
+            credential_keys: vec!["GH_TOKEN".into()],
+            refresh: None,
+        });
+        {
+            let mut p = b.get_sandbox_profile("default").expect("default");
+            p.provider_names = vec!["github".into(), "vertex".into()];
+            b.upsert_sandbox_profile(p).expect("attach");
+        }
+        assert!(b.migrate_github_app_provider_name());
+        let providers = b.openshell_providers();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "github-app");
+        assert_eq!(providers[0].provider_type, "github-app");
+        assert_eq!(
+            b.get_sandbox_profile("default")
+                .expect("default")
+                .provider_names,
+            vec!["github-app".to_string(), "vertex".to_string()]
+        );
+        assert!(!b.migrate_github_app_provider_name());
+    }
+
+    #[test]
+    fn migrate_github_app_sealed_into_provider_moves_bundle() {
+        use crate::github_app::{CONFIG_APP_ID, CONFIG_INSTALLATION_ID, CRED_PRIVATE_KEY};
+        use crate::secrets::{open_string_map, seal_github_app, GitHubAppBundle};
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-ghapp-seal-migrate-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let key_path = dir.join("master.key");
+        let _env = crate::secrets::master_key_env::Guard::with_key_path(&key_path);
+        let b = Board::new(Schema::default(), dir.join("board.json"));
+        let pem = include_str!("testdata/github_app_test_rsa.pem");
+        let sealed = seal_github_app(&GitHubAppBundle {
+            app_id: "4242".into(),
+            private_key_pem: pem.into(),
+            webhook_secret: "whsec".into(),
+            ..Default::default()
+        })
+        .expect("seal");
+        {
+            let mut s = b.state.write();
+            s.github_app_sealed = Some(sealed);
+            s.github_app_installation_id = Some(99);
+        }
+        assert!(b.migrate_github_app_sealed_into_provider());
+        assert!(b.github_app_sealed().is_none());
+        assert!(b.state.read().github_app_installation_id.is_none());
+        let p = b
+            .openshell_providers()
+            .into_iter()
+            .find(|p| p.name == "github-app")
+            .expect("provider");
+        assert_eq!(p.provider_type, "github-app");
+        assert_eq!(p.config.get(CONFIG_APP_ID).map(String::as_str), Some("4242"));
+        assert_eq!(
+            p.config.get(CONFIG_INSTALLATION_ID).map(String::as_str),
+            Some("99")
+        );
+        let map = open_string_map(p.credentials_sealed.as_deref().unwrap()).expect("open");
+        assert!(map.get(CRED_PRIVATE_KEY).is_some_and(|s| s.contains("BEGIN")));
+        assert_eq!(b.github_app_installation_id(), Some(99));
+        assert!(b.github_app_status().complete);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

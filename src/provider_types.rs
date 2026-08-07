@@ -1,18 +1,20 @@
 //! Board-owned OpenShell provider type profiles.
 //!
-//! Shipped YAML (antigravity, cursor-agent) seeds the board catalog; Sync
-//! imports every board type to the gateway before applying provider instances.
+//! Shipped YAML (antigravity, cursor-agent, github-app) seeds the board catalog;
+//! Sync imports every board type to the gateway before applying provider instances.
 //! Builtin OpenShell types (including egress-only `cursor`) stay on the gateway.
 
 use crate::model::{
     OpenShellProviderTypeDesired, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_PROVIDER_TYPE_NAME,
-    CURSOR_AGENT_PROVIDER_TYPE, CURSOR_AGENT_PROVIDER_TYPE_NAME,
+    CURSOR_AGENT_PROVIDER_TYPE, CURSOR_AGENT_PROVIDER_TYPE_NAME, GITHUB_APP_PROVIDER_TYPE,
+    GITHUB_APP_PROVIDER_TYPE_NAME,
 };
 use crate::openshell::{OpenShell, ProviderTypeProfile};
 use crate::store::{Board, SharedBoard};
 
 const ANTIGRAVITY_YAML: &str = include_str!("../sandbox/openshell/antigravity.yaml");
 const CURSOR_AGENT_YAML: &str = include_str!("../sandbox/openshell/cursor-agent.yaml");
+const GITHUB_APP_YAML: &str = include_str!("../sandbox/openshell/github-app.yaml");
 
 /// Parsed metadata used by API upsert and catalog merge.
 #[derive(Debug, Clone)]
@@ -40,6 +42,15 @@ pub fn shipped_provider_types() -> Vec<OpenShellProviderTypeDesired> {
             yaml: CURSOR_AGENT_YAML.trim().to_string(),
             shipped: true,
             form_config_keys: vec![],
+        },
+        OpenShellProviderTypeDesired {
+            id: GITHUB_APP_PROVIDER_TYPE.into(),
+            yaml: GITHUB_APP_YAML.trim().to_string(),
+            shipped: true,
+            form_config_keys: vec![
+                crate::github_app::CONFIG_APP_ID.into(),
+                crate::github_app::CONFIG_INSTALLATION_ID.into(),
+            ],
         },
     ]
 }
@@ -102,6 +113,8 @@ pub async fn import_board_types_to_gateway(
             ANTIGRAVITY_PROVIDER_TYPE_NAME
         } else if entry.id == CURSOR_AGENT_PROVIDER_TYPE {
             CURSOR_AGENT_PROVIDER_TYPE_NAME
+        } else if entry.id == GITHUB_APP_PROVIDER_TYPE {
+            GITHUB_APP_PROVIDER_TYPE_NAME
         } else {
             entry.id.as_str()
         };
@@ -247,6 +260,11 @@ mod tests {
             .credential_env_vars
             .iter()
             .any(|e| e == "CURSOR_API_KEY"));
+
+        let gh =
+            parse_provider_type_yaml(GITHUB_APP_YAML, Some(GITHUB_APP_PROVIDER_TYPE)).unwrap();
+        assert_eq!(gh.id, GITHUB_APP_PROVIDER_TYPE);
+        assert!(gh.credential_env_vars.iter().any(|e| e == "GH_TOKEN"));
     }
 
     #[test]
@@ -254,10 +272,11 @@ mod tests {
         let b = temp_board();
         assert!(b.openshell_provider_types().is_empty());
         let added = ensure_shipped_on_board(&b);
-        assert_eq!(added, 2);
+        assert_eq!(added, 3);
         let types = b.openshell_provider_types();
         assert!(types.contains_key(ANTIGRAVITY_PROVIDER));
         assert!(types.contains_key(CURSOR_AGENT_PROVIDER_TYPE));
+        assert!(types.contains_key(GITHUB_APP_PROVIDER_TYPE));
         assert_eq!(ensure_shipped_on_board(&b), 0);
     }
 
@@ -319,6 +338,10 @@ mod tests {
         assert!(
             got.iter().any(|s| s.contains("cursor-agent")),
             "expected cursor-agent import, got {got:?}"
+        );
+        assert!(
+            got.iter().any(|s| s.contains("github-app")),
+            "expected github-app import, got {got:?}"
         );
     }
 

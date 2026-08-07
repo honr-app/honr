@@ -831,9 +831,9 @@ async fn put_github_app(
     AxState(b): AxState<SharedBoard>,
     Json(req): Json<GitHubAppSettings>,
 ) -> Result<Json<GitHubAppSettings>, (axum::http::StatusCode, String)> {
+    // Compatibility shim: App material lives on the `github-app` provider row.
     if req.clear {
-        b.set_github_app_sealed(None);
-        b.set_github_app_installation_id(None);
+        b.clear_github_app();
         return Ok(Json(github_app_settings_view(&b).await));
     }
 
@@ -870,13 +870,12 @@ async fn put_github_app(
         if let Some(sec) = req.client_secret {
             bundle.client_secret = sec;
         }
-        let sealed = crate::secrets::seal_github_app(&bundle).map_err(|e| {
+        b.set_github_app_bundle(&bundle).map_err(|e| {
             (
                 axum::http::StatusCode::BAD_REQUEST,
                 format!("seal GitHub App: {e}"),
             )
         })?;
-        b.set_github_app_sealed(Some(sealed));
     }
 
     // Persist succeeded — mint/push immediately when App + installation are ready
@@ -997,12 +996,29 @@ fn seal_credentials_from_write(
     existing: Option<&OpenShellProviderDesired>,
 ) -> Result<(Option<String>, Vec<String>), (StatusCode, String)> {
     if let Some(creds) = credentials {
-        let cleaned: BTreeMap<String, String> = creds
-            .iter()
-            .map(|(k, v)| (k.trim().to_string(), v.clone()))
-            .filter(|(k, v)| !k.is_empty() && !v.is_empty())
-            .collect();
-        if cleaned.is_empty() {
+        // Merge: blank values mean "keep existing" (Providers form write-only fields).
+        let mut merged = existing
+            .and_then(|e| e.credentials_sealed.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .map(open_string_map)
+            .transpose()
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("open existing credentials: {e}"),
+                )
+            })?
+            .unwrap_or_default();
+        let mut any_new = false;
+        for (k, v) in creds {
+            let key = k.trim();
+            if key.is_empty() || v.trim().is_empty() {
+                continue;
+            }
+            merged.insert(key.to_string(), v.clone());
+            any_new = true;
+        }
+        if !any_new {
             return Ok((
                 existing.and_then(|e| e.credentials_sealed.clone()),
                 existing
@@ -1010,8 +1026,8 @@ fn seal_credentials_from_write(
                     .unwrap_or_default(),
             ));
         }
-        let keys: Vec<_> = cleaned.keys().cloned().collect();
-        let sealed = seal_string_map(&cleaned).map_err(|e| {
+        let keys: Vec<_> = merged.keys().cloned().collect();
+        let sealed = seal_string_map(&merged).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("seal credentials: {e}"),
@@ -1085,14 +1101,35 @@ async fn apply_desired_to_gateway(
     b: &SharedBoard,
     p: &OpenShellProviderDesired,
 ) -> Result<(), String> {
+    // App-minted github-app: mint (or reuse cache) then push GH_TOKEN only.
+    if p.name == crate::github_app::PROVIDER_NAME
+        || p.provider_type == crate::github_app::PROVIDER_TYPE
+    {
+        match crate::github_app::ensure_github_provider(b).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                // Incomplete App material — still try a filtered apply of whatever
+                // GH_TOKEN is already sealed (no private key leakage).
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
     let os = b.openshell_client();
-    let credentials = credentials_for_apply(p)?;
+    let mut credentials = credentials_for_apply(p)?;
+    let mut config = p.config.clone();
+    if p.name == crate::github_app::PROVIDER_NAME
+        || p.provider_type == crate::github_app::PROVIDER_TYPE
+    {
+        credentials = crate::github_app::gateway_credentials(&credentials);
+        config = crate::github_app::gateway_config(&config);
+    }
     let refresh = refresh_for_apply(p)?;
     os.apply_provider(
         &p.name,
         &p.provider_type,
         credentials,
-        p.config.clone(),
+        config,
         refresh.as_ref(),
     )
     .await
@@ -1151,6 +1188,11 @@ async fn create_openshell_provider(
     }
     .normalized();
     let stored = b.upsert_openshell_provider(desired);
+    if stored.name == crate::github_app::PROVIDER_NAME
+        || stored.provider_type == crate::github_app::PROVIDER_TYPE
+    {
+        b.set_github_app_token_cache(crate::github_app::TokenCache::default());
+    }
     // Best-effort apply; desired state is already persisted.
     let apply_err = apply_desired_to_gateway(&b, &stored).await.err();
     let gateway_synced = match &apply_err {
@@ -1216,6 +1258,11 @@ async fn update_openshell_provider(
     }
     .normalized();
     let stored = b.upsert_openshell_provider(desired);
+    if stored.name == crate::github_app::PROVIDER_NAME
+        || stored.provider_type == crate::github_app::PROVIDER_TYPE
+    {
+        b.set_github_app_token_cache(crate::github_app::TokenCache::default());
+    }
     let apply_err = apply_desired_to_gateway(&b, &stored).await.err();
     let mut view = provider_view(&stored, None);
     view.gateway_synced = Some(apply_err.is_none());
@@ -3223,6 +3270,7 @@ mod tests {
             Json(WebhookPollConfig {
                 enabled: true,
                 interval_secs: 5,
+                provider_name: None,
             }),
         )
         .await;
@@ -3443,9 +3491,15 @@ mod tests {
         assert!(saved.webhook_secret.is_none());
         assert!(saved.client_secret.is_none());
         assert_eq!(b.github_app_installation_id(), Some(7777));
-        let sealed = b.github_app_sealed().expect("sealed stored");
+        let p = b
+            .openshell_providers()
+            .into_iter()
+            .find(|p| p.name == crate::github_app::PROVIDER_NAME)
+            .expect("github-app provider row");
+        let sealed = p.credentials_sealed.as_deref().expect("sealed on provider");
         assert!(!sealed.contains("BEGIN"));
         assert!(!sealed.contains("whsec_never_echo"));
+        assert!(b.github_app_sealed().is_none());
         let Json(got) = get_github_app(AxState(b.clone())).await;
         assert_eq!(got.app_id.as_deref(), Some("424242"));
         assert_eq!(got.installation_id, Some(7777));
@@ -3473,7 +3527,7 @@ mod tests {
         .await
         .expect("clear");
         assert!(!cleared.status.complete);
-        assert!(b.github_app_sealed().is_none());
+        assert!(!b.github_app_status().complete);
 
         drop(_env);
         let _ = std::fs::remove_dir_all(&dir);

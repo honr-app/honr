@@ -107,7 +107,7 @@ do not treat a stale local `main` as truth.
 ## Environment
 
 Model credentials for sandboxed agents come from OpenShell providers (Settings
-→ OpenShell / GitHub App), not from process boot. GitHub
+→ OpenShell Providers / shipped `github-app`), not from process boot. GitHub
 git + `gh` in the sandbox use the App installation token (`GH_TOKEN`) for
 `execution.agents.repo` (`upstream` / `fork` / `base`).
 

@@ -1,25 +1,58 @@
 //! GitHub App JWT + installation access tokens for sandbox `GH_TOKEN`.
 //!
 //! OpenShell has no App-native refresh strategy, so honr mints short-lived
-//! installation tokens and upserts them into the gateway `github` provider.
-//! Only `GH_TOKEN` is set — never `GITHUB_TOKEN` (gh prefers `GH_TOKEN`, and a
-//! leftover user PAT under that name would shadow the App token).
+//! installation tokens and upserts them into the gateway provider instance
+//! [`PROVIDER_NAME`] (`github-app`, shipped type [`PROVIDER_TYPE`]).
+//! Only `GH_TOKEN` is pushed to the gateway — never the App private key.
 
-use crate::model::OpenShellProviderDesired;
+use crate::model::{OpenShellProviderDesired, GITHUB_APP_PROVIDER_TYPE};
 use crate::secrets::{open_string_map, seal_string_map, GitHubAppBundle};
-use crate::store::SharedBoard;
+use crate::store::{Board, SharedBoard};
 
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Desired OpenShell provider name (also attach name).
-pub const PROVIDER_NAME: &str = "github";
+/// OpenShell provider **instance** name (sandbox attach name).
+pub const PROVIDER_NAME: &str = "github-app";
+/// Pre-rename instance name; board load rewrites attaches + provider rows.
+pub const LEGACY_PROVIDER_NAME: &str = "github";
+/// OpenShell builtin type used before the shipped `github-app` profile.
+pub const LEGACY_BUILTIN_TYPE: &str = "github";
+/// Shipped custom provider type (see `sandbox/openshell/github-app.yaml`).
+pub const PROVIDER_TYPE: &str = GITHUB_APP_PROVIDER_TYPE;
 /// Env / credential key sandboxes and `gh` expect (`gh` prefers this over `GITHUB_TOKEN`).
 pub const CREDENTIAL_KEY: &str = "GH_TOKEN";
+/// Board config: GitHub App numeric id (non-secret).
+pub const CONFIG_APP_ID: &str = "GITHUB_APP_ID";
+/// Board config: installation id that mints tokens (non-secret).
+pub const CONFIG_INSTALLATION_ID: &str = "GITHUB_INSTALLATION_ID";
+/// Board-only sealed credential: App private key PEM (never pushed to gateway).
+pub const CRED_PRIVATE_KEY: &str = "GITHUB_APP_PRIVATE_KEY";
+/// Board-only sealed: webhook secret (Access / Forge; not gateway).
+pub const CRED_WEBHOOK_SECRET: &str = "GITHUB_APP_WEBHOOK_SECRET";
+/// Board-only sealed: OAuth client id (Access; not gateway).
+pub const CRED_CLIENT_ID: &str = "GITHUB_APP_CLIENT_ID";
+/// Board-only sealed: OAuth client secret (Access; not gateway).
+pub const CRED_CLIENT_SECRET: &str = "GITHUB_APP_CLIENT_SECRET";
 /// Remint when this close to expiry (installation tokens last ~1h).
 pub const REFRESH_SKEW: Duration = Duration::minutes(10);
+
+/// Config keys that stay on the board and must not be sent to OpenShell.
+pub fn board_only_config_keys() -> &'static [&'static str] {
+    &[CONFIG_APP_ID, CONFIG_INSTALLATION_ID]
+}
+
+/// Credential keys that stay on the board and must not be sent to OpenShell.
+pub fn board_only_credential_keys() -> &'static [&'static str] {
+    &[
+        CRED_PRIVATE_KEY,
+        CRED_WEBHOOK_SECRET,
+        CRED_CLIENT_ID,
+        CRED_CLIENT_SECRET,
+    ]
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -210,14 +243,94 @@ pub async fn mint_installation_token(
     create_installation_token(&jwt, installation_id).await
 }
 
-/// Credential map for the OpenShell `github` provider.
+/// Credential map pushed to the OpenShell `github-app` provider (`GH_TOKEN` only).
 pub fn provider_credentials(token: &str) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     m.insert(CREDENTIAL_KEY.into(), token.to_string());
     m
 }
 
-/// Mint (if needed) and upsert the OpenShell `github` provider with a live token.
+/// Gateway config for `github-app`: strip board-only App mint fields.
+pub fn gateway_config(config: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    config
+        .iter()
+        .filter(|(k, _)| !board_only_config_keys().contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Filter board sealed credentials down to what the gateway may see.
+pub fn gateway_credentials(creds: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    creds
+        .iter()
+        .filter(|(k, v)| {
+            !board_only_credential_keys().contains(&k.as_str()) && !v.trim().is_empty()
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Read App bundle from the `github-app` provider row (config + sealed map).
+pub fn bundle_from_provider(board: &Board) -> Option<GitHubAppBundle> {
+    let p = board
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == PROVIDER_NAME)?;
+    let map = p
+        .credentials_sealed
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| open_string_map(s).ok())
+        .unwrap_or_default();
+    let app_id = p
+        .config
+        .get(CONFIG_APP_ID)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let private_key_pem = map
+        .get(CRED_PRIVATE_KEY)
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    if app_id.is_empty() && private_key_pem.is_empty() {
+        return None;
+    }
+    Some(GitHubAppBundle {
+        app_id,
+        private_key_pem,
+        webhook_secret: map
+            .get(CRED_WEBHOOK_SECRET)
+            .cloned()
+            .unwrap_or_default(),
+        client_id: map.get(CRED_CLIENT_ID).cloned().unwrap_or_default(),
+        client_secret: map
+            .get(CRED_CLIENT_SECRET)
+            .cloned()
+            .unwrap_or_default(),
+    })
+}
+
+/// Installation id from provider config (preferred) or legacy board field.
+pub fn installation_id_from_provider(board: &Board) -> Option<u64> {
+    let p = board
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == PROVIDER_NAME)?;
+    p.config
+        .get(CONFIG_INSTALLATION_ID)
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Presence flags derived from the provider row (or legacy sealed blob).
+pub fn status_from_board(board: &Board) -> crate::secrets::GitHubAppStatus {
+    if let Some(b) = bundle_from_provider(board) {
+        return crate::secrets::GitHubAppStatus::from(&b);
+    }
+    crate::secrets::github_app_status_from_sealed(board.github_app_sealed().as_deref())
+}
+
+/// Mint (if needed) and upsert the OpenShell `github-app` provider with a live token.
 ///
 /// No-op when App credentials or installation_id are unset (returns Ok(false)).
 /// Returns Ok(true) when the gateway provider was refreshed (or confirmed fresh).
@@ -282,7 +395,7 @@ pub async fn ensure_github_provider(board: &SharedBoard) -> Result<bool, Error> 
     Ok(true)
 }
 
-/// True when the gateway is missing `github`, lacks `GH_TOKEN`, or still has
+/// True when the gateway is missing `github-app`, lacks `GH_TOKEN`, or still has
 /// a leftover `GITHUB_TOKEN` credential key.
 async fn gateway_github_provider_needs_push(board: &SharedBoard) -> Result<bool, Error> {
     let os = board.openshell_client();
@@ -305,7 +418,7 @@ async fn push_github_provider_on_gateway(board: &SharedBoard, token: &str) -> Re
         .openshell_providers()
         .into_iter()
         .find(|p| p.name == PROVIDER_NAME)
-        .ok_or_else(|| Error::Config("github provider missing after upsert".into()))?;
+        .ok_or_else(|| Error::Config("github-app provider missing after upsert".into()))?;
     let os = board.openshell_client();
     let exists = os
         .list_providers()
@@ -313,28 +426,24 @@ async fn push_github_provider_on_gateway(board: &SharedBoard, token: &str) -> Re
         .map_err(|e| Error::Api(format!("openshell list providers: {e}")))?
         .iter()
         .any(|p| p.name == PROVIDER_NAME);
+    let config = gateway_config(&desired.config);
 
     if exists {
         let mut credentials = provider_credentials(token);
         // Empty value clears a merged leftover from older PAT / App syncs.
         credentials.insert("GITHUB_TOKEN".into(), String::new());
-        os.update_provider(
-            PROVIDER_NAME,
-            "github",
-            credentials,
-            desired.config.clone(),
-        )
-        .await
-        .map_err(|e| Error::Api(format!("openshell update github provider: {e}")))?;
+        os.update_provider(PROVIDER_NAME, PROVIDER_TYPE, credentials, config)
+            .await
+            .map_err(|e| Error::Api(format!("openshell update {PROVIDER_NAME} provider: {e}")))?;
     } else {
         os.create_provider(
             PROVIDER_NAME,
-            "github",
+            PROVIDER_TYPE,
             provider_credentials(token),
-            desired.config.clone(),
+            config,
         )
         .await
-        .map_err(|e| Error::Api(format!("openshell create github provider: {e}")))?;
+        .map_err(|e| Error::Api(format!("openshell create {PROVIDER_NAME} provider: {e}")))?;
     }
     Ok(())
 }
@@ -361,47 +470,115 @@ fn sealed_github_token(board: &SharedBoard) -> Result<Option<String>, Error> {
     Ok(None)
 }
 
+/// Merge `fresh_token` into the existing sealed map (preserve App private key).
 fn ensure_desired_row(board: &SharedBoard, fresh_token: Option<&str>) -> Result<(), Error> {
     let existing = board
         .openshell_providers()
         .into_iter()
         .find(|p| p.name == PROVIDER_NAME);
 
-    let (credentials_sealed, credential_keys) = if let Some(token) = fresh_token {
-        let sealed = seal_string_map(&provider_credentials(token))
-            .map_err(|e| Error::Config(format!("seal GH_TOKEN: {e}")))?;
-        (Some(sealed), vec![CREDENTIAL_KEY.to_string()])
-    } else if let Some(ref e) = existing {
-        // Prefer already-sealed GH_TOKEN; if only legacy GITHUB_TOKEN is sealed,
-        // keep the blob for migration via sealed_github_token — credential_keys
-        // advertise GH_TOKEN only.
-        (e.credentials_sealed.clone(), vec![CREDENTIAL_KEY.to_string()])
+    let mut map = existing
+        .as_ref()
+        .and_then(|e| e.credentials_sealed.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| open_string_map(s).map_err(|e| Error::Config(format!("open credentials: {e}"))))
+        .transpose()?
+        .unwrap_or_default();
+
+    if let Some(token) = fresh_token {
+        map.insert(CREDENTIAL_KEY.into(), token.to_string());
+        map.remove("GITHUB_TOKEN");
+    }
+
+    let credential_keys: Vec<String> = map.keys().cloned().collect();
+    let credentials_sealed = if map.is_empty() {
+        None
     } else {
-        (None, vec![CREDENTIAL_KEY.to_string()])
+        Some(seal_string_map(&map).map_err(|e| Error::Config(format!("seal credentials: {e}")))?)
     };
 
     let config = existing
         .as_ref()
         .map(|e| e.config.clone())
         .unwrap_or_default();
+    let refresh = existing.as_ref().and_then(|e| e.refresh.clone());
 
     board.upsert_openshell_provider(
         OpenShellProviderDesired {
             name: PROVIDER_NAME.into(),
-            provider_type: "github".into(),
+            provider_type: PROVIDER_TYPE.into(),
             config,
             credentials_sealed,
             credential_keys,
-            refresh: None,
+            refresh,
         }
         .normalized(),
     );
     Ok(())
 }
 
-/// Whether minting is possible (sealed App + installation id).
+/// Whether minting is possible (App material + installation id on the provider).
 pub fn configured_for_tokens(board: &SharedBoard) -> bool {
-    board.github_app_status().complete && board.github_app_installation_id().is_some()
+    status_from_board(board).complete && board.github_app_installation_id().is_some()
+}
+
+/// Whether a desired provider can supply a host GitHub REST token.
+pub fn provider_can_host_poll(p: &OpenShellProviderDesired) -> bool {
+    if p.provider_type == PROVIDER_TYPE || p.name == PROVIDER_NAME {
+        return true;
+    }
+    if p.provider_type == LEGACY_BUILTIN_TYPE {
+        return true;
+    }
+    p.credential_keys
+        .iter()
+        .any(|k| k == CREDENTIAL_KEY || k == "GITHUB_TOKEN")
+}
+
+/// Host GitHub REST token for Forge poll from an **explicit** provider name.
+///
+/// No auto-selection — `provider_name` must be set under Forge. Returns
+/// `Ok(None)` when unset, missing, or not yet credentialed.
+///
+/// - `github-app`: mint/reuse installation token (App JWT path).
+/// - other rows: read sealed `GH_TOKEN` (or legacy `GITHUB_TOKEN`).
+pub async fn host_poll_token(
+    board: &SharedBoard,
+    provider_name: Option<&str>,
+) -> Result<Option<(String, String)>, Error> {
+    let Some(name) = provider_name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(p) = board
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == name)
+    else {
+        return Ok(None);
+    };
+    if !provider_can_host_poll(&p) {
+        return Ok(None);
+    }
+
+    if p.provider_type == PROVIDER_TYPE || p.name == PROVIDER_NAME {
+        return match host_installation_token(board).await? {
+            Some(t) => Ok(Some((name.to_string(), t))),
+            None => Ok(None),
+        };
+    }
+
+    let Some(sealed) = p.credentials_sealed.as_deref() else {
+        return Ok(None);
+    };
+    let map = open_string_map(sealed).map_err(|e| Error::Config(format!("open poll token: {e}")))?;
+    if let Some(t) = map
+        .get(CREDENTIAL_KEY)
+        .or_else(|| map.get("GITHUB_TOKEN"))
+        .filter(|t| !t.is_empty())
+    {
+        return Ok(Some((name.to_string(), t.clone())));
+    }
+    Ok(None)
 }
 
 /// Host-side installation token for REST (webhook poll). Reuses the sealed
@@ -548,7 +725,7 @@ pub(crate) async fn fetch_pr_conflict_check_with_token(
 mod tests {
     use super::*;
     use crate::openshell::{OpenShell, Output};
-    use crate::secrets::{open_string_map, seal_github_app};
+    use crate::secrets::open_string_map;
     use crate::store::Board;
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -626,13 +803,13 @@ mod tests {
     }
 
     fn seal_test_app(board: &SharedBoard) {
-        let sealed = seal_github_app(&GitHubAppBundle {
-            app_id: "123456".into(),
-            private_key_pem: test_rsa_pem(),
-            ..Default::default()
-        })
-        .expect("seal");
-        board.set_github_app_sealed(Some(sealed));
+        board
+            .set_github_app_bundle(&GitHubAppBundle {
+                app_id: "123456".into(),
+                private_key_pem: test_rsa_pem(),
+                ..Default::default()
+            })
+            .expect("seal onto provider");
     }
 
     async fn spawn_github_mock() -> (String, tokio::task::JoinHandle<()>) {
@@ -709,6 +886,38 @@ mod tests {
         assert_eq!(m.len(), 1);
     }
 
+    #[tokio::test]
+    async fn host_poll_token_requires_explicit_provider_name() {
+        let (dir, board, _env) = test_board("poll-explicit");
+        seal_test_app(&board);
+        board.set_github_app_installation_id(Some(99));
+        // Even with App ready, no auto-pick without Forge provider_name.
+        assert!(host_poll_token(&board, None).await.expect("ok").is_none());
+        assert!(host_poll_token(&board, Some("nope"))
+            .await
+            .expect("ok")
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gateway_credentials_strips_app_private_material() {
+        let mut board = BTreeMap::new();
+        board.insert(CREDENTIAL_KEY.into(), "ghs_live".into());
+        board.insert(CRED_PRIVATE_KEY.into(), "-----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY-----\n".into());
+        board.insert(CRED_WEBHOOK_SECRET.into(), "whsec".into());
+        let gw = gateway_credentials(&board);
+        assert_eq!(gw.get(CREDENTIAL_KEY).map(String::as_str), Some("ghs_live"));
+        assert!(!gw.contains_key(CRED_PRIVATE_KEY));
+        assert!(!gw.contains_key(CRED_WEBHOOK_SECRET));
+        let mut cfg = BTreeMap::new();
+        cfg.insert(CONFIG_APP_ID.into(), "1".into());
+        cfg.insert("OTHER".into(), "x".into());
+        let gcfg = gateway_config(&cfg);
+        assert!(!gcfg.contains_key(CONFIG_APP_ID));
+        assert_eq!(gcfg.get("OTHER").map(String::as_str), Some("x"));
+    }
+
     #[test]
     fn ensure_desired_row_seals_token_without_plaintext_on_board() {
         let (dir, board, _env) = test_board("desired");
@@ -717,8 +926,8 @@ mod tests {
         assert_eq!(providers.len(), 1);
         let p = &providers[0];
         assert_eq!(p.name, PROVIDER_NAME);
-        assert_eq!(p.provider_type, "github");
-        assert_eq!(p.credential_keys, vec![CREDENTIAL_KEY.to_string()]);
+        assert_eq!(p.provider_type, PROVIDER_TYPE);
+        assert!(p.credential_keys.iter().any(|k| k == CREDENTIAL_KEY));
         let sealed = p.credentials_sealed.as_deref().expect("sealed");
         assert!(!sealed.contains("ghs_secret_value"));
         let opened = open_string_map(sealed).expect("open");

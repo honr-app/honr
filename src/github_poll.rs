@@ -72,21 +72,22 @@ pub async fn tick(board: &SharedBoard) -> Result<(), String> {
         return Ok(());
     }
 
-    let token = match github_app::host_installation_token(board).await {
-        Ok(Some(t)) => {
+    let token = match github_app::host_poll_token(board, cfg.provider_name.as_deref()).await {
+        Ok(Some((provider, t))) => {
             clear_warn("config");
             clear_warn("auth");
+            tracing::debug!(%provider, "webhook poll using host token from provider");
             t
         }
         Ok(None) => {
             warn_once(
                 "config",
-                "webhook poll enabled but GitHub App / installation not configured; skipping",
+                "webhook poll enabled but Forge credential provider is unset or not ready; skipping",
             );
             return Ok(());
         }
         Err(e) => {
-            warn_once("auth", format!("webhook poll token mint failed: {e}"));
+            warn_once("auth", format!("webhook poll token failed: {e}"));
             return Err(e.to_string());
         }
     };
@@ -448,7 +449,6 @@ fn client() -> Result<reqwest::Client, String> {
 mod tests {
     use super::*;
     use crate::model::{Origin, WebhookPollConfig};
-    use crate::secrets::seal_github_app;
     use crate::store::Board;
     use axum::routing::get;
     use axum::{Json, Router};
@@ -505,13 +505,13 @@ mod tests {
     }
 
     fn seal_test_app(board: &SharedBoard) {
-        let sealed = seal_github_app(&crate::secrets::GitHubAppBundle {
-            app_id: "123456".into(),
-            private_key_pem: test_rsa_pem(),
-            ..Default::default()
-        })
-        .expect("seal");
-        board.set_github_app_sealed(Some(sealed));
+        board
+            .set_github_app_bundle(&crate::secrets::GitHubAppBundle {
+                app_id: "123456".into(),
+                private_key_pem: test_rsa_pem(),
+                ..Default::default()
+            })
+            .expect("seal onto provider");
         board.set_github_app_installation_id(Some(99));
     }
 
@@ -627,6 +627,7 @@ mod tests {
         let cfg = WebhookPollConfig {
             enabled: true,
             interval_secs: 5,
+            provider_name: None,
         }
         .normalized();
         assert_eq!(cfg.interval_secs, MIN_WEBHOOK_POLL_INTERVAL_SECS);
@@ -639,6 +640,7 @@ mod tests {
         board.set_webhook_poll_config(WebhookPollConfig {
             enabled: false,
             interval_secs: 60,
+            provider_name: None,
         });
         // Dead API — must not be contacted.
         let _api = github_api_env::Guard::set("http://127.0.0.1:1");
@@ -653,6 +655,7 @@ mod tests {
         board.set_webhook_poll_config(WebhookPollConfig {
             enabled: true,
             interval_secs: 60,
+            provider_name: Some("github-app".into()),
         });
 
         let p = board
@@ -743,6 +746,7 @@ mod tests {
         board.set_webhook_poll_config(WebhookPollConfig {
             enabled: true,
             interval_secs: 60,
+            provider_name: Some("github-app".into()),
         });
 
         let p = board
@@ -818,6 +822,7 @@ mod tests {
         board.set_webhook_poll_config(WebhookPollConfig {
             enabled: true,
             interval_secs: 60,
+            provider_name: Some("github-app".into()),
         });
         let id = review_card(&board);
 
@@ -855,6 +860,7 @@ mod tests {
         board.set_webhook_poll_config(WebhookPollConfig {
             enabled: true,
             interval_secs: 60,
+            provider_name: Some("github-app".into()),
         });
         let id = review_card(&board);
         board.set_webhook_poll_pr_review_cursor("acme/widgets", 7, 1000);
@@ -900,6 +906,7 @@ mod tests {
         board.set_webhook_poll_config(WebhookPollConfig {
             enabled: true,
             interval_secs: 60,
+            provider_name: Some("github-app".into()),
         });
         let id = review_card(&board);
         board.set_webhook_poll_pr_review_cursor("acme/widgets", 7, 50);
@@ -934,6 +941,7 @@ mod tests {
         board.set_webhook_poll_config(WebhookPollConfig {
             enabled: true,
             interval_secs: 60,
+            provider_name: Some("github-app".into()),
         });
         let id = review_card(&board);
         board.set_webhook_poll_pr_review_cursor("acme/widgets", 7, 1);
