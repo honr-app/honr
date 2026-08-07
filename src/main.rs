@@ -28,7 +28,9 @@ mod ws;
 use crate::schema::Schema;
 use crate::store::{Board, SharedBoard};
 
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use std::path::PathBuf;
@@ -36,6 +38,21 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
+
+/// Public bootstrap guide for operator agents (`GET /llms.txt`).
+const LLMS_TXT: &str = include_str!("../llms.txt");
+
+async fn llms_txt() -> Response {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )],
+        LLMS_TXT,
+    )
+        .into_response()
+}
 
 /// How long graceful shutdown waits for open connections (SSE, MCP streams)
 /// before we drop them. Without a ceiling, a single Chrome EventSource holds
@@ -121,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/events", get(sse::events))
         .route("/api/ws", get(ws::ws_handler))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/llms.txt", get(llms_txt))
         .nest("/.well-known", mcp_oauth::well_known_routes())
         .nest("/oauth", mcp_oauth::oauth_routes());
 
@@ -210,4 +228,22 @@ async fn wait_interrupt() {
     }
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn llms_txt_covers_fresh_board_bootstrap() {
+        let body = super::LLMS_TXT;
+        assert!(body.contains("/llms.txt"));
+        assert!(body.contains("POST /auth/bootstrap"));
+        assert!(body.contains("PUT /api/openshell"));
+        assert!(body.contains("cursor-agent"));
+        assert!(body.contains("PUT /api/github-app"));
+        assert!(body.contains("installations"));
+        assert!(body.contains("POST /api/sandbox-profiles"));
+        assert!(body.contains("clone_repo"));
+        // Current contract: walk Settings; do not invent parallel bootstrap.
+        assert!(body.contains("Do not invent a parallel bootstrap"));
+    }
 }

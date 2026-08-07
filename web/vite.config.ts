@@ -44,6 +44,9 @@ export default defineConfig({
       "/api": toHonr({ ws: true }),
       "/auth": toHonr(),
       "/mcp": toHonr(),
+      "/healthz": toHonr(),
+      // Public agent bootstrap guide — must not fall through to the SPA shell.
+      "/llms.txt": toHonr(),
     },
   },
   build: { outDir: "dist" },

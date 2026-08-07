@@ -18,7 +18,8 @@ On an empty board, **Welcome to honr** embeds the same operator guide as
 
 Work the checklist there; deep links land on Settings → OpenShell and Agent
 runtime. This page is the prose companion: the same order, with checks and the
-host-side pieces the UI does not run for you.
+host-side pieces the UI does not run for you. An operator agent should start from
+the public [`/llms.txt`](../llms.txt) guide (same order, API-shaped checks).
 
 Every step has a check. Do not move on until the check passes — see
 [why](troubleshooting.md#everything-fails-as-a-hang) below: in this stack a

@@ -131,6 +131,7 @@ pub fn api_settings_routes() -> Router<SharedBoard> {
 
 pub fn path_exempt(path: &str) -> bool {
     path == "/healthz"
+        || path == "/llms.txt"
         || path.starts_with("/auth/")
         || path == "/auth"
         || path == "/api/webhooks/github"
@@ -1183,6 +1184,7 @@ mod tests {
         assert!(path_exempt("/oauth/token"));
         assert!(path_exempt("/oauth/authorize"));
         assert!(path_exempt("/healthz"));
+        assert!(path_exempt("/llms.txt"));
         assert!(!path_exempt("/api/board"));
         assert!(!path_exempt("/api/auth/settings"));
     }
