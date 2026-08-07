@@ -6,6 +6,20 @@ opens a pull request.
 > **This spends real money and opens pull requests.** Work through it once,
 > deliberately, on a repo you do not mind receiving a small PR against.
 
+## Start in the product
+
+On an empty board, **Welcome to honr** embeds the same operator guide as
+**Help** (nav → Help). That guide is the named first-run path:
+
+1. **Connect MCP**
+2. **OpenShell + sandbox** — Connectivity, Providers, Sandbox specs, then
+   agents enabled
+3. **First Project loop**
+
+Work the checklist there; deep links land on Settings → OpenShell and Agent
+runtime. This page is the prose companion: the same order, with checks and the
+host-side pieces the UI does not run for you.
+
 Every step has a check. Do not move on until the check passes — see
 [why](troubleshooting.md#everything-fails-as-a-hang) below: in this stack a
 half-finished step does not error, it hangs.
@@ -62,7 +76,8 @@ gateway in-process over gRPC with client certificates.
 openshell status   # expect Connected + Authenticated
 ```
 
-Then tell honr how to reach it, in **Settings → OpenShell**:
+Then tell honr how to reach it, in **Settings → OpenShell → Connectivity**
+(Welcome/Help deep-links here):
 
 - **Gateway endpoint** — often `https://127.0.0.1:17670`. Deliberately not
   honr's `8080`; your install may differ.
@@ -71,6 +86,9 @@ Then tell honr how to reach it, in **Settings → OpenShell**:
   hands private key material back. honr will not go looking for them on disk:
   it assumes nothing about what is on the host, so configuration is uploaded
   rather than discovered.
+
+**Settings** (stored on the board) is the live source of truth for gateway
+endpoint and sealed PEMs — same split as [Configuration](configuration.md).
 
 **Check:** hit **Refresh status** in Settings. You want **Healthy**.
 
@@ -112,9 +130,17 @@ From the **repo root**, not `sandbox/` — `Cargo.lock` and
 `web/package-lock.json` have to be in build context. The image pre-warms cargo
 and npm caches so crates.io never has to be reachable from a sandbox.
 
-**Check:** `docker image ls | grep honr-sandbox`
+Then confirm the board's **default** sandbox spec in
+**Settings → OpenShell → Sandbox specs** (Welcome/Help deep-links here). Specs
+live on the board; [Configuration](configuration.md#sandbox-specs) and
+[Sandbox](sandbox.md) cover resolution and policy.
+
+**Check:** `docker image ls | grep honr-sandbox`, and the default spec's image
+matches what you built.
 
 ## 5. Turn agents on
+
+Enable agents in **Settings → Agent runtime**, or set them in `honr.yaml`:
 
 ```yaml
 # honr.yaml
@@ -123,19 +149,23 @@ execution:
     enabled: true
 ```
 
-Then **restart honr**. Config is read once at startup; there is no hot reload
-and no runtime toggle.
+Board Settings is the live source of truth once saved; YAML seeds empty state
+([Configuration](configuration.md)). If the process started with agents
+disabled, **restart honr** after enabling so the dispatch loop starts. YAML is
+read once at startup; there is no hot reload from the file alone.
 
-> Put it back to `false` before you commit. It has been committed as `true` once
-> already, swept in by `git add -A`, which makes a fresh clone spend money on
-> startup.
+> Put `enabled: false` back before you commit YAML. It has been committed as
+> `true` once already, swept in by `git add -A`, which makes a fresh clone spend
+> money on startup.
 
 **Check:** the startup log no longer says
 `execution.agents.enabled = false; board runs with no executor`.
 
 ## 6. Run one card
 
-1. Create a Project pointed at your repo.
+This is the **First Project loop** section of Welcome/Help:
+
+1. Create a Project pointed at your repo (`clone_repo` as `owner/name`).
 2. **Start** its Initial plan card.
 3. Watch it move Backlog → Running. The card shows its sandbox name.
 4. It lands in **Review** with a proposed breakdown. Read it, edit it, Approve.
@@ -146,7 +176,9 @@ and no runtime toggle.
 Keep `max_concurrent` at 1 until you have watched this work end to end.
 
 If something takes longer than it should, it has already failed —
-[Troubleshooting](troubleshooting.md) is the next page you want.
+[Troubleshooting](troubleshooting.md#everything-fails-as-a-hang) is the next
+page you want. Denied egress, missing credentials, and wedged relays present as
+silence; treat hangs as failure, not as "give it more time."
 
 ## Next
 

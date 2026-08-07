@@ -112,4 +112,4 @@ make. If that fits on a phone, you can walk away from the rest.
 
 - Run the board yourself, agents off: [Quickstart](quickstart.md)
 - The vocabulary in one place: [Concepts](concepts.md) · [Glossary](glossary.md)
-- Turn on real sandboxed agents: [Your first agent](first-agent.md)
+- Turn on real sandboxed agents: empty-board **Welcome** / **Help**, then [Your first agent](first-agent.md)

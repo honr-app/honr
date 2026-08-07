@@ -1,6 +1,7 @@
 # Workflow
 
-Day-to-day operation once the board is up. To enable sandboxed agents first, see
+Day-to-day operation once the board is up. To enable sandboxed agents first, use
+the empty-board **Welcome** or **Help** OpenShell + sandbox guide, then
 [Your first agent](first-agent.md).
 
 ## The happy path
