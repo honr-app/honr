@@ -322,6 +322,22 @@ const headHtml = renderToString(
 console.log("\nDetail Head HTML:\n", headHtml);
 assert(headHtml.includes("📦 Archive"), "Detail Head should offer Archive action button");
 assert(headHtml.includes("🗑 Delete"), "Detail Head should offer Delete action button");
+assert(!headHtml.includes("data-testid=\"drawer-unarchive\""),
+  "Detail Head should not offer Unarchive when onUnarchive is omitted");
+
+const headUnarchiveHtml = renderToString(
+  React.createElement(Head, {
+    title: "#101 Archived Project",
+    onClose: () => {},
+    onUnarchive: () => {},
+    onDelete: () => {},
+  })
+);
+assert(headUnarchiveHtml.includes("data-testid=\"drawer-unarchive\""),
+  "Detail Head should offer Unarchive for retired Projects");
+assert(headUnarchiveHtml.includes("Unarchive"), "Detail Head Unarchive label");
+assert(!headUnarchiveHtml.includes("📦 Archive"),
+  "Detail Head should not offer Archive when only onUnarchive is set");
 
 // Test 9: Detail Plan editor renders plan task blocker selection UI
 const samplePlanTasksSpec = [
@@ -1805,6 +1821,23 @@ assert(
   /Show\s*(?:<!-- -->)?1(?:<!-- -->)?\s*archived/.test(archivedEmptyBoardHtml),
   "Archived toggle labels count",
 );
+
+// Archived Project lane offers confirm-gated Unarchive (Board source).
+const boardSrc = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "src/components/Board.tsx"),
+  "utf8",
+);
+assert(boardSrc.includes('data-testid="lane-unarchive"'),
+  "Archived Project lane should expose Unarchive control");
+assert(boardSrc.includes("api.unarchive"),
+  "Board Unarchive should call api.unarchive");
+const apiSrc = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "src/api.ts"),
+  "utf8",
+);
+assert(apiSrc.includes("/items/${id}/unarchive"),
+  "api.unarchive should POST /items/{id}/unarchive");
+
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
 );

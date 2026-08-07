@@ -539,6 +539,7 @@ export function DetailDrawer({
   const [planTasks, setPlanTasks] = useState<EditPlanTask[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const [confirmUnarchive, setConfirmUnarchive] = useState(false);
   const [confirmHalt, setConfirmHalt] = useState(false);
   const [logs, setLogs] = useState<{ agent: string[]; openshell: string[] }>({
     agent: [],
@@ -598,6 +599,7 @@ export function DetailDrawer({
     setErr(null);
     setConfirmDelete(false);
     setConfirmArchive(false);
+    setConfirmUnarchive(false);
     setConfirmHalt(false);
     setPlanTasks([]);
     setSandboxPickerErr(null);
@@ -644,6 +646,16 @@ export function DetailDrawer({
           d.state !== "retired"
             ? () => {
                 setConfirmArchive(!confirmArchive);
+                setConfirmUnarchive(false);
+                setConfirmDelete(false);
+              }
+            : undefined
+        }
+        onUnarchive={
+          d.state === "retired" && d.level === "Project"
+            ? () => {
+                setConfirmUnarchive(!confirmUnarchive);
+                setConfirmArchive(false);
                 setConfirmDelete(false);
               }
             : undefined
@@ -651,6 +663,7 @@ export function DetailDrawer({
         onDelete={() => {
           setConfirmDelete(!confirmDelete);
           setConfirmArchive(false);
+          setConfirmUnarchive(false);
         }}
         title={`#${d.id} ${d.title}`}
       />
@@ -710,6 +723,67 @@ export function DetailDrawer({
                 cursor: "pointer",
               }}
               onClick={() => setConfirmArchive(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirmUnarchive && (
+        <div
+          style={{
+            background: "var(--accent-fill)",
+            border: "1px solid var(--accent)",
+            borderRadius: "6px",
+            padding: "10px 12px",
+            marginBottom: "12px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+          }}
+        >
+          <div style={{ color: "var(--accent-fill)", fontSize: "12px", fontWeight: 600 }}>
+            Unarchive #{d.id} "{d.title}"?
+          </div>
+          <div style={{ color: "var(--accent)", fontSize: "11px" }}>
+            Restores this Project from history. In-flight work returns to Backlog — not delete.
+          </div>
+          <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+            <button
+              style={{
+                fontSize: "11px",
+                padding: "4px 12px",
+                background: "var(--accent)",
+                color: "#fff",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+              onClick={() => {
+                api
+                  .unarchive(d.id, "unarchived from drawer")
+                  .then(() => {
+                    onChanged();
+                    onClose();
+                  })
+                  .catch((e) => setErr(String(e)));
+              }}
+            >
+              Confirm Unarchive
+            </button>
+            <button
+              style={{
+                fontSize: "11px",
+                padding: "4px 12px",
+                background: "var(--panel-2)",
+                color: "var(--dim)",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+              }}
+              onClick={() => setConfirmUnarchive(false)}
             >
               Cancel
             </button>
@@ -1568,11 +1642,13 @@ export const Head = ({
   title,
   onClose,
   onArchive,
+  onUnarchive,
   onDelete,
 }: {
   title: string;
   onClose: () => void;
   onArchive?: () => void;
+  onUnarchive?: () => void;
   onDelete?: () => void;
 }) => (
   <div className="drawer-head" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -1594,6 +1670,25 @@ export const Head = ({
           title="Archive (soft retire) item and its subtree"
         >
           📦 Archive
+        </button>
+      )}
+      {onUnarchive && (
+        <button
+          style={{
+            fontSize: "11px",
+            padding: "3px 8px",
+            background: "var(--accent-fill)",
+            color: "var(--accent)",
+            border: "1px solid var(--accent)",
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontWeight: 600,
+          }}
+          onClick={onUnarchive}
+          title="Unarchive — restore from history (in-flight work returns to Backlog)"
+          data-testid="drawer-unarchive"
+        >
+          Unarchive
         </button>
       )}
       {onDelete && (
