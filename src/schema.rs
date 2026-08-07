@@ -194,8 +194,9 @@ pub struct AgentConfig {
     /// `sandbox/Containerfile`.
     #[serde(default = "d_image")]
     pub image: String,
-    /// Host path to OpenShell policy YAML used only to **seed** / fall back when
-    /// the board catalog is empty. Catalog profiles store the YAML text itself.
+    /// Seed / YAML-fallback marker for an empty board catalog: `embedded`
+    /// (default), empty, legacy `sandbox/policy.yaml`, or already-inline YAML.
+    /// Not a host file path — live policy is the board sandbox profile.
     #[serde(default = "d_policy")]
     pub policy: String,
     #[serde(default)]
@@ -298,19 +299,14 @@ impl AgentConfig {
             return Ok(());
         }
         // Live policy is the board sandbox profile. `agents.policy` is seed /
-        // YAML-fallback only: embedded default, inline YAML, or an optional path.
-        let p = self.policy.trim();
-        if p.is_empty()
-            || p == "embedded"
-            || p == "sandbox/policy.yaml"
-            || crate::model::is_inline_policy_yaml(p)
-        {
+        // YAML-fallback only — never a host path that must exist on disk.
+        if crate::model::is_supported_agents_policy(&self.policy) {
             return Ok(());
         }
-        if !std::path::Path::new(p).exists() {
-            return Err(format!("execution.agents.policy {:?} does not exist", self.policy));
-        }
-        Ok(())
+        Err(format!(
+            "execution.agents.policy {:?} is not supported (use embedded, empty, sandbox/policy.yaml, or inline YAML)",
+            self.policy
+        ))
     }
 }
 
@@ -420,7 +416,23 @@ mod tests {
 
         let mut bad_policy = workable();
         bad_policy.policy = "sandbox/does-not-exist.yaml".into();
-        assert!(bad_policy.validate().is_err());
+        let err = bad_policy.validate().expect_err("host paths are not supported");
+        assert!(
+            err.contains("not supported"),
+            "expected unsupported-policy error, got {err}"
+        );
+
+        // Existing path is still rejected — seed never reads host policy files.
+        let mut path_policy = workable();
+        path_policy.policy = "honr.yaml".into();
+        assert!(
+            path_policy.validate().is_err(),
+            "existing host path must not pass as agents.policy"
+        );
+
+        let mut inline = workable();
+        inline.policy = "version: 1\n# inline-ok\n".into();
+        assert!(inline.validate().is_ok());
     }
 
     /// honr.yaml must parse into the config the code expects — the file is the
