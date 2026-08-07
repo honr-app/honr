@@ -739,21 +739,24 @@ assert.equal(cockpitChatGate(runningSession).canSend, true);
 const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
 assert(helpHtml.includes("data-testid=\"operator-guide\""), "Help embeds OperatorGuide");
+assert(helpHtml.includes("data-testid=\"operator-guide-quickstart\""), "Help shows OperatorGuide Quickstart");
 assert(helpHtml.includes("data-testid=\"operator-guide-mcp\""), "Help shows OperatorGuide MCP section");
 assert(helpHtml.includes("data-testid=\"operator-guide-openshell\""), "Help shows OperatorGuide OpenShell section");
-assert(helpHtml.includes("data-testid=\"operator-guide-loop\""), "Help shows OperatorGuide Project loop");
 assert(helpHtml.includes("create_project"), "Help should document create_project");
+assert(helpHtml.includes("clone_repo"), "Help should document clone_repo");
 assert(helpHtml.includes("plan.json"), "Help should document plan.json");
 assert(helpHtml.includes("dispatch"), "Help should document dispatch");
 assert(helpHtml.includes("8080/mcp"), "Help should show MCP URL");
-assert(helpHtml.includes("OpenShell and sandbox"), "Help hero mentions OpenShell/sandbox onboarding");
+assert(helpHtml.includes("Quickstart"), "Help hero names Quickstart as a Help job");
+assert(helpHtml.includes("Connect MCP"), "Help hero names Connect MCP as a Help job");
 
-// OperatorGuide — MCP → OpenShell/sandbox → first Project loop (Board empty / Help)
+// OperatorGuide — Quickstart → MCP → OpenShell/sandbox (Board empty / Help)
 const guideHtml = renderToString(React.createElement(OperatorGuide));
 assert(guideHtml.includes("data-testid=\"operator-guide\""), "OperatorGuide root testid");
+assert(guideHtml.includes("data-testid=\"operator-guide-quickstart\""), "OperatorGuide Quickstart section");
+assert(guideHtml.includes("data-testid=\"operator-guide-quickstart-steps\""), "OperatorGuide Quickstart steps");
 assert(guideHtml.includes("data-testid=\"operator-guide-mcp\""), "OperatorGuide MCP section");
 assert(guideHtml.includes("data-testid=\"operator-guide-openshell\""), "OperatorGuide OpenShell/sandbox section");
-assert(guideHtml.includes("data-testid=\"operator-guide-loop\""), "OperatorGuide Project loop section");
 assert(guideHtml.includes("data-testid=\"operator-guide-client-examples\""), "OperatorGuide client examples are secondary");
 assert(guideHtml.includes("data-testid=\"operator-guide-mcp-url\""), "OperatorGuide copyable MCP URL");
 assert(guideHtml.includes("data-testid=\"operator-guide-cursor-snippet\""), "OperatorGuide Cursor snippet");
@@ -761,6 +764,7 @@ assert(guideHtml.includes("data-testid=\"operator-guide-claude-snippet\""), "Ope
 assert(guideHtml.includes("http://127.0.0.1:8080/mcp"), "OperatorGuide shows MCP endpoint");
 assert(guideHtml.includes("Streamable HTTP"), "OperatorGuide names Streamable HTTP transport");
 assert(guideHtml.includes("create_project"), "OperatorGuide documents create_project");
+assert(guideHtml.includes("clone_repo"), "OperatorGuide documents clone_repo");
 assert(guideHtml.includes("plan.json"), "OperatorGuide documents plan.json");
 assert(guideHtml.includes("Approve"), "OperatorGuide documents Approve");
 assert(guideHtml.includes("idle"), "OperatorGuide notes agents stay idle until enable+dispatch");
@@ -776,15 +780,18 @@ assert(guideHtml.includes("GH_TOKEN"), "OperatorGuide mentions GH_TOKEN via GitH
 assert(guideHtml.includes("Sandbox specs"), "OperatorGuide names Sandbox specs tab");
 assert(guideHtml.includes("mTLS"), "OperatorGuide mentions mTLS on Connectivity");
 assert(guideHtml.includes("honr.yaml"), "OperatorGuide mentions honr.yaml for agents enabled");
-// Order: MCP (with examples) → OpenShell/sandbox → Project loop.
+// Order: Quickstart → MCP (with examples) → OpenShell/sandbox.
+const quickstartIdx = guideHtml.indexOf("data-testid=\"operator-guide-quickstart\"");
 const mcpIdx = guideHtml.indexOf("data-testid=\"operator-guide-mcp\"");
 const openshellIdx = guideHtml.indexOf("data-testid=\"operator-guide-openshell\"");
-const loopIdx = guideHtml.indexOf("data-testid=\"operator-guide-loop\"");
 const examplesIdx = guideHtml.indexOf("data-testid=\"operator-guide-client-examples\"");
-assert(mcpIdx >= 0 && loopIdx > mcpIdx, "OperatorGuide leads with MCP before Project loop");
 assert(
-  openshellIdx > mcpIdx && openshellIdx < loopIdx,
-  "OpenShell/sandbox sits between MCP and Project loop",
+  quickstartIdx >= 0 && mcpIdx > quickstartIdx,
+  "OperatorGuide leads with Quickstart before MCP",
+);
+assert(
+  openshellIdx > mcpIdx,
+  "OpenShell/sandbox follows MCP (after the two Help pillars)",
 );
 assert(examplesIdx > mcpIdx && examplesIdx < openshellIdx, "Client examples sit under MCP, before OpenShell");
 
@@ -1253,9 +1260,9 @@ assert(emptyBoardHtml.includes("board-page") || emptyBoardHtml.includes("Welcome
 assert(emptyBoardHtml.includes("Welcome to honr"), "Board empty keeps Welcome hero");
 assert(emptyBoardHtml.includes("data-testid=\"board-empty\""), "Board empty shell testid");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide\""), "Board empty embeds OperatorGuide");
+assert(emptyBoardHtml.includes("data-testid=\"operator-guide-quickstart\""), "Board empty shows Quickstart section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-mcp\""), "Board empty shows MCP section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-openshell\""), "Board empty shows OpenShell section");
-assert(emptyBoardHtml.includes("data-testid=\"operator-guide-loop\""), "Board empty shows Project loop");
 assert(emptyBoardHtml.includes("OpenShell and sandbox"), "Board Welcome lede mentions OpenShell/sandbox");
 assert(emptyBoardHtml.includes("/settings/openshell/connectivity"), "Board empty deep-links Connectivity");
 assert(emptyBoardHtml.includes("/settings/agent-runtime"), "Board empty deep-links Agent runtime");

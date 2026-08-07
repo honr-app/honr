@@ -1385,7 +1385,7 @@ main.with-side-panes {
   overflow-y: auto !important;
 }
 
-/* OperatorGuide — MCP + OpenShell/sandbox + first-loop (Board empty / Help). */
+/* OperatorGuide — Quickstart + MCP + OpenShell onboarding (Board empty / Help). */
 .operator-guide {
   max-width: 640px;
 }
