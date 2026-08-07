@@ -63,7 +63,41 @@ pub fn allowed(from: State, to: State) -> bool {
         // Approved too early, or Done should wait for GitHub merge — return to Review.
         (Done, Review) => true,
 
+        // Unarchive: restore from history to safe states only — never re-enter
+        // Claimed/Running/Splitting/NeedsHuman from Retired.
+        (Retired, Draft) => true,
+        (Retired, Shaping) => true,
+        (Retired, Backlog) => true,
+        (Retired, Review) => true,
+        (Retired, Done) => true,
+
         _ => false,
+    }
+}
+
+/// Target state when unarchiving a Retired item whose pre-retire state was `prior`.
+///
+/// In-flight priors are remapped to Backlog (or Shaping when a leaf lacks DoD)
+/// so restore never revives a claim or a running lease.
+#[allow(dead_code)] // Board::unarchive_scope; REST/MCP land in the follow-up card
+pub fn unarchive_target(prior: State, has_children: bool, has_dod: bool) -> State {
+    match prior {
+        State::Claimed | State::Running | State::Splitting | State::NeedsHuman => {
+            if !has_children && !has_dod {
+                State::Shaping
+            } else {
+                State::Backlog
+            }
+        }
+        State::Draft | State::Shaping | State::Backlog | State::Review | State::Done => prior,
+        // Missing history or a curious double-retire — land somewhere claimable later.
+        State::Retired => {
+            if !has_children && !has_dod {
+                State::Shaping
+            } else {
+                State::Backlog
+            }
+        }
     }
 }
 
@@ -219,6 +253,34 @@ mod tests {
         assert!(allowed(Done, Retired));
         assert!(allowed(Running, Retired));
         assert!(!allowed(Retired, Retired));
+    }
+
+    #[test]
+    fn unarchive_allows_only_safe_retired_exits() {
+        for to in [Draft, Shaping, Backlog, Review, Done] {
+            assert!(allowed(Retired, to), "Retired -> {to:?} should be legal");
+        }
+        for to in [Claimed, Running, Splitting, NeedsHuman, Retired] {
+            assert!(!allowed(Retired, to), "Retired -> {to:?} must stay illegal");
+        }
+    }
+
+    #[test]
+    fn unarchive_target_remaps_in_flight_priors() {
+        assert_eq!(unarchive_target(Running, false, true), Backlog);
+        assert_eq!(unarchive_target(Claimed, false, true), Backlog);
+        assert_eq!(unarchive_target(Splitting, true, false), Backlog);
+        assert_eq!(unarchive_target(NeedsHuman, false, true), Backlog);
+        assert_eq!(
+            unarchive_target(Running, false, false),
+            Shaping,
+            "leaf without DoD cannot land in Backlog"
+        );
+        assert_eq!(unarchive_target(Done, false, true), Done);
+        assert_eq!(unarchive_target(Review, false, true), Review);
+        assert_eq!(unarchive_target(Draft, false, false), Draft);
+        assert_eq!(unarchive_target(Shaping, false, false), Shaping);
+        assert_eq!(unarchive_target(Backlog, false, true), Backlog);
     }
 
     #[test]
