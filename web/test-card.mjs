@@ -745,10 +745,21 @@ assert(helpHtml.includes("data-testid=\"operator-guide-openshell\""), "Help show
 assert(helpHtml.includes("create_project"), "Help should document create_project");
 assert(helpHtml.includes("clone_repo"), "Help should document clone_repo");
 assert(helpHtml.includes("plan.json"), "Help should document plan.json");
+assert(helpHtml.includes("Approve"), "Help should document Approve");
 assert(helpHtml.includes("dispatch"), "Help should document dispatch");
-assert(helpHtml.includes("8080/mcp"), "Help should show MCP URL");
+assert(helpHtml.includes("http://127.0.0.1:8080/mcp"), "Help should show MCP URL");
+assert(helpHtml.includes("Streamable HTTP"), "Help should name Streamable HTTP transport");
 assert(helpHtml.includes("Quickstart"), "Help hero names Quickstart as a Help job");
 assert(helpHtml.includes("Connect MCP"), "Help hero names Connect MCP as a Help job");
+// Help surface order: Quickstart pillar before MCP pillar.
+{
+  const helpQuickstartIdx = helpHtml.indexOf("data-testid=\"operator-guide-quickstart\"");
+  const helpMcpIdx = helpHtml.indexOf("data-testid=\"operator-guide-mcp\"");
+  assert(
+    helpQuickstartIdx >= 0 && helpMcpIdx > helpQuickstartIdx,
+    "Help orders Quickstart before MCP",
+  );
+}
 
 // OperatorGuide — Quickstart → MCP → OpenShell/sandbox (Board empty / Help)
 const guideHtml = renderToString(React.createElement(OperatorGuide));
@@ -1263,6 +1274,11 @@ assert(emptyBoardHtml.includes("data-testid=\"operator-guide\""), "Board empty e
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-quickstart\""), "Board empty shows Quickstart section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-mcp\""), "Board empty shows MCP section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-openshell\""), "Board empty shows OpenShell section");
+assert(emptyBoardHtml.includes("clone_repo"), "Board empty documents clone_repo");
+assert(emptyBoardHtml.includes("plan.json"), "Board empty documents plan.json");
+assert(emptyBoardHtml.includes("Approve"), "Board empty documents Approve");
+assert(emptyBoardHtml.includes("http://127.0.0.1:8080/mcp"), "Board empty shows MCP URL");
+assert(emptyBoardHtml.includes("Streamable HTTP"), "Board empty names Streamable HTTP transport");
 assert(emptyBoardHtml.includes("OpenShell and sandbox"), "Board Welcome lede mentions OpenShell/sandbox");
 assert(emptyBoardHtml.includes("/settings/openshell/connectivity"), "Board empty deep-links Connectivity");
 assert(emptyBoardHtml.includes("/settings/agent-runtime"), "Board empty deep-links Agent runtime");
@@ -1270,6 +1286,15 @@ assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness\""), "Board em
 assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness-gateway\""), "Board empty readiness: gateway row");
 assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness-sandbox\""), "Board empty readiness: sandbox row");
 assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness-agents\""), "Board empty readiness: agents row");
+// Board empty shares OperatorGuide order: Quickstart → MCP.
+{
+  const boardQuickstartIdx = emptyBoardHtml.indexOf("data-testid=\"operator-guide-quickstart\"");
+  const boardMcpIdx = emptyBoardHtml.indexOf("data-testid=\"operator-guide-mcp\"");
+  assert(
+    boardQuickstartIdx >= 0 && boardMcpIdx > boardQuickstartIdx,
+    "Board empty orders Quickstart before MCP",
+  );
+}
 
 // OpenShell readiness strip — presentational ready / not-ready fixtures
 assert.strictEqual(
