@@ -946,6 +946,13 @@ async fn run_inside(
         Ok(())
     };
 
+    // Workdir contract for `run_inside`:
+    // - Cold start (`!is_reused`): clear `/sandbox/repo` so the agent clones
+    //   into an empty tree. Supervisor never clones.
+    // - Reuse (`is_reused`): keep the live sandbox workdir. Park unpark resume
+    //   and Needs You answer reclaim both set this flag the same way. If a
+    //   checkout exists, refresh in place; otherwise ensure the directory
+    //   without wiping prior contents or caches. Still never supervisor-clone.
     let branch_state = if !is_reused {
         if let Err(e) = with_board_cancel(board, id, async {
             let _ = os.delete(&spec.name).await;
@@ -982,8 +989,8 @@ async fn run_inside(
         let _ =
             with_board_cancel(board, id, ensure_report_schema_in_sandbox(os, name, short)).await;
 
-        // Reuse: refresh only if the agent already left a checkout. Otherwise
-        // empty workdir again — never supervisor-clone.
+        // Reuse: refresh an existing checkout in place; otherwise ensure the
+        // directory without wiping. Never empty_workdir_script here.
         let has_repo = with_board_cancel(board, id, async {
             os.exec(name, &format!("test -d {WORKDIR}/.git"), short)
                 .await
@@ -1005,7 +1012,7 @@ async fn run_inside(
             let _ = with_board_cancel(
                 board,
                 id,
-                exec_with_infra_retry(os, name, &empty_workdir_script(), short, "workdir"),
+                exec_with_infra_retry(os, name, &ensure_workdir_script(), short, "workdir"),
             )
             .await?;
             beat(0.03)?;
@@ -2067,11 +2074,22 @@ pub const MARK_REBASED: &str = "HONR-BRANCH-REBASED";
 pub const MARK_CONFLICT: &str = "HONR-BRANCH-CONFLICT";
 pub const MARK_CONFLICT_FILES: &str = "HONR-CONFLICT-FILES=";
 
-/// Empty `/sandbox/repo` directory for the agent to clone into.
+/// Cold-start only: wipe `/sandbox/repo` so the agent clones into an empty tree.
+/// Reuse paths (park resume / Needs You reclaim) must not call this.
 fn empty_workdir_script() -> String {
     format!(
         r#"set -e
 rm -rf {WORKDIR}
+mkdir -p {WORKDIR}
+echo {MARK_FRESH}"#
+    )
+}
+
+/// Reuse without a checkout: ensure `/sandbox/repo` exists without wiping
+/// prior contents or caches. Agent still owns any clone.
+fn ensure_workdir_script() -> String {
+    format!(
+        r#"set -e
 mkdir -p {WORKDIR}
 echo {MARK_FRESH}"#
     )
@@ -4378,6 +4396,42 @@ mod tests {
         assert!(s.contains("fetch -q origin honr/card-8"), "{s}");
         assert!(s.contains("rebase -q upstream/main"), "{s}");
         assert!(!s.contains("rm -rf"), "must not wipe workdir: {s}");
+    }
+
+    /// Cold start (`!is_reused`) empties `/sandbox/repo` before the agent
+    /// clones. Park resume and Needs You answer reclaim share the `is_reused`
+    /// path and must never call this wipe script.
+    #[test]
+    fn cold_start_empty_workdir_wipes_repo() {
+        let s = empty_workdir_script();
+        assert!(
+            s.contains("rm -rf /sandbox/repo"),
+            "cold start must clear workdir: {s}"
+        );
+        assert!(s.contains("mkdir -p /sandbox/repo"), "{s}");
+        assert!(s.contains(MARK_FRESH), "{s}");
+        assert!(
+            !s.contains("git clone"),
+            "supervisor must not clone: {s}"
+        );
+    }
+
+    /// Reuse without a checkout (same `is_reused` path as park resume and
+    /// Needs You reclaim): ensure the directory exists; do not wipe contents
+    /// or caches. Agent still owns clone.
+    #[test]
+    fn reuse_ensure_workdir_does_not_wipe() {
+        let s = ensure_workdir_script();
+        assert!(
+            !s.contains("rm -rf"),
+            "reuse must not wipe /sandbox/repo: {s}"
+        );
+        assert!(s.contains("mkdir -p /sandbox/repo"), "{s}");
+        assert!(s.contains(MARK_FRESH), "{s}");
+        assert!(
+            !s.contains("git clone"),
+            "supervisor must not clone: {s}"
+        );
     }
 
     /// Where to resume after honr restarts mid-run.
