@@ -18,7 +18,7 @@ import {
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayMtlsReady, sandboxSpecReady } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellPoliciesPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayMtlsReady, sandboxSpecReady } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import {
   chromeLocationsEqual,
@@ -800,11 +800,13 @@ assert(guideHtml.includes("mcp.json"), "OperatorGuide has Cursor mcp.json exampl
 assert(guideHtml.includes("OpenShell + sandbox"), "OperatorGuide OpenShell section title");
 assert(guideHtml.includes("/settings/openshell/connectivity"), "OpenShell deep link: Connectivity");
 assert(guideHtml.includes("/settings/openshell/providers"), "OpenShell deep link: Providers");
+assert(guideHtml.includes("/settings/openshell/policies"), "OpenShell deep link: Policies");
 assert(guideHtml.includes("/settings/openshell/profiles"), "OpenShell deep link: Sandbox specs");
 assert(guideHtml.includes("/settings/agent-runtime"), "OpenShell deep link: Agent runtime");
 assert(guideHtml.includes("github-app"), "OperatorGuide mentions github-app provider");
 assert(guideHtml.includes("GH_TOKEN"), "OperatorGuide mentions GH_TOKEN");
 assert(guideHtml.includes("cursor-agent"), "OperatorGuide places github-app with other shipped types");
+assert(guideHtml.includes("Policies"), "OperatorGuide names Policies tab");
 assert(guideHtml.includes("Sandbox specs"), "OperatorGuide names Sandbox specs tab");
 assert(guideHtml.includes("mTLS"), "OperatorGuide mentions mTLS on Connectivity");
 // Order: Quickstart → MCP (with examples) → OpenShell/sandbox.
@@ -830,6 +832,7 @@ assert(!settingsHtml.includes("data-testid=\"settings-nav-github-app\""), "GitHu
 assert(settingsHtml.includes("data-testid=\"openshell-panel\""), "Default section is OpenShell");
 assert(settingsHtml.includes("data-testid=\"openshell-subnav\""), "OpenShell has section subnav");
 assert(settingsHtml.includes("data-testid=\"openshell-tab-profiles\""), "OpenShell tab for Profiles");
+assert(settingsHtml.includes("data-testid=\"openshell-tab-policies\""), "OpenShell tab for Policies");
 assert(settingsHtml.includes("data-testid=\"openshell-connectivity\""), "Default OpenShell tab is Connectivity");
 assert(settingsHtml.includes("Connectivity"), "Settings OpenShell names Connectivity");
 assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
@@ -908,8 +911,9 @@ assert(
   openshellHtml.includes("data-testid=\"openshell-tab-connectivity\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-providers\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-provider-types\"") &&
+    openshellHtml.includes("data-testid=\"openshell-tab-policies\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-profiles\""),
-  "OpenShell tabs: Connectivity / Providers / Provider types / Sandbox specs",
+  "OpenShell tabs: Connectivity / Providers / Provider types / Policies / Sandbox specs",
 );
 
 const openshellUnhealthyHtml = renderToString(
@@ -1241,6 +1245,91 @@ const openshellProfilesTabHtml = renderToString(
 );
 assert(openshellProfilesTabHtml.includes("data-testid=\"openshell-profiles-slot\""), "Profiles tab hosts profiles slot");
 
+const openshellPoliciesTabHtml = renderToString(
+  React.createElement(OpenShellPanelView, {
+    ...openshellPanelProps,
+    activeTab: "policies",
+    status: { healthy: true, summary: "ok", not_configured: false },
+    policies: React.createElement("div", { "data-testid": "openshell-policies-slot" }, "policies"),
+    profiles: React.createElement("div", { "data-testid": "openshell-profiles-slot" }, "profiles"),
+  }),
+);
+assert(openshellPoliciesTabHtml.includes("data-testid=\"openshell-policies-slot\""), "Policies tab hosts policies slot");
+assert(!openshellPoliciesTabHtml.includes("data-testid=\"openshell-profiles-slot\""), "Profiles slot hidden on Policies tab");
+
+const fixturePolicies = [
+  {
+    id: "minimal",
+    name: "Minimal",
+    yaml: "version: 1\n# minimal\n",
+  },
+  {
+    id: "heavy-pol",
+    name: "Heavy allow",
+    yaml: "version: 1\n# heavy\n",
+  },
+];
+
+const openshellPoliciesHtml = renderToString(
+  React.createElement(OpenShellPoliciesPanelView, {
+    policies: fixturePolicies,
+    editingId: null,
+    draft: null,
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onStartCreate: () => {},
+  }),
+);
+assert(openshellPoliciesHtml.includes("data-testid=\"openshell-policies\""), "Policies band renders");
+assert(
+  openshellPoliciesHtml.includes(">Policies<") || openshellPoliciesHtml.includes("Policies</h3>"),
+  "Policies catalog heading",
+);
+assert(openshellPoliciesHtml.includes("data-testid=\"openshell-policy-minimal\""), "Policy row renders");
+assert(openshellPoliciesHtml.includes("data-testid=\"openshell-policies-add\""), "Add policy control");
+assert(openshellPoliciesHtml.includes("Sandbox spec"), "Policies copy points attach to Sandbox specs");
+
+const openshellPoliciesEmptyHtml = renderToString(
+  React.createElement(OpenShellPoliciesPanelView, {
+    policies: [],
+    editingId: null,
+    draft: null,
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onStartCreate: () => {},
+  }),
+);
+assert(openshellPoliciesEmptyHtml.includes("data-testid=\"openshell-policies-empty\""), "Empty policies state");
+
+const openshellPolicyFormHtml = renderToString(
+  React.createElement(OpenShellPoliciesPanelView, {
+    policies: fixturePolicies,
+    editingId: "",
+    draft: {
+      id: "",
+      name: "CI allow",
+      yaml: "version: 1\nfilesystem_policy:\n  include_workdir: true\n",
+    },
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onStartCreate: () => {},
+  }),
+);
+assert(openshellPolicyFormHtml.includes("data-testid=\"openshell-policy-form\""), "Policy create form");
+assert(openshellPolicyFormHtml.includes("data-testid=\"openshell-policy-field-name\""), "Policy name field");
+assert(openshellPolicyFormHtml.includes("data-testid=\"openshell-policy-field-yaml\""), "Policy YAML field");
+assert(openshellPolicyFormHtml.includes("<textarea"), "Policy YAML is a textarea");
+assert(openshellPolicyFormHtml.includes("data-testid=\"openshell-policy-save\""), "Policy save control");
+
 const workspaceHtml = renderToString(
   React.createElement(WorkspacePanelView, {
     draft: {
@@ -1369,7 +1458,7 @@ const fixtureProfiles = [
     id: "default",
     name: "Default",
     image: "img:1",
-    policy: "version: 1\n# default\n",
+    policy_id: "minimal",
     cpu: "2",
     memory: "4Gi",
     engine: "cursor",
@@ -1378,7 +1467,7 @@ const fixtureProfiles = [
     id: "heavy",
     name: "Heavy",
     image: "img:heavy",
-    policy: "version: 1\n# heavy\n",
+    policy_id: "heavy-pol",
     cpu: "8",
     memory: "16Gi",
     engine: "agy",
@@ -1387,6 +1476,7 @@ const fixtureProfiles = [
 
 const sandboxPanelBase = {
   profiles: fixtureProfiles,
+  policies: fixturePolicies,
   defaultId: "default",
   cockpitId: "default",
   availableProviders: [
@@ -1406,7 +1496,7 @@ const sandboxPanelBase = {
     id: "",
     name: "",
     image: "",
-    policy: "",
+    policy_id: "minimal",
     cpu: "",
     memory: "",
     engine: "cursor",
@@ -1441,6 +1531,9 @@ assert(sandboxesHtml.includes("data-testid=\"sandbox-create\""), "Sandbox specs 
 assert(sandboxesHtml.includes("data-testid=\"sandbox-edit-default\""), "Selected profile offers Edit");
 assert(sandboxesHtml.includes("cursor"), "Selected profile shows engine");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-delete-default\""), "Default profile can be deleted");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-policy-summary\""), "Selected profile shows policy summary");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-policy-name\""), "Selected profile shows policy name");
+assert(sandboxesHtml.includes(">Minimal<") || sandboxesHtml.includes("Minimal"), "Policy name resolved from catalog");
 assert(!sandboxesHtml.includes("data-testid=\"sandbox-destroy\""),
   "Sandbox specs panel must not offer live OpenShell sandbox destroy");
 assert(!/destroy sandbox|delete environment/i.test(sandboxesHtml),
@@ -1467,7 +1560,7 @@ const createFormHtml = renderToString(
       id: "",
       name: "CI",
       image: "img:ci",
-      policy: "version: 1\nfilesystem_policy:\n  include_workdir: true\n",
+      policy_id: "minimal",
       cpu: "",
       memory: "",
       engine: "cursor",
@@ -1480,10 +1573,12 @@ assert(!createFormHtml.includes("data-testid=\"sandbox-field-id\""),
   "Create form must not require an Id field (server slugs from name)");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-name\""), "Create form should include name");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-engine\""), "Form should include engine field");
-assert(createFormHtml.includes("data-testid=\"sandbox-field-policy\""), "Form should include policy field");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-policy\""), "Form should include policy select");
+assert(createFormHtml.includes("<select"), "Policy control should be a select by id");
+assert(createFormHtml.includes("value=\"minimal\"") || createFormHtml.includes(">Minimal"),
+  "Form lists catalog policies");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-providers\""), "Form includes per-profile providers");
 assert(createFormHtml.includes("data-testid=\"sandbox-provider-vertex\""), "Form lists available providers");
-assert(createFormHtml.includes("<textarea"), "Policy control should be a textarea for inline YAML");
 assert(!/policy path|path to.*policy|host path/i.test(createFormHtml),
   "Settings must not ask for a host filesystem policy path");
 assert(createFormHtml.includes("data-testid=\"sandbox-save\""), "Form should include save");
@@ -1497,7 +1592,7 @@ const editFormHtml = renderToString(
       id: "default",
       name: "Default",
       image: "img",
-      policy: "version: 1\n# default\n",
+      policy_id: "minimal",
       cpu: "",
       memory: "",
       engine: "cursor",
@@ -1615,7 +1710,7 @@ assert.strictEqual(
 assert.strictEqual(gatewayMtlsReady(null), false, "gatewayMtlsReady fails closed on null");
 assert.strictEqual(
   sandboxSpecReady({
-    profiles: [{ id: "default", name: "Default", image: "honr-sandbox:latest", policy: "" }],
+    profiles: [{ id: "default", name: "Default", image: "honr-sandbox:latest", policy_id: "minimal" }],
     default_sandbox_profile_id: "default",
     cockpit_sandbox_profile_id: null,
   }),
@@ -1761,6 +1856,12 @@ assert.deepStrictEqual(parseChromeLocation("/settings/openshell/provider-types")
   settingsSection: "openshell",
   openShellTab: "provider-types",
 });
+assert.deepStrictEqual(parseChromeLocation("/settings/openshell/policies"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "openshell",
+  openShellTab: "policies",
+});
 assert.deepStrictEqual(parseChromeLocation("/settings/openshell/profiles"), {
   view: "settings",
   cardId: null,
@@ -1871,6 +1972,15 @@ assert.strictEqual(
     openShellTab: "provider-types",
   }),
   "/settings/openshell/provider-types",
+);
+assert.strictEqual(
+  formatChromePath({
+    view: "settings",
+    cardId: null,
+    settingsSection: "openshell",
+    openShellTab: "policies",
+  }),
+  "/settings/openshell/policies",
 );
 assert.strictEqual(
   formatChromePath({

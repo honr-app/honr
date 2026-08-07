@@ -22,6 +22,7 @@ const OPENSHELL_TABS = new Set<string>([
   "connectivity",
   "providers",
   "provider-types",
+  "policies",
   "profiles",
 ]);
 

@@ -177,12 +177,24 @@ export function OperatorGuide() {
           <li>
             <a
               className="operator-guide-link"
+              href="/settings/openshell/policies"
+            >
+              Settings → OpenShell → Policies
+            </a>
+            {" "}
+            — named OpenShell allow-list YAML (filesystem / network). Sandbox
+            specs reference a policy by id.
+          </li>
+          <li>
+            <a
+              className="operator-guide-link"
               href="/settings/openshell/profiles"
             >
               Settings → OpenShell → Sandbox specs
             </a>
             {" "}
-            — default profile / sandbox image runs will use.
+            — image, resources, engine, and which policy + providers attach on
+            create.
           </li>
           <li>
             Tune concurrency / timeouts under{" "}
