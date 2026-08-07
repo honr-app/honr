@@ -519,7 +519,7 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
-/* Persistent Board | Help — Settings lives under the account menu. */
+/* Persistent Board | Help | Settings — account menu keeps a secondary Settings path. */
 .shell {
   flex: 1;
   display: flex;
