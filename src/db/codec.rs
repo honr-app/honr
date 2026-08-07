@@ -67,6 +67,9 @@ pub const META_SANDBOX_PROFILES: &str = "sandbox_profiles";
 /// JSON blob: `BTreeMap<String, OpenShellPolicy>` Policies catalog.
 pub const META_OPENSHELL_POLICIES: &str = "openshell_policies";
 
+/// JSON blob: `BTreeMap<String, McpServerDesired>` MCP servers catalog.
+pub const META_MCP_SERVERS: &str = "mcp_servers";
+
 /// Global default sandbox profile id (empty string means unset).
 pub const META_DEFAULT_SANDBOX_PROFILE_ID: &str = "default_sandbox_profile_id";
 

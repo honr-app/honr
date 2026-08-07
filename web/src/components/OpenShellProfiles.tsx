@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import type {
+  McpServerDesired,
   OpenShellPolicy,
   OpenShellProviderView,
   SandboxProfile,
@@ -17,6 +18,7 @@ type ProfileDraft = {
   engine: string;
   /** Explicit attach list (always sent on save). */
   provider_names: string[];
+  mcp_server_ids: string[];
 };
 
 const emptyDraft = (defaults?: SandboxProfileCreateDefaults | null): ProfileDraft => ({
@@ -28,6 +30,7 @@ const emptyDraft = (defaults?: SandboxProfileCreateDefaults | null): ProfileDraf
   memory: defaults?.memory ?? "",
   engine: defaults?.engine?.trim() || "cursor",
   provider_names: [],
+  mcp_server_ids: [],
 });
 
 function draftFrom(p: SandboxProfile): ProfileDraft {
@@ -40,6 +43,7 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
     memory: p.memory ?? "",
     engine: p.engine?.trim() || "cursor",
     provider_names: [...(p.provider_names ?? [])],
+    mcp_server_ids: [...(p.mcp_server_ids ?? [])],
   };
 }
 
@@ -57,6 +61,7 @@ export function SandboxesPanelView({
   defaultId,
   cockpitId,
   availableProviders,
+  availableMcpServers = [],
   selectedId,
   busy,
   error,
@@ -77,6 +82,7 @@ export function SandboxesPanelView({
   defaultId: string | null;
   cockpitId: string | null;
   availableProviders: OpenShellProviderView[];
+  availableMcpServers?: McpServerDesired[];
   selectedId: string | null;
   busy?: boolean;
   error?: string | null;
@@ -105,6 +111,13 @@ export function SandboxesPanelView({
     if (set.has(name)) set.delete(name);
     else set.add(name);
     onDraftChange({ ...draft, provider_names: [...set] });
+  };
+
+  const toggleMcp = (id: string) => {
+    const set = new Set(draft.mcp_server_ids);
+    if (set.has(id)) set.delete(id);
+    else set.add(id);
+    onDraftChange({ ...draft, mcp_server_ids: [...set] });
   };
 
   return (
@@ -340,6 +353,50 @@ export function SandboxesPanelView({
                   )}
                 </div>
 
+                <div
+                  className="openshell-profile-providers"
+                  data-testid="sandbox-field-mcp-servers"
+                >
+                  <div className="openshell-profile-providers-head">
+                    <span className="openshell-profile-providers-title">
+                      Attach MCP servers
+                    </span>
+                    <span className="dim sandbox-field-hint">
+                      Config inject + policy/provider merge at create. Cockpit
+                      always gets shipped <code>honr</code>.
+                    </span>
+                  </div>
+                  {availableMcpServers.length === 0 ? (
+                    <p className="dim" data-testid="sandbox-mcp-servers-empty">
+                      No MCP servers yet — add them under MCP servers.
+                    </p>
+                  ) : (
+                    <ul className="openshell-profile-provider-ul">
+                      {availableMcpServers.map((s) => (
+                        <li key={s.id}>
+                          <label className="openshell-provider-check">
+                            <input
+                              type="checkbox"
+                              checked={draft.mcp_server_ids.includes(s.id)}
+                              disabled={busy}
+                              onChange={() => toggleMcp(s.id)}
+                              data-testid={`sandbox-mcp-${s.id}`}
+                            />
+                            <span className="openshell-provider-check-text">
+                              <span className="openshell-provider-check-name">
+                                {s.name}
+                              </span>
+                              <span className="dim openshell-provider-check-type">
+                                {s.transport.kind} · {s.audience ?? "cockpit"}
+                              </span>
+                            </span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
                 <div className="sandbox-profile-form-row">
                   <label>
                     CPU
@@ -481,6 +538,7 @@ export function SandboxesPanel() {
   const [profiles, setProfiles] = useState<SandboxProfile[]>([]);
   const [policies, setPolicies] = useState<OpenShellPolicy[]>([]);
   const [providers, setProviders] = useState<OpenShellProviderView[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerDesired[]>([]);
   const [defaultId, setDefaultId] = useState<string | null>(null);
   const [cockpitId, setCockpitId] = useState<string | null>(null);
   const [createDefaults, setCreateDefaults] =
@@ -498,14 +556,16 @@ export function SandboxesPanel() {
       api.listSandboxProfiles(),
       api.listOpenShellProviders(),
       api.listOpenShellPolicies(),
+      api.listMcpServers(),
     ])
-      .then(([out, prov, pol]) => {
+      .then(([out, prov, pol, mcp]) => {
         setProfiles(out.profiles);
         setDefaultId(out.default_sandbox_profile_id);
         setCockpitId(out.cockpit_sandbox_profile_id);
         setCreateDefaults(out.create_defaults);
         setProviders(prov.providers);
         setPolicies(pol.policies);
+        setMcpServers(mcp.servers);
         setSelectedId((cur) => {
           if (cur && out.profiles.some((p) => p.id === cur)) return cur;
           return (
@@ -556,6 +616,7 @@ export function SandboxesPanel() {
       defaultId={defaultId}
       cockpitId={cockpitId}
       availableProviders={providers}
+      availableMcpServers={mcpServers}
       selectedId={selectedId}
       busy={busy}
       error={error}
@@ -590,6 +651,7 @@ export function SandboxesPanel() {
           memory: draft.memory.trim() || null,
           engine: draft.engine.trim() || null,
           provider_names: draft.provider_names,
+          mcp_server_ids: draft.mcp_server_ids,
         };
         run(api.upsertSandboxProfile(body)).then(() => {
           setEditingId(null);

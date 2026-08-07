@@ -13,7 +13,9 @@
 use crate::model::CockpitSessionStatus;
 use crate::openshell::InteractiveEvent;
 use crate::store::SharedBoard;
-use crate::supervisor::{cockpit_briefing, setup_agy_auth, shell_quote, stop_agent};
+use crate::supervisor::{
+    cockpit_briefing, setup_agy_auth, shell_quote, stop_agent, wait_until_sandbox_ready,
+};
 use crate::ws::{read_frame, write_frame, WsFrame};
 
 use axum::extract::{Request, State as AxState};
@@ -331,6 +333,13 @@ where
     let os = board.openshell_client();
 
     let engine = board.resolve_cockpit_engine();
+
+    // Board may publish `environment` right as Ready settles, or attach can
+    // reconnect while OpenShell is still bouncing the relay after create.
+    // Wait here so we do not spam exec with "sandbox is not ready".
+    wait_until_sandbox_ready(&os, &environment)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if engine.trim() == "agy" {
         if let Err(e) = setup_agy_auth(&os, &environment, &board).await {

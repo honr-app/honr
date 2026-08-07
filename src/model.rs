@@ -720,6 +720,186 @@ pub struct OpenShellPolicy {
     pub yaml: String,
 }
 
+/// Shipped board MCP server id for the host honr Streamable HTTP seat.
+pub const HONR_MCP_SERVER_ID: &str = "honr";
+
+/// Which sandboxes may receive this MCP server.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAudience {
+    /// Operator cockpit seat only (includes host `/mcp`).
+    #[default]
+    Cockpit,
+    /// Card-worker sandboxes only (never host `/mcp`).
+    Worker,
+    /// Both cockpit and workers.
+    Both,
+}
+
+impl McpAudience {
+    pub fn allows_cockpit(self) -> bool {
+        matches!(self, Self::Cockpit | Self::Both)
+    }
+
+    pub fn allows_worker(self) -> bool {
+        matches!(self, Self::Worker | Self::Both)
+    }
+}
+
+/// HTTP MCP auth for engine client config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpHttpAuth {
+    /// No Authorization header.
+    None,
+    /// Mint cockpit Bearer via `mcp_oauth` at inject time (host `/mcp` only).
+    CockpitBearer,
+    /// `Authorization: Bearer ${env}` — env supplied by an attached provider.
+    BearerEnv { env: String },
+}
+
+/// How an MCP server is exposed to the agent engine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpTransport {
+    Http {
+        url: String,
+        #[serde(default = "default_mcp_http_auth")]
+        auth: McpHttpAuth,
+    },
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+}
+
+fn default_mcp_http_auth() -> McpHttpAuth {
+    McpHttpAuth::None
+}
+
+/// Board catalog entry for an MCP server (Settings → OpenShell → MCP servers).
+///
+/// Specs attach by id; create merges policy fragments + provider names, and
+/// inject writes Cursor/Claude/agy/OpenCode client config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpServerDesired {
+    pub id: String,
+    pub name: String,
+    pub transport: McpTransport,
+    /// Optional OpenShell YAML fragment merged into the sandbox policy at create.
+    /// Accepts a full policy document or a bare `network_policies:` map.
+    #[serde(default)]
+    pub policy_fragment_yaml: Option<String>,
+    /// Extra OpenShell provider names required by this server.
+    #[serde(default)]
+    pub provider_names: Vec<String>,
+    /// Non-secret env for stdio children (and optional HTTP client hints).
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub audience: McpAudience,
+    /// Seeded from the repo; operators may edit.
+    #[serde(default)]
+    pub shipped: bool,
+}
+
+impl McpServerDesired {
+    pub fn normalized(mut self) -> Result<Self, String> {
+        self.id = self.id.trim().to_string();
+        self.name = self.name.trim().to_string();
+        if self.name.is_empty() {
+            return Err("mcp server name must not be empty".into());
+        }
+        self.provider_names = self
+            .provider_names
+            .into_iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect();
+        self.env = self
+            .env
+            .into_iter()
+            .map(|(k, v)| (k.trim().to_string(), v))
+            .filter(|(k, _)| !k.is_empty())
+            .collect();
+        if let Some(frag) = self.policy_fragment_yaml.take() {
+            let t = frag.trim();
+            self.policy_fragment_yaml = if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            };
+        }
+        match &mut self.transport {
+            McpTransport::Http { url, auth } => {
+                *url = url.trim().to_string();
+                if url.is_empty() && !matches!(auth, McpHttpAuth::CockpitBearer) {
+                    return Err("http mcp server url must not be empty".into());
+                }
+                if let McpHttpAuth::BearerEnv { env } = auth {
+                    *env = env.trim().to_string();
+                    if env.is_empty() {
+                        return Err("bearer_env auth requires env".into());
+                    }
+                }
+            }
+            McpTransport::Stdio {
+                command,
+                args,
+                cwd,
+            } => {
+                *command = command.trim().to_string();
+                if command.is_empty() {
+                    return Err("stdio mcp server command must not be empty".into());
+                }
+                *args = args.iter().map(|a| a.to_string()).collect();
+                if let Some(c) = cwd.take() {
+                    let t = c.trim();
+                    *cwd = if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    };
+                }
+            }
+        }
+        if matches!(
+            (&self.transport, self.audience),
+            (
+                McpTransport::Http {
+                    auth: McpHttpAuth::CockpitBearer,
+                    ..
+                },
+                McpAudience::Worker
+            )
+        ) {
+            return Err("cockpit_bearer auth cannot target worker audience".into());
+        }
+        Ok(self)
+    }
+
+    /// Shipped host honr MCP (Streamable HTTP + cockpit Bearer).
+    pub fn shipped_honr() -> Self {
+        Self {
+            id: HONR_MCP_SERVER_ID.into(),
+            name: "honr".into(),
+            transport: McpTransport::Http {
+                // Resolved at inject from mcp_oauth::cockpit_mcp_resource().
+                url: String::new(),
+                auth: McpHttpAuth::CockpitBearer,
+            },
+            policy_fragment_yaml: None,
+            provider_names: Vec::new(),
+            env: BTreeMap::new(),
+            audience: McpAudience::Cockpit,
+            shipped: true,
+        }
+    }
+}
+
 /// Named create-spec for OpenShell sandboxes. Board-state catalog entries;
 /// empty catalogs seed from compiled [`crate::schema::AgentConfig::default`]
 /// and embedded policy constants (not from host `honr.yaml` create knobs).
@@ -748,6 +928,10 @@ pub struct SandboxProfile {
     /// Empty = attach none. Unknown names are dropped at create time.
     #[serde(default)]
     pub provider_names: Vec<String>,
+    /// MCP server catalog ids to attach (config inject + policy/provider merge).
+    /// Empty = none from the catalog; cockpit still injects shipped `honr`.
+    #[serde(default)]
+    pub mcp_server_ids: Vec<String>,
 }
 
 /// Create-form / last-resort knobs when the catalog has no matching profile.
@@ -873,8 +1057,10 @@ pub struct ResolvedSandboxCreate {
     pub engine: Option<String>,
     /// Catalog profile that won, if any. `None` means compiled-default fallback.
     pub profile_id: Option<String>,
-    /// Provider names to attach (from the winning profile; empty for fallback).
+    /// Provider names to attach (from the winning profile + MCP servers; empty for fallback).
     pub providers: Vec<String>,
+    /// MCP server catalog ids attached for this create (audience-filtered).
+    pub mcp_server_ids: Vec<String>,
 }
 
 impl ResolvedSandboxCreate {
@@ -893,6 +1079,7 @@ impl ResolvedSandboxCreate {
                 .map(|s| s.to_string()),
             profile_id: Some(p.id.clone()),
             providers: p.provider_names.clone(),
+            mcp_server_ids: p.mcp_server_ids.clone(),
         }
     }
 
@@ -914,6 +1101,7 @@ impl ResolvedSandboxCreate {
             engine,
             profile_id: None,
             providers: Vec::new(),
+            mcp_server_ids: Vec::new(),
         }
     }
 }
@@ -1350,6 +1538,7 @@ mod tests {
             memory: None,
             engine: None,
             provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("policy_id"));
