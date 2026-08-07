@@ -36,8 +36,8 @@ of them is the same.
 |---|---|
 | **Dispatch** / **Start** | Marks a Backlog card as wanting to run. The supervisor picks it up on the next tick. |
 | **Auto mode** | Per-Project. Queues every claimable Backlog leaf automatically. Never approves, answers, or unparks. |
-| **Approve** | On a proposal, creates the sibling Tasks. On a Review card, surfaces the PR. Never merges. |
-| **Request changes** | Sends a Review card back with a note that reaches the next run's briefing. Does not restart it. |
+| **Approve** | On a proposal, creates the sibling Tasks. On a Review card, surfaces the PR. Never merges. A GitHub PR `APPROVED` review does not Approve in honr. |
+| **Request changes** | Sends a Review card back with a note that reaches the next run's briefing. Does not restart it. Submitted GitHub `CHANGES_REQUESTED` / `COMMENT` reviews take the same Board path (pointer steer → Backlog); see [Workflow](workflow.md#pr-review-feedback). |
 | **Steer** | A soft note stored for the next claim. Does not interrupt a running turn. |
 | **Park** | Stops the agent but keeps the sandbox and conversation. Resume continues the same thread. |
 | **Halt** | Stops the agent, clears the conversation, deletes the sandbox. The next dispatch starts clean. |
