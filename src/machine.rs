@@ -79,7 +79,6 @@ pub fn allowed(from: State, to: State) -> bool {
 ///
 /// In-flight priors are remapped to Backlog (or Shaping when a leaf lacks DoD)
 /// so restore never revives a claim or a running lease.
-#[allow(dead_code)] // Board::unarchive_scope; REST/MCP land in the follow-up card
 pub fn unarchive_target(prior: State, has_children: bool, has_dod: bool) -> State {
     match prior {
         State::Claimed | State::Running | State::Splitting | State::NeedsHuman => {
