@@ -624,6 +624,10 @@ impl Board {
             tracing::info!("seeded shipped MCP servers");
             board.flush();
         }
+        if board.ensure_cockpit_honr_mcp_attach() {
+            tracing::info!("attached shipped honr MCP to Cockpit sandbox profile");
+            board.flush();
+        }
         if board.migrate_github_app_provider_name() {
             tracing::info!("migrated GitHub App provider attach name github → github-app");
             board.flush();
@@ -703,6 +707,10 @@ impl Board {
         }
         if board.ensure_shipped_mcp_servers() {
             tracing::info!("seeded shipped MCP servers");
+            board.flush();
+        }
+        if board.ensure_cockpit_honr_mcp_attach() {
+            tracing::info!("attached shipped honr MCP to Cockpit sandbox profile");
             board.flush();
         }
         if board.migrate_github_app_provider_name() {
@@ -2997,6 +3005,36 @@ impl Board {
         added
     }
 
+    /// Attach shipped `honr` to the Cockpit sandbox profile's `mcp_server_ids`.
+    ///
+    /// Uses `cockpit_sandbox_profile_id`, else the global default profile (same
+    /// resolve order as [`Self::resolve_cockpit_sandbox_create`]). Idempotent.
+    /// Matches inject: cockpit always gets the host operator MCP seat.
+    pub fn ensure_cockpit_honr_mcp_attach(&self) -> bool {
+        self.ensure_shipped_mcp_servers();
+        let mut s = self.state.write();
+        if !s.mcp_servers.contains_key(HONR_MCP_SERVER_ID) {
+            return false;
+        }
+        let profile_id = s
+            .cockpit_sandbox_profile_id
+            .clone()
+            .or_else(|| s.default_sandbox_profile_id.clone());
+        let Some(pid) = profile_id else {
+            return false;
+        };
+        let Some(p) = s.sandbox_profiles.get_mut(&pid) else {
+            return false;
+        };
+        if p.mcp_server_ids.iter().any(|id| id == HONR_MCP_SERVER_ID) {
+            return false;
+        }
+        p.mcp_server_ids.insert(0, HONR_MCP_SERVER_ID.into());
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        true
+    }
+
     pub fn list_mcp_servers(&self) -> Vec<McpServerDesired> {
         self.ensure_shipped_mcp_servers();
         self.state.read().mcp_servers.values().cloned().collect()
@@ -3217,6 +3255,8 @@ impl Board {
         &self,
         profile: SandboxProfile,
     ) -> Result<SandboxProfile, String> {
+        // So Cockpit force-attach can see shipped `honr` even on a cold board.
+        self.ensure_shipped_mcp_servers();
         if profile.name.trim().is_empty() {
             return Err("sandbox profile name must not be empty".into());
         }
@@ -3241,7 +3281,7 @@ impl Board {
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty())
             .collect();
-        let mcp_server_ids: Vec<String> = profile
+        let mut mcp_server_ids: Vec<String> = profile
             .mcp_server_ids
             .into_iter()
             .map(|n| n.trim().to_string())
@@ -3265,6 +3305,19 @@ impl Board {
                 trimmed.to_string()
             }
         };
+        // Cockpit target cannot drop shipped honr — resolve/inject re-add it.
+        let cockpit_target = s
+            .cockpit_sandbox_profile_id
+            .as_deref()
+            .or(s.default_sandbox_profile_id.as_deref());
+        let becomes_first_default =
+            s.sandbox_profiles.is_empty() && s.default_sandbox_profile_id.is_none();
+        if (cockpit_target == Some(id.as_str()) || becomes_first_default)
+            && s.mcp_servers.contains_key(HONR_MCP_SERVER_ID)
+            && !mcp_server_ids.iter().any(|x| x == HONR_MCP_SERVER_ID)
+        {
+            mcp_server_ids.insert(0, HONR_MCP_SERVER_ID.into());
+        }
         let stored = SandboxProfile {
             id,
             name,
@@ -3297,6 +3350,10 @@ impl Board {
         s.default_sandbox_profile_id = Some(id.to_string());
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
+        // When Cockpit inherits the global default, keep shipped honr attached.
+        if self.cockpit_sandbox_profile_id().is_none() {
+            let _ = self.ensure_cockpit_honr_mcp_attach();
+        }
         Ok(())
     }
 
@@ -3308,6 +3365,7 @@ impl Board {
         s.cockpit_sandbox_profile_id = Some(id.to_string());
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
+        let _ = self.ensure_cockpit_honr_mcp_attach();
         Ok(())
     }
 
@@ -3317,6 +3375,7 @@ impl Board {
         if s.cockpit_sandbox_profile_id.take().is_some() {
             drop(s);
             self.dirty.store(true, Ordering::Relaxed);
+            let _ = self.ensure_cockpit_honr_mcp_attach();
         }
     }
 
@@ -3556,13 +3615,16 @@ impl Board {
 
     /// Profile → resolved create: audience-filter MCP ids, merge policy fragments,
     /// union provider names from attached MCP servers.
+    ///
+    /// Cockpit always includes shipped `honr` when present in the catalog, even
+    /// if the profile list omitted it (same as inject).
     fn materialize_resolved(
         s: &BoardState,
         p: &SandboxProfile,
         for_cockpit: bool,
     ) -> ResolvedSandboxCreate {
         let base_yaml = Self::policy_yaml_for_profile(s, p);
-        let servers: Vec<&McpServerDesired> = p
+        let mut servers: Vec<&McpServerDesired> = p
             .mcp_server_ids
             .iter()
             .filter_map(|id| s.mcp_servers.get(id))
@@ -3581,6 +3643,15 @@ impl Board {
                 }
             })
             .collect();
+        if for_cockpit {
+            if let Some(honr) = s.mcp_servers.get(HONR_MCP_SERVER_ID) {
+                if honr.audience.allows_cockpit()
+                    && !servers.iter().any(|m| m.id == HONR_MCP_SERVER_ID)
+                {
+                    servers.insert(0, honr);
+                }
+            }
+        }
         let fragments: Vec<&str> = servers
             .iter()
             .filter_map(|m| m.policy_fragment_yaml.as_deref())
@@ -11709,7 +11780,11 @@ network_policies:
         let resolved = b.resolve_cockpit_sandbox_create();
         assert!(resolved.policy.contains("huggingface.co"));
         assert_eq!(resolved.providers, vec!["gcp-adc".to_string()]);
-        assert_eq!(resolved.mcp_server_ids, vec!["cnv".to_string()]);
+        // Cockpit always gets shipped honr even when the profile only listed cnv.
+        assert_eq!(
+            resolved.mcp_server_ids,
+            vec!["honr".to_string(), "cnv".to_string()]
+        );
         let worker = {
             let project = b
                 .create(None, "P", "why", None, Origin::Human, true, None)
@@ -11737,6 +11812,87 @@ network_policies:
                 .id,
         );
         assert_eq!(worker2.mcp_server_ids, vec!["cnv".to_string()]);
+    }
+
+    #[test]
+    fn ensure_cockpit_honr_mcp_attach_seeds_profile_and_resolve() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-cockpit-honr-attach-{}",
+                std::process::id()
+            )),
+        );
+        ensure_seed_policy(&b);
+        assert!(b.ensure_shipped_mcp_servers());
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "cockpit".into(),
+            name: "Cockpit".into(),
+            image: "img:1".into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("cursor".into()),
+            provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
+        })
+        .expect("profile");
+        b.set_cockpit_sandbox_profile("cockpit").unwrap();
+        let profile = b
+            .list_sandbox_profiles()
+            .into_iter()
+            .find(|p| p.id == "cockpit")
+            .expect("cockpit profile");
+        assert_eq!(profile.mcp_server_ids, vec!["honr".to_string()]);
+        assert!(!b.ensure_cockpit_honr_mcp_attach());
+        let resolved = b.resolve_cockpit_sandbox_create();
+        assert_eq!(resolved.mcp_server_ids, vec!["honr".to_string()]);
+    }
+
+    #[test]
+    fn upsert_cockpit_profile_refuses_to_drop_shipped_honr() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-cockpit-honr-locked-{}",
+                std::process::id()
+            )),
+        );
+        ensure_seed_policy(&b);
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "cockpit".into(),
+            name: "Cockpit".into(),
+            image: "img:1".into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("cursor".into()),
+            provider_names: Vec::new(),
+            mcp_server_ids: vec!["honr".into()],
+        })
+        .expect("profile");
+        b.set_cockpit_sandbox_profile("cockpit").unwrap();
+        let stored = b
+            .upsert_sandbox_profile(SandboxProfile {
+                id: "cockpit".into(),
+                name: "Cockpit".into(),
+                image: "img:1".into(),
+                policy_id: SEED_POLICY_ID.into(),
+                policy_inline_legacy: None,
+                cpu: None,
+                memory: None,
+                engine: Some("cursor".into()),
+                provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
+            })
+            .expect("upsert without honr");
+        assert_eq!(
+            stored.mcp_server_ids,
+            vec!["honr".to_string()],
+            "cockpit upsert must keep shipped honr"
+        );
     }
 
     #[test]

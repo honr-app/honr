@@ -929,7 +929,8 @@ pub struct SandboxProfile {
     #[serde(default)]
     pub provider_names: Vec<String>,
     /// MCP server catalog ids to attach (config inject + policy/provider merge).
-    /// Empty = none from the catalog; cockpit still injects shipped `honr`.
+    /// Empty = none from the catalog. Cockpit always attaches shipped `honr`
+    /// (profile ensure + resolve + inject) even when omitted here.
     #[serde(default)]
     pub mcp_server_ids: Vec<String>,
 }
