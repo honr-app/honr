@@ -3,6 +3,8 @@ import type {
   AuthSettings,
   AuthStatus,
   GitHubAppSettings,
+  OpenShellPoliciesOut,
+  OpenShellPolicy,
   OpenShellProviderView,
   OpenShellProviderWrite,
   OpenShellProvidersOut,
@@ -165,7 +167,7 @@ export const api = {
     id?: string;
     name: string;
     image: string;
-    policy: string;
+    policy_id: string;
     cpu?: string | null;
     memory?: string | null;
     engine?: string | null;
@@ -215,6 +217,21 @@ export const api = {
     put("/github-app", settings),
   syncGitHubAppToken: (): Promise<GitHubAppSettings> =>
     post("/github-app/sync-token"),
+
+  listOpenShellPolicies: (): Promise<OpenShellPoliciesOut> =>
+    fetch("/api/openshell/policies", fetchOpts).then(jsonOrThrow),
+  getOpenShellPolicy: (id: string): Promise<OpenShellPolicy> =>
+    fetch(`/api/openshell/policies/${encodeURIComponent(id)}`, fetchOpts).then(
+      jsonOrThrow,
+    ),
+  upsertOpenShellPolicy: (body: {
+    /** Omit on create — server derives a slug from `name`. */
+    id?: string;
+    name: string;
+    yaml: string;
+  }): Promise<OpenShellPolicy> => post("/openshell/policies", body),
+  deleteOpenShellPolicy: (id: string): Promise<{ ok: boolean }> =>
+    del(`/openshell/policies/${encodeURIComponent(id)}`),
 
   listOpenShellProviders: (): Promise<OpenShellProvidersOut> =>
     fetch("/api/openshell/providers", fetchOpts).then(jsonOrThrow),

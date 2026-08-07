@@ -50,13 +50,28 @@ export interface BlockerSummary {
   state: State;
 }
 
+/** Board-owned OpenShell policy (Settings → OpenShell → Policies). */
+export interface OpenShellPolicy {
+  id: string;
+  name: string;
+  /** Inline OpenShell policy YAML text. */
+  yaml: string;
+}
+
+/** GET /api/openshell/policies */
+export interface OpenShellPoliciesOut {
+  policies: OpenShellPolicy[];
+  /** Prefill id for create forms (seeded minimal policy). */
+  create_default_policy_id: string;
+}
+
 /** Named OpenShell create-spec from the board catalog (Settings → OpenShell → Sandbox specs). */
 export interface SandboxProfile {
   id: string;
   name: string;
   image: string;
-  /** Inline OpenShell policy YAML text. */
-  policy: string;
+  /** Policies catalog id. Resolved to YAML at sandbox create. */
+  policy_id: string;
   cpu?: string | null;
   memory?: string | null;
   /** Agent CLI (`cursor` / `agy` / `claude` / `opencode`). Unset → Agent runtime default. */
@@ -69,7 +84,8 @@ export interface SandboxProfile {
 export interface SandboxProfileCreateDefaults {
   name: string;
   image: string;
-  policy: string;
+  /** Prefill: seeded minimal Policies catalog id. */
+  policy_id: string;
   cpu?: string | null;
   memory?: string | null;
   engine?: string | null;
