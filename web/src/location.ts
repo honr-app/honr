@@ -4,6 +4,7 @@ import type { OpenShellTab } from "./components/OpenShellSettings";
 /** Settings nav sections mirrored under `/settings/...`. */
 export type SettingsSection =
   | "openshell"
+  | "mcp-servers"
   | "access"
   | "workspace"
   | "agent-runtime";
@@ -13,6 +14,7 @@ export const DEFAULT_OPENSHELL_TAB: OpenShellTab = "connectivity";
 
 const SETTINGS_SECTIONS = new Set<string>([
   "openshell",
+  "mcp-servers",
   "access",
   "workspace",
   "agent-runtime",
@@ -23,7 +25,6 @@ const OPENSHELL_TABS = new Set<string>([
   "providers",
   "provider-types",
   "policies",
-  "mcp-servers",
   "profiles",
 ]);
 
@@ -45,6 +46,8 @@ export type ChromeLocation = {
  *   `/settings`                          → settings / OpenShell / Connectivity
  *   `/settings/openshell`                → settings / OpenShell / Connectivity
  *   `/settings/openshell/:tab`           → settings / OpenShell / tab
+ *   `/settings/mcp-servers`              → settings / MCP servers
+ *   `/settings/openshell/mcp-servers`    → redirect: MCP servers (top-level)
  *   `/settings/:section`                 → settings / section
  *   `/settings/github-app`               → redirect target: OpenShell / Providers
  *   `/card/:id`                          → board with DetailDrawer open on that card
@@ -192,6 +195,13 @@ function parseSettingsPath(
     return {
       settingsSection: "openshell",
       openShellTab: "providers",
+    };
+  }
+  // MCP servers used to live under OpenShell; keep the old path working.
+  if (head === "openshell" && tab === "mcp-servers") {
+    return {
+      settingsSection: "mcp-servers",
+      openShellTab: DEFAULT_OPENSHELL_TAB,
     };
   }
   if (head === "openshell") {

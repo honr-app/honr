@@ -4,6 +4,7 @@ import type {
   McpAudience,
   McpServerDesired,
   McpTransport,
+  OpenShellProviderView,
 } from "../types.js";
 import { YamlEditor } from "./YamlEditor.js";
 
@@ -20,7 +21,7 @@ type ServerDraft = {
   argsText: string;
   cwd: string;
   policy_fragment_yaml: string;
-  provider_names_text: string;
+  provider_names: string[];
   env_text: string;
   audience: McpAudience;
   shipped: boolean;
@@ -38,7 +39,7 @@ const emptyDraft = (): ServerDraft => ({
     "tool run --from context-server@latest context-server serve --db /tmp/kb.db",
   cwd: "",
   policy_fragment_yaml: "",
-  provider_names_text: "",
+  provider_names: [],
   env_text: "",
   audience: "both",
   shipped: false,
@@ -64,7 +65,7 @@ function draftFrom(s: McpServerDesired): ServerDraft {
       argsText: "",
       cwd: "",
       policy_fragment_yaml: s.policy_fragment_yaml ?? "",
-      provider_names_text: (s.provider_names ?? []).join(", "),
+      provider_names: [...(s.provider_names ?? [])],
       env_text: Object.entries(s.env ?? {})
         .map(([k, v]) => `${k}=${v}`)
         .join("\n"),
@@ -83,7 +84,7 @@ function draftFrom(s: McpServerDesired): ServerDraft {
     argsText: (t.args ?? []).join(" "),
     cwd: t.cwd ?? "",
     policy_fragment_yaml: s.policy_fragment_yaml ?? "",
-    provider_names_text: (s.provider_names ?? []).join(", "),
+    provider_names: [...(s.provider_names ?? [])],
     env_text: Object.entries(s.env ?? {})
       .map(([k, v]) => `${k}=${v}`)
       .join("\n"),
@@ -135,6 +136,7 @@ function transportLabel(s: McpServerDesired): string {
 
 export function OpenShellMcpServersPanelView({
   servers,
+  availableProviders,
   busy,
   error,
   hint,
@@ -148,6 +150,7 @@ export function OpenShellMcpServersPanelView({
   onStartCreate,
 }: {
   servers: McpServerDesired[];
+  availableProviders: OpenShellProviderView[];
   busy?: boolean;
   error?: string | null;
   hint?: string | null;
@@ -163,19 +166,27 @@ export function OpenShellMcpServersPanelView({
   const isCreate = editingId === "";
   const isEditing = editingId !== null && draft != null;
 
+  const toggleProvider = (name: string) => {
+    if (!draft) return;
+    const set = new Set(draft.provider_names);
+    if (set.has(name)) set.delete(name);
+    else set.add(name);
+    onDraftChange({ ...draft, provider_names: [...set] });
+  };
+
   return (
-    <div
+    <section
       className="openshell-band openshell-mcp-servers"
-      data-testid="openshell-mcp-servers"
-      aria-labelledby="openshell-mcp-servers-title"
+      data-testid="mcp-servers-panel"
+      aria-labelledby="mcp-servers-title"
     >
       <div className="openshell-band-head">
-        <h3 id="openshell-mcp-servers-title">MCP servers</h3>
+        <h2 id="mcp-servers-title">MCP servers</h2>
         <p className="dim">
-          HTTP or stdio servers injected into sandboxes. Attach them on a{" "}
-          <strong>Sandbox spec</strong>. Policy fragments and providers merge at
-          create; engines get Cursor/Claude/agy/OpenCode config without pasting
-          JSON.
+          HTTP or stdio servers injected into sandboxes. Attach them on an
+          OpenShell <strong>Sandbox spec</strong>. Policy fragments and
+          providers merge at create; engines get Cursor/Claude/agy/OpenCode
+          config without pasting JSON.
         </p>
       </div>
 
@@ -219,7 +230,7 @@ export function OpenShellMcpServersPanelView({
                 <strong>{s.name}</strong>
                 <span className="dim">
                   {s.id}
-                  {s.shipped ? " · shipped" : ""}
+                  {s.shipped ? " · built-in" : ""}
                 </span>
               </div>
               <div className="openshell-provider-meta dim">
@@ -413,22 +424,56 @@ export function OpenShellMcpServersPanelView({
             </>
           )}
 
-          <label>
-            Provider names (comma-separated)
-            <input
-              className="search-input"
-              value={draft.provider_names_text}
-              disabled={busy}
-              onChange={(e) =>
-                onDraftChange({
-                  ...draft,
-                  provider_names_text: e.target.value,
-                })
-              }
-              placeholder="gcp-adc, …"
-              data-testid="openshell-mcp-field-providers"
-            />
-          </label>
+          <div
+            className="openshell-profile-providers"
+            data-testid="openshell-mcp-field-providers"
+          >
+            <div className="openshell-profile-providers-head">
+              <span className="openshell-profile-providers-title">
+                Required providers
+              </span>
+              <span className="dim sandbox-field-hint">
+                Attached when a sandbox using this MCP server is created.
+                Credentials live under OpenShell → Providers.
+              </span>
+            </div>
+            {availableProviders.length === 0 ? (
+              <p className="dim" data-testid="openshell-mcp-providers-empty">
+                No providers yet — add them under OpenShell → Providers.
+              </p>
+            ) : (
+              <ul className="openshell-profile-provider-ul">
+                {availableProviders.map((p) => {
+                  const typeDiffers =
+                    p.type.trim().toLowerCase() !==
+                    p.name.trim().toLowerCase();
+                  return (
+                    <li key={p.name}>
+                      <label className="openshell-provider-check">
+                        <input
+                          type="checkbox"
+                          checked={draft.provider_names.includes(p.name)}
+                          disabled={busy}
+                          onChange={() => toggleProvider(p.name)}
+                          data-testid={`openshell-mcp-provider-${p.name}`}
+                        />
+                        <span className="openshell-provider-check-text">
+                          <span className="openshell-provider-check-name">
+                            {p.name}
+                          </span>
+                          {typeDiffers ? (
+                            <span className="dim openshell-provider-check-type">
+                              {p.type}
+                            </span>
+                          ) : null}
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
           <label>
             Env (KEY=value per line)
             <textarea
@@ -473,12 +518,13 @@ export function OpenShellMcpServersPanelView({
           </div>
         </form>
       )}
-    </div>
+    </section>
   );
 }
 
 export function OpenShellMcpServersPanel() {
   const [servers, setServers] = useState<McpServerDesired[]>([]);
+  const [providers, setProviders] = useState<OpenShellProviderView[]>([]);
   const [draft, setDraft] = useState<ServerDraft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -486,10 +532,16 @@ export function OpenShellMcpServersPanel() {
   const [hint, setHint] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    return api
-      .listMcpServers()
-      .then((out) => {
-        setServers(out.servers);
+    return Promise.all([
+      api.listMcpServers(),
+      api.listOpenShellProviders().catch(() => ({
+        providers: [] as OpenShellProviderView[],
+        gateway_reachable: false,
+      })),
+    ])
+      .then(([mcp, prov]) => {
+        setServers(mcp.servers);
+        setProviders(prov.providers);
         setError(null);
       })
       .catch((e) => setError(String(e)));
@@ -502,6 +554,7 @@ export function OpenShellMcpServersPanel() {
   return (
     <OpenShellMcpServersPanelView
       servers={servers}
+      availableProviders={providers}
       busy={busy}
       error={error}
       hint={hint}
@@ -534,16 +587,12 @@ export function OpenShellMcpServersPanel() {
         setBusy(true);
         setError(null);
         setHint(null);
-        const provider_names = draft.provider_names_text
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
         const body = {
           ...(editingId ? { id: draft.id.trim() } : {}),
           name,
           transport: transportFrom(draft),
           policy_fragment_yaml: draft.policy_fragment_yaml.trim() || null,
-          provider_names,
+          provider_names: draft.provider_names,
           env: parseEnv(draft.env_text),
           audience: draft.audience,
         };

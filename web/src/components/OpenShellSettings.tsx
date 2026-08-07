@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "../api.js";
 import type { OpenShellSettings, OpenShellStatus } from "../types.js";
-import { OpenShellMcpServersPanel } from "./OpenShellMcpServers.js";
 import { OpenShellPoliciesPanel } from "./OpenShellPolicies.js";
 import { OpenShellProvidersPanel } from "./OpenShellProviders.js";
 import { OpenShellProviderTypesPanel } from "./OpenShellProviderTypes.js";
@@ -12,7 +11,6 @@ export type OpenShellTab =
   | "providers"
   | "provider-types"
   | "policies"
-  | "mcp-servers"
   | "profiles";
 
 const TABS: { id: OpenShellTab; label: string }[] = [
@@ -20,7 +18,6 @@ const TABS: { id: OpenShellTab; label: string }[] = [
   { id: "providers", label: "Providers" },
   { id: "provider-types", label: "Provider types" },
   { id: "policies", label: "Policies" },
-  { id: "mcp-servers", label: "MCP servers" },
   { id: "profiles", label: "Sandbox specs" },
 ];
 
@@ -46,7 +43,6 @@ export function OpenShellPanelView({
   providers,
   providerTypes,
   policies,
-  mcpServers,
   profiles,
 }: {
   status: OpenShellStatus | null;
@@ -71,7 +67,6 @@ export function OpenShellPanelView({
   providers?: ReactNode;
   providerTypes?: ReactNode;
   policies?: ReactNode;
-  mcpServers?: ReactNode;
   profiles?: ReactNode;
 }) {
   const [internalTab, setInternalTab] = useState<OpenShellTab>("connectivity");
@@ -103,8 +98,8 @@ export function OpenShellPanelView({
         <h2 id="openshell-title">OpenShell</h2>
         <p className="dim openshell-hero-lead">
           Connect honr to your OpenShell gateway, then configure providers,
-          policies, and sandbox specs. Each spec picks which providers and
-          policy a run gets.
+          policies, and sandbox specs. Each spec picks which providers, policy,
+          and MCP servers a run gets.
         </p>
         <div
           className="openshell-status-chip"
@@ -291,12 +286,6 @@ export function OpenShellPanelView({
         </div>
       )}
 
-      {tab === "mcp-servers" && (
-        <div className="openshell-pane" data-testid="openshell-mcp-servers-host">
-          {mcpServers}
-        </div>
-      )}
-
       {tab === "profiles" && (
         <div className="openshell-pane" data-testid="openshell-profiles-host">
           {profiles}
@@ -425,7 +414,6 @@ export function OpenShellPanel({
       providers={<OpenShellProvidersPanel gatewayHealthy={!!status?.healthy} />}
       providerTypes={<OpenShellProviderTypesPanel />}
       policies={<OpenShellPoliciesPanel />}
-      mcpServers={<OpenShellMcpServersPanel />}
       profiles={<SandboxesPanel />}
     />
   );

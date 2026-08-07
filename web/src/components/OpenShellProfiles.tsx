@@ -363,12 +363,13 @@ export function SandboxesPanelView({
                     </span>
                     <span className="dim sandbox-field-hint">
                       Config inject + policy/provider merge at create. Cockpit
-                      always gets shipped <code>honr</code>.
+                      always gets built-in <code>honr</code>.
                     </span>
                   </div>
                   {availableMcpServers.length === 0 ? (
                     <p className="dim" data-testid="sandbox-mcp-servers-empty">
-                      No MCP servers yet — add them under MCP servers.
+                      No MCP servers yet — add them under Settings → MCP
+                      servers.
                     </p>
                   ) : (
                     <ul className="openshell-profile-provider-ul">

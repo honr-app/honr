@@ -9,6 +9,7 @@ import type {
   WebhookPollConfig,
   WorkspaceBinding,
 } from "../types.js";
+import { OpenShellMcpServersPanel } from "./OpenShellMcpServers.js";
 import {
   OpenShellPanel,
   type OpenShellTab,
@@ -18,6 +19,7 @@ export { OpenShellPanelView } from "./OpenShellSettings.js";
 export { OpenShellProvidersPanelView } from "./OpenShellProviders.js";
 export { OpenShellPoliciesPanelView } from "./OpenShellPolicies.js";
 export { OpenShellProviderTypesPanelView } from "./OpenShellProviderTypes.js";
+export { OpenShellMcpServersPanelView } from "./OpenShellMcpServers.js";
 export {
   OpenShellReadinessStripView,
   gatewayMtlsReady,
@@ -31,6 +33,7 @@ export type { SettingsSection } from "../location.js";
 
 const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "openshell", label: "OpenShell" },
+  { id: "mcp-servers", label: "MCP servers" },
   { id: "access", label: "Access" },
   // Nav label is Forge — "Workspace" implied a single work repo (upstream/fork).
   { id: "workspace", label: "Forge" },
@@ -85,7 +88,7 @@ const emptyAgentRuntime = (): AgentRuntimeConfig => ({
 
 /**
  * Settings shell — OpenShell (incl. shipped github-app provider on
- * Providers), Access, Forge, Agent runtime.
+ * Providers), MCP servers, Access, Forge, Agent runtime.
  * Section / OpenShell tab may be controlled by the URL location contract.
  */
 export function Settings({
@@ -112,7 +115,7 @@ export function Settings({
       <header className="settings-hero">
         <h1>Settings</h1>
         <p className="settings-lede">
-          OpenShell, access, forge polling, and agent runtime.
+          OpenShell, MCP servers, access, forge polling, and agent runtime.
         </p>
       </header>
 
@@ -139,6 +142,8 @@ export function Settings({
               activeTab={openShellTab}
               onTabChange={onOpenShellTabChange}
             />
+          ) : section === "mcp-servers" ? (
+            <OpenShellMcpServersPanel />
           ) : section === "access" ? (
             <AccessPanel />
           ) : section === "workspace" ? (
