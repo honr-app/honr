@@ -2132,9 +2132,14 @@ test -d {VERDICT_DIR}"#
     Ok(())
 }
 
-/// Refresh an existing sandbox repository in-place (git fetch & rebase)
-/// without wiping the workdir or build caches. Cold runs leave clone to the
-/// agent; this path only runs when a reused sandbox already has a checkout.
+/// Refresh an existing sandbox repository in-place (git fetch & optional rebase)
+/// without wiping the workdir, build caches, or mid-run edits.
+///
+/// Park / MainAdvanced reclaim used to `reset --hard` + `clean -fd` and prefer
+/// `origin/{branch}` over the live local branch — that discarded uncommitted
+/// (and unpushed) work before the agent resumed. Prefer the local card branch;
+/// only rebase when the tree is clean. Dirty trees stay put; steer notes tell
+/// the agent to rebase. Cold runs still leave clone to the agent.
 fn refresh_script(cfg: &AgentConfig, branch: &str) -> String {
     let upstream = cfg.repo.upstream.trim();
     let base = cfg.repo.base.trim();
@@ -2158,16 +2163,21 @@ fi
 cd {WORKDIR}
 git config user.email "agent@honr.local"
 git config user.name "honr agent"
-{fetch_base}git reset --hard >/dev/null 2>&1 || true
-git clean -fd >/dev/null 2>&1 || true
-if git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
+{fetch_base}# Keep local card-branch commits and the dirty tree. Do not reset --hard,
+# clean -fd, or force checkout -B from origin/{{branch}} — those wiped park resumes.
+if git rev-parse --verify {branch} >/dev/null 2>&1; then
+  git checkout -q {branch}
+elif git -c '{GIT_CRED}' ls-remote --exit-code --heads origin {branch} >/dev/null 2>&1; then
   git -c '{GIT_CRED}' fetch -q origin {branch}
   git checkout -q -B {branch} origin/{branch}
-elif git rev-parse --verify {branch} >/dev/null 2>&1; then
-  git checkout -q {branch}
 else
   git checkout -q -B {branch} {base_ref}
   echo {MARK_FRESH}
+  exit 0
+fi
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  # Mid-run edits: leave them; agent rebases per steer / resume briefing.
+  echo {MARK_REBASED}
   exit 0
 fi
 if git rebase -q {base_ref} >/dev/null 2>&1; then
@@ -4585,12 +4595,20 @@ mod tests {
         let s = refresh_script(&cfg, "honr/card-8");
         assert!(s.contains("cd /sandbox/repo"), "{s}");
         assert!(
-            s.contains("git reset --hard"),
-            "must reset tracked files: {s}"
+            !s.contains("git reset --hard"),
+            "must not discard mid-run tracked edits: {s}"
         );
         assert!(
-            s.contains("git clean -fd"),
-            "must clean untracked files: {s}"
+            !s.contains("git clean -fd"),
+            "must not discard mid-run untracked edits: {s}"
+        );
+        assert!(
+            s.contains("git status --porcelain"),
+            "dirty tree must skip supervisor rebase: {s}"
+        );
+        assert!(
+            s.contains("git rev-parse --verify honr/card-8"),
+            "must prefer local card branch before origin: {s}"
         );
         assert!(s.contains("fetch -q upstream main"), "{s}");
         assert!(s.contains("fetch -q origin honr/card-8"), "{s}");

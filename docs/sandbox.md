@@ -107,12 +107,14 @@ not as the card failing: see `is_infrastructure` in the supervisor.
 clears `/sandbox/repo` so the agent clones into an empty tree from the Remotes
 briefing (`origin` / `upstream`). Reclaim of a kept sandbox — park resume and
 Needs You answer share the same reuse path — does **not** wipe `/sandbox/repo`.
-When a checkout exists, the supervisor refreshes in place (fetch + rebase onto
-the PR-target tip); otherwise it ensures the directory without clearing prior
-contents or caches. The supervisor never clones; agent-owns-clone stays.
+When a checkout exists, the supervisor refreshes in place: fetch the PR-target
+tip, prefer the local card branch (not a hard reset to `origin/`), and rebase
+only when the tree is clean. Dirty mid-run edits stay put — MainAdvanced steer
+asks the agent to rebase. Otherwise it ensures the directory without clearing
+prior contents or caches. The supervisor never clones; agent-owns-clone stays.
 `/sandbox/.honr` is always present at start with at least `report.schema.json`.
-If a reuse rebase conflicts, the supervisor backs out and tells the agent to
-resolve it.
+If a clean-tree reuse rebase conflicts, the supervisor backs out and tells the
+agent to resolve it.
 
 **Policy is immutable on a live sandbox** for filesystem and process sections.
 Set it at create time; `policy set --wait` is expensive.
