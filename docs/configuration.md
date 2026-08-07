@@ -7,10 +7,10 @@ Three layers:
 | Layer | Role |
 |---|---|
 | **`honr.yaml`** | Boot essentials only: board database URL, level schema, sweep timing, and the `agents.enabled` process gate. Read once at startup. |
-| **Compiled defaults** | Empty sandbox-spec catalogs and unset Agent runtime seed from built-in constants (`AgentConfig::default`, `src/seed_policies.rs`). |
+| **Compiled defaults** | Create-form prefill for sandbox specs (`src/seed_policies.rs` minimal policy) and unset Agent runtime (`AgentConfig::default`). |
 | **Board DB + Settings / API** | Live source of truth for sandbox specs, Agent runtime, OpenShell gateway/providers, Forge, and GitHub App. Edit in the UI or via REST. |
 
-Changing `honr.yaml` after a board already has the corresponding rows does not rewrite those rows. Live create knobs (image, policy, cpu, memory, engine) and Agent runtime process settings are board-owned after seed.
+Changing `honr.yaml` after a board already has the corresponding rows does not rewrite those rows. Live create knobs (image, policy, cpu, memory, engine) and Agent runtime process settings are board-owned.
 
 ## Board database
 
@@ -108,15 +108,10 @@ Resolved in this order:
 
 An empty catalog is seeded with two specs:
 
-| Spec | For | Egress |
-|---|---|---|
-| `default` | Card workers | Inference, GitHub, package registries. **No** honr MCP. |
-| `cockpit` | The cockpit seat | honr MCP, inference, GitHub. **No** package registries. |
-
-The global default stays the worker spec. Boards that already had a worker
-catalog get `cockpit` added at boot if it is missing. After seed, edit the
-board specs — changing the compiled seed text in `src/seed_policies.rs` updates
-the next empty catalog, not an existing board.
+Sandbox specs are operator-created. The first profile becomes the global
+default; Cockpit uses that default unless you set an explicit Cockpit profile.
+Create prefill uses the minimal policy in `src/seed_policies.rs` — add egress
+(honr MCP, registries, toolchains) in the YAML when needed.
 
 ## Engines
 
@@ -143,7 +138,14 @@ Claude and OpenCode use OpenShell `inference.local` via `ANTHROPIC_BASE_URL`.
 **Settings → OpenShell → Providers** holds the desired list with credentials
 sealed. That list is the source of truth; **Sync** applies it to the gateway
 (`POST /api/openshell/providers/sync`), and Save also applies when the gateway is
-reachable. Providers marked **attach** are passed on sandbox create.
+reachable. Which providers attach on create is chosen per **Sandbox spec**, not
+on the provider row.
+
+**Settings → OpenShell → Provider types** holds custom OpenShell provider type
+profiles (YAML) on the board. Shipped types (`antigravity`, `cursor-agent`) seed
+on startup. Sync imports board types to the gateway before applying provider
+instances. Builtin OpenShell `cursor` stays egress-only on the gateway; use
+board type `cursor-agent` when the seat needs `CURSOR_API_KEY`.
 
 Provider `github` is owned by **Settings → GitHub App** — installation tokens
 sync in as `GH_TOKEN`. Do not hand-edit that provider's credentials.

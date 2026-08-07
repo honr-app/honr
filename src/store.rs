@@ -72,6 +72,12 @@ pub struct BoardState {
     /// Desired OpenShell providers (Settings → OpenShell → Providers). Board SoT.
     #[serde(default)]
     pub openshell_providers: Vec<OpenShellProviderDesired>,
+    /// Custom OpenShell provider type profiles (YAML). Board SoT; Sync imports.
+    #[serde(default)]
+    pub openshell_provider_types: BTreeMap<String, OpenShellProviderTypeDesired>,
+    /// Shipped type ids the operator deleted — ensure will not resurrect them.
+    #[serde(default)]
+    pub openshell_provider_type_tombstones: BTreeSet<String>,
     /// Settings → Forge: webhook polling fallback.
     #[serde(default)]
     pub webhook_poll: Option<WebhookPollConfig>,
@@ -118,6 +124,8 @@ impl BoardState {
             auth_allowed_teams: self.auth_allowed_teams.clone(),
             agent_runtime: self.agent_runtime.clone(),
             openshell_providers: self.openshell_providers.clone(),
+            openshell_provider_types: self.openshell_provider_types.clone(),
+            openshell_provider_type_tombstones: self.openshell_provider_type_tombstones.clone(),
             webhook_poll: self.webhook_poll.clone(),
             webhook_poll_tips: self.webhook_poll_tips.clone(),
             webhook_poll_pr_reviews: self.webhook_poll_pr_reviews.clone(),
@@ -591,20 +599,10 @@ impl Board {
                 Err(e) => tracing::warn!("ignoring unreadable {path:?}: {e}"),
             }
         }
-        if board.seed_sandbox_profiles_if_empty() {
-            tracing::info!("seeded sandbox profile catalog from compiled defaults");
-            board.flush();
-        }
-        if board.ensure_default_sandbox_profile() {
-            tracing::info!("seeded default sandbox profile for card workers");
-            board.flush();
-        }
-        if board.ensure_cockpit_sandbox_profile() {
-            tracing::info!("seeded cockpit sandbox profile for control-plane seat");
-            board.flush();
-        }
-        if board.ensure_cockpit_antigravity_provider() {
-            tracing::info!("ensured cockpit sandbox spec attaches antigravity provider");
+        // Sandbox specs are operator-owned (Settings → Sandbox specs). Do not
+        // invent default/cockpit entries on boot.
+        if board.prune_sandbox_attach_names() {
+            tracing::info!("pruned sandbox attach names that are not in Providers");
             board.flush();
         }
         if board.seed_workspace_binding_if_empty() {
@@ -613,6 +611,10 @@ impl Board {
         }
         if board.seed_agent_runtime_if_empty() {
             tracing::info!("seeded agent runtime from compiled defaults");
+            board.flush();
+        }
+        if crate::provider_types::ensure_shipped_on_board(&board) > 0 {
+            tracing::info!("seeded shipped OpenShell provider types");
             board.flush();
         }
         board
@@ -656,20 +658,10 @@ impl Board {
             board.dirty.store(true, Ordering::Relaxed);
             board.flush();
         }
-        if board.seed_sandbox_profiles_if_empty() {
-            tracing::info!("seeded sandbox profile catalog from compiled defaults");
-            board.flush();
-        }
-        if board.ensure_default_sandbox_profile() {
-            tracing::info!("seeded default sandbox profile for card workers");
-            board.flush();
-        }
-        if board.ensure_cockpit_sandbox_profile() {
-            tracing::info!("seeded cockpit sandbox profile for control-plane seat");
-            board.flush();
-        }
-        if board.ensure_cockpit_antigravity_provider() {
-            tracing::info!("ensured cockpit sandbox spec attaches antigravity provider");
+        // Sandbox specs are operator-owned (Settings → Sandbox specs). Do not
+        // invent default/cockpit entries on boot.
+        if board.prune_sandbox_attach_names() {
+            tracing::info!("pruned sandbox attach names that are not in Providers");
             board.flush();
         }
         if board.seed_workspace_binding_if_empty() {
@@ -678,6 +670,10 @@ impl Board {
         }
         if board.seed_agent_runtime_if_empty() {
             tracing::info!("seeded agent runtime from compiled defaults");
+            board.flush();
+        }
+        if crate::provider_types::ensure_shipped_on_board(&board) > 0 {
+            tracing::info!("seeded shipped OpenShell provider types");
             board.flush();
         }
         Ok(board)
@@ -1897,172 +1893,30 @@ impl Board {
 
     // ------------------------------------------------ sandbox profiles (board state)
     //
-    // Public surface for the follow-on api-supervisor card. Unit tests exercise
-    // it; production callers land with REST/MCP wiring.
+    // Operator-owned create-specs. No boot-time seed — create the first one in
+    // Settings (minimal defaults). Cockpit uses the global default unless an
+    // explicit cockpit profile id is set.
 
-    /// Seed worker `default` + cockpit profiles when the catalog is empty.
-    /// Returns true when profiles were inserted. After seed, the board profile
-    /// is authoritative — edit via Settings / `/api/sandbox-profiles`.
-    ///
-    /// Create knobs come from compiled [`AgentConfig::default`] and embedded
-    /// policy constants — not from `honr.yaml` image/cpu/memory/policy fields.
-    pub fn seed_sandbox_profiles_if_empty(&self) -> bool {
-        self.seed_sandbox_profiles_from(&AgentConfig::default())
-    }
-
-    /// Same as [`Self::seed_sandbox_profiles_if_empty`] but with an explicit
-    /// AgentConfig (tests and callers that don't want compiled defaults).
-    pub fn seed_sandbox_profiles_from(&self, agents: &AgentConfig) -> bool {
-        let mut s = self.state.write();
-        if !s.sandbox_profiles.is_empty() {
-            return false;
-        }
-        let id = crate::model::DEFAULT_SANDBOX_PROFILE_ID.to_string();
-        let engine = {
-            let e = agents.engine.trim();
-            if e.is_empty() {
-                None
-            } else {
-                Some(e.to_string())
-            }
-        };
-        s.sandbox_profiles.insert(
-            id.clone(),
-            SandboxProfile {
-                id: id.clone(),
-                name: "Default".into(),
-                image: agents.image.clone(),
-                policy: resolve_policy_yaml(&agents.policy),
-                cpu: agents.cpu.clone(),
-                memory: agents.memory.clone(),
-                engine,
-                provider_names: Vec::new(),
-            },
-        );
-        let cockpit_profile = crate::model::cockpit_sandbox_profile_from_agents(agents);
-        let cockpit_id = cockpit_profile.id.clone();
-        s.sandbox_profiles
-            .insert(cockpit_id.clone(), cockpit_profile);
-        s.default_sandbox_profile_id = Some(id);
-        s.cockpit_sandbox_profile_id = Some(cockpit_id);
-        drop(s);
-        self.dirty.store(true, Ordering::Relaxed);
-        true
-    }
-
-    /// Insert the worker `default` catalog entry when missing (never overwrite),
-    /// and point `default_sandbox_profile_id` at it when that preference is unset.
-    /// Together with [`Self::ensure_cockpit_sandbox_profile`], boot always leaves
-    /// `default`+`cockpit` so live create does not depend on compiled-default
-    /// fallback text.
-    pub fn ensure_default_sandbox_profile(&self) -> bool {
-        self.ensure_default_sandbox_profile_from(&AgentConfig::default())
-    }
-
-    /// Same as [`Self::ensure_default_sandbox_profile`] with an explicit AgentConfig.
-    pub fn ensure_default_sandbox_profile_from(&self, agents: &AgentConfig) -> bool {
-        let mut s = self.state.write();
-        let mut changed = false;
-        let default_id = crate::model::DEFAULT_SANDBOX_PROFILE_ID;
-        if !s.sandbox_profiles.contains_key(default_id) {
-            let engine = {
-                let e = agents.engine.trim();
-                if e.is_empty() {
-                    None
-                } else {
-                    Some(e.to_string())
-                }
-            };
-            s.sandbox_profiles.insert(
-                default_id.to_string(),
-                SandboxProfile {
-                    id: default_id.to_string(),
-                    name: "Default".into(),
-                    image: agents.image.clone(),
-                    policy: resolve_policy_yaml(&agents.policy),
-                    cpu: agents.cpu.clone(),
-                    memory: agents.memory.clone(),
-                    engine,
-                    provider_names: Vec::new(),
-                },
-            );
-            changed = true;
-        }
-        if s.default_sandbox_profile_id.is_none() && s.sandbox_profiles.contains_key(default_id) {
-            s.default_sandbox_profile_id = Some(default_id.to_string());
-            changed = true;
-        }
-        drop(s);
-        if changed {
-            self.dirty.store(true, Ordering::Relaxed);
-        }
-        changed
-    }
-
-    /// Insert the `cockpit` catalog entry when missing (never overwrite), and
-    /// point `cockpit_sandbox_profile_id` at it when that preference is unset.
-    /// Boards that already had a worker default used to keep the preference
-    /// empty forever — resolve then fell through to the air-gapped worker
-    /// profile and Cockpit MCP stayed `policy_denied`.
-    pub fn ensure_cockpit_sandbox_profile(&self) -> bool {
-        self.ensure_cockpit_sandbox_profile_from(&AgentConfig::default())
-    }
-
-    /// Same as [`Self::ensure_cockpit_sandbox_profile`] with an explicit AgentConfig.
-    pub fn ensure_cockpit_sandbox_profile_from(&self, agents: &AgentConfig) -> bool {
-        let mut s = self.state.write();
-        let mut changed = false;
-        if !s
-            .sandbox_profiles
-            .contains_key(crate::model::COCKPIT_SANDBOX_PROFILE_ID)
-        {
-            let cockpit_profile = crate::model::cockpit_sandbox_profile_from_agents(agents);
-            s.sandbox_profiles
-                .insert(cockpit_profile.id.clone(), cockpit_profile);
-            changed = true;
-        }
-        if s.cockpit_sandbox_profile_id.is_none()
-            && s.sandbox_profiles
-                .contains_key(crate::model::COCKPIT_SANDBOX_PROFILE_ID)
-        {
-            s.cockpit_sandbox_profile_id =
-                Some(crate::model::COCKPIT_SANDBOX_PROFILE_ID.to_string());
-            changed = true;
-        }
-        drop(s);
-        if changed {
-            self.dirty.store(true, Ordering::Relaxed);
-        }
-        changed
-    }
-
-    /// Append `antigravity` to the cockpit create-spec's `provider_names` when
-    /// missing. Covers boards seeded before Antigravity was a first-class
-    /// provider type — seed only fills an empty catalog.
-    pub fn ensure_cockpit_antigravity_provider(&self) -> bool {
-        use crate::model::{ANTIGRAVITY_PROVIDER, COCKPIT_SANDBOX_PROFILE_ID};
-        let mut s = self.state.write();
-        let mut ids = std::collections::BTreeSet::new();
-        ids.insert(COCKPIT_SANDBOX_PROFILE_ID.to_string());
-        if let Some(cid) = &s.cockpit_sandbox_profile_id {
-            ids.insert(cid.clone());
-        }
-        let mut changed = false;
-        for id in ids {
-            let Some(profile) = s.sandbox_profiles.get_mut(&id) else {
-                continue;
-            };
-            if profile
-                .provider_names
+    /// Drop attach names that are not in the Providers catalog.
+    /// Keeps Sandbox specs honest — no ghost attach wishlist.
+    pub fn prune_sandbox_attach_names(&self) -> bool {
+        let changed = {
+            let mut s = self.state.write();
+            let known: BTreeSet<String> = s
+                .openshell_providers
                 .iter()
-                .any(|n| n == ANTIGRAVITY_PROVIDER)
-            {
-                continue;
+                .map(|p| p.name.clone())
+                .collect();
+            let mut changed = false;
+            for profile in s.sandbox_profiles.values_mut() {
+                let before = profile.provider_names.len();
+                profile.provider_names.retain(|n| known.contains(n));
+                if profile.provider_names.len() != before {
+                    changed = true;
+                }
             }
-            profile.provider_names.push(ANTIGRAVITY_PROVIDER.into());
-            changed = true;
-        }
-        drop(s);
+            changed
+        };
         if changed {
             self.dirty.store(true, Ordering::Relaxed);
         }
@@ -2394,6 +2248,84 @@ impl Board {
         removed
     }
 
+    /// Board-owned custom OpenShell provider type profiles.
+    pub fn openshell_provider_types(&self) -> BTreeMap<String, OpenShellProviderTypeDesired> {
+        self.state.read().openshell_provider_types.clone()
+    }
+
+    /// Upsert a board provider type. Clears tombstone for this id.
+    pub fn upsert_openshell_provider_type(
+        &self,
+        entry: OpenShellProviderTypeDesired,
+    ) -> Result<OpenShellProviderTypeDesired, String> {
+        let stored = entry.normalized();
+        if stored.id.is_empty() {
+            return Err("provider type id required".into());
+        }
+        if stored.yaml.is_empty() {
+            return Err("provider type yaml required".into());
+        }
+        {
+            let mut s = self.state.write();
+            s.openshell_provider_type_tombstones.remove(&stored.id);
+            s.openshell_provider_types
+                .insert(stored.id.clone(), stored.clone());
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(stored)
+    }
+
+    /// Delete a board provider type. Shipped ids are tombstoned so ensure won't resurrect.
+    pub fn delete_openshell_provider_type(&self, id: &str) -> bool {
+        let id = id.trim();
+        if id.is_empty() {
+            return false;
+        }
+        let removed = {
+            let mut s = self.state.write();
+            let had = s.openshell_provider_types.remove(id).is_some();
+            if had {
+                s.openshell_provider_type_tombstones.insert(id.to_string());
+            }
+            had
+        };
+        if removed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        removed
+    }
+
+    /// Insert shipped provider types that are missing and not tombstoned.
+    /// Returns how many entries were added.
+    pub fn ensure_shipped_provider_types(
+        &self,
+        shipped: Vec<OpenShellProviderTypeDesired>,
+    ) -> usize {
+        let mut added = 0;
+        {
+            let mut s = self.state.write();
+            for entry in shipped {
+                let entry = entry.normalized();
+                if entry.id.is_empty() {
+                    continue;
+                }
+                if s.openshell_provider_type_tombstones.contains(&entry.id) {
+                    continue;
+                }
+                if s.openshell_provider_types.contains_key(&entry.id) {
+                    continue;
+                }
+                s.openshell_provider_types
+                    .insert(entry.id.clone(), entry);
+                added += 1;
+            }
+        }
+        if added > 0 {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        added
+    }
+
     /// Providers to attach for a resolved create-spec.
     ///
     /// Uses the profile's `provider_names` (empty = attach none). Unknown names
@@ -2666,7 +2598,13 @@ impl Board {
             engine,
             provider_names,
         };
+        let first = s.sandbox_profiles.is_empty();
         s.sandbox_profiles.insert(stored.id.clone(), stored.clone());
+        // First catalog entry becomes the global default. Cockpit inherits it
+        // until an explicit cockpit preference is set.
+        if first && s.default_sandbox_profile_id.is_none() {
+            s.default_sandbox_profile_id = Some(stored.id.clone());
+        }
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         Ok(stored)
@@ -2692,6 +2630,15 @@ impl Board {
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Clear the Cockpit override so Cockpit uses the global default profile.
+    pub fn clear_cockpit_sandbox_profile(&self) {
+        let mut s = self.state.write();
+        if s.cockpit_sandbox_profile_id.take().is_some() {
+            drop(s);
+            self.dirty.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Assign a Project's sandbox profile override. `None` clears (inherit global default).
@@ -2731,24 +2678,13 @@ impl Board {
         Ok(item)
     }
 
-    /// Delete a profile. Refused while it is the global default, the Cockpit
-    /// profile, or assigned to any Project — reassign those first.
+    /// Delete a profile. Refused while assigned to any Project — clear those
+    /// overrides first. Clearing the global default / Cockpit designation is
+    /// allowed (prefs become unset).
     pub fn delete_sandbox_profile(&self, id: &str) -> Result<(), String> {
         let mut s = self.state.write();
         if !s.sandbox_profiles.contains_key(id) {
             return Err(format!("no sandbox profile `{id}`"));
-        }
-        if s.default_sandbox_profile_id.as_deref() == Some(id) {
-            return Err(format!(
-                "cannot delete sandbox profile `{id}`: it is the global default; \
-                 set another default first"
-            ));
-        }
-        if s.cockpit_sandbox_profile_id.as_deref() == Some(id) {
-            return Err(format!(
-                "cannot delete sandbox profile `{id}`: it is the Cockpit profile; \
-                 set another Cockpit profile first"
-            ));
         }
         let in_use: Vec<ItemId> = s
             .items
@@ -2762,6 +2698,12 @@ impl Board {
                  clear or reassign those overrides first",
                 in_use
             ));
+        }
+        if s.default_sandbox_profile_id.as_deref() == Some(id) {
+            s.default_sandbox_profile_id = None;
+        }
+        if s.cockpit_sandbox_profile_id.as_deref() == Some(id) {
+            s.cockpit_sandbox_profile_id = None;
         }
         s.sandbox_profiles.remove(id);
         drop(s);
@@ -2861,8 +2803,8 @@ impl Board {
 
     /// Create knobs for the Cockpit / cockpit sandbox.
     ///
-    /// Order: `cockpit_sandbox_profile_id` → `default_sandbox_profile_id` →
-    /// synthetic cockpit-from-compiled-defaults.
+    /// Order: explicit `cockpit_sandbox_profile_id` → `default_sandbox_profile_id`
+    /// → minimal compiled last-resort ([`ResolvedSandboxCreate::from_agents`]).
     pub fn resolve_cockpit_sandbox_create(&self) -> ResolvedSandboxCreate {
         let s = self.state.read();
         if let Some(ref cid) = s.cockpit_sandbox_profile_id {
@@ -2876,9 +2818,7 @@ impl Board {
             }
         }
         drop(s);
-        ResolvedSandboxCreate::from_profile(&crate::model::cockpit_sandbox_profile_from_agents(
-            &AgentConfig::default(),
-        ))
+        ResolvedSandboxCreate::from_agents(&AgentConfig::default())
     }
 
     /// Engine for Cockpit attach / chat: profile engine, else Agent runtime.
@@ -2904,9 +2844,8 @@ impl Board {
     /// Resolve create knobs for a card at sandbox create.
     ///
     /// Order: Project `sandbox_profile_id` → board `default_sandbox_profile_id`
-    /// → compiled [`AgentConfig::default`] (last resort). Missing catalog
-    /// entries fall through; boot ensures `default`+`cockpit` so the fallback
-    /// is rarely hit. Do not weaken this order.
+    /// → compiled [`AgentConfig::default`] + minimal policy (last resort).
+    /// Missing catalog entries fall through. Do not weaken this order.
     pub fn resolve_sandbox_create(&self, item_id: ItemId) -> ResolvedSandboxCreate {
         let item = match self.get(item_id) {
             Some(i) => i,
@@ -5522,22 +5461,20 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join(format!("honr-test-resolve-cockpit-{}", std::process::id())),
         );
-        assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
-        assert_eq!(
-            b.cockpit_sandbox_profile_id().as_deref(),
-            Some("cockpit"),
-            "seed points Cockpit at the cockpit profile"
+        upsert_test_profile(&b, "default", "Default", "seed-image:test");
+        assert!(
+            b.cockpit_sandbox_profile_id().is_none(),
+            "Cockpit inherits default until an override is set"
         );
-        let seeded = b.resolve_cockpit_sandbox_create();
-        assert_eq!(seeded.profile_id.as_deref(), Some("cockpit"));
+        let inherited = b.resolve_cockpit_sandbox_create();
+        assert_eq!(inherited.profile_id.as_deref(), Some("default"));
 
-        b.set_cockpit_sandbox_profile("default")
-            .expect("point Cockpit at worker default");
+        upsert_test_profile(&b, "heavy", "Heavy", "heavy:1");
+        b.set_cockpit_sandbox_profile("heavy")
+            .expect("point Cockpit at heavy");
         let resolved = b.resolve_cockpit_sandbox_create();
-        assert_eq!(resolved.profile_id.as_deref(), Some("default"));
-        let worker = b.get_sandbox_profile("default").expect("default");
-        assert_eq!(resolved.cpu, worker.cpu);
-        assert_eq!(resolved.image, worker.image);
+        assert_eq!(resolved.profile_id.as_deref(), Some("heavy"));
+        assert_eq!(resolved.image, "heavy:1");
     }
 
     #[test]
@@ -5549,14 +5486,14 @@ mod tests {
                 std::process::id()
             )),
         );
-        assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
+        upsert_test_profile(&b, "default", "Default", "seed-image:test");
         b.set_agent_runtime(crate::model::AgentRuntimeConfig {
             engine: "cursor".into(),
             ..Default::default()
         });
-        let mut cockpit = b.get_sandbox_profile("cockpit").expect("cockpit");
-        cockpit.engine = Some("opencode".into());
-        b.upsert_sandbox_profile(cockpit).expect("save");
+        let mut profile = b.get_sandbox_profile("default").expect("default");
+        profile.engine = Some("opencode".into());
+        b.upsert_sandbox_profile(profile).expect("save");
         assert_eq!(b.resolve_cockpit_engine(), "opencode");
     }
 
@@ -9199,190 +9136,97 @@ mod tests {
     const SEED_POLICY_YAML: &str =
         "version: 1\n# seed-policy\nfilesystem_policy:\n  include_workdir: true\n";
 
-    fn agents_for_seed() -> AgentConfig {
-        AgentConfig {
-            image: "seed-image:test".into(),
-            policy: SEED_POLICY_YAML.into(),
-            cpu: Some("4".into()),
-            memory: Some("8Gi".into()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn sandbox_profiles_seed_from_agents_when_catalog_empty() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join("honr-test-sbx-seed.json"),
-        );
-        assert!(b.list_sandbox_profiles().is_empty());
-        assert!(b.seed_sandbox_profiles_from(&agents_for_seed()));
-        let profiles = b.list_sandbox_profiles();
-        assert_eq!(profiles.len(), 2);
-        let p = b.get_sandbox_profile("default").expect("default");
-        assert_eq!(p.image, "seed-image:test");
-        assert_eq!(p.policy, SEED_POLICY_YAML);
-        assert_eq!(p.cpu.as_deref(), Some("4"));
-        assert_eq!(p.memory.as_deref(), Some("8Gi"));
-        assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
-        let cockpit_profile = b.get_sandbox_profile("cockpit").expect("cockpit");
-        assert_eq!(cockpit_profile.name, "Cockpit");
-        assert_eq!(cockpit_profile.image, "seed-image:test");
-        assert_eq!(
-            cockpit_profile.cpu.as_deref(),
-            Some(crate::model::COCKPIT_SANDBOX_CPU)
-        );
-        assert_eq!(
-            cockpit_profile.memory.as_deref(),
-            Some(crate::model::COCKPIT_SANDBOX_MEMORY)
-        );
-        assert_ne!(
-            cockpit_profile.cpu, p.cpu,
-            "cockpit cpu must stay distinct from worker default"
-        );
-        assert_ne!(
-            cockpit_profile.memory, p.memory,
-            "cockpit memory must stay distinct from worker default"
-        );
-        assert!(
-            cockpit_profile.policy.contains("github.com")
-                && cockpit_profile.policy.contains("name: github"),
-            "cockpit seed policy allow-lists GitHub"
-        );
-        assert_eq!(
-            cockpit_profile.provider_names,
-            vec![
-                "github".to_string(),
-                "vertex".to_string(),
-                "antigravity".to_string()
-            ],
-            "cockpit seed attaches github + vertex + antigravity"
-        );
-        // Second seed is a no-op.
-        assert!(!b.seed_sandbox_profiles_from(&agents_for_seed()));
-        assert_eq!(b.list_sandbox_profiles().len(), 2);
-    }
-
-    #[test]
-    fn sandbox_profiles_if_empty_uses_compiled_defaults_not_yaml() {
-        let mut schema = Schema::default();
-        schema.execution.agents = AgentConfig {
-            image: "yaml-must-not-seed:1".into(),
-            policy: "version: 1\n# yaml-must-not-seed\n".into(),
-            cpu: Some("99".into()),
-            memory: Some("99Gi".into()),
-            engine: "agy".into(),
-            ..Default::default()
-        };
-        let b = Board::new(
-            schema,
-            std::env::temp_dir().join(format!(
-                "honr-test-sbx-seed-defaults-{}",
-                std::process::id()
-            )),
-        );
-        assert!(b.seed_sandbox_profiles_if_empty());
-        let compiled = AgentConfig::default();
-        let p = b.get_sandbox_profile("default").expect("default");
-        assert_eq!(p.image, compiled.image);
-        assert_eq!(p.policy, resolve_policy_yaml(&compiled.policy));
-        assert_eq!(p.cpu, compiled.cpu);
-        assert_eq!(p.memory, compiled.memory);
-        assert_eq!(p.engine.as_deref(), Some(compiled.engine.as_str()));
-        assert_ne!(p.image, "yaml-must-not-seed:1");
-        assert!(b.get_sandbox_profile("cockpit").is_some());
-    }
-
-    #[test]
-    fn sandbox_profiles_ensure_default_when_catalog_only_has_cockpit() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-sbx-ensure-default-{}",
-                std::process::id()
-            )),
-        );
+    fn upsert_test_profile(b: &Board, id: &str, name: &str, image: &str) -> SandboxProfile {
         b.upsert_sandbox_profile(SandboxProfile {
-            id: "cockpit".into(),
-            name: "Cockpit".into(),
-            image: "cockpit:1".into(),
-            policy: SEED_POLICY_YAML.into(),
-            cpu: Some("1".into()),
-            memory: Some("2Gi".into()),
-            engine: Some("cursor".into()),
-            provider_names: vec!["github".into()],
-        })
-        .expect("cockpit");
-        b.set_cockpit_sandbox_profile("cockpit").unwrap();
-        assert!(b.get_sandbox_profile("default").is_none());
-        assert!(b.ensure_default_sandbox_profile());
-        let p = b.get_sandbox_profile("default").expect("default");
-        assert_eq!(p.image, AgentConfig::default().image);
-        assert_eq!(
-            b.default_sandbox_profile_id().as_deref(),
-            Some("default"),
-            "ensure sets global default preference when unset"
-        );
-        assert!(!b.ensure_default_sandbox_profile());
-        assert_eq!(b.list_sandbox_profiles().len(), 2);
-    }
-
-    #[test]
-    fn sandbox_profiles_ensure_cockpit_when_catalog_already_has_default() {
-        let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join(format!(
-                "honr-test-sbx-ensure-cockpit-{}",
-                std::process::id()
-            )),
-        );
-        b.upsert_sandbox_profile(SandboxProfile {
-            id: "default".into(),
-            name: "Default".into(),
-            image: "worker:1".into(),
+            id: id.into(),
+            name: name.into(),
+            image: image.into(),
             policy: SEED_POLICY_YAML.into(),
             cpu: Some("2".into()),
             memory: Some("4Gi".into()),
             engine: Some("cursor".into()),
             provider_names: Vec::new(),
         })
-        .expect("default");
-        b.set_default_sandbox_profile("default").unwrap();
-        assert!(b.get_sandbox_profile("cockpit").is_none());
-        assert!(b.ensure_cockpit_sandbox_profile_from(&agents_for_seed()));
-        let cockpit_profile = b.get_sandbox_profile("cockpit").expect("cockpit");
-        assert_eq!(
-            cockpit_profile.cpu.as_deref(),
-            Some(crate::model::COCKPIT_SANDBOX_CPU)
+        .expect("upsert profile")
+    }
+
+    #[test]
+    fn first_sandbox_profile_becomes_default_and_cockpit_inherits() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join("honr-test-sbx-first.json"),
         );
-        assert_eq!(
-            cockpit_profile.memory.as_deref(),
-            Some(crate::model::COCKPIT_SANDBOX_MEMORY)
-        );
-        assert_eq!(
-            b.cockpit_sandbox_profile_id().as_deref(),
-            Some("cockpit"),
-            "ensure sets Cockpit preference when it was unset"
-        );
-        // Never overwrite an existing cockpit entry or preference.
-        assert!(!b.ensure_cockpit_sandbox_profile_from(&agents_for_seed()));
-        assert_eq!(b.list_sandbox_profiles().len(), 2);
+        assert!(b.list_sandbox_profiles().is_empty());
+        let p = upsert_test_profile(&b, "default", "Default", "seed-image:test");
+        assert_eq!(b.list_sandbox_profiles().len(), 1);
+        assert_eq!(p.image, "seed-image:test");
         assert_eq!(b.default_sandbox_profile_id().as_deref(), Some("default"));
-        // Fresh seed already includes antigravity; strip it and ensure restores.
+        assert!(b.cockpit_sandbox_profile_id().is_none());
+        let resolved = b.resolve_cockpit_sandbox_create();
+        assert_eq!(resolved.profile_id.as_deref(), Some("default"));
+        assert_eq!(resolved.image, "seed-image:test");
+    }
+
+    #[test]
+    fn explicit_cockpit_profile_overrides_default() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-sbx-cockpit-override-{}",
+                std::process::id()
+            )),
+        );
+        upsert_test_profile(&b, "default", "Default", "worker:1");
+        upsert_test_profile(&b, "heavy", "Heavy", "heavy:1");
+        b.set_cockpit_sandbox_profile("heavy").unwrap();
+        assert_eq!(b.cockpit_sandbox_profile_id().as_deref(), Some("heavy"));
+        assert_eq!(
+            b.resolve_cockpit_sandbox_create().profile_id.as_deref(),
+            Some("heavy")
+        );
+        b.clear_cockpit_sandbox_profile();
+        assert!(b.cockpit_sandbox_profile_id().is_none());
+        assert_eq!(
+            b.resolve_cockpit_sandbox_create().profile_id.as_deref(),
+            Some("default")
+        );
+    }
+
+    #[test]
+    fn prune_sandbox_attach_names_drops_unknown_providers() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-sbx-prune-attach-{}",
+                std::process::id()
+            )),
+        );
+        upsert_test_profile(&b, "default", "Default", AgentConfig::default().image.as_str());
+        b.upsert_openshell_provider(OpenShellProviderDesired {
+            name: "github".into(),
+            provider_type: "github".into(),
+            config: BTreeMap::new(),
+            credentials_sealed: None,
+            credential_keys: vec![],
+            refresh: None,
+        });
         {
-            let mut p = b.get_sandbox_profile("cockpit").expect("cockpit");
-            p.provider_names
-                .retain(|n| n != crate::model::ANTIGRAVITY_PROVIDER);
-            b.upsert_sandbox_profile(p).expect("strip");
+            let mut p = b.get_sandbox_profile("default").expect("default");
+            p.provider_names = vec![
+                "github".into(),
+                "vertex".into(),
+                "antigravity".into(),
+            ];
+            b.upsert_sandbox_profile(p).expect("wishlist");
         }
-        assert!(b.ensure_cockpit_antigravity_provider());
-        assert!(b
-            .get_sandbox_profile("cockpit")
-            .expect("cockpit")
-            .provider_names
-            .iter()
-            .any(|n| n == crate::model::ANTIGRAVITY_PROVIDER));
-        assert!(!b.ensure_cockpit_antigravity_provider());
+        assert!(b.prune_sandbox_attach_names());
+        assert_eq!(
+            b.get_sandbox_profile("default")
+                .expect("default")
+                .provider_names,
+            vec!["github".to_string()]
+        );
+        assert!(!b.prune_sandbox_attach_names());
     }
 
     fn agents_with_repo() -> AgentConfig {
@@ -10139,9 +9983,9 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_profiles_seed_uses_embedded_not_host_path() {
+    fn resolve_policy_yaml_ignores_host_paths_for_create_defaults() {
         let dir = std::env::temp_dir().join(format!(
-            "honr-test-sbx-seed-no-host-{}",
+            "honr-test-sbx-no-host-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -10149,21 +9993,13 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("policy.yaml");
-        let yaml = "version: 1\n# from-file\n";
-        std::fs::write(&path, yaml).unwrap();
-
-        let b = Board::new(Schema::default(), dir.join("board.json"));
-        let agents = AgentConfig {
-            image: "from-file:1".into(),
-            // Host path is not a seed surface — resolve to embedded default.
-            policy: path.to_string_lossy().into(),
-            ..Default::default()
-        };
-        assert!(b.seed_sandbox_profiles_from(&agents));
+        std::fs::write(&path, "version: 1\n# from-file\n").unwrap();
         assert_eq!(
-            b.get_sandbox_profile("default").expect("default").policy,
-            crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY
+            resolve_policy_yaml(path.to_str().unwrap()),
+            crate::seed_policies::MINIMAL_SANDBOX_POLICY
         );
+        let defaults = crate::model::sandbox_profile_create_defaults();
+        assert_eq!(defaults.policy, crate::seed_policies::MINIMAL_SANDBOX_POLICY);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10173,7 +10009,7 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-sbx-override.json"),
         );
-        b.seed_sandbox_profiles_from(&agents_for_seed());
+        upsert_test_profile(&b, "default", "Default", "seed-image:test");
         let heavy = b
             .upsert_sandbox_profile(SandboxProfile {
                 id: "heavy".into(),
@@ -10222,7 +10058,7 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join(format!("honr-test-attach-profile-{}", std::process::id())),
         );
-        b.seed_sandbox_profiles_from(&agents_for_seed());
+        upsert_test_profile(&b, "default", "Default", "seed-image:test");
         b.upsert_openshell_provider(OpenShellProviderDesired {
             name: "vertex".into(),
             provider_type: "google-vertex-ai".into(),
@@ -10267,12 +10103,12 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_profiles_refuse_delete_of_default_or_in_use() {
+    fn sandbox_profiles_refuse_delete_when_in_use_by_project() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join("honr-test-sbx-delete.json"),
         );
-        b.seed_sandbox_profiles_from(&agents_for_seed());
+        upsert_test_profile(&b, "default", "Default", "seed-image:test");
         b.upsert_sandbox_profile(SandboxProfile {
             id: "alt".into(),
             name: "Alt".into(),
@@ -10285,12 +10121,10 @@ mod tests {
         })
         .unwrap();
 
-        let err = b.delete_sandbox_profile("default").unwrap_err();
-        assert!(
-            err.contains("global default"),
-            "expected default refusal, got {err}"
-        );
-
+        // Default may be deleted (clears the preference); Project override still blocks.
+        b.delete_sandbox_profile("default").expect("delete default");
+        assert!(b.default_sandbox_profile_id().is_none());
+        upsert_test_profile(&b, "default", "Default", "seed-image:test");
         b.set_default_sandbox_profile("alt").unwrap();
         let project = b
             .create(None, "Uses Default", "why", None, Origin::Human, true, None)
@@ -10319,7 +10153,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let b = Board::new(Schema::default(), path.clone());
-        b.seed_sandbox_profiles_from(&agents_for_seed());
+        upsert_test_profile(&b, "default", "Default", "seed-image:test");
         b.upsert_sandbox_profile(SandboxProfile {
             id: "ci".into(),
             name: "CI".into(),
@@ -10341,11 +10175,9 @@ mod tests {
 
         let restored = Board::load_or_new(Schema::default(), path.clone());
         assert_eq!(restored.default_sandbox_profile_id().as_deref(), Some("ci"));
-        assert_eq!(restored.list_sandbox_profiles().len(), 3);
+        assert_eq!(restored.list_sandbox_profiles().len(), 2);
         let p = restored.get(project.id).expect("project");
         assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
-        // Catalog already populated — must not re-seed over existing profiles.
-        assert!(!restored.seed_sandbox_profiles_from(&agents_for_seed()));
         assert!(
             crate::model::is_inline_policy_yaml(
                 &restored.get_sandbox_profile("ci").unwrap().policy
@@ -10540,7 +10372,7 @@ mod tests {
             Schema::default(),
             std::env::temp_dir().join("honr-test-sbx-slug.json"),
         );
-        b.seed_sandbox_profiles_from(&agents_for_seed());
+        upsert_test_profile(&b, "default", "Default", "seed-image:test");
 
         let created = b
             .upsert_sandbox_profile(SandboxProfile {

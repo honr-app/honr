@@ -6,6 +6,8 @@ import type {
   OpenShellProviderView,
   OpenShellProviderWrite,
   OpenShellProvidersOut,
+  OpenShellProviderTypeEntry,
+  OpenShellProviderTypeWrite,
   OpenShellSettings,
   OpenShellStatus,
   CockpitSession,
@@ -175,6 +177,9 @@ export const api = {
     post(`/sandbox-profiles/${encodeURIComponent(id)}/default`),
   setCockpitSandboxProfile: (id: string): Promise<SandboxProfilesOut> =>
     post(`/sandbox-profiles/${encodeURIComponent(id)}/cockpit`),
+  /** Clear Cockpit override — Cockpit uses the global default again. */
+  clearCockpitSandboxProfile: (): Promise<SandboxProfilesOut> =>
+    post("/sandbox-profiles/cockpit/clear"),
   /** Project only. Pass `null` (or omit) to inherit the global default. */
   setProjectSandboxProfile: (
     id: number,
@@ -226,6 +231,18 @@ export const api = {
     post("/openshell/providers/sync"),
   listOpenShellProviderProfiles: (): Promise<ProviderTypeProfile[]> =>
     fetch("/api/openshell/provider-profiles", fetchOpts).then(jsonOrThrow),
+  listOpenShellProviderTypes: (): Promise<OpenShellProviderTypeEntry[]> =>
+    fetch("/api/openshell/provider-types", fetchOpts).then(jsonOrThrow),
+  putOpenShellProviderType: (
+    body: OpenShellProviderTypeWrite,
+  ): Promise<{
+    id: string;
+    yaml: string;
+    shipped: boolean;
+    form_config_keys: string[];
+  }> => put("/openshell/provider-types", body),
+  deleteOpenShellProviderType: (id: string): Promise<null> =>
+    del(`/openshell/provider-types/${encodeURIComponent(id)}`),
 
   /** Board cockpit-session singleton — Cockpit polls this; no local lifecycle. */
   getCockpitSession: (): Promise<CockpitSessionOut> =>

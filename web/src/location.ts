@@ -23,6 +23,7 @@ const SETTINGS_SECTIONS = new Set<string>([
 const OPENSHELL_TABS = new Set<string>([
   "connectivity",
   "providers",
+  "provider-types",
   "profiles",
 ]);
 

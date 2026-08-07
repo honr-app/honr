@@ -31,7 +31,7 @@ UI / MCP / supervisor
 | `src/supervisor.rs` | Card dispatch, durable cockpit start/reconcile/stop, briefing, lease sweeping. |
 | `src/engine.rs` | Explicit registry of agent engines — unknown ids fail loud. |
 | `honr.yaml` | Boot essentials: database URL, level schema, sweep timing, `agents.enabled`. |
-| `sandbox/` | Container image; policy seed constants live in `src/seed_policies.rs`. |
+| `sandbox/` | Container image; minimal create-form policy lives in `src/seed_policies.rs`. |
 | `web/` | React UI + Playwright screenshot harness. |
 | `migrations/` | Versioned SQLx migrations for the board store. |
 

@@ -1,0 +1,40 @@
+# OpenShell provider type for the Cursor Agent CLI.
+# Builtin `cursor` is egress-only (no credentials). This custom type seals
+# CURSOR_API_KEY and rewrites Bearer traffic to Cursor API hosts.
+id: cursor-agent
+display_name: Cursor Agent
+description: Cursor Agent CLI via CURSOR_API_KEY (Bearer on api2.cursor.sh)
+category: agent
+credentials:
+  - name: api_key
+    description: Cursor user API key for the Agent CLI
+    env_vars:
+      - CURSOR_API_KEY
+    required: true
+    auth_style: bearer
+    header_name: authorization
+    query_param: ""
+discovery:
+  credentials:
+    - api_key
+endpoints:
+  - host: api2.cursor.sh
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: cursor.blob.core.windows.net
+    port: 443
+  - host: repo.cursor.sh
+    port: 443
+  - host: download.cursor.sh
+    port: 443
+  - host: cursor.download.prss.microsoft.com
+    port: 443
+binaries:
+  - /usr/local/bin/agent
+  - /usr/bin/agent
+  - /usr/bin/curl
+  - /usr/bin/wget
+  - /sandbox/.cursor-server/**
+inference_capable: false

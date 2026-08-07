@@ -6,7 +6,12 @@ import type { IncomingMessage } from "node:http";
 function forwardBrowserHost(proxyReq: { setHeader: (k: string, v: string) => void }, req: IncomingMessage) {
   const host = req.headers.host;
   if (host) proxyReq.setHeader("X-Forwarded-Host", host);
-  proxyReq.setHeader("X-Forwarded-Proto", "http");
+  // Preserve Tailscale Serve HTTPS; fall back to http for local Vite.
+  const proto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0]?.trim();
+  proxyReq.setHeader(
+    "X-Forwarded-Proto",
+    proto === "https" || proto === "http" ? proto : "http",
+  );
 }
 
 const toHonr = (extra: ProxyOptions = {}): ProxyOptions => ({
@@ -25,6 +30,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // Tailscale Serve (https://tot.tail43beb.ts.net:5173 → Vite).
+    allowedHosts: ["tot.tail43beb.ts.net"],
     proxy: {
       // SSE must be declared before the general `/api` rule. Zero timeouts keep
       // the long-lived stream open; the backend also flushes an immediate

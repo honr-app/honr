@@ -21,7 +21,7 @@ help:
 	@echo "  make dev-ui         Vite dev server (:5173 → :8080)"
 	@echo "  make docs           mdbook build → target/mdbook"
 	@echo "  make docs-serve     mdbook serve (http://localhost:3000)"
-	@echo "  make sandbox        Rebuild honr-sandbox:latest (warm crates/npm caches)"
+	@echo "  make sandbox        Rebuild honr-sandbox:latest via podman (CONTAINER_ENGINE=docker to override)"
 	@echo "  make test           cargo nextest/test + web tests"
 	@echo "  make clippy         cargo clippy -D warnings"
 	@echo "  make clean          cargo clean + remove web/dist"
@@ -97,8 +97,12 @@ docs-serve:
 
 # Rebuild when Cargo.lock / src / web/package-lock.json change. New sandboxes
 # pick this up via --from; existing ones keep the create-time image.
+# Default engine is podman (OpenShell's usual host driver). Override with
+# CONTAINER_ENGINE=docker when needed.
+CONTAINER_ENGINE ?= podman
+
 sandbox:
-	docker build -f sandbox/Containerfile -t honr-sandbox:latest .
+	$(CONTAINER_ENGINE) build -f sandbox/Containerfile -t honr-sandbox:latest .
 
 clean:
 	cargo clean

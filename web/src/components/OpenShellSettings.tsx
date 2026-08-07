@@ -2,13 +2,19 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "../api.js";
 import type { OpenShellSettings, OpenShellStatus } from "../types.js";
 import { OpenShellProvidersPanel } from "./OpenShellProviders.js";
+import { OpenShellProviderTypesPanel } from "./OpenShellProviderTypes.js";
 import { SandboxesPanel } from "./OpenShellProfiles.js";
 
-export type OpenShellTab = "connectivity" | "providers" | "profiles";
+export type OpenShellTab =
+  | "connectivity"
+  | "providers"
+  | "provider-types"
+  | "profiles";
 
 const TABS: { id: OpenShellTab; label: string }[] = [
   { id: "connectivity", label: "Connectivity" },
   { id: "providers", label: "Providers" },
+  { id: "provider-types", label: "Provider types" },
   { id: "profiles", label: "Sandbox specs" },
 ];
 
@@ -32,6 +38,7 @@ export function OpenShellPanelView({
   onSave,
   onClearMtls,
   providers,
+  providerTypes,
   profiles,
 }: {
   status: OpenShellStatus | null;
@@ -54,6 +61,7 @@ export function OpenShellPanelView({
   onSave: () => void;
   onClearMtls: () => void;
   providers?: ReactNode;
+  providerTypes?: ReactNode;
   profiles?: ReactNode;
 }) {
   const [internalTab, setInternalTab] = useState<OpenShellTab>("connectivity");
@@ -259,6 +267,15 @@ export function OpenShellPanelView({
         </div>
       )}
 
+      {tab === "provider-types" && (
+        <div
+          className="openshell-pane"
+          data-testid="openshell-provider-types-host"
+        >
+          {providerTypes}
+        </div>
+      )}
+
       {tab === "profiles" && (
         <div className="openshell-pane" data-testid="openshell-profiles-host">
           {profiles}
@@ -385,6 +402,7 @@ export function OpenShellPanel({
         );
       }}
       providers={<OpenShellProvidersPanel gatewayHealthy={!!status?.healthy} />}
+      providerTypes={<OpenShellProviderTypesPanel />}
       profiles={<SandboxesPanel />}
     />
   );

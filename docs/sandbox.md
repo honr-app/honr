@@ -71,18 +71,18 @@ inherit that path and reuse the debug artifacts.
 
 ```bash
 # from the repo root; Cargo.lock, src/, migrations/, and web/package-lock.json in context
-docker build -f sandbox/Containerfile -t honr-sandbox:latest .
-# or: make sandbox
+make sandbox
+# or: podman build -f sandbox/Containerfile -t honr-sandbox:latest .
+# Docker: CONTAINER_ENGINE=docker make sandbox
 ```
 
 The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock`, `src/`, or
 `migrations/` change materially, or when you need a newer Cursor/OpenCode CLI. Matching `/opt`
 entries (`/opt/cargo`, `/opt/cargo-target`, `/opt/npm-cache`, `/opt/opencode`, …)
-belong in the worker **board** sandbox spec policy (Settings → OpenShell →
-Sandbox specs → `default`). Empty catalogs seed that text from
-`src/seed_policies.rs`; after seed, paste policy updates (or recreate the spec)
-in Settings when `/opt` layout changes — including `/opt/cargo-target` on
-`read_write`.
+belong in the **board** sandbox spec policy (Settings → OpenShell → Sandbox
+specs). Create starts from a minimal policy (`src/seed_policies.rs`); paste
+your `/opt` allow-list (including `/opt/cargo-target` on `read_write`) when you
+need the honr image layout.
 
 Pass `--offline` in gate commands so a cache miss fails loudly instead of
 hanging on a denied fetch.
@@ -123,26 +123,28 @@ Set it at create time; `policy set --wait` is expensive.
 **Binary paths are matched literally** in the policy. Lists are deliberately
 generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 
-## Cockpit vs worker containment
+## Default vs Cockpit
 
-| Catalog id | Empty-catalog seed | Live config | Egress |
-|---|---|---|---|
-| `default` (worker) | Embedded worker policy in `src/seed_policies.rs` | Settings → OpenShell → Sandbox specs | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
-| `cockpit` | Embedded `DEFAULT_COCKPIT_SANDBOX_POLICY` in `src/seed_policies.rs` | Settings → OpenShell → Sandbox specs | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
+There is no separate seeded Cockpit profile. Create a sandbox spec under
+**Settings → OpenShell → Sandbox specs** (minimal policy prefill). The first
+profile becomes the global default; Cockpit uses that default until you create
+another profile and click **Use for Cockpit**.
 
-Board sandbox specs are the live source of truth for both after seed. The
-cockpit spec seeds with `github` + `vertex` + `antigravity` attach names so
-Claude/OpenCode can use workspace `inference.local`, `gh` gets an App token,
-and agy gets a Bearer placeholder from the Board provider credential.
+Attach on create starts empty — add providers under **Providers**, then check
+them on the spec. Add honr MCP / package-registry / toolchain egress in the
+policy YAML when you need it.
 
 ## Antigravity / agy
 
 Bare OpenShell `generic` providers do **not** resolve
 `openshell:resolve:…` placeholders — the egress proxy only substitutes on
-endpoints declared by a **provider type**. Honr ships
+endpoints declared by a **provider type**. Honr ships board provider types
 [`sandbox/openshell/antigravity.yaml`](https://github.com/honr-app/honr/blob/main/sandbox/openshell/antigravity.yaml)
-(`auth_style: bearer`, Cloud Code / Google API hosts), compiled into the binary
-and imported on provider Sync when missing.
+(`auth_style: bearer`, Cloud Code / Google API hosts) and
+[`sandbox/openshell/cursor-agent.yaml`](https://github.com/honr-app/honr/blob/main/sandbox/openshell/cursor-agent.yaml)
+(`CURSOR_API_KEY`, Bearer on Cursor API hosts). Both seed into
+**Settings → OpenShell → Provider types** and import on provider Sync when
+missing. Builtin OpenShell `cursor` remains egress-only (no credentials).
 
 Create the provider yourself under **Settings → OpenShell → Providers** with an
 `ANTIGRAVITY_ACCESS_TOKEN` credential. honr does not read the host keychain —
@@ -156,8 +158,7 @@ configuration arrives over the API like everything else.
 | Seat token file | Placeholder only + far-future expiry; **no** `refresh_token` |
 | Seat `settings.json` | `enableTelemetry: false`, `gcp.project` / `gcp.location` from Board provider config `ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION` (Settings → Providers; not Vertex/`GOOGLE_CLOUD_PROJECT`) |
 
-Existing cockpit specs created before this attach name need the checkbox (or
-board ensure on startup appends `antigravity` to the cockpit create-spec).
+Attach names that are not in the Providers catalog are pruned on board load.
 
 ## Related
 

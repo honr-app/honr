@@ -1,16 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import type {
+  OpenShellProviderTypeEntry,
   OpenShellProviderView,
   OpenShellProviderWrite,
-  ProviderTypeProfile,
 } from "../types.js";
 
 /** Fixed OpenShell provider name filled by Settings → GitHub App. */
 const GITHUB_APP_PROVIDER_NAME = "github";
 
+/** Gateway builtin without board YAML — keep project/location fields. */
+const VERTEX_FORM_KEYS = ["VERTEX_AI_PROJECT_ID", "VERTEX_AI_LOCATION"];
+
 function isGitHubAppManagedProvider(name: string, type?: string): boolean {
   return name.trim() === GITHUB_APP_PROVIDER_NAME && (type == null || type === "github");
+}
+
+function formConfigKeysForType(
+  typeId: string,
+  profile?: OpenShellProviderTypeEntry,
+): string[] {
+  if (profile?.form_config_keys?.length) return profile.form_config_keys;
+  if (typeId === "google-vertex-ai") return VERTEX_FORM_KEYS;
+  return [];
 }
 
 /** Presentational providers band — exported for UI tests without fetch. */
@@ -31,7 +43,7 @@ export function OpenShellProvidersPanelView({
 }: {
   providers: OpenShellProviderView[];
   gatewayReachable: boolean;
-  profiles: ProviderTypeProfile[];
+  profiles: OpenShellProviderTypeEntry[];
   busy?: boolean;
   error?: string | null;
   hint?: string | null;
@@ -44,11 +56,18 @@ export function OpenShellProvidersPanelView({
   onSync: () => void;
 }) {
   const typeOptions = profiles.length
-    ? profiles.map((p) => p.id)
-    : ["github", "google-vertex-ai", "cursor", "claude", "antigravity"];
+    ? profiles.map((p) => ({ id: p.id, label: p.display_name || p.id }))
+    : [
+        { id: "github", label: "github" },
+        { id: "google-vertex-ai", label: "google-vertex-ai" },
+        { id: "cursor-agent", label: "cursor-agent" },
+        { id: "antigravity", label: "antigravity" },
+      ];
   // Prefer a non-App type for "Add" — github/GH_TOKEN is owned by GitHub App.
   const defaultAddType =
-    typeOptions.find((t) => t !== "github") ?? typeOptions[0] ?? "google-vertex-ai";
+    typeOptions.find((t) => t.id !== "github")?.id ??
+    typeOptions[0]?.id ??
+    "google-vertex-ai";
   const selectedProfile = draft
     ? profiles.find((p) => p.id === draft.type)
     : undefined;
@@ -63,6 +82,13 @@ export function OpenShellProvidersPanelView({
       : draft?.type === "github"
         ? ["GH_TOKEN"]
         : [];
+  const configKeys = draft
+    ? formConfigKeysForType(draft.type, selectedProfile)
+    : [];
+  const knownConfig = new Set(configKeys);
+  const extraConfigEntries = Object.entries(draft?.config ?? {}).filter(
+    ([k]) => !knownConfig.has(k),
+  );
 
   return (
     <div
@@ -222,8 +248,8 @@ export function OpenShellProvidersPanelView({
               data-testid="openshell-provider-field-type"
             >
               {typeOptions.map((t) => (
-                <option key={t} value={t}>
-                  {t}
+                <option key={t.id} value={t.id}>
+                  {t.label}
                 </option>
               ))}
             </select>
@@ -263,82 +289,56 @@ export function OpenShellProvidersPanelView({
               )}
             </label>
           ))}
-          {draft.type === "google-vertex-ai" && (
-            <>
-              <label>
-                VERTEX_AI_PROJECT_ID
-                <input
-                  className="search-input"
-                  value={draft.config?.VERTEX_AI_PROJECT_ID ?? ""}
-                  disabled={busy}
-                  onChange={(e) =>
-                    onDraftChange({
-                      ...draft,
-                      config: { ...(draft.config ?? {}), VERTEX_AI_PROJECT_ID: e.target.value },
-                    })
-                  }
-                  data-testid="openshell-provider-config-project"
-                />
-              </label>
-              <label>
-                VERTEX_AI_LOCATION
-                <input
-                  className="search-input"
-                  value={draft.config?.VERTEX_AI_LOCATION ?? "global"}
-                  disabled={busy}
-                  onChange={(e) =>
-                    onDraftChange({
-                      ...draft,
-                      config: { ...(draft.config ?? {}), VERTEX_AI_LOCATION: e.target.value },
-                    })
-                  }
-                  data-testid="openshell-provider-config-location"
-                />
-              </label>
-            </>
-          )}
-          {draft.type === "antigravity" && (
-            <>
-              <label>
-                ANTIGRAVITY_GCP_PROJECT
-                <input
-                  className="search-input"
-                  value={draft.config?.ANTIGRAVITY_GCP_PROJECT ?? ""}
-                  disabled={busy}
-                  onChange={(e) =>
-                    onDraftChange({
-                      ...draft,
-                      config: {
-                        ...(draft.config ?? {}),
-                        ANTIGRAVITY_GCP_PROJECT: e.target.value,
-                      },
-                    })
-                  }
-                  data-testid="openshell-provider-config-agy-project"
-                  placeholder="GCP project id"
-                />
-              </label>
-              <label>
-                ANTIGRAVITY_GCP_LOCATION
-                <input
-                  className="search-input"
-                  value={draft.config?.ANTIGRAVITY_GCP_LOCATION ?? "global"}
-                  disabled={busy}
-                  onChange={(e) =>
-                    onDraftChange({
-                      ...draft,
-                      config: {
-                        ...(draft.config ?? {}),
-                        ANTIGRAVITY_GCP_LOCATION: e.target.value,
-                      },
-                    })
-                  }
-                  data-testid="openshell-provider-config-agy-location"
-                />
-              </label>
-            </>
-          )}
+          {configKeys.map((key) => (
+            <label key={key}>
+              {key}
+              <input
+                className="search-input"
+                value={draft.config?.[key] ?? (key.endsWith("_LOCATION") ? "global" : "")}
+                disabled={busy}
+                onChange={(e) =>
+                  onDraftChange({
+                    ...draft,
+                    config: { ...(draft.config ?? {}), [key]: e.target.value },
+                  })
+                }
+                data-testid={`openshell-provider-config-${key}`}
+              />
+            </label>
+          ))}
+          {extraConfigEntries.map(([key, value]) => (
+            <label key={`extra-${key}`}>
+              {key} (extra)
+              <input
+                className="search-input"
+                value={value}
+                disabled={busy}
+                onChange={(e) =>
+                  onDraftChange({
+                    ...draft,
+                    config: { ...(draft.config ?? {}), [key]: e.target.value },
+                  })
+                }
+                data-testid={`openshell-provider-config-extra-${key}`}
+              />
+            </label>
+          ))}
           <div className="btns">
+            <button
+              type="button"
+              disabled={busy}
+              data-testid="openshell-provider-config-add-extra"
+              onClick={() => {
+                const key = window.prompt("Extra config key");
+                if (!key?.trim()) return;
+                onDraftChange({
+                  ...draft,
+                  config: { ...(draft.config ?? {}), [key.trim()]: "" },
+                });
+              }}
+            >
+              Add config key
+            </button>
             <button type="submit" className="primary" disabled={busy} data-testid="openshell-provider-save">
               Save provider
             </button>
@@ -355,7 +355,7 @@ export function OpenShellProvidersPanelView({
 export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: boolean }) {
   const [providers, setProviders] = useState<OpenShellProviderView[]>([]);
   const [gatewayReachable, setGatewayReachable] = useState(gatewayHealthy);
-  const [profiles, setProfiles] = useState<ProviderTypeProfile[]>([]);
+  const [profiles, setProfiles] = useState<OpenShellProviderTypeEntry[]>([]);
   const [draft, setDraft] = useState<OpenShellProviderWrite | null>(null);
   const [editingName, setEditingName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -376,7 +376,7 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
   useEffect(() => {
     refresh();
     api
-      .listOpenShellProviderProfiles()
+      .listOpenShellProviderTypes()
       .then(setProfiles)
       .catch(() => setProfiles([]));
   }, [refresh]);

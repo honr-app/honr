@@ -65,10 +65,21 @@ export interface SandboxProfile {
   provider_names?: string[];
 }
 
+/** Prefill for Settings → Sandbox specs → Create. */
+export interface SandboxProfileCreateDefaults {
+  name: string;
+  image: string;
+  policy: string;
+  cpu?: string | null;
+  memory?: string | null;
+  engine?: string | null;
+}
+
 export interface SandboxProfilesOut {
   profiles: SandboxProfile[];
   default_sandbox_profile_id: string | null;
   cockpit_sandbox_profile_id: string | null;
+  create_defaults: SandboxProfileCreateDefaults;
 }
 
 /**
@@ -219,6 +230,27 @@ export interface ProviderTypeProfile {
   category: string;
   credential_env_vars: string[];
   config_keys: string[];
+  /** Non-secret config keys for Add Provider (board types / UI merge). */
+  form_config_keys?: string[];
+}
+
+/** GET /api/openshell/provider-types — board customs merged with gateway builtins. */
+export interface OpenShellProviderTypeEntry {
+  id: string;
+  display_name: string;
+  description: string;
+  /** board | builtin | both */
+  source: string;
+  credential_env_vars: string[];
+  form_config_keys: string[];
+  yaml?: string | null;
+  shipped?: boolean | null;
+}
+
+export interface OpenShellProviderTypeWrite {
+  id: string;
+  yaml: string;
+  form_config_keys?: string[];
 }
 
 export interface SyncProvidersOut {
