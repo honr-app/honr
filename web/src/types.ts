@@ -107,7 +107,7 @@ export interface SandboxProfile {
   engine?: string | null;
   /** Providers to attach on sandbox create (`[]` = none). */
   provider_names?: string[];
-  /** MCP server catalog ids to attach (`[]` = none; cockpit still injects shipped honr). */
+  /** MCP server catalog ids to attach (`[]` = none; cockpit always attaches shipped honr). */
   mcp_server_ids?: string[];
 }
 

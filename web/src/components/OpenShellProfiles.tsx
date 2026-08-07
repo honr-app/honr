@@ -105,6 +105,12 @@ export function SandboxesPanelView({
   /** Cockpit uses an explicit override, else the global default. */
   const effectiveCockpitId = cockpitId ?? defaultId;
   const canDeleteSelected = !!selected && !isEditing;
+  /** Editing the Cockpit spec: shipped `honr` is required (resolve/inject re-add it). */
+  const editingCockpitSpec =
+    isEditing &&
+    !isCreate &&
+    !!effectiveCockpitId &&
+    (editingId === effectiveCockpitId || draft.id === effectiveCockpitId);
 
   const toggleProvider = (name: string) => {
     const set = new Set(draft.provider_names);
@@ -114,6 +120,7 @@ export function SandboxesPanelView({
   };
 
   const toggleMcp = (id: string) => {
+    if (editingCockpitSpec && id === "honr") return;
     const set = new Set(draft.mcp_server_ids);
     if (set.has(id)) set.delete(id);
     else set.add(id);
@@ -362,8 +369,10 @@ export function SandboxesPanelView({
                       Attach MCP servers
                     </span>
                     <span className="dim sandbox-field-hint">
-                      Config inject + policy/provider merge at create. Cockpit
-                      always gets built-in <code>honr</code>.
+                      Config inject + policy/provider merge at create.
+                      {editingCockpitSpec
+                        ? " Built-in honr stays on for Cockpit."
+                        : " Cockpit always gets built-in honr."}
                     </span>
                   </div>
                   {availableMcpServers.length === 0 ? (
@@ -373,27 +382,39 @@ export function SandboxesPanelView({
                     </p>
                   ) : (
                     <ul className="openshell-profile-provider-ul">
-                      {availableMcpServers.map((s) => (
-                        <li key={s.id}>
-                          <label className="openshell-provider-check">
-                            <input
-                              type="checkbox"
-                              checked={draft.mcp_server_ids.includes(s.id)}
-                              disabled={busy}
-                              onChange={() => toggleMcp(s.id)}
-                              data-testid={`sandbox-mcp-${s.id}`}
-                            />
-                            <span className="openshell-provider-check-text">
-                              <span className="openshell-provider-check-name">
-                                {s.name}
+                      {availableMcpServers.map((s) => {
+                        const lockedHonr =
+                          editingCockpitSpec && s.id === "honr";
+                        const checked =
+                          lockedHonr || draft.mcp_server_ids.includes(s.id);
+                        return (
+                          <li key={s.id}>
+                            <label className="openshell-provider-check">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={busy || lockedHonr}
+                                onChange={() => toggleMcp(s.id)}
+                                data-testid={`sandbox-mcp-${s.id}`}
+                                title={
+                                  lockedHonr
+                                    ? "Required for Cockpit — cannot detach"
+                                    : undefined
+                                }
+                              />
+                              <span className="openshell-provider-check-text">
+                                <span className="openshell-provider-check-name">
+                                  {s.name}
+                                  {lockedHonr ? " (required)" : ""}
+                                </span>
+                                <span className="dim openshell-provider-check-type">
+                                  {s.transport.kind} · {s.audience ?? "cockpit"}
+                                </span>
                               </span>
-                              <span className="dim openshell-provider-check-type">
-                                {s.transport.kind} · {s.audience ?? "cockpit"}
-                              </span>
-                            </span>
-                          </label>
-                        </li>
-                      ))}
+                            </label>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
@@ -643,6 +664,15 @@ export function SandboxesPanel() {
           setError("policy is required — add one under Policies");
           return;
         }
+        const effectiveCockpit = cockpitId ?? defaultId;
+        const savingCockpit =
+          !!effectiveCockpit &&
+          (draft.id.trim() === effectiveCockpit ||
+            editingId === effectiveCockpit);
+        let mcp_server_ids = [...draft.mcp_server_ids];
+        if (savingCockpit && !mcp_server_ids.includes("honr")) {
+          mcp_server_ids = ["honr", ...mcp_server_ids];
+        }
         const body = {
           ...(editingId ? { id: draft.id.trim() } : {}),
           name: draft.name.trim(),
@@ -652,7 +682,7 @@ export function SandboxesPanel() {
           memory: draft.memory.trim() || null,
           engine: draft.engine.trim() || null,
           provider_names: draft.provider_names,
-          mcp_server_ids: draft.mcp_server_ids,
+          mcp_server_ids,
         };
         run(api.upsertSandboxProfile(body)).then(() => {
           setEditingId(null);

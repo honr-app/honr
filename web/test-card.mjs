@@ -1649,6 +1649,37 @@ assert(editFormHtml.includes("data-testid=\"sandbox-field-id\""),
   "Edit form may show id read-only");
 assert(editFormHtml.includes("disabled") || editFormHtml.includes("readonly"),
   "Edit id field should be non-editable");
+// Cockpit-effective spec: shipped honr is locked on (cannot uncheck).
+assert(
+  /data-testid="sandbox-mcp-honr"[^>]*disabled/.test(editFormHtml) ||
+    /disabled[^>]*data-testid="sandbox-mcp-honr"/.test(editFormHtml),
+  "Cockpit spec must lock shipped honr MCP checkbox",
+);
+assert(editFormHtml.includes("(required)"), "Locked honr shows required label");
+
+const nonCockpitMcpHtml = renderToString(
+  React.createElement(SandboxesPanelView, {
+    ...sandboxPanelBase,
+    cockpitId: "default",
+    editingId: "heavy",
+    draft: {
+      id: "heavy",
+      name: "Heavy",
+      image: "img",
+      policy_id: "minimal",
+      cpu: "",
+      memory: "",
+      engine: "cursor",
+      provider_names: [],
+      mcp_server_ids: [],
+    },
+  }),
+);
+assert(
+  !/data-testid="sandbox-mcp-honr"[^>]*disabled/.test(nonCockpitMcpHtml) &&
+    !/disabled[^>]*data-testid="sandbox-mcp-honr"/.test(nonCockpitMcpHtml),
+  "Non-Cockpit spec may toggle honr MCP",
+);
 
 const pickerHtml = renderToString(
   React.createElement(ProjectSandboxPicker, {
