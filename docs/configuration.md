@@ -7,7 +7,7 @@ Two layers:
 | Layer | Role |
 |---|---|
 | **Process boot** | Database URL (`HONR_DATABASE_URL` else `sqlite:honr.db`). Hierarchy is compile-time Project + Task. |
-| **Board DB + Settings / API** | Live source of truth for sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval), OpenShell gateway/providers (incl. shipped `github-app`), and Forge. |
+| **Board DB + Settings / API** | Live source of truth for Policies, sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval), OpenShell gateway/providers (incl. shipped `github-app`), and Forge. |
 
 ## Board database
 
@@ -62,27 +62,40 @@ Empty boards seed from compiled defaults; edits persist on the board. The
 supervisor always starts dispatch and cockpit; OpenShell gateway + a sandbox
 spec are the practical readiness gates.
 
+## Policies
+
+A **Policy** is a named OpenShell YAML allow-list (filesystem / network). The
+catalog lives on the board and is edited in **Settings → OpenShell → Policies**
+(REST: `/api/openshell/policies`). Empty boards seed a minimal row from
+`src/seed_policies.rs`; operators add egress there as needed.
+
+Live policy always comes from this board catalog. At sandbox create the
+supervisor resolves the selected policy to YAML for OpenShell. Policy is
+**immutable on a running sandbox** for filesystem and process sections —
+recreate the sandbox after a change.
+
 ## Sandbox specs
 
-A sandbox spec is the recipe for a sandbox: image, network policy, CPU, memory,
-engine, attached providers. They live on the board and are edited in
-**Settings → OpenShell → Sandbox specs** (REST: `/api/sandbox-profiles`).
-
-Policy is **inline YAML text stored on the board**. At create time the
-supervisor writes it to a temp file for OpenShell's `--policy` flag.
+A sandbox spec is the recipe for a sandbox: image, CPU, memory, engine,
+attached providers, and a **reference to a named Policy** (`policy_id`). Specs
+live on the board and are edited in **Settings → OpenShell → Sandbox specs**
+(REST: `/api/sandbox-profiles`). Upsert requires a known `policy_id`; you edit
+allow-list YAML under Policies, not on the spec.
 
 ### Which spec a card gets
 
 Resolution order is documented in [Sandbox](sandbox.md). Create-form defaults
-use a minimal policy (`src/seed_policies.rs`); operators add egress as needed.
+select the seeded minimal policy; attach providers and pick the policy the run
+needs.
 
 ### Cockpit
 
 Cockpit uses the global default sandbox spec unless you set an explicit Cockpit
-profile under Sandbox specs.
+profile under Sandbox specs. That spec's `policy_id` is what the seat gets at
+create.
 
 ## OpenShell / Forge / GitHub App provider
 
 Connectivity, providers (including the shipped `github-app` type that mints
-`GH_TOKEN`), provider types, and Forge poll are board Settings — see the
-Settings UI and [Your first agent](first-agent.md).
+`GH_TOKEN`), provider types, Policies, Sandbox specs, and Forge poll are board
+Settings — see the Settings UI and [Your first agent](first-agent.md).

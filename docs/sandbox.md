@@ -79,10 +79,11 @@ make sandbox
 The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock`, `src/`, or
 `migrations/` change materially, or when you need a newer Cursor/OpenCode CLI. Matching `/opt`
 entries (`/opt/cargo`, `/opt/cargo-target`, `/opt/npm-cache`, `/opt/opencode`, …)
-belong in the **board** sandbox spec policy (Settings → OpenShell → Sandbox
-specs). Create starts from a minimal policy (`src/seed_policies.rs`); paste
-your `/opt` allow-list (including `/opt/cargo-target` on `read_write`) when you
-need the honr image layout.
+belong in the **board Policies** catalog (Settings → OpenShell → Policies). Specs
+only reference a policy by id. Create-form defaults select the seeded minimal
+policy (`src/seed_policies.rs`); add your `/opt` allow-list (including
+`/opt/cargo-target` on `read_write`) under Policies when you need the honr image
+layout.
 
 Pass `--offline` in gate commands so a cache miss fails loudly instead of
 hanging on a denied fetch.
@@ -118,21 +119,24 @@ If a clean-tree reuse rebase conflicts, the supervisor backs out and tells the
 agent to resolve it.
 
 **Policy is immutable on a live sandbox** for filesystem and process sections.
-Set it at create time; `policy set --wait` is expensive.
+Live policy comes from the board Policies catalog and is materialized at create
+time; `policy set --wait` is expensive.
 
 **Binary paths are matched literally** in the policy. Lists are deliberately
 generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 
 ## Default vs Cockpit
 
-There is no separate seeded Cockpit profile. Create a sandbox spec under
-**Settings → OpenShell → Sandbox specs** (minimal policy prefill). The first
-profile becomes the global default; Cockpit uses that default until you create
-another profile and click **Use for Cockpit**.
+There is no separate seeded Cockpit profile. Create a Policy under
+**Settings → OpenShell → Policies**, then a sandbox spec under
+**Settings → OpenShell → Sandbox specs** that selects that policy (create-form
+defaults pick the seeded minimal policy). The first profile becomes the global
+default; Cockpit uses that default until you create another profile and click
+**Use for Cockpit**.
 
 Attach on create starts empty — add providers under **Providers**, then check
-them on the spec. Add honr MCP / package-registry / toolchain egress in the
-policy YAML when you need it.
+them on the spec. Add honr MCP / package-registry / toolchain egress under
+**Policies** when you need it.
 
 ## Antigravity / agy
 
@@ -164,4 +168,5 @@ Attach names that are not in the Providers catalog are pruned on board load.
 
 - [Your first agent](first-agent.md) — Welcome/Help OpenShell onboarding, then the first run
 - [Troubleshooting](troubleshooting.md) — the gotchas above, as symptoms
+- [Configuration](configuration.md#policies) — Policies catalog vs Sandbox specs
 - [Configuration](configuration.md#sandbox-specs) — spec resolution and engines

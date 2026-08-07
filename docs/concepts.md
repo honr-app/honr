@@ -56,8 +56,9 @@ honr's MCP could approve its own review.** So it cannot: the supervisor calls
 `claim` / `heartbeat` / `report` on its behalf, and the card worker is material
 the board acts on, not a participant in it.
 
-The cockpit is a separate sandbox spec precisely so that privileged reach to the
-board does not share the worker's network allow-list.
+The cockpit is a separate sandbox spec (with its own Policy reference) precisely
+so that privileged reach to the board does not share the worker's network
+allow-list.
 
 ## How an agent finishes
 

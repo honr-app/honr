@@ -1,9 +1,10 @@
-# Checked-in copy of DEFAULT_COCKPIT_SANDBOX_POLICY (`src/seed_policies.rs`).
-# Empty-catalog / ensure-cockpit seed uses the compiled constant; live config is
-# the board `cockpit` profile (Settings → OpenShell → Profiles → cockpit).
+# Checked-in starting point for a cockpit seat Policy (OpenShell YAML).
+# Live allow-lists live in the board Policies catalog (Settings → OpenShell →
+# Policies); Sandbox specs reference a policy by id. Adapt this file into a
+# Policy row when it matches the install.
 # honr cockpit sandbox: privileged control-plane seat.
 # Egress: host honr MCP, inference, and GitHub (App `GH_TOKEN` via the `github`
-# provider). Package registries stay on the card-worker profile (`default`).
+# provider). Package registries typically stay on the card-worker Policy.
 # Worker sandboxes stay air-gapped from honr (no honr MCP allow-list there).
 version: 1
 

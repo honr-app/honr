@@ -61,7 +61,8 @@ and **steer** over both when the note can wait.
 | Term | Meaning |
 |---|---|
 | **OpenShell** | The sandbox gateway honr talks to over gRPC. Owns containers, network policy, and provider credentials. |
-| **Sandbox spec** | The named recipe for a sandbox: image, network policy, CPU, memory, engine, attached providers. Managed in Settings → OpenShell → Sandbox specs. |
+| **Policy** | A named OpenShell YAML allow-list (filesystem / network) on the board. Edited in Settings → OpenShell → Policies. Live policy is board-owned and set at sandbox create — immutable on a running sandbox. |
+| **Sandbox spec** | The named recipe for a sandbox: image, CPU, memory, engine, attached providers, and a reference to a Policy by id. Managed in Settings → OpenShell → Sandbox specs. |
 | **Engine** | Which agent CLI runs in the seat: `cursor`, `claude`, `opencode`, or `agy`. |
 | **Provider** | A credential OpenShell holds and injects on egress — inference, GitHub. Secrets never enter the sandbox. |
 | **Briefing** | What the supervisor assembles for an agent at claim time: card intent, DoD, standing Project instructions, remotes, protocol paths. |
