@@ -794,7 +794,7 @@ assert(guideHtml.includes("create_project"), "OperatorGuide documents create_pro
 assert(guideHtml.includes("clone_repo"), "OperatorGuide documents clone_repo");
 assert(guideHtml.includes("plan.json"), "OperatorGuide documents plan.json");
 assert(guideHtml.includes("Approve"), "OperatorGuide documents Approve");
-assert(guideHtml.includes("idle"), "OperatorGuide notes agents stay idle until enable+dispatch");
+assert(guideHtml.includes("idle"), "OperatorGuide notes agents stay idle until dispatch");
 assert(guideHtml.includes("claude mcp add"), "OperatorGuide has Claude mcp add example");
 assert(guideHtml.includes("mcp.json"), "OperatorGuide has Cursor mcp.json example");
 assert(guideHtml.includes("OpenShell + sandbox"), "OperatorGuide OpenShell section title");

@@ -28,7 +28,7 @@ export function OperatorGuide() {
         <h2 id="operator-guide-quickstart-title">Quickstart</h2>
         <p className="dim">
           The in-app first loop: create a Project, plan, Approve, then dispatch.
-          Agents stay idle until you enable them and dispatch.
+          Agents stay idle until you dispatch.
         </p>
         <ol
           className="operator-guide-steps"
@@ -56,8 +56,8 @@ export function OperatorGuide() {
           </li>
         </ol>
         <p className="dim" data-testid="operator-guide-idle-note">
-          Agents stay idle until you enable them in Settings and dispatch. Name
-          the repo to clone in each Task&apos;s intent/DoD. After a report, card{" "}
+          Agents stay idle until you dispatch. Name the repo to clone in each
+          Task&apos;s intent/DoD. After a report, card{" "}
           <code>pull_request</code> drives resume remotes.
         </p>
       </section>
@@ -142,8 +142,8 @@ export function OperatorGuide() {
         <h2 id="operator-guide-openshell-title">OpenShell + sandbox</h2>
         <p className="dim">
           Before agents can run the Quickstart loop, configure the OpenShell
-          gateway, providers, a sandbox spec, and enable agents. honr does not
-          discover host credentials — paste them in Settings.
+          gateway, providers, and a sandbox spec. honr does not discover host
+          credentials — paste them in Settings.
         </p>
         <ol
           className="operator-guide-steps"
