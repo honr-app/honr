@@ -180,6 +180,17 @@ gh webhook forward \
 For a polling fallback instead, see
 [Configuration](configuration.md#openshell--forge--github-app-provider).
 
+## Archive and Unarchive
+
+**Archive** soft-retires a Project (and its subtree). The lane leaves the active
+board unless you toggle **Show archived**; nothing is deleted — history stays in
+state.
+
+**Unarchive** is the reverse: restore from history so the lane rejoins active
+Projects. Prior states that were Claimed/Running (or other in-flight) come back
+as Backlog, not as live work. Confirm-gated on the board and in the Detail
+drawer, same pattern as Archive.
+
 ## Next
 
 - [Troubleshooting](troubleshooting.md) — when a card stops moving

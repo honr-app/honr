@@ -157,6 +157,8 @@ export const api = {
   ): Promise<WorkItem> => post(`/items/${id}/update`, fields),
   cut: (id: number, reason?: string): Promise<number[]> =>
     post(`/items/${id}/cut`, { reason }),
+  unarchive: (id: number, reason?: string): Promise<number[]> =>
+    post(`/items/${id}/unarchive`, { reason }),
   deleteItem: (id: number): Promise<void> =>
     fetch(`/api/items/${id}`, { ...fetchOpts, method: "DELETE" }).then(jsonOrThrow),
 

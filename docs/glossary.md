@@ -41,6 +41,8 @@ of them is the same.
 | **Steer** | A soft note stored for the next claim. Does not interrupt a running turn. |
 | **Park** | Stops the agent but keeps the sandbox and conversation. Resume continues the same thread. |
 | **Halt** | Stops the agent, clears the conversation, deletes the sandbox. The next dispatch starts clean. |
+| **Archive** | Soft-retire a Project (or cut mid-tree) via `cut_scope`. The subtree leaves the active board unless **Show archived**; history stays in state. Not delete. |
+| **Unarchive** | Reverse of Archive: restore a retired Project/subtree from history. In-flight priors remapped to Backlog (or Shaping), never Claimed/Running. |
 | **Escalate** | What an agent does instead of guessing: writes a question with options and stops. |
 | **Split** | What an agent does when its card is bigger than one card. Proposes siblings, same as Approve. |
 
