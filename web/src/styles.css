@@ -1452,7 +1452,8 @@ main.with-side-panes {
   font-size: 12px;
   color: var(--dim);
 }
-.operator-guide-section > p[data-testid="operator-guide-idle-note"] {
+.operator-guide-section > p[data-testid="operator-guide-idle-note"],
+.operator-guide-section > p[data-testid="operator-guide-mcp-empty-tools"] {
   margin-top: 12px;
 }
 

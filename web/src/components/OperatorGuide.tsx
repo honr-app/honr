@@ -69,8 +69,11 @@ export function OperatorGuide() {
       >
         <h2 id="operator-guide-mcp-title">Connect MCP</h2>
         <p className="dim">
-          Drive Projects and Tasks from any MCP client. `/mcp` is the operator
-          seat: operator tools only (no worker verbs). honr must already be
+          Drive Projects and Tasks from any MCP client.{" "}
+          <code>/mcp</code> is the <strong>operator seat</strong>: shape
+          Projects, triage, dispatch, park, steer, approve — operator tools
+          only. Worker verbs (<code>claim</code>, <code>heartbeat</code>,{" "}
+          <code>report</code>, …) are not on this seat. honr must already be
           listening before you add the server.
         </p>
         <ol className="operator-guide-steps" data-testid="operator-guide-mcp-steps">
@@ -87,18 +90,20 @@ export function OperatorGuide() {
             </pre>
           </li>
           <li>
-            Transport is <strong>HTTP / Streamable HTTP</strong> (not stdio).
+            Transport is <strong>Streamable HTTP</strong> (not stdio).
           </li>
           <li>
             Add an MCP server named <code>honr</code> at that URL.
           </li>
           <li>
             After local admin exists, authenticate via MCP OAuth (browser login /
-            consent — same admin or GitHub allowlist as the board). In Cursor:
-            Tools &amp; MCP → Authenticate / Connect.
+            consent — same admin or GitHub allowlist as the board).
           </li>
-          <li>Enable or reload the server if your client requires it.</li>
         </ol>
+        <p className="dim" data-testid="operator-guide-mcp-empty-tools">
+          Tokens survive a honr restart. If the tools list stays empty, reload
+          the client.
+        </p>
 
         <aside
           className="operator-guide-examples"
@@ -106,11 +111,12 @@ export function OperatorGuide() {
         >
           <h3>Client examples</h3>
           <p className="dim">
-            Optional — same endpoint and server name in any MCP client that
-            speaks Streamable HTTP.
+            Optional — same Streamable HTTP endpoint and server name{" "}
+            <code>honr</code> in any MCP client.
           </p>
           <p className="operator-guide-example-label">
-            Cursor — <code>.cursor/mcp.json</code>
+            Cursor — <code>.cursor/mcp.json</code>, then Tools &amp; MCP →
+            Authenticate / Connect (or <code>agent mcp login honr</code>)
           </p>
           <pre
             className="operator-guide-snippet"
