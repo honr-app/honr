@@ -156,7 +156,10 @@ sync in as `GH_TOKEN`. Do not hand-edit that provider's credentials.
 **Settings → Forge** configures the forge provider and an optional **webhook
 polling fallback**: honr polls GitHub on an interval *in addition to* webhooks
 (default 60s, minimum 15s) using the App installation token. Same board effects
-either way. Needs a configured GitHub App and installation id.
+either way — merge → Done, main-advanced, and submitted PR review feedback
+(`CHANGES_REQUESTED` / `COMMENT` → pointer steer + Backlog). Needs a configured
+GitHub App and installation id.
 
 Webhook ingress is `POST /api/webhooks/github`. See
-[Workflow](workflow.md#when-main-moves) for what a push actually does.
+[Workflow](workflow.md#when-main-moves) for what a push does, and
+[PR review feedback](workflow.md#pr-review-feedback) for submitted reviews.
