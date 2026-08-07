@@ -242,6 +242,7 @@ mod tests {
         assert!(body.contains("PUT /api/github-app"));
         assert!(body.contains("installations"));
         assert!(body.contains("POST /api/sandbox-profiles"));
+        assert!(body.contains("POST /api/openshell/policies"));
         assert!(body.contains("clone_repo"));
         // Current contract: walk Settings; do not invent parallel bootstrap.
         assert!(body.contains("Do not invent a parallel bootstrap"));

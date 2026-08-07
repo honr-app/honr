@@ -35,6 +35,10 @@ pub struct BoardState {
     /// from compiled [`AgentConfig::default`] / embedded policy constants.
     #[serde(default)]
     pub sandbox_profiles: BTreeMap<String, SandboxProfile>,
+    /// Board-owned OpenShell Policies catalog (id → named YAML). Specs
+    /// reference these via `SandboxProfile.policy_id`.
+    #[serde(default)]
+    pub openshell_policies: BTreeMap<String, OpenShellPolicy>,
     /// Global default profile id. Projects may override via `sandbox_profile_id`.
     #[serde(default)]
     pub default_sandbox_profile_id: Option<String>,
@@ -112,6 +116,7 @@ impl BoardState {
             items: self.items.clone(),
             stories: self.stories.clone(),
             sandbox_profiles: self.sandbox_profiles.clone(),
+            openshell_policies: self.openshell_policies.clone(),
             default_sandbox_profile_id: self.default_sandbox_profile_id.clone(),
             cockpit_sandbox_profile_id: self.cockpit_sandbox_profile_id.clone(),
             workspace: self.workspace.clone(),
@@ -585,11 +590,17 @@ impl Board {
                     }
                     state.rebuild_hot_indexes();
                     *board.state.write() = state;
-                    let migrated = board.migrate_sandbox_policies_to_inline();
-                    if healed > 0 || renamed > 0 || migrated > 0 {
-                        if migrated > 0 {
+                    let path_migrated = board.migrate_sandbox_policies_to_inline();
+                    let catalog_migrated = board.migrate_inline_policies_to_catalog();
+                    if healed > 0 || renamed > 0 || path_migrated > 0 || catalog_migrated > 0 {
+                        if path_migrated > 0 {
                             tracing::info!(
-                                "migrated {migrated} sandbox profile polic(ies) from host path to inline YAML"
+                                "migrated {path_migrated} sandbox profile polic(ies) from host path to inline YAML"
+                            );
+                        }
+                        if catalog_migrated > 0 {
+                            tracing::info!(
+                                "migrated {catalog_migrated} inline sandbox polic(ies) into Policies catalog"
                             );
                         }
                         board.dirty.store(true, Ordering::Relaxed);
@@ -601,6 +612,10 @@ impl Board {
         }
         // Sandbox specs are operator-owned (Settings → Sandbox specs). Do not
         // invent default/cockpit entries on boot.
+        if board.ensure_minimal_policy() {
+            tracing::info!("seeded minimal OpenShell policy");
+            board.flush();
+        }
         if board.migrate_github_app_provider_name() {
             tracing::info!("migrated GitHub App provider attach name github → github-app");
             board.flush();
@@ -656,11 +671,17 @@ impl Board {
         let mut board = Self::new(schema, json_path);
         board.store = Some(store);
         *board.state.write() = state;
-        let migrated = board.migrate_sandbox_policies_to_inline();
-        if healed > 0 || renamed > 0 || migrated > 0 {
-            if migrated > 0 {
+        let path_migrated = board.migrate_sandbox_policies_to_inline();
+        let catalog_migrated = board.migrate_inline_policies_to_catalog();
+        if healed > 0 || renamed > 0 || path_migrated > 0 || catalog_migrated > 0 {
+            if path_migrated > 0 {
                 tracing::info!(
-                    "migrated {migrated} sandbox profile polic(ies) from host path to inline YAML"
+                    "migrated {path_migrated} sandbox profile polic(ies) from host path to inline YAML"
+                );
+            }
+            if catalog_migrated > 0 {
+                tracing::info!(
+                    "migrated {catalog_migrated} inline sandbox polic(ies) into Policies catalog"
                 );
             }
             board.dirty.store(true, Ordering::Relaxed);
@@ -668,6 +689,10 @@ impl Board {
         }
         // Sandbox specs are operator-owned (Settings → Sandbox specs). Do not
         // invent default/cockpit entries on boot.
+        if board.ensure_minimal_policy() {
+            tracing::info!("seeded minimal OpenShell policy");
+            board.flush();
+        }
         if board.migrate_github_app_provider_name() {
             tracing::info!("migrated GitHub App provider attach name github → github-app");
             board.flush();
@@ -2846,14 +2871,18 @@ impl Board {
         Ok(None)
     }
 
-    /// Upgrade catalog entries that still store a host path as `policy`.
-    /// Returns how many profiles were rewritten.
+    /// Upgrade catalog entries that still store a host path as legacy `policy`.
+    /// Returns how many profiles were rewritten (bytes moved into the legacy
+    /// inline field for the subsequent catalog migration).
     pub fn migrate_sandbox_policies_to_inline(&self) -> usize {
         let mut s = self.state.write();
         let mut n = 0usize;
         for profile in s.sandbox_profiles.values_mut() {
-            if let Some(content) = migrate_profile_policy_to_inline(&profile.policy) {
-                profile.policy = content;
+            let Some(legacy) = profile.policy_inline_legacy.as_deref() else {
+                continue;
+            };
+            if let Some(content) = migrate_profile_policy_to_inline(legacy) {
+                profile.policy_inline_legacy = Some(content);
                 n += 1;
             }
         }
@@ -2862,6 +2891,161 @@ impl Board {
             self.dirty.store(true, Ordering::Relaxed);
         }
         n
+    }
+
+    /// One-shot: move each profile's legacy inline `policy` YAML into the
+    /// Policies catalog and set `policy_id`. Preserves YAML bytes exactly.
+    /// Returns how many profiles were rewritten.
+    pub fn migrate_inline_policies_to_catalog(&self) -> usize {
+        let mut s = self.state.write();
+        let mut n = 0usize;
+        // Collect (profile_id, yaml) first so we can allocate unique policy ids
+        // without holding conflicting borrows.
+        let pending: Vec<(String, String, String)> = s
+            .sandbox_profiles
+            .values()
+            .filter(|p| p.policy_id.trim().is_empty())
+            .filter_map(|p| {
+                let yaml = p.policy_inline_legacy.clone()?;
+                if yaml.trim().is_empty() {
+                    return None;
+                }
+                Some((p.id.clone(), p.name.clone(), yaml))
+            })
+            .collect();
+        for (profile_id, profile_name, yaml) in pending {
+            let base = format!("{profile_id}-policy");
+            let policy_id =
+                Self::allocate_unique_openshell_policy_id(&s.openshell_policies, &base);
+            let name = {
+                let trimmed = profile_name.trim();
+                if trimmed.is_empty() {
+                    policy_id.clone()
+                } else {
+                    format!("{trimmed} policy")
+                }
+            };
+            s.openshell_policies.insert(
+                policy_id.clone(),
+                OpenShellPolicy {
+                    id: policy_id.clone(),
+                    name,
+                    // Exact bytes from the profile — do not trim or rewrite.
+                    yaml,
+                },
+            );
+            if let Some(profile) = s.sandbox_profiles.get_mut(&profile_id) {
+                profile.policy_id = policy_id;
+                profile.policy_inline_legacy = None;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            drop(s);
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        n
+    }
+
+    /// Seed the minimal Policies catalog row when missing (create-form default).
+    /// Does not overwrite an operator-edited `minimal` entry.
+    pub fn ensure_minimal_policy(&self) -> bool {
+        let mut s = self.state.write();
+        let id = crate::seed_policies::MINIMAL_POLICY_ID;
+        if s.openshell_policies.contains_key(id) {
+            return false;
+        }
+        s.openshell_policies.insert(
+            id.into(),
+            OpenShellPolicy {
+                id: id.into(),
+                name: crate::seed_policies::MINIMAL_POLICY_NAME.into(),
+                yaml: crate::seed_policies::MINIMAL_SANDBOX_POLICY.to_string(),
+            },
+        );
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        true
+    }
+
+    pub fn list_openshell_policies(&self) -> Vec<OpenShellPolicy> {
+        let s = self.state.read();
+        s.openshell_policies.values().cloned().collect()
+    }
+
+    pub fn get_openshell_policy(&self, id: &str) -> Option<OpenShellPolicy> {
+        self.state.read().openshell_policies.get(id).cloned()
+    }
+
+    /// Insert or replace a Policies catalog entry. Empty `id` means create:
+    /// slug from `name` with `-2`, `-3`, … on collision.
+    pub fn upsert_openshell_policy(
+        &self,
+        policy: OpenShellPolicy,
+    ) -> Result<OpenShellPolicy, String> {
+        if policy.name.trim().is_empty() {
+            return Err("policy name must not be empty".into());
+        }
+        // Empty-check with trim, but keep YAML text as submitted (trailing
+        // newline is normal for policy files / textareas).
+        if policy.yaml.trim().is_empty() {
+            return Err("policy yaml must not be empty".into());
+        }
+        let name = policy.name.trim().to_string();
+        let yaml = policy.yaml;
+        let mut s = self.state.write();
+        let id = {
+            let trimmed = policy.id.trim();
+            if trimmed.is_empty() {
+                let base = crate::model::slugify_sandbox_profile_id(&name);
+                Self::allocate_unique_openshell_policy_id(&s.openshell_policies, &base)
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let stored = OpenShellPolicy { id, name, yaml };
+        s.openshell_policies
+            .insert(stored.id.clone(), stored.clone());
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(stored)
+    }
+
+    /// Delete a policy. Refused while any sandbox spec references it.
+    pub fn delete_openshell_policy(&self, id: &str) -> Result<(), String> {
+        let mut s = self.state.write();
+        if !s.openshell_policies.contains_key(id) {
+            return Err(format!("no policy `{id}`"));
+        }
+        let in_use: Vec<String> = s
+            .sandbox_profiles
+            .values()
+            .filter(|p| p.policy_id == id)
+            .map(|p| p.id.clone())
+            .collect();
+        if !in_use.is_empty() {
+            return Err(format!(
+                "cannot delete policy `{id}`: in use by sandbox spec(s) {:?}; \
+                 reassign those specs first",
+                in_use
+            ));
+        }
+        s.openshell_policies.remove(id);
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Materialize YAML for a profile's `policy_id`. Missing catalog rows fall
+    /// through to the minimal built-in (same last-resort as empty catalog).
+    fn policy_yaml_for_profile(s: &BoardState, p: &SandboxProfile) -> String {
+        let id = p.policy_id.trim();
+        if !id.is_empty() {
+            if let Some(pol) = s.openshell_policies.get(id) {
+                return pol.yaml.clone();
+            }
+        }
+        crate::seed_policies::MINIMAL_SANDBOX_POLICY.to_string()
     }
 
     pub fn list_sandbox_profiles(&self) -> Vec<SandboxProfile> {
@@ -2884,6 +3068,7 @@ impl Board {
     /// Insert or replace a profile. Empty `id` means create: derive a slug from
     /// `name` and append `-2`, `-3`, … when that slug is already taken. Explicit
     /// ids still upsert in place (edit / seed). Does not change the global default.
+    /// Requires a known `policy_id` in the Policies catalog.
     pub fn upsert_sandbox_profile(
         &self,
         profile: SandboxProfile,
@@ -2894,15 +3079,12 @@ impl Board {
         if profile.image.trim().is_empty() {
             return Err("sandbox profile image must not be empty".into());
         }
-        // Empty-check with trim, but keep the YAML text as submitted (trailing
-        // newline is normal for policy files / textareas).
-        if profile.policy.trim().is_empty() {
-            return Err("sandbox profile policy must not be empty".into());
+        let policy_id = profile.policy_id.trim().to_string();
+        if policy_id.is_empty() {
+            return Err("sandbox profile policy_id must not be empty".into());
         }
         let name = profile.name.trim().to_string();
         let image = profile.image.trim().to_string();
-        // Keep YAML as submitted (trailing newline is normal for policy textareas).
-        let policy = profile.policy;
         let cpu = profile.cpu.filter(|c| !c.trim().is_empty());
         let memory = profile.memory.filter(|m| !m.trim().is_empty());
         let engine = profile
@@ -2916,6 +3098,9 @@ impl Board {
             .filter(|n| !n.is_empty())
             .collect();
         let mut s = self.state.write();
+        if !s.openshell_policies.contains_key(&policy_id) {
+            return Err(format!("no policy `{policy_id}`"));
+        }
         let id = {
             let trimmed = profile.id.trim();
             if trimmed.is_empty() {
@@ -2929,7 +3114,8 @@ impl Board {
             id,
             name,
             image,
-            policy,
+            policy_id,
+            policy_inline_legacy: None,
             cpu,
             memory,
             engine,
@@ -3146,12 +3332,14 @@ impl Board {
         let s = self.state.read();
         if let Some(ref cid) = s.cockpit_sandbox_profile_id {
             if let Some(p) = s.sandbox_profiles.get(cid) {
-                return ResolvedSandboxCreate::from_profile(p);
+                let yaml = Self::policy_yaml_for_profile(&s, p);
+                return ResolvedSandboxCreate::from_profile(p, &yaml);
             }
         }
         if let Some(ref did) = s.default_sandbox_profile_id {
             if let Some(p) = s.sandbox_profiles.get(did) {
-                return ResolvedSandboxCreate::from_profile(p);
+                let yaml = Self::policy_yaml_for_profile(&s, p);
+                return ResolvedSandboxCreate::from_profile(p, &yaml);
             }
         }
         drop(s);
@@ -3198,12 +3386,14 @@ impl Board {
         let s = self.state.read();
         if let Some(ref oid) = override_id {
             if let Some(p) = s.sandbox_profiles.get(oid) {
-                return ResolvedSandboxCreate::from_profile(p);
+                let yaml = Self::policy_yaml_for_profile(&s, p);
+                return ResolvedSandboxCreate::from_profile(p, &yaml);
             }
         }
         if let Some(ref did) = s.default_sandbox_profile_id {
             if let Some(p) = s.sandbox_profiles.get(did) {
-                return ResolvedSandboxCreate::from_profile(p);
+                let yaml = Self::policy_yaml_for_profile(&s, p);
+                return ResolvedSandboxCreate::from_profile(p, &yaml);
             }
         }
         drop(s);
@@ -3641,6 +3831,26 @@ impl Board {
             n = n.saturating_add(1);
             if n == u32::MAX {
                 // Pathological; still must terminate.
+                return format!("{base}-{n}");
+            }
+        }
+    }
+
+    fn allocate_unique_openshell_policy_id(
+        existing: &BTreeMap<String, OpenShellPolicy>,
+        base: &str,
+    ) -> String {
+        if !existing.contains_key(base) {
+            return base.to_string();
+        }
+        let mut n = 2u32;
+        loop {
+            let candidate = format!("{base}-{n}");
+            if !existing.contains_key(&candidate) {
+                return candidate;
+            }
+            n = n.saturating_add(1);
+            if n == u32::MAX {
                 return format!("{base}-{n}");
             }
         }
@@ -9472,13 +9682,25 @@ mod tests {
 
     const SEED_POLICY_YAML: &str =
         "version: 1\n# seed-policy\nfilesystem_policy:\n  include_workdir: true\n";
+    const SEED_POLICY_ID: &str = "seed-policy";
+
+    fn ensure_seed_policy(b: &Board) {
+        b.upsert_openshell_policy(OpenShellPolicy {
+            id: SEED_POLICY_ID.into(),
+            name: "Seed".into(),
+            yaml: SEED_POLICY_YAML.into(),
+        })
+        .expect("seed policy");
+    }
 
     fn upsert_test_profile(b: &Board, id: &str, name: &str, image: &str) -> SandboxProfile {
+        ensure_seed_policy(b);
         b.upsert_sandbox_profile(SandboxProfile {
             id: id.into(),
             name: name.into(),
             image: image.into(),
-            policy: SEED_POLICY_YAML.into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
             cpu: Some("2".into()),
             memory: Some("4Gi".into()),
             engine: Some("cursor".into()),
@@ -10415,7 +10637,10 @@ mod tests {
             crate::seed_policies::MINIMAL_SANDBOX_POLICY
         );
         let defaults = crate::model::sandbox_profile_create_defaults();
-        assert_eq!(defaults.policy, crate::seed_policies::MINIMAL_SANDBOX_POLICY);
+        assert_eq!(
+            defaults.policy_id,
+            crate::seed_policies::MINIMAL_POLICY_ID
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10431,7 +10656,8 @@ mod tests {
                 id: "heavy".into(),
                 name: "Heavy".into(),
                 image: "heavy:latest".into(),
-                policy: SEED_POLICY_YAML.into(),
+                policy_id: SEED_POLICY_ID.into(),
+                policy_inline_legacy: None,
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
                 engine: None,
@@ -10504,7 +10730,8 @@ mod tests {
             id: "default".into(),
             name: "Default".into(),
             image: "img:1".into(),
-            policy: SEED_POLICY_YAML.into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
             cpu: None,
             memory: None,
             engine: Some("cursor".into()),
@@ -10529,7 +10756,8 @@ mod tests {
             id: "alt".into(),
             name: "Alt".into(),
             image: "alt:latest".into(),
-            policy: SEED_POLICY_YAML.into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
             cpu: None,
             memory: None,
             engine: None,
@@ -10574,7 +10802,8 @@ mod tests {
             id: "ci".into(),
             name: "CI".into(),
             image: "ci:1".into(),
-            policy: SEED_POLICY_YAML.into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
             cpu: Some("1".into()),
             memory: None,
             engine: None,
@@ -10594,11 +10823,16 @@ mod tests {
         assert_eq!(restored.list_sandbox_profiles().len(), 2);
         let p = restored.get(project.id).expect("project");
         assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
-        assert!(
-            crate::model::is_inline_policy_yaml(
-                &restored.get_sandbox_profile("ci").unwrap().policy
-            ),
-            "persisted policy must remain inline YAML"
+        assert_eq!(
+            restored.get_sandbox_profile("ci").unwrap().policy_id,
+            SEED_POLICY_ID
+        );
+        assert_eq!(
+            restored
+                .get_openshell_policy(SEED_POLICY_ID)
+                .unwrap()
+                .yaml,
+            SEED_POLICY_YAML
         );
 
         let _ = std::fs::remove_file(&path);
@@ -10646,11 +10880,24 @@ mod tests {
         assert_eq!(fallback.policy, resolve_policy_yaml(&compiled.policy));
         assert_ne!(fallback.image, "yaml-img");
 
+        b.upsert_openshell_policy(OpenShellPolicy {
+            id: "def-pol".into(),
+            name: "Default policy".into(),
+            yaml: def_policy.into(),
+        })
+        .unwrap();
+        b.upsert_openshell_policy(OpenShellPolicy {
+            id: "alt-pol".into(),
+            name: "Alt policy".into(),
+            yaml: alt_policy.into(),
+        })
+        .unwrap();
         b.upsert_sandbox_profile(SandboxProfile {
             id: "default".into(),
             name: "Default".into(),
             image: "def-img".into(),
-            policy: def_policy.into(),
+            policy_id: "def-pol".into(),
+            policy_inline_legacy: None,
             cpu: Some("2".into()),
             memory: None,
             engine: None,
@@ -10667,7 +10914,8 @@ mod tests {
             id: "alt".into(),
             name: "Alt".into(),
             image: "alt-img".into(),
-            policy: alt_policy.into(),
+            policy_id: "alt-pol".into(),
+            policy_inline_legacy: None,
             cpu: None,
             memory: Some("8Gi".into()),
             engine: None,
@@ -10698,11 +10946,13 @@ mod tests {
             engine: "cursor".into(),
             ..Default::default()
         });
+        ensure_seed_policy(&b);
         b.upsert_sandbox_profile(SandboxProfile {
             id: "default".into(),
             name: "Default".into(),
             image: "img:1".into(),
-            policy: SEED_POLICY_YAML.into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
             cpu: None,
             memory: None,
             engine: Some("agy".into()),
@@ -10751,11 +11001,13 @@ mod tests {
             engine: "claude".into(),
             ..Default::default()
         });
+        ensure_seed_policy(&b);
         b.upsert_sandbox_profile(SandboxProfile {
             id: "default".into(),
             name: "Default".into(),
             image: "img:1".into(),
-            policy: SEED_POLICY_YAML.into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
             cpu: None,
             memory: None,
             engine: None,
@@ -10793,7 +11045,8 @@ mod tests {
                 id: String::new(),
                 name: "Heavy CI".into(),
                 image: "img:ci".into(),
-                policy: SEED_POLICY_YAML.into(),
+                policy_id: SEED_POLICY_ID.into(),
+                policy_inline_legacy: None,
                 cpu: None,
                 memory: None,
                 engine: None,
@@ -10809,7 +11062,8 @@ mod tests {
                 id: String::new(),
                 name: "Default".into(),
                 image: "img:2".into(),
-                policy: SEED_POLICY_YAML.into(),
+                policy_id: SEED_POLICY_ID.into(),
+                policy_inline_legacy: None,
                 cpu: None,
                 memory: None,
                 engine: None,
@@ -10824,7 +11078,8 @@ mod tests {
                 id: "".into(),
                 name: "!!!".into(),
                 image: "img:x".into(),
-                policy: SEED_POLICY_YAML.into(),
+                policy_id: SEED_POLICY_ID.into(),
+                policy_inline_legacy: None,
                 cpu: None,
                 memory: None,
                 engine: None,
@@ -10839,7 +11094,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_sandbox_policies_path_to_inline_yaml() {
+    fn migrate_sandbox_policies_path_to_inline_then_catalog() {
         let dir = std::env::temp_dir().join(format!(
             "honr-test-sbx-migrate-{}",
             std::time::SystemTime::now()
@@ -10853,20 +11108,161 @@ mod tests {
         std::fs::write(&policy_path, yaml).unwrap();
 
         let b = Board::new(Schema::default(), dir.join("board.json"));
+        // Simulate a pre-catalog board row: host path in legacy `policy` field.
+        {
+            let mut s = b.state.write();
+            s.sandbox_profiles.insert(
+                "legacy".into(),
+                SandboxProfile {
+                    id: "legacy".into(),
+                    name: "Legacy".into(),
+                    image: "img:1".into(),
+                    policy_id: String::new(),
+                    policy_inline_legacy: Some(policy_path.to_string_lossy().into()),
+                    cpu: None,
+                    memory: None,
+                    engine: None,
+                    provider_names: Vec::new(),
+                },
+            );
+        }
+        assert_eq!(b.migrate_sandbox_policies_to_inline(), 1);
+        assert_eq!(
+            b.get_sandbox_profile("legacy")
+                .unwrap()
+                .policy_inline_legacy
+                .as_deref(),
+            Some(yaml)
+        );
+        assert_eq!(b.migrate_sandbox_policies_to_inline(), 0);
+        assert_eq!(b.migrate_inline_policies_to_catalog(), 1);
+        let profile = b.get_sandbox_profile("legacy").unwrap();
+        assert_eq!(profile.policy_id, "legacy-policy");
+        assert!(profile.policy_inline_legacy.is_none());
+        assert_eq!(
+            b.get_openshell_policy("legacy-policy").unwrap().yaml,
+            yaml,
+            "migration must preserve YAML bytes exactly"
+        );
+        assert_eq!(b.migrate_inline_policies_to_catalog(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn openshell_policies_crud_and_refuse_in_use_delete() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-policies-crud-{}",
+                std::process::id()
+            )),
+        );
+        let created = b
+            .upsert_openshell_policy(OpenShellPolicy {
+                id: "".into(),
+                name: "Allow crates".into(),
+                yaml: "version: 1\n# crates\n".into(),
+            })
+            .expect("create policy");
+        assert_eq!(created.id, "allow-crates");
+        assert_eq!(b.list_openshell_policies().len(), 1);
+
         b.upsert_sandbox_profile(SandboxProfile {
-            id: "legacy".into(),
-            name: "Legacy".into(),
+            id: "default".into(),
+            name: "Default".into(),
             image: "img:1".into(),
-            policy: policy_path.to_string_lossy().into(),
+            policy_id: created.id.clone(),
+            policy_inline_legacy: None,
             cpu: None,
             memory: None,
             engine: None,
             provider_names: Vec::new(),
         })
+        .expect("profile");
+
+        let err = b.delete_openshell_policy(&created.id).unwrap_err();
+        assert!(
+            err.contains("in use"),
+            "in-use delete must fail, got {err}"
+        );
+
+        b.delete_sandbox_profile("default").expect("drop profile");
+        b.delete_openshell_policy(&created.id).expect("delete free");
+        assert!(b.get_openshell_policy(&created.id).is_none());
+    }
+
+    #[test]
+    fn ensure_minimal_policy_seeds_once_without_overwrite() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-minimal-seed-{}",
+                std::process::id()
+            )),
+        );
+        assert!(b.ensure_minimal_policy());
+        assert!(!b.ensure_minimal_policy());
+        let id = crate::seed_policies::MINIMAL_POLICY_ID;
+        let edited = "version: 1\n# operator-edited\n";
+        b.upsert_openshell_policy(OpenShellPolicy {
+            id: id.into(),
+            name: "Minimal+".into(),
+            yaml: edited.into(),
+        })
         .unwrap();
-        assert_eq!(b.migrate_sandbox_policies_to_inline(), 1);
-        assert_eq!(b.get_sandbox_profile("legacy").unwrap().policy, yaml);
-        assert_eq!(b.migrate_sandbox_policies_to_inline(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!b.ensure_minimal_policy());
+        assert_eq!(b.get_openshell_policy(id).unwrap().yaml, edited);
+        let defaults = crate::model::sandbox_profile_create_defaults();
+        assert_eq!(defaults.policy_id, id);
+    }
+
+    #[test]
+    fn migrate_inline_policy_boards_losslessly_on_load() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-inline-migrate-load-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let yaml = "version: 1\n# keep-exact-bytes\nfilesystem_policy:\n  include_workdir: true\n";
+        // Pre-catalog board JSON (inline policy on the profile).
+        let legacy = serde_json::json!({
+            "next_id": 1,
+            "items": {},
+            "sandbox_profiles": {
+                "default": {
+                    "id": "default",
+                    "name": "Default",
+                    "image": "img:1",
+                    "policy": yaml,
+                    "cpu": null,
+                    "memory": null,
+                    "engine": null,
+                    "provider_names": []
+                }
+            },
+            "default_sandbox_profile_id": "default"
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let restored = Board::load_or_new(Schema::default(), path.clone());
+        let profile = restored.get_sandbox_profile("default").unwrap();
+        assert_eq!(profile.policy_id, "default-policy");
+        assert!(profile.policy_inline_legacy.is_none());
+        assert_eq!(
+            restored.get_openshell_policy("default-policy").unwrap().yaml,
+            yaml
+        );
+        let resolved = restored.resolve_cockpit_sandbox_create();
+        assert_eq!(resolved.policy, yaml);
+        // Minimal seed also present for create defaults.
+        assert!(
+            restored
+                .get_openshell_policy(crate::seed_policies::MINIMAL_POLICY_ID)
+                .is_some()
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -2,7 +2,7 @@
 //! the pixels and the agent API can't drift apart.
 
 use crate::model::{
-    AgentRuntimeConfig, CockpitSession, ItemId, OpenShellProviderDesired,
+    AgentRuntimeConfig, CockpitSession, ItemId, OpenShellPolicy, OpenShellProviderDesired,
     OpenShellProviderRefreshDesired, OpenShellProviderTypeDesired, SandboxProfile,
     SandboxProfileCreateDefaults, State, WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
@@ -139,6 +139,14 @@ pub fn routes() -> Router<SharedBoard> {
         .route(
             "/openshell/provider-types/{id}",
             delete(delete_openshell_provider_type),
+        )
+        .route(
+            "/openshell/policies",
+            get(list_openshell_policies).post(upsert_openshell_policy),
+        )
+        .route(
+            "/openshell/policies/{id}",
+            get(get_openshell_policy).delete(delete_openshell_policy),
         )
         .route("/github-app", get(get_github_app).put(put_github_app))
         .route("/github-app/sync-token", post(sync_github_app_token))
@@ -1402,6 +1410,7 @@ pub struct SandboxProfilesOut {
 }
 
 fn sandbox_profiles_out(b: &crate::store::SharedBoard) -> SandboxProfilesOut {
+    b.ensure_minimal_policy();
     SandboxProfilesOut {
         profiles: b.list_sandbox_profiles(),
         default_sandbox_profile_id: b.default_sandbox_profile_id(),
@@ -1431,7 +1440,8 @@ pub struct UpsertSandboxProfileReq {
     pub id: Option<String>,
     pub name: String,
     pub image: String,
-    pub policy: String,
+    /// Policies catalog id (required).
+    pub policy_id: String,
     #[serde(default)]
     pub cpu: Option<String>,
     #[serde(default)]
@@ -1451,7 +1461,8 @@ async fn upsert_sandbox_profile(
             id: req.id.unwrap_or_default(),
             name: req.name,
             image: req.image,
-            policy: req.policy,
+            policy_id: req.policy_id,
+            policy_inline_legacy: None,
             cpu: req.cpu,
             memory: req.memory,
             engine: req.engine,
@@ -1490,6 +1501,65 @@ async fn clear_cockpit_sandbox_profile(
 ) -> ApiResult<SandboxProfilesOut> {
     b.clear_cockpit_sandbox_profile();
     Ok(Json(sandbox_profiles_out(&b)))
+}
+
+#[derive(Serialize)]
+pub struct OpenShellPoliciesOut {
+    pub policies: Vec<OpenShellPolicy>,
+    /// Prefill id for create forms (seeded minimal policy).
+    pub create_default_policy_id: String,
+}
+
+fn openshell_policies_out(b: &crate::store::SharedBoard) -> OpenShellPoliciesOut {
+    b.ensure_minimal_policy();
+    OpenShellPoliciesOut {
+        policies: b.list_openshell_policies(),
+        create_default_policy_id: crate::seed_policies::MINIMAL_POLICY_ID.to_string(),
+    }
+}
+
+async fn list_openshell_policies(AxState(b): AxState<SharedBoard>) -> Json<OpenShellPoliciesOut> {
+    Json(openshell_policies_out(&b))
+}
+
+async fn get_openshell_policy(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> ApiResult<OpenShellPolicy> {
+    b.get_openshell_policy(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError(format!("no policy `{id}`")))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpsertOpenShellPolicyReq {
+    /// Omit or leave empty on create — board derives a slug from `name`.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub yaml: String,
+}
+
+async fn upsert_openshell_policy(
+    AxState(b): AxState<SharedBoard>,
+    Json(req): Json<UpsertOpenShellPolicyReq>,
+) -> ApiResult<OpenShellPolicy> {
+    Ok(Json(
+        b.upsert_openshell_policy(OpenShellPolicy {
+            id: req.id.unwrap_or_default(),
+            name: req.name,
+            yaml: req.yaml,
+        })
+        .map_err(ApiError)?,
+    ))
+}
+
+async fn delete_openshell_policy(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    b.delete_openshell_policy(&id).map_err(ApiError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -3056,6 +3126,29 @@ mod tests {
         assert!(empty.profiles.is_empty());
         assert!(empty.default_sandbox_profile_id.is_none());
         assert!(empty.cockpit_sandbox_profile_id.is_none());
+        assert_eq!(
+            empty.create_defaults.policy_id,
+            crate::seed_policies::MINIMAL_POLICY_ID
+        );
+        // Listing seeds the minimal Policies catalog row.
+        assert!(
+            b.get_openshell_policy(crate::seed_policies::MINIMAL_POLICY_ID)
+                .is_some()
+        );
+
+        let Ok(Json(pol)) = upsert_openshell_policy(
+            AxState(b.clone()),
+            Json(UpsertOpenShellPolicyReq {
+                id: Some("api-test".into()),
+                name: "API test".into(),
+                yaml: "version: 1\n# api-test\n".into(),
+            }),
+        )
+        .await
+        else {
+            panic!("create policy");
+        };
+        assert_eq!(pol.id, "api-test");
 
         let Ok(Json(created)) = upsert_sandbox_profile(
             AxState(b.clone()),
@@ -3063,7 +3156,7 @@ mod tests {
                 id: Some("default".into()),
                 name: "Default".into(),
                 image: "honr-sandbox:latest".into(),
-                policy: "version: 1\n# api-test\n".into(),
+                policy_id: "api-test".into(),
                 cpu: Some("2".into()),
                 memory: Some("4Gi".into()),
                 engine: None,
@@ -3076,11 +3169,7 @@ mod tests {
         };
         assert_eq!(created.id, "default");
         assert_eq!(created.image, "honr-sandbox:latest");
-        assert!(
-            created.policy.contains("version: 1"),
-            "policy should be inline YAML, got {:?}",
-            created.policy
-        );
+        assert_eq!(created.policy_id, "api-test");
 
         let Ok(Json(heavy)) = upsert_sandbox_profile(
             AxState(b.clone()),
@@ -3088,7 +3177,7 @@ mod tests {
                 id: Some("heavy".into()),
                 name: "Heavy".into(),
                 image: "honr-sandbox:heavy".into(),
-                policy: "version: 1\n# api-test\n".into(),
+                policy_id: "api-test".into(),
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
                 engine: None,
@@ -3108,7 +3197,7 @@ mod tests {
                 id: Some("heavy".into()),
                 name: "Heavy+".into(),
                 image: "honr-sandbox:heavy2".into(),
-                policy: "version: 1\n# api-test-updated\n".into(),
+                policy_id: "api-test".into(),
                 cpu: Some("8".into()),
                 memory: Some("32Gi".into()),
                 engine: None,
@@ -3201,11 +3290,33 @@ mod tests {
         )
         .await
         .is_err());
+
+        // In-use policy delete fails.
+        let err = delete_openshell_policy(AxState(b.clone()), Path("api-test".into()))
+            .await
+            .unwrap_err();
+        assert!(err.0.contains("in use"), "got {}", err.0);
+
+        // Unknown policy_id refused on profile upsert.
+        assert!(upsert_sandbox_profile(
+            AxState(b.clone()),
+            Json(UpsertSandboxProfileReq {
+                id: Some("bad".into()),
+                name: "Bad".into(),
+                image: "img:x".into(),
+                policy_id: "missing".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
     async fn sandbox_profiles_create_omits_id_and_returns_slug() {
         let b = sandbox_profiles_board();
+        let _ = list_sandbox_profiles(AxState(b.clone())).await; // seed minimal
+        let policy_id = crate::seed_policies::MINIMAL_POLICY_ID.to_string();
 
         let Ok(Json(created)) = upsert_sandbox_profile(
             AxState(b.clone()),
@@ -3213,7 +3324,7 @@ mod tests {
                 id: None,
                 name: "Heavy CI".into(),
                 image: "img:ci".into(),
-                policy: "policy.yaml".into(),
+                policy_id: policy_id.clone(),
                 cpu: None,
                 memory: None,
                 engine: None,
@@ -3234,7 +3345,7 @@ mod tests {
                 id: Some("".into()),
                 name: "Heavy CI".into(),
                 image: "img:ci2".into(),
-                policy: "policy.yaml".into(),
+                policy_id,
                 cpu: None,
                 memory: None,
                 engine: None,
@@ -3246,6 +3357,53 @@ mod tests {
             panic!("create colliding name");
         };
         assert_eq!(second.id, "heavy-ci-2");
+    }
+
+    #[tokio::test]
+    async fn openshell_policies_list_upsert_get_delete() {
+        let b = sandbox_profiles_board();
+        let Json(listed) = list_openshell_policies(AxState(b.clone())).await;
+        assert_eq!(
+            listed.create_default_policy_id,
+            crate::seed_policies::MINIMAL_POLICY_ID
+        );
+        assert!(
+            listed
+                .policies
+                .iter()
+                .any(|p| p.id == crate::seed_policies::MINIMAL_POLICY_ID)
+        );
+
+        let Ok(Json(created)) = upsert_openshell_policy(
+            AxState(b.clone()),
+            Json(UpsertOpenShellPolicyReq {
+                id: None,
+                name: "Allow npm".into(),
+                yaml: "version: 1\n# npm\n".into(),
+            }),
+        )
+        .await
+        else {
+            panic!("create");
+        };
+        assert_eq!(created.id, "allow-npm");
+
+        let Ok(Json(got)) =
+            get_openshell_policy(AxState(b.clone()), Path("allow-npm".into())).await
+        else {
+            panic!("get");
+        };
+        assert_eq!(got.yaml, "version: 1\n# npm\n");
+
+        let Ok(Json(ok)) =
+            delete_openshell_policy(AxState(b.clone()), Path("allow-npm".into())).await
+        else {
+            panic!("delete");
+        };
+        assert_eq!(ok["ok"], true);
+        assert!(get_openshell_policy(AxState(b.clone()), Path("allow-npm".into()))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

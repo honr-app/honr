@@ -64,6 +64,9 @@ pub const META_NEXT_ID: &str = "next_id";
 /// JSON blob: `BTreeMap<String, SandboxProfile>` catalog.
 pub const META_SANDBOX_PROFILES: &str = "sandbox_profiles";
 
+/// JSON blob: `BTreeMap<String, OpenShellPolicy>` Policies catalog.
+pub const META_OPENSHELL_POLICIES: &str = "openshell_policies";
+
 /// Global default sandbox profile id (empty string means unset).
 pub const META_DEFAULT_SANDBOX_PROFILE_ID: &str = "default_sandbox_profile_id";
 
