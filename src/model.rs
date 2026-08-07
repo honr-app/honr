@@ -508,9 +508,9 @@ impl OpenShellProviderDesired {
 
 /// Per-install agent process knobs (Settings → Agent runtime).
 ///
-/// Seeded from `honr.yaml` `execution.agents`; Board is source of truth after.
-/// Image / policy / cpu / memory stay on sandbox profiles; work remotes stay
-/// on card `pull_request` / yaml repo.
+/// Empty boards seed from compiled [`Default`] (`enabled` copies the
+/// `honr.yaml` boot gate). Board is source of truth after. Image / policy /
+/// cpu / memory live on sandbox profiles; work remotes on card `pull_request`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentRuntimeConfig {
     #[serde(default)]
@@ -693,7 +693,8 @@ pub fn normalize_cockpit_field(value: Option<String>) -> Option<String> {
 }
 
 /// Named create-spec for OpenShell sandboxes. Board-state catalog entries;
-/// yaml `execution.agents` seeds the catalog when empty at boot.
+/// empty catalogs seed from compiled [`crate::schema::AgentConfig::default`]
+/// and embedded policy constants (not from host `honr.yaml` create knobs).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxProfile {
     pub id: String,
@@ -716,6 +717,9 @@ pub struct SandboxProfile {
     #[serde(default)]
     pub provider_names: Vec<String>,
 }
+
+/// Catalog id for the worker default create-spec.
+pub const DEFAULT_SANDBOX_PROFILE_ID: &str = "default";
 
 /// Catalog id for the privileged cockpit control-plane seat (not the card worker).
 pub const COCKPIT_SANDBOX_PROFILE_ID: &str = "cockpit";
@@ -780,19 +784,20 @@ pub fn slugify_sandbox_profile_id(name: &str) -> String {
     }
 }
 
-/// Create knobs after Project override → global default → YAML resolution.
-/// `policy` is always YAML **content** ready to materialize as a temp file.
+/// Create knobs after Project override → global default → compiled-default
+/// resolution. `policy` is always YAML **content** ready to materialize as a
+/// temp file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSandboxCreate {
     pub image: String,
     pub policy: String,
     pub cpu: Option<String>,
     pub memory: Option<String>,
-    /// Profile engine when set; YAML fallback carries `agents.engine`.
+    /// Profile engine when set; compiled-default fallback carries `agents.engine`.
     pub engine: Option<String>,
-    /// Catalog profile that won, if any. `None` means YAML fallback.
+    /// Catalog profile that won, if any. `None` means compiled-default fallback.
     pub profile_id: Option<String>,
-    /// Provider names to attach (from the winning profile; empty for YAML fallback).
+    /// Provider names to attach (from the winning profile; empty for fallback).
     pub providers: Vec<String>,
 }
 
@@ -825,7 +830,7 @@ impl ResolvedSandboxCreate {
         };
         Self {
             image: agents.image.clone(),
-            // Seed / YAML-fallback only — never a host file read.
+            // Last-resort create knobs — usually AgentConfig::default(); never a host file.
             policy: resolve_policy_yaml(&agents.policy),
             cpu: agents.cpu.clone(),
             memory: agents.memory.clone(),

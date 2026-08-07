@@ -1,8 +1,7 @@
-# Level schema — Project + flat Tasks.
-#
-# Project is the only container. Tasks are flat siblings under a Project,
-# related by dependency edges (blocks / relates-to), not nested hierarchy.
-# Schema is Project + Task only.
+# Boot essentials for the control plane. Live create knobs (sandbox image /
+# policy / cpu / memory / engine) and Agent runtime process settings live on
+# the board (Settings / API) after empty-catalog seed from compiled defaults.
+# Editing this file does not change an already-seeded board.
 
 # Board persistence. Default is local SQLite (`sqlite:honr.db`). Set a
 # postgres:// or postgresql:// URL (or HONR_DATABASE_URL) for Postgres.
@@ -12,6 +11,9 @@ board:
   database:
     url: sqlite:honr.db
 
+# Level schema — Project + flat Tasks.
+# Project is the only container. Tasks are flat siblings under a Project,
+# related by dependency edges (blocks / relates-to), not nested hierarchy.
 levels:
   - name: Project
     horizon: 2q
@@ -23,49 +25,17 @@ levels:
     claimable: true
     requires: [definition_of_done]
 
-# Execution. These are control-plane timings, not simulation knobs: the lease
-# is what makes a dead agent survivable, and cards decay visibly once their
+# Execution control-plane timings + the agents startup gate.
 execution:
-  # Run budget is agents.agent_timeout_secs (one clock). lease_secs /
-  # heartbeat_expect_secs are ignored if present (compat with older yaml).
+  # How often to check for overdue run deadlines.
+  # Run budget is Settings → Agent runtime `agent_timeout_secs` (one clock).
+  # lease_secs / heartbeat_expect_secs are ignored if present (compat).
   sweep_interval_ms: 2000
 
   # Real agents in OpenShell sandboxes. Off by default so the board runs on a
-  # machine with no podman, no gateway and no credentials. Turning this on
-  # spends real money — see docs/agents.md and docs/sandbox.md before you do.
+  # machine with no podman, no gateway and no credentials. This `enabled` flag
+  # is the process boot gate (seeded into Agent runtime on a fresh board);
+  # turning it on spends real money — see docs/agents.md and docs/sandbox.md.
+  # Other agent create knobs seed from compiled defaults; edit via Settings.
   agents:
     enabled: true
-    engine: cursor
-
-    # Needs a Rust toolchain to build honr: docker build -f sandbox/Containerfile .
-    image: honr-sandbox:latest
-    # Worker network policy lives on the board sandbox profile (Settings →
-    # Profiles → default). `embedded` seeds that profile from the built-in
-    # default when the catalog is empty — do not put a host policy.yaml path
-    # here; editing a file does not change live sandboxes.
-    policy: embedded
-
-    # Default remotes when a card already has pull_request facts; first clone
-    # still follows intent/DoD prose until report sets pull_request.
-    repo:
-      upstream: honr-app/honr
-      # App install on shanemcd; push honr/card-* and open PRs into main.
-      # Default branch is owner-only (ruleset); humans merge.
-      fork: honr-app/honr
-      base: main
-
-    # Branch / sandbox name stem (default honr → honr/card-N / honr-card-N-a1).
-    # branch_prefix: honr
-
-    cpu: "2"
-    memory: 4Gi
-
-    # Sandboxes are heavy and OpenShell is alpha. Do not start at seven.
-    # Keep low while OpenShell is alpha and agents claim their own gates.
-    max_concurrent: 1
-
-    agent_timeout_secs: 1800
-
-    # Runs that die without producing work before the card becomes a human's
-    # problem. Without a count, early failures requeue every lease period forever.
-    max_attempts: 3

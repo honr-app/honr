@@ -578,15 +578,15 @@ async fn put_webhook_poll(
 
 // ---------------------------------------------------------------- agent runtime
 
-/// GET returns durable Agent runtime, seeding from yaml when unset so Settings
-/// always has something to edit.
+/// GET returns durable Agent runtime, seeding from compiled defaults when
+/// unset so Settings always has something to edit.
 async fn get_agent_runtime(AxState(b): AxState<SharedBoard>) -> Json<AgentRuntimeConfig> {
     if b.agent_runtime().is_none() {
         let _ = b.seed_agent_runtime_if_empty();
     }
     Json(
         b.agent_runtime()
-            .unwrap_or_else(|| runtime_from_yaml(&b.schema.execution.agents)),
+            .unwrap_or_else(|| runtime_seed_fallback(&b.schema.execution.agents)),
     )
 }
 
@@ -597,14 +597,12 @@ async fn put_agent_runtime(
     Json(b.set_agent_runtime(req))
 }
 
-fn runtime_from_yaml(agents: &crate::schema::AgentConfig) -> AgentRuntimeConfig {
+/// Fallback when board runtime is still unset: compiled defaults with the
+/// `honr.yaml` `enabled` boot gate.
+fn runtime_seed_fallback(agents: &crate::schema::AgentConfig) -> AgentRuntimeConfig {
     AgentRuntimeConfig {
         enabled: agents.enabled,
-        engine: agents.engine.clone(),
-        max_concurrent: agents.max_concurrent,
-        agent_timeout_secs: agents.agent_timeout_secs,
-        max_attempts: agents.max_attempts,
-        branch_prefix: agents.branch_prefix.clone(),
+        ..AgentRuntimeConfig::default()
     }
 }
 
