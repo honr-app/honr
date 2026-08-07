@@ -100,13 +100,16 @@ inside it. Put the file in `/tmp` so it lands at `/tmp/foo.py`.
 **The compute driver can stop on its own.** Classify that as infrastructure,
 not as the card failing: see `is_infrastructure` in the supervisor.
 
-**`/sandbox/repo` starts empty.** The agent clones from the Remotes briefing
-(`origin` / `upstream`) into that path. `/sandbox/.honr` is always present at
-start with at least `report.schema.json`.
-
-**Rebase onto upstream `main`.** Re-running a card resumes its existing branch
-and rebases onto the PR-target tip. If the rebase conflicts, the supervisor
-backs out and tells the agent to resolve it.
+**Workdir: cold start empties; reclaim preserves.** Brand-new sandbox create
+clears `/sandbox/repo` so the agent clones into an empty tree from the Remotes
+briefing (`origin` / `upstream`). Reclaim of a kept sandbox — park resume and
+Needs You answer share the same reuse path — does **not** wipe `/sandbox/repo`.
+When a checkout exists, the supervisor refreshes in place (fetch + rebase onto
+the PR-target tip); otherwise it ensures the directory without clearing prior
+contents or caches. The supervisor never clones; agent-owns-clone stays.
+`/sandbox/.honr` is always present at start with at least `report.schema.json`.
+If a reuse rebase conflicts, the supervisor backs out and tells the agent to
+resolve it.
 
 **Policy is immutable on a live sandbox** for filesystem and process sections.
 Set it at create time; `policy set --wait` is expensive.
