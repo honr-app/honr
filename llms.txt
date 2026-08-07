@@ -1,0 +1,186 @@
+# honr — agent bootstrap
+
+Plain-text guide for an operator agent bringing up a fresh honr board.
+Human docs: /docs (Quickstart, Your first agent, Configuration).
+This file is public and needs no auth.
+
+honr is a board pointed at a repository. Moving a card starts a sandboxed
+coding agent; pull requests come back for a human to merge. Merging is always
+human — honr never merges.
+
+Work the product path. Do not invent a parallel bootstrap (extra secret stores
+for values the UI already walks, host discovery of credentials, skipping
+Settings). Board Settings are the source of truth; upload configuration through
+the API the same way a human pastes into the UI.
+
+## Rules that keep you out of trouble
+
+- Every step has a check. Do not continue until it passes.
+- In this stack, half-finished setup fails as a hang, not a loud error. Treat
+  silence as failure.
+- honr does not read the host keychain or OpenShell files on disk. You (or the
+  human) supply PEMs and secrets over the API; the board seals them.
+- `/mcp` is the operator seat (Projects, triage, dispatch, park, steer,
+  approve). Worker verbs (`claim`, `heartbeat`, `report`, …) are supervisor-only.
+- Dispatch spends real money and opens PRs. Confirm with the human before the
+  first Project loop.
+
+## Base URL
+
+Default: `http://127.0.0.1:8080`
+
+- UI + API + MCP share that origin.
+- OpenShell gateway is separate (often `https://127.0.0.1:17670`).
+
+## Auth
+
+Until an admin exists, the API refuses everything except bootstrap and a few
+public paths (this file, `/healthz`, `/auth/*`, MCP OAuth discovery).
+
+1. `GET /auth/status` — if `bootstrap` is true, create admin:
+   `POST /auth/bootstrap` with JSON `{ "username", "password" }`
+   (password ≥ 8 chars). Returns a session cookie.
+2. After bootstrap: session cookie (`honr_session`) or HTTP Basic with the
+   local admin username/password on `/api/*`.
+3. MCP: Streamable HTTP at `/mcp`. Authenticate with MCP OAuth (browser login /
+   consent) once admin exists. Tokens survive honr restarts.
+
+Check: `GET /api/board` returns JSON (not 401).
+
+## Host prerequisites (outside honr)
+
+These are not Settings fields. Confirm with the human / host tools before
+pasting anything into honr.
+
+| Need | Check |
+|---|---|
+| Container engine the gateway can reach | `docker info` (or equivalent) succeeds |
+| OpenShell gateway up | `openshell status` → Connected + Authenticated |
+| Sandbox image named by your spec | e.g. `honr-sandbox:latest` built (`make sandbox` from repo root) |
+
+`DOCKER_HOST` belongs to the gateway process, not to honr.
+
+## Bootstrap order (Settings)
+
+Same order as Welcome / Help → OpenShell + sandbox.
+
+### 1. Connectivity — Settings → OpenShell → Connectivity
+
+`PUT /api/openshell` with:
+
+- `gateway_endpoint` — e.g. `https://127.0.0.1:17670`
+- `ca_pem`, `client_cert_pem`, `client_key_pem` — full PEM text
+
+If the OpenShell CLI on this machine already talks to the gateway, client PEMs
+are commonly under `~/.config/openshell/gateways/<name>/mtls/` (`ca.crt`,
+`tls.crt`, `tls.key`). Read them and upload; do not assume honr will find them.
+
+Check: `GET /api/openshell/status` → `healthy: true`, `mtls.complete: true`,
+`not_configured: false`.
+
+### 2. Providers — Settings → OpenShell → Providers
+
+Board provider list is desired state; Sync applies it to the gateway.
+
+Typical fresh install for Cursor-engine boards:
+
+**Cursor Agent**
+
+- `POST /api/openshell/providers` with
+  `{ "name": "Cursor API Key", "type": "cursor-agent",
+     "credentials": { "CURSOR_API_KEY": "…" } }`
+- Builtin OpenShell type `cursor` is egress-only. Use board type `cursor-agent`
+  when you need `CURSOR_API_KEY`.
+- `POST /api/openshell/providers/sync`
+
+**GitHub App → sandbox `GH_TOKEN`**
+
+Do this in the product flow — not by inventing an installation-id scavenger hunt.
+
+1. Obtain App ID + private key PEM from the human (GitHub App settings).
+2. `PUT /api/github-app` with `{ "app_id", "private_key_pem" }`.
+3. Read `installations` from the response (or `GET /api/github-app`).
+4. Ask the human which account/org to use if more than one; then
+   `PUT /api/github-app` with `{ "installation_id": <id> }`.
+5. `POST /api/github-app/sync-token` — mints `GH_TOKEN` onto the `github-app`
+   provider and syncs the gateway.
+
+Optional later: webhook secret, OAuth client id/secret (GitHub login to the
+board). Not required for the first sandboxed PR.
+
+Check: `GET /api/openshell/providers` → expected names, `gateway_reachable: true`,
+`gateway_synced: true`. GitHub: `token_status.configured: true`.
+
+### 3. Sandbox specs — Settings → OpenShell → Sandbox specs
+
+Create at least one spec and mark it default.
+
+- `POST /api/sandbox-profiles` with `id`, `name`, `image`, `policy` (inline YAML),
+  `engine` (e.g. `cursor`), `provider_names` (attach names that exist in
+  Providers — instance names, not type ids).
+- `POST /api/sandbox-profiles/{id}/default`
+
+Create-form default policy is minimal (`network_policies: {}`). Add egress the
+work needs (Cursor hosts, GitHub, and for cockpit: host honr MCP with
+`protocol: mcp`). This repo’s checked-in starting point for a full seat is
+`sandbox/cockpit-policy.yaml` — use it only when that matches the human’s
+intent; do not silently assume every install wants it.
+
+Attach only providers that exist. Missing attach names get pruned.
+
+Check: `GET /api/sandbox-profiles` → `default_sandbox_profile_id` set.
+Welcome readiness: Gateway/mTLS + Sandbox spec both ready.
+
+### 4. Agent runtime (optional)
+
+`GET` / `PUT /api/agent-runtime` — engine, concurrency, timeouts. Defaults are
+fine; keep `max_concurrent` at 1 until one card has finished end to end.
+Dispatch starts with the process; OpenShell + a default sandbox spec are the
+practical gates.
+
+## First Project loop
+
+Only after Connectivity, Providers, and a default sandbox spec are ready.
+
+1. Create a Project: `POST /api/items` with level Project, intent, and required
+   `clone_repo` as `owner/name`. honr seeds a claimable **Initial plan** Task.
+2. `POST /api/items/{id}/dispatch` on the Initial plan (confirm spend with the
+   human first).
+3. Card moves Backlog → Running → Review with a proposed breakdown (`plan.json`).
+4. Human (or operator with approval): Approve — creates sibling Tasks. Never merges.
+5. Dispatch one Task; it opens a PR and lands in Review.
+6. Human merges on GitHub; card moves to Done.
+
+Steer / park / answer escalation / request changes as needed. Prefer park over
+halt when a run is wedged (park keeps sandbox + session).
+
+## Useful endpoints
+
+| Method | Path | Role |
+|---|---|---|
+| GET | `/llms.txt` | This guide (no auth) |
+| GET | `/healthz` | Liveness (no auth) |
+| GET | `/auth/status` | Bootstrap / session |
+| POST | `/auth/bootstrap` | First admin |
+| POST | `/auth/login` | Session cookie |
+| GET | `/api/board` | Full snapshot |
+| GET/PUT | `/api/openshell` | Gateway + mTLS |
+| GET | `/api/openshell/status` | Health |
+| GET/POST | `/api/openshell/providers` | Provider catalog |
+| POST | `/api/openshell/providers/sync` | Apply to gateway |
+| GET/PUT | `/api/github-app` | App credentials + installation |
+| POST | `/api/github-app/sync-token` | Mint GH_TOKEN |
+| GET/POST | `/api/sandbox-profiles` | Specs |
+| POST | `/api/sandbox-profiles/{id}/default` | Set default |
+| GET/PUT | `/api/agent-runtime` | Engine / concurrency |
+| POST | `/api/items` | Create Project / Task |
+| POST | `/api/items/{id}/dispatch` | Start a card |
+
+## When stuck
+
+- Hangs → denied egress, missing provider, bad mTLS, or wedged gateway. Fix
+  readiness; do not “wait longer.”
+- Podman/Docker machine stopped → infrastructure; fix the host, do not burn
+  card retries.
+- Empty MCP tool list → reload client after OAuth.
+- Provider attach does nothing → name must match Providers exactly; Sync again.

@@ -58,6 +58,16 @@ break anything that a restart does not fix.
 You can drive the board from Cursor or Claude Code over MCP instead of the UI.
 honr must already be listening.
 
+For an agent bringing up a **fresh** board (admin, OpenShell, providers, sandbox
+spec, first Project), point it at the public bootstrap guide first:
+
+```bash
+curl -sS http://127.0.0.1:8080/llms.txt
+```
+
+`GET /llms.txt` needs no auth. Source lives at [`llms.txt`](../llms.txt) in the
+repo; Vite’s `:5173` proxy forwards the same path in `make dev-ui`.
+
 `/mcp` is the **operator surface**: shape Projects, triage, dispatch, park,
 steer, approve. Worker verbs (`claim`, `heartbeat`, `report`, …) are not there —
 those belong to the supervisor.

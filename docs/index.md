@@ -43,10 +43,12 @@ credentials, no spend. That is the default, and it is the right way to start.
 | Learn the vocabulary | [Concepts](concepts.md) · [Glossary](glossary.md) |
 | Run the board locally | [Quickstart](quickstart.md) |
 | Get one real agent opening PRs | Welcome/Help, then [Your first agent](first-agent.md) |
+| Point an agent at fresh-board bootstrap | Public [`/llms.txt`](../llms.txt) (no auth) |
 | Operate it day to day | [Workflow](workflow.md) |
 | Understand how it is built | [Architecture](architecture.md) |
 
 Machine contracts, not prose: [`schemas/report.schema.json`](schemas/report.schema.json).
+Live agent bootstrap (same origin as the board): `GET /llms.txt`.
 
 honr is under active development and is used to ship changes to itself. Expect
 sharp edges.

@@ -66,6 +66,7 @@ of worker verbs on the live path.
 | Operator seat (operator tools only) | MCP streamable HTTP at `/mcp` | Chat and cockpit agents (OAuth) |
 | Host seat (operator + worker verbs) | `Operator::host`, in-process | Supervisor/host tooling and tests |
 | Human UI | REST + board SSE | React app; one-tap answers and approvals |
+| Agent bootstrap guide | `GET /llms.txt` (no auth) | Operator agents on a fresh board |
 | Cockpit terminal | `GET`/WS `/api/cockpit-attach` | xterm → `ExecSandboxInteractive` |
 | Cockpit chat bridge (legacy) | `POST /api/cockpit-chat` (SSE) | Detached-agent stream-json bridge |
 
