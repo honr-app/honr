@@ -79,9 +79,10 @@ The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock`, `src/`, or
 `migrations/` change materially, or when you need a newer Cursor/OpenCode CLI. Matching `/opt`
 entries (`/opt/cargo`, `/opt/cargo-target`, `/opt/npm-cache`, `/opt/opencode`, …)
 belong in the worker **board** sandbox spec policy (Settings → OpenShell →
-Sandbox specs → `default`; seed text in `src/seed_policies.rs`). Live specs do
-not auto-pick up seed edits — paste policy updates (or recreate the spec) after
-changing the seed, including `/opt/cargo-target` on `read_write`.
+Sandbox specs → `default`). Empty catalogs seed that text from
+`src/seed_policies.rs`; after seed, paste policy updates (or recreate the spec)
+in Settings when `/opt` layout changes — including `/opt/cargo-target` on
+`read_write`.
 
 Pass `--offline` in gate commands so a cache miss fails loudly instead of
 hanging on a denied fetch.
@@ -124,15 +125,15 @@ generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
 
 ## Cockpit vs worker containment
 
-| Catalog id | Seed source | Egress |
-|---|---|---|
-| `default` (worker) | Built-in `src/seed_policies.rs` when catalog empty; then **board spec only** | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
-| `cockpit` | Built-in `DEFAULT_COCKPIT_SANDBOX_POLICY` in `src/seed_policies.rs` when catalog empty; then **board spec only** | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
+| Catalog id | Empty-catalog seed | Live config | Egress |
+|---|---|---|---|
+| `default` (worker) | Embedded worker policy in `src/seed_policies.rs` | Settings → OpenShell → Sandbox specs | Inference + GitHub (+ package registries). **No** honr MCP — workers stay air-gapped from the board. |
+| `cockpit` | Embedded `DEFAULT_COCKPIT_SANDBOX_POLICY` in `src/seed_policies.rs` | Settings → OpenShell → Sandbox specs | Host honr MCP (`host.docker.internal` / `127.0.0.1` / `localhost`:8080) + inference + GitHub (`GH_TOKEN`). **No** package-registry allow-list. |
 
-Settings → OpenShell → Sandbox specs is the live source of truth for both. The
+Board sandbox specs are the live source of truth for both after seed. The
 cockpit spec seeds with `github` + `vertex` + `antigravity` attach names so
 Claude/OpenCode can use workspace `inference.local`, `gh` gets an App token,
-and agy gets a Bearer placeholder (never a host OAuth file).
+and agy gets a Bearer placeholder from the Board provider credential.
 
 ## Antigravity / agy
 
@@ -153,7 +154,7 @@ configuration arrives over the API like everything else.
 | Board provider `antigravity` | Sealed `ANTIGRAVITY_ACCESS_TOKEN`, supplied via the API |
 | Gateway | Real credential; injects placeholder env into attached sandboxes |
 | Seat token file | Placeholder only + far-future expiry; **no** `refresh_token` |
-| Seat `settings.json` | `enableTelemetry: false`, `gcp.project` / `gcp.location` from Board provider config `ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION` (Settings → Providers — not host files, not Vertex/`GOOGLE_CLOUD_PROJECT`) |
+| Seat `settings.json` | `enableTelemetry: false`, `gcp.project` / `gcp.location` from Board provider config `ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION` (Settings → Providers; not Vertex/`GOOGLE_CLOUD_PROJECT`) |
 
 Existing cockpit specs created before this attach name need the checkbox (or
 board ensure on startup appends `antigravity` to the cockpit create-spec).

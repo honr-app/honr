@@ -30,8 +30,8 @@ UI / MCP / supervisor
 | `src/openshell.rs` | In-process gRPC client to the OpenShell gateway (board endpoint + sealed mTLS); every call has a deadline. |
 | `src/supervisor.rs` | Card dispatch, durable cockpit start/reconcile/stop, briefing, lease sweeping. |
 | `src/engine.rs` | Explicit registry of agent engines — unknown ids fail loud. |
-| `honr.yaml` | Level schema (Project + Task) and execution config. |
-| `sandbox/` | Container image, network policy. |
+| `honr.yaml` | Boot essentials: database URL, level schema, sweep timing, `agents.enabled`. |
+| `sandbox/` | Container image; policy seed constants live in `src/seed_policies.rs`. |
 | `web/` | React UI + Playwright screenshot harness. |
 | `migrations/` | Versioned SQLx migrations for the board store. |
 
