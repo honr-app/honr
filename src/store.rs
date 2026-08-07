@@ -443,7 +443,7 @@ pub type SharedBoard = Arc<Board>;
 /// Outcome of a Review catch-up check after main advanced (GitHub API mergeable).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebaseOutcome {
-    /// GitHub reports MERGEABLE — stay in Review.
+    /// GitHub reports MERGEABLE — stay in Review; no catch-up work signal.
     Clean,
     /// GitHub reports CONFLICTING — bounce to Backlog for an agent to rebase.
     Conflict {
@@ -4266,14 +4266,14 @@ facts are pasted, then unpark";
         s.stories.get(&goal).cloned().unwrap_or_default()
     }
 
-    /// Notify connected subscribers that the main branch advanced (via push or PR merge).
+    /// Notify that the default branch advanced (push or merge into main).
     ///
-    /// Review cards with open PRs get a rebase dispatch (tip-driven; not limited to
-    /// parents that already have a Done child). Claimed/Running cards get a
-    /// steer note telling the agent to fetch and rebase onto upstream/main, then a
-    /// park+unpark so the supervisor re-claims with that note — the supervisor does
-    /// not touch the live worktree itself. Review stays Review until conflict or
-    /// human bounce — it is not parked to reuse the Running path.
+    /// Claimed/Running cards get a steer note to fetch/rebase onto upstream base,
+    /// then park+unpark so the resume briefing carries it — the supervisor does
+    /// not touch the live worktree. Review catch-up is not queued here: callers
+    /// observe GitHub `mergeable` (MERGEABLE = no-op; CONFLICTING → Backlog;
+    /// UNKNOWN → [`Self::dispatch_rebase`] retry). Review is not parked onto the
+    /// Running steer path.
     pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
         tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
         self.record_and_send(BoardEvent::MainAdvanced {
@@ -4281,7 +4281,6 @@ facts are pasted, then unpark";
             ref_name: ref_name.to_string(),
             commit_sha: commit_sha.clone(),
         });
-        self.trigger_rebase_for_all_behind_siblings();
         self.steer_live_cards_on_main_advanced(ref_name, commit_sha.as_deref());
     }
 
@@ -4376,11 +4375,10 @@ facts are pasted, then unpark";
 
     /// Identify every Review card with an open PR for tip-driven catch-up.
     ///
-    /// `MainAdvanced` (push / poll tip) means the default branch moved under open
-    /// PRs — not only under parents that already have a Done child. Filtering on
-    /// Done siblings skipped live Review PRs when main advanced without a board
-    /// merge (direct push, or a merge of a PR that is not a card). Merge→Done
-    /// still uses [`Self::identify_behind_sibling_prs`] for same-parent siblings.
+    /// Callers pass these to a host GitHub `mergeable` observation after
+    /// `MainAdvanced`. MERGEABLE is a no-op; CONFLICTING bounces to Backlog;
+    /// UNKNOWN queues [`Self::dispatch_rebase`] for retry. Same-parent sibling
+    /// merge uses [`Self::identify_behind_sibling_prs`].
     pub fn identify_all_behind_sibling_prs(&self) -> Vec<WorkItem> {
         let s = self.state.read();
         let mut results: Vec<_> = s
@@ -4393,7 +4391,10 @@ facts are pasted, then unpark";
         results
     }
 
-    /// Dispatch/queue a rebase request for a card in Review whose branch is behind main.
+    /// Queue a Review card for mergeable-check retry (UNKNOWN / deferred).
+    ///
+    /// Not used for MERGEABLE — main advanced under a mergeable Review PR is a
+    /// no-op with no catch-up work signal.
     pub fn dispatch_rebase(&self, id: ItemId) -> Result<WorkItem, String> {
         let item = {
             let mut s = self.state.write();
@@ -4403,12 +4404,17 @@ facts are pasted, then unpark";
                 .ok_or_else(|| format!("no such item {id}"))?;
             if it.state != State::Review {
                 return Err(format!(
-                    "only Review cards can be rebased, #{id} is in {:?}",
+                    "only Review cards can queue mergeable retry, #{id} is in {:?}",
                     it.state
                 ));
             }
             if it.pr_url().is_none() {
-                return Err(format!("card #{id} has no pull_request.url to rebase"));
+                return Err(format!("card #{id} has no pull_request.url for mergeable check"));
+            }
+            if it.rebase_requested {
+                let mut out = it.clone();
+                Self::populate_blockers(&s, &mut out);
+                return Ok(out);
             }
             it.rebase_requested = true;
             it.awaiting_dispatch = true;
@@ -4420,39 +4426,14 @@ facts are pasted, then unpark";
         self.story(
             id,
             format!(
-                "{}: queued rebase request — branch is behind main.",
+                "{}: waiting on GitHub mergeable — catch-up will retry.",
                 item.title
             ),
         );
         Ok(item)
     }
 
-    /// Identify sibling PRs in Review behind main for `near_id`'s parent and dispatch rebase requests.
-    pub fn trigger_rebase_for_behind_siblings(&self, near_id: ItemId) -> Vec<WorkItem> {
-        let siblings = self.identify_behind_sibling_prs(near_id);
-        let mut dispatched = Vec::new();
-        for s in siblings {
-            if let Ok(item) = self.dispatch_rebase(s.id) {
-                dispatched.push(item);
-            }
-        }
-        dispatched
-    }
-
-    /// Queue rebase for every Review card with an open PR (tip-driven MainAdvanced).
-    pub fn trigger_rebase_for_all_behind_siblings(&self) -> Vec<WorkItem> {
-        let candidates = self.identify_all_behind_sibling_prs();
-        let mut dispatched = Vec::new();
-        for s in candidates {
-            if let Ok(item) = self.dispatch_rebase(s.id) {
-                dispatched.push(item);
-            }
-        }
-        dispatched
-    }
-
-    /// List all cards in Review that have a pending rebase request.
-    #[allow(dead_code)]
+    /// Review cards with a pending mergeable-check retry (`rebase_requested`).
     pub fn list_awaiting_rebase(&self) -> Vec<WorkItem> {
         let s = self.state.read();
         let mut items: Vec<_> = s
@@ -4467,11 +4448,11 @@ facts are pasted, then unpark";
         items
     }
 
-    /// Record the outcome of a Review catch-up mergeable check.
+    /// Record the outcome of a Review catch-up mergeable observation.
     ///
-    /// If Clean (GitHub MERGEABLE): stay in Review; clear queue flags.
-    /// If Conflict (GitHub CONFLICTING): bounce to Backlog (or escalate on
-    /// repeated overlapping conflict files); clear queue flags.
+    /// Clean (MERGEABLE): stay in Review; clear retry flags (silent no-op).
+    /// Conflict (CONFLICTING): bounce to Backlog with binding note, or escalate
+    /// on repeated overlapping conflict files when those lists are present.
     pub fn record_rebase_outcome(
         &self,
         id: ItemId,
@@ -4509,10 +4490,6 @@ facts are pasted, then unpark";
                     out
                 };
                 self.emit(&item);
-                self.story(
-                    id,
-                    format!("{title}: still mergeable after main advance — retained in Review."),
-                );
                 Ok(item)
             }
             RebaseOutcome::Conflict {
@@ -4629,7 +4606,7 @@ facts are pasted, then unpark";
         }
     }
 
-    /// GitHub reports MERGEABLE — clear catch-up queue, stay in Review.
+    /// GitHub reports MERGEABLE — clear catch-up retry flags; stay in Review.
     pub fn complete_rebase_clean(&self, id: ItemId) -> Result<WorkItem, String> {
         self.record_rebase_outcome(id, RebaseOutcome::Clean)
     }
@@ -4701,7 +4678,6 @@ facts are pasted, then unpark";
         match self.transition(id, State::Done, by, Some(reason)) {
             Ok(item) => {
                 self.story(id, format!("{} — PR merged; card Done.", item.title));
-                self.trigger_rebase_for_behind_siblings(id);
                 Some(id)
             }
             Err(e) => {
@@ -8178,7 +8154,7 @@ mod tests {
     }
 
     #[test]
-    fn identify_behind_sibling_prs_and_dispatch_rebase() {
+    fn identify_behind_sibling_prs_after_merge_done_without_blind_rebase_queue() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!("honr-test-rebase-{}.json", std::process::id())),
@@ -8246,24 +8222,30 @@ mod tests {
         assert_eq!(completed_id, t1.id);
 
         let t2_updated = b.get(t2.id).unwrap();
+        assert_eq!(t2_updated.state, State::Review);
         assert!(
-            t2_updated.rebase_requested,
-            "t2 should have rebase_requested set"
+            !t2_updated.rebase_requested,
+            "merge→Done must not set rebase_requested before mergeable is observed"
         );
+        assert!(!t2_updated.awaiting_dispatch);
         assert!(
-            t2_updated.awaiting_dispatch,
-            "t2 should have awaiting_dispatch set"
+            b.list_awaiting_rebase().is_empty(),
+            "no catch-up work signal until mergeable observation"
         );
-
-        let awaiting_rebase = b.list_awaiting_rebase();
-        assert_eq!(awaiting_rebase.len(), 1);
-        assert_eq!(awaiting_rebase[0].id, t2.id);
+        assert_eq!(
+            b.identify_behind_sibling_prs(t1.id)
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<_>>(),
+            vec![t2.id],
+            "sibling remains a catch-up candidate for mergeable observation"
+        );
     }
 
-    /// MainAdvanced with a Done sibling + Review PR sets rebase_requested
-    /// while keeping the card in Review (not parked to Backlog).
+    /// MainAdvanced steers Running only; Review stays Review with no catch-up
+    /// signal until mergeable is observed (MERGEABLE = no-op).
     #[test]
-    fn notify_main_advanced_dispatches_rebase_for_sibling_prs_in_review() {
+    fn notify_main_advanced_leaves_review_as_noop_until_mergeable_observed() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!("honr-test-rebase-main-{}.json", std::process::id())),
@@ -8318,25 +8300,24 @@ mod tests {
         b.notify_main_advanced("refs/heads/main", Some("sha123".into()));
 
         let t2_updated = b.get(t2.id).unwrap();
+        assert_eq!(t2_updated.state, State::Review);
         assert!(
-            t2_updated.rebase_requested,
-            "t2 rebase_requested should be true"
+            !t2_updated.rebase_requested,
+            "MainAdvanced must not treat every Review PR as rebase work up front"
         );
+        assert!(!t2_updated.awaiting_dispatch);
         assert!(
-            t2_updated.awaiting_dispatch,
-            "t2 awaiting_dispatch should be true"
-        );
-        assert_eq!(
-            t2_updated.state,
-            State::Review,
-            "Review must stay Review when rebase is only queued"
+            b.identify_all_behind_sibling_prs()
+                .iter()
+                .any(|i| i.id == t2.id),
+            "Review PR remains a tip catch-up candidate"
         );
     }
 
-    /// Tip advance (push / poll) must queue Review PRs even when no sibling is
-    /// Done yet — the old parents_with_done filter skipped those live cards.
+    /// Tip advance identifies Review PRs even without a Done sibling — observation
+    /// happens later; Board alone must not set rebase_requested.
     #[test]
-    fn notify_main_advanced_queues_review_rebase_without_done_sibling() {
+    fn notify_main_advanced_identifies_review_without_done_sibling_as_noop() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -8380,7 +8361,6 @@ mod tests {
             Some("https://github.com/honr-app/honr/pull/404".into()),
         );
 
-        // No Done sibling on the board — tip-driven MainAdvanced only.
         assert!(
             b.identify_all_behind_sibling_prs()
                 .iter()
@@ -8393,17 +8373,16 @@ mod tests {
         let after = b.get(review.id).unwrap();
         assert_eq!(after.state, State::Review);
         assert!(
-            after.rebase_requested,
-            "MainAdvanced without Done sibling must still set rebase_requested"
+            !after.rebase_requested,
+            "MERGEABLE-default: MainAdvanced alone is a Review no-op"
         );
-        assert!(after.awaiting_dispatch);
+        assert!(!after.awaiting_dispatch);
     }
 
-    /// Regression: Review is not left behind when only Running was steered.
-    /// MainAdvanced must queue `rebase_requested` on the Review PR and still
-    /// steer + park/unpark the Running card — park/unpark is for live runs only.
+    /// MainAdvanced steers Running while leaving Review as a silent no-op until
+    /// mergeable observation (Review is not parked onto the Running path).
     #[test]
-    fn notify_main_advanced_queues_review_while_steering_running() {
+    fn notify_main_advanced_steers_running_without_queuing_review_rebase() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
@@ -8486,8 +8465,8 @@ mod tests {
         let review_after = b.get(review.id).unwrap();
         assert_eq!(review_after.state, State::Review);
         assert!(
-            review_after.rebase_requested,
-            "Review must get rebase_requested even when a Running card is steered"
+            !review_after.rebase_requested,
+            "Review catch-up waits for mergeable observation; MainAdvanced alone is a no-op"
         );
         assert!(
             !review_after
@@ -8512,9 +8491,9 @@ mod tests {
     }
 
     #[test]
-    fn complete_for_merged_pr_by_queues_sibling_review_catch_up() {
-        // Shared Board path: webhook and poll actors must queue the same sibling
-        // Review catch-up (no poll-only skip of trigger_rebase_for_behind_siblings).
+    fn complete_for_merged_pr_by_leaves_sibling_review_for_mergeable_observation() {
+        // Shared Board path: webhook and poll actors complete the same way;
+        // sibling Review catch-up observes mergeable later (not rebase_requested up front).
         for by in ["github-webhook", "github-poll"] {
             let b = Board::new(
                 Schema::default(),
@@ -8581,10 +8560,16 @@ mod tests {
             let sibling_after = b.get(sibling.id).unwrap();
             assert_eq!(sibling_after.state, State::Review, "{by}");
             assert!(
-                sibling_after.rebase_requested,
-                "{by}: merge→Done must queue sibling Review catch-up"
+                !sibling_after.rebase_requested,
+                "{by}: merge→Done must not set rebase_requested before mergeable observation"
             );
-            assert!(sibling_after.awaiting_dispatch, "{by}");
+            assert!(!sibling_after.awaiting_dispatch, "{by}");
+            assert!(
+                b.identify_behind_sibling_prs(merged.id)
+                    .iter()
+                    .any(|i| i.id == sibling.id),
+                "{by}: sibling remains a catch-up candidate"
+            );
             let hist_by = b
                 .get(merged.id)
                 .unwrap()

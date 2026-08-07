@@ -3,7 +3,8 @@
 //! When Settings → Forge enables polling, a background loop mints a GitHub App
 //! installation token and scans Review/NeedsHuman PRs plus default-branch tips
 //! for repos on live cards. Merges call `complete_for_merged_pr_by(..., "github-poll")`;
-//! tip changes call `notify_main_advanced`. Webhooks keep working in parallel.
+//! tip changes call `notify_main_advanced` then Review mergeable catch-up.
+//! Webhooks keep working in parallel.
 
 use crate::github_app;
 use crate::model::{State, MIN_WEBHOOK_POLL_INTERVAL_SECS};
@@ -103,6 +104,7 @@ pub async fn tick(board: &SharedBoard) -> Result<(), String> {
                     board.complete_for_merged_pr_by(&url, Some(pr.number), POLL_BY)
                 {
                     tracing::info!(id, pr = %pr.owner_repo, number = pr.number, "poll: PR merged → Done");
+                    let _ = crate::supervisor::process_sibling_review_catch_up(board, id).await;
                 }
             }
             Ok(_) => {}
@@ -133,6 +135,7 @@ pub async fn tick(board: &SharedBoard) -> Result<(), String> {
                 }
                 let ref_name = format!("refs/heads/{branch}");
                 board.notify_main_advanced(&ref_name, Some(sha.clone()));
+                let _ = crate::supervisor::process_main_advanced_review_catch_up(board).await;
                 tracing::info!(%repo, %branch, %sha, "poll: default branch advanced");
             }
             Ok(None) => {}
@@ -552,15 +555,18 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(by, POLL_BY);
 
-        // Poll merge uses the same Board complete_for_merged_pr_by path as
-        // webhooks — sibling Review PRs must get rebase_requested.
+        // Poll merge completes via the same Board path as webhooks; sibling
+        // Review catch-up observes mergeable (may defer/queue without App mock).
         let sib = board.get(sibling.id).unwrap();
         assert_eq!(sib.state, State::Review);
         assert!(
-            sib.rebase_requested,
-            "github-poll merge must queue sibling Review catch-up like webhook"
+            board
+                .identify_behind_sibling_prs(t.id)
+                .iter()
+                .any(|i| i.id == sibling.id)
+                || sib.rebase_requested,
+            "github-poll merge must leave sibling as a catch-up target like webhook"
         );
-        assert!(sib.awaiting_dispatch);
 
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);

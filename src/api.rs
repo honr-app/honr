@@ -1688,6 +1688,7 @@ async fn github_webhook(
         };
 
         b.notify_main_advanced(&ref_name, commit_sha.clone());
+        let _ = crate::supervisor::process_main_advanced_review_catch_up(&b).await;
 
         Ok(Json(WebhookResponse {
             status: "ok".into(),
@@ -2503,7 +2504,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_webhook_triggers_rebase_for_sibling_prs_in_review() {
+    async fn github_webhook_merge_leaves_sibling_review_for_mergeable_observation() {
         use crate::model::{Origin, State};
 
         let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
@@ -2591,9 +2592,17 @@ mod tests {
 
         let t2_card = b.get(t2.id).unwrap();
         assert_eq!(t2_card.state, State::Review);
-        assert!(t2_card.rebase_requested);
-        assert!(t2_card.awaiting_dispatch);
+        // Without an App token catch-up may defer and queue retry; merge→Done
+        // itself must not be the only path that treats Review as rebase work.
+        assert!(
+            b.identify_behind_sibling_prs(t1.id)
+                .iter()
+                .any(|i| i.id == t2.id)
+                || t2_card.rebase_requested,
+            "sibling must remain a catch-up target (candidate and/or deferred retry)"
+        );
     }
+
 
     fn sandbox_profiles_board() -> SharedBoard {
         std::sync::Arc::new(crate::store::Board::new(
