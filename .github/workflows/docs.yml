@@ -27,7 +27,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: docs-pages
+  # Ref-scoped: cancel-in-progress only affects the same PR or git ref.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
