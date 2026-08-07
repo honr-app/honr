@@ -2531,7 +2531,17 @@ fn proof_facts_from_notes(notes: &[String]) -> Option<String> {
     None
 }
 
-fn remotes_briefing_lines(repo: &crate::schema::RepoConfig, notes: &[String]) -> String {
+/// Remotes / clone lines for the agent briefing.
+///
+/// `preserved` is the reclaim contract: park unpark resume and Needs You answer
+/// reclaim both reuse a live sandbox, so copy must not claim a blank
+/// `/sandbox/repo` or order a wipe-and-clone. Cold start (`!preserved`) still
+/// describes an empty workdir the agent clones into.
+fn remotes_briefing_lines(
+    repo: &crate::schema::RepoConfig,
+    notes: &[String],
+    preserved: bool,
+) -> String {
     if let Some(facts) = proof_facts_from_notes(notes) {
         // Proof facts win over unbound/clone guidance — the card's job is documentation.
         return format!(
@@ -2542,6 +2552,14 @@ satisfied by the cited Board card + `pr_url`. Do **not** re-escalate for another
     }
     if !repo.is_complete() {
         if let Some(target) = clone_target_from_notes(notes) {
+            if preserved {
+                return format!(
+                    "\n`/sandbox/repo` was preserved on this reclaim (park resume and Needs You \
+answer reclaim share this path). The human already decided the clone target: `{target}`. \
+Use the existing checkout if present; otherwise clone `{target}` into `/sandbox/repo`. \
+Do **not** wipe-and-clone. Do **not** re-escalate asking which repository to clone.\n"
+                );
+            }
             return format!(
                 "\nNo card pull_request yet (first run). The human already decided the clone \
 target: `{target}`. Clone that into `/sandbox/repo` and continue the card. Do **not** \
@@ -2549,6 +2567,19 @@ re-escalate asking which repository to clone.\n"
             );
         }
         // Clone target comes from card intent/DoD/notes. Escalate when unnamed.
+        if preserved {
+            return "\n`/sandbox/repo` was preserved on this reclaim (park resume and Needs You \
+answer reclaim share this path). Inspect and continue — clone only if the checkout is \
+missing and this card's intent, definition of done, or notes name an exact repository \
+(`owner/name` or git URL), including distinct push vs PR-target remotes when both are \
+named. Do **not** wipe-and-clone. Do **not** guess from context, history, or the card \
+title. If you must clone and the target is missing or ambiguous, write \
+`/sandbox/.honr/escalate.json` with a short question, at least two concrete options, \
+and a recommended index, then exit — do not open a PR. When you finish, write \
+`/sandbox/.honr/report.json` with `url`, `base`, and `head` (schema: \
+`/sandbox/.honr/report.schema.json`).\n"
+                .into();
+        }
         return "\nNo card pull_request yet (first run). Clone into `/sandbox/repo` **only** \
 when this card's intent, definition of done, or notes name an exact repository \
 (`owner/name` or git URL), including distinct push vs PR-target remotes when both \
@@ -2563,16 +2594,23 @@ clone and do not open a PR. When you do clone and finish, write \
     let base = repo.base.trim();
     let upstream = repo.upstream.trim();
     let clone = repo.clone_target();
+    let workdir = if preserved {
+        "`/sandbox/repo` was preserved on this reclaim (park resume and Needs You answer \
+reclaim share this path). Inspect and continue — clone only if the checkout is missing. \
+Do not wipe-and-clone."
+    } else {
+        "Clone into `/sandbox/repo` yourself (empty workspace on claim)."
+    };
     if repo.uses_cross_fork() {
         format!(
-            "\nClone into `/sandbox/repo` yourself (empty workspace on claim). \
+            "\n{workdir} \
 Remotes for this run: `origin` is `{clone}` (push); add `upstream` = `{upstream}` and \
 rebase onto `upstream/{base}` (PR target). Never treat `origin/{base}` alone as the \
 merge base when head and base repos differ.\n"
         )
     } else {
         format!(
-            "\nClone into `/sandbox/repo` yourself (empty workspace on claim). \
+            "\n{workdir} \
 Remotes for this run: `origin` is `{upstream}` (clone and push). Rebase onto \
 `origin/{base}`. Open the PR against the same repo, base `{base}`.\n"
         )
@@ -2623,7 +2661,9 @@ fn resume_briefing(grant: &ClaimGrant, repo: &crate::schema::RepoConfig) -> Stri
             b.push_str(&format!("  - {n}\n"));
         }
     }
-    b.push_str(&remotes_briefing_lines(repo, &grant.notes));
+    // Park resume reclaims a kept sandbox — same preserve remotes contract as
+    // Needs You answer reclaim (Rebased / Conflicted cold briefing).
+    b.push_str(&remotes_briefing_lines(repo, &grant.notes, true));
     b.push_str(
         "\nWhen the work is done, write `/sandbox/.honr/report.json` (url/base/head per \
          report.schema.json) and publish the PR on this card's branch.\n",
@@ -2703,6 +2743,11 @@ fn briefing(
     }
 
     let base_ref = repo.base_ref();
+    // Fresh = cold-start empty workdir. Rebased / Conflicted = reclaim of a
+    // kept sandbox (Needs You answer reclaim; park resume without conversation
+    // resume uses the same states). Park resume with conversation resume uses
+    // `resume_briefing` instead — same preserve remotes contract.
+    let preserved = matches!(branch, BranchState::Rebased | BranchState::Conflicted);
     match branch {
         BranchState::Fresh => {
             if repo.is_complete() {
@@ -2729,21 +2774,25 @@ names an exact product repo; otherwise escalate (see Remotes) — do not guess.\
             }
         }
         BranchState::Rebased => b.push_str(&format!(
-            "\nThis card has been worked before. You are on its existing branch, already rebased \
-             onto `{base_ref}` — review what is there and address the notes above rather \
-             than starting over.\n"
+            "\nThis card has been worked before. `/sandbox/repo` was preserved on this reclaim \
+             (park resume and Needs You answer reclaim share this path). You are on its \
+             existing branch, already rebased onto `{base_ref}` — inspect and continue; \
+             clone only if the checkout is missing. Do not wipe-and-clone. Address the \
+             notes above rather than starting over.\n"
         )),
         BranchState::Conflicted => {
             b.push_str(&format!(
-                "\nThis card has been worked before and its branch CONFLICTS with the base. The \
-             rebase was left un-applied, so you are on the branch as it was. Rebase onto \
-             `{base_ref}` yourself and resolve the conflicts, keeping the intent of both \
-             sides. Do this before any other work.\n"
+                "\nThis card has been worked before and its branch CONFLICTS with the base. \
+             `/sandbox/repo` was preserved on this reclaim (park resume and Needs You \
+             answer reclaim share this path). The rebase was left un-applied, so you are \
+             on the branch as it was. Rebase onto `{base_ref}` yourself and resolve the \
+             conflicts, keeping the intent of both sides. Do this before any other work. \
+             Do not wipe-and-clone.\n"
             ));
         }
     }
 
-    b.push_str(&remotes_briefing_lines(repo, &grant.notes));
+    b.push_str(&remotes_briefing_lines(repo, &grant.notes, preserved));
 
     b.push_str(
         "\nIf you hit network connectivity problems (denied egress, hangs on fetch/clone/API, \
@@ -3569,8 +3618,92 @@ mod tests {
             "must tell the agent to clone into an empty workdir: {b}"
         );
         assert!(
+            b.contains("empty workspace on claim"),
+            "cold-start Remotes must claim empty workdir: {b}"
+        );
+        assert!(
             !b.contains("You are on a new branch off the base"),
             "must not imply a pre-populated checkout: {b}"
+        );
+    }
+
+    /// Cold-start Remotes claim an empty workdir; reclaim Remotes (park resume
+    /// via `resume_briefing`, Needs You answer via Rebased) preserve it.
+    #[test]
+    fn briefing_remotes_split_cold_start_empty_vs_reuse_preserve() {
+        let repo = cross_fork_repo();
+        let cold = briefing(&grant(), BranchState::Fresh, "honr/card-7", &repo);
+        assert!(
+            cold.contains("empty workspace on claim") || cold.contains("`/sandbox/repo` is empty"),
+            "Fresh cold-start must describe empty `/sandbox/repo`: {cold}"
+        );
+        assert!(
+            !cold.contains("was preserved on this reclaim"),
+            "Fresh must not use reclaim preserve copy: {cold}"
+        );
+
+        // Needs You answer reclaim: full briefing with Rebased (shared is_reused).
+        let reclaim = briefing(&grant(), BranchState::Rebased, "honr/card-7", &repo);
+        assert!(
+            reclaim.contains("was preserved on this reclaim"),
+            "Rebased reclaim must describe preserved workdir: {reclaim}"
+        );
+        assert!(
+            reclaim.contains("clone only if the checkout is missing")
+                || reclaim.contains("clone only if"),
+            "reclaim must not order a blanket clone: {reclaim}"
+        );
+        assert!(
+            reclaim.contains("Do not wipe-and-clone") || reclaim.contains("do not wipe-and-clone"),
+            "reclaim must forbid wipe-and-clone: {reclaim}"
+        );
+        assert!(
+            !reclaim.contains("empty workspace on claim"),
+            "reclaim Remotes must not claim empty workspace: {reclaim}"
+        );
+        assert!(
+            !reclaim.contains("`/sandbox/repo` is empty"),
+            "reclaim must not claim blank workdir: {reclaim}"
+        );
+
+        // Park resume: short resume_briefing — same preserve Remotes contract.
+        let parked = resume_briefing(&grant(), &repo);
+        assert!(
+            parked.contains("was preserved on this reclaim"),
+            "park resume Remotes must preserve workdir: {parked}"
+        );
+        assert!(
+            !parked.contains("empty workspace on claim"),
+            "park resume must not claim empty workspace: {parked}"
+        );
+        assert!(
+            parked.contains("park resume and Needs You answer reclaim share this path"),
+            "park and Needs You must share one reuse Remotes contract: {parked}"
+        );
+        assert!(
+            reclaim.contains("park resume and Needs You answer reclaim share this path"),
+            "Needs You reclaim must name the shared path: {reclaim}"
+        );
+    }
+
+    /// Conflicted reclaim still gets CONFLICTS copy, but Remotes stay preserve
+    /// (not empty-on-claim) — same is_reused path as park / Needs You.
+    #[test]
+    fn conflicted_reclaim_remotes_preserve_not_empty() {
+        let b = briefing(
+            &grant(),
+            BranchState::Conflicted,
+            "honr/card-7",
+            &cross_fork_repo(),
+        );
+        assert!(b.contains("CONFLICTS"), "{b}");
+        assert!(
+            b.contains("was preserved on this reclaim"),
+            "Conflicted reclaim must preserve workdir: {b}"
+        );
+        assert!(
+            !b.contains("empty workspace on claim"),
+            "Conflicted must not claim empty workspace: {b}"
         );
     }
 
