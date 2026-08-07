@@ -720,15 +720,13 @@ pub struct SandboxProfile {
 /// Catalog id for the privileged cockpit control-plane seat (not the card worker).
 pub const COCKPIT_SANDBOX_PROFILE_ID: &str = "cockpit";
 
-/// Host-path seed source for the cockpit profile policy (inline after seed).
-pub const COCKPIT_SANDBOX_POLICY_PATH: &str = "sandbox/cockpit-policy.yaml";
-
 /// Lighter create knobs than the worker default — chat seat, not a build box.
 pub const COCKPIT_SANDBOX_CPU: &str = "1";
 pub const COCKPIT_SANDBOX_MEMORY: &str = "2Gi";
 
 /// Build the seedable `cockpit` catalog entry from AgentConfig image/engine and
-/// [`COCKPIT_SANDBOX_POLICY_PATH`]. Cpu/memory stay distinct from the worker default.
+/// [`crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY`]. Cpu/memory stay
+/// distinct from the worker default. After seed, the board profile is SoT.
 pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) -> SandboxProfile {
     let engine = {
         let e = agents.engine.trim();
@@ -742,7 +740,7 @@ pub fn cockpit_sandbox_profile_from_agents(agents: &crate::schema::AgentConfig) 
         id: COCKPIT_SANDBOX_PROFILE_ID.into(),
         name: "Cockpit".into(),
         image: agents.image.clone(),
-        policy: resolve_policy_yaml(COCKPIT_SANDBOX_POLICY_PATH),
+        policy: crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY.to_string(),
         cpu: Some(COCKPIT_SANDBOX_CPU.into()),
         memory: Some(COCKPIT_SANDBOX_MEMORY.into()),
         engine,
@@ -1211,9 +1209,8 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_sandbox_policy_file_is_distinct_from_worker() {
-        let cockpit_pol = std::fs::read_to_string(COCKPIT_SANDBOX_POLICY_PATH)
-            .unwrap_or_else(|e| panic!("read {COCKPIT_SANDBOX_POLICY_PATH}: {e}"));
+    fn cockpit_sandbox_policy_seed_is_distinct_from_worker() {
+        let cockpit_pol = crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY;
         let worker = crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY;
         assert!(
             cockpit_pol.contains("honr-mcp") && cockpit_pol.contains("host.docker.internal"),
@@ -1252,7 +1249,8 @@ mod tests {
             cockpit_pol.contains("/opt/cargo-target"),
             "cockpit policy must include the precompiled cargo target dir"
         );
-        openshell_policy::parse_sandbox_policy(&cockpit_pol).expect("cockpit-policy.yaml parses");
+        openshell_policy::parse_sandbox_policy(cockpit_pol)
+            .expect("embedded cockpit policy parses");
         openshell_policy::parse_sandbox_policy(worker).expect("embedded worker policy parses");
 
         let agents = crate::schema::AgentConfig {

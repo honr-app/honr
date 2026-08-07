@@ -1890,7 +1890,8 @@ impl Board {
     /// is authoritative — edit via Settings / `/api/sandbox-profiles`. Worker
     /// seed policy comes from `agents.policy` via
     /// [`crate::model::resolve_policy_yaml`] (usually the built-in embedded
-    /// default); cockpit still seeds from [`crate::model::COCKPIT_SANDBOX_POLICY_PATH`].
+    /// default); cockpit seeds from
+    /// [`crate::seed_policies::DEFAULT_COCKPIT_SANDBOX_POLICY`].
     pub fn seed_sandbox_profiles_if_empty(&self) -> bool {
         self.seed_sandbox_profiles_from(&self.schema.execution.agents)
     }
