@@ -4720,7 +4720,6 @@ facts are pasted, then unpark";
     ///
     /// History `by` defaults to `github-review` (webhook). Polling should use
     /// [`Self::apply_pr_review_feedback_by`] with `github-poll`.
-    #[allow(dead_code)] // wired by webhook-pr-review / poll-pr-review-feedback cards
     pub fn apply_pr_review_feedback(
         &self,
         pr_url: &str,
@@ -4731,7 +4730,7 @@ facts are pasted, then unpark";
     }
 
     /// Same as [`Self::apply_pr_review_feedback`] with an explicit history actor.
-    #[allow(dead_code)] // wired by webhook-pr-review / poll-pr-review-feedback cards
+    #[allow(dead_code)] // wired by poll-pr-review-feedback card
     pub fn apply_pr_review_feedback_by(
         &self,
         pr_url: &str,
