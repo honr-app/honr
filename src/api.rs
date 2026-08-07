@@ -1534,9 +1534,19 @@ pub struct GithubWebhookPayload {
     pub action: Option<String>,
     #[serde(default)]
     pub pull_request: Option<GithubPullRequest>,
+    /// Present on `pull_request_review` events. Only `state` is read — review
+    /// bodies are never forwarded into Board notes (Board writes the pointer steer).
+    #[serde(default)]
+    pub review: Option<GithubReview>,
 
     #[serde(default)]
     pub repository: Option<GithubRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GithubReview {
+    /// GitHub review state (`approved`, `changes_requested`, `commented`, …).
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1575,9 +1585,12 @@ pub struct WebhookResponse {
     /// Board cards moved to Done because their `pr_url` matched a merged PR.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_item_ids: Vec<u64>,
+    /// Board cards steered to Backlog by submitted PR review feedback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered_item_ids: Vec<u64>,
 }
 
-fn resolve_merged_pr_url(payload: &GithubWebhookPayload) -> Option<String> {
+fn resolve_pr_url(payload: &GithubWebhookPayload) -> Option<String> {
     let pr = payload.pull_request.as_ref()?;
     if let Some(url) = pr
         .html_url
@@ -1594,6 +1607,10 @@ fn resolve_merged_pr_url(payload: &GithubWebhookPayload) -> Option<String> {
         .and_then(|r| r.full_name.as_deref())
         .filter(|s| !s.is_empty())?;
     Some(format!("https://github.com/{full_name}/pull/{number}"))
+}
+
+fn resolve_merged_pr_url(payload: &GithubWebhookPayload) -> Option<String> {
+    resolve_pr_url(payload)
 }
 
 async fn github_webhook(
@@ -1613,6 +1630,41 @@ async fn github_webhook(
             ref_name: None,
             commit_sha: None,
             completed_item_ids: Vec::new(),
+            steered_item_ids: Vec::new(),
+        }));
+    }
+
+    // Transport only: parse review + PR identity, invoke Board. Board owns
+    // steer note / Backlog / APPROVED no-op. Never forward review bodies.
+    if event_type == "pull_request_review" {
+        let mut steered_item_ids = Vec::new();
+        if payload.action.as_deref() == Some("submitted") {
+            if let (Some(state), Some(pr_url)) = (
+                payload
+                    .review
+                    .as_ref()
+                    .and_then(|r| r.state.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+                resolve_pr_url(&payload),
+            ) {
+                let number = payload.pull_request.as_ref().and_then(|pr| pr.number);
+                if let Some(id) = b.apply_pr_review_feedback(&pr_url, number, state) {
+                    steered_item_ids.push(id);
+                }
+            }
+        }
+        return Ok(Json(WebhookResponse {
+            status: if steered_item_ids.is_empty() {
+                "ignored".into()
+            } else {
+                "ok".into()
+            },
+            main_advanced: false,
+            ref_name: None,
+            commit_sha: None,
+            completed_item_ids: Vec::new(),
+            steered_item_ids,
         }));
     }
 
@@ -1696,6 +1748,7 @@ async fn github_webhook(
             ref_name: Some(ref_name),
             commit_sha,
             completed_item_ids,
+            steered_item_ids: Vec::new(),
         }))
     } else {
         Ok(Json(WebhookResponse {
@@ -1704,6 +1757,7 @@ async fn github_webhook(
             ref_name: None,
             commit_sha: None,
             completed_item_ids,
+            steered_item_ids: Vec::new(),
         }))
     }
 }
@@ -2603,6 +2657,252 @@ mod tests {
         );
     }
 
+    fn review_feedback_payload(
+        action: &str,
+        review_state: &str,
+        review_body: &str,
+        pr_url: &str,
+        pr_number: u64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "action": action,
+            "review": {
+                "state": review_state,
+                "body": review_body,
+            },
+            "pull_request": {
+                "html_url": pr_url,
+                "number": pr_number,
+                "merged": false,
+                "base": { "ref": "main" }
+            },
+            "repository": {
+                "default_branch": "main",
+                "full_name": "honr-app/honr"
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn github_webhook_pr_review_changes_requested_steers_to_backlog() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-review-cr-{}.json",
+                std::process::id()
+            )),
+        ));
+        let pr_url = "https://github.com/honr-app/honr/pull/4243";
+        let id = review_card_with_pr(&b, pr_url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request_review".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(
+                serde_json::from_value(review_feedback_payload(
+                    "submitted",
+                    "changes_requested",
+                    "please dump this body into the note — must not appear",
+                    pr_url,
+                    4243,
+                ))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ok");
+        assert!(!resp.main_advanced);
+        assert!(resp.completed_item_ids.is_empty());
+        assert_eq!(resp.steered_item_ids, vec![id]);
+
+        let item = b.get(id).unwrap();
+        assert_eq!(item.state, State::Backlog);
+        let note = &item.notes.last().expect("pointer steer note").text;
+        assert!(
+            note.contains("PR review feedback") && note.contains("gh"),
+            "pointer-style note expected, got: {note}"
+        );
+        assert!(
+            !note.contains("please dump") && !note.contains("must not appear"),
+            "must not forward review body into steer note: {note}"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_webhook_pr_review_comment_same_steer_path() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-review-comment-{}.json",
+                std::process::id()
+            )),
+        ));
+        let pr_url = "https://github.com/honr-app/honr/pull/4244";
+        let id = review_card_with_pr(&b, pr_url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request_review".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(
+                serde_json::from_value(review_feedback_payload(
+                    "submitted",
+                    "commented",
+                    "nit: rename foo — must not be summarized into the note",
+                    pr_url,
+                    4244,
+                ))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ok");
+        assert_eq!(resp.steered_item_ids, vec![id]);
+        let item = b.get(id).unwrap();
+        assert_eq!(item.state, State::Backlog);
+        let note = &item.notes.last().unwrap().text;
+        assert!(note.contains("PR review feedback") && note.contains("gh"));
+        assert!(!note.contains("rename foo"));
+    }
+
+    #[tokio::test]
+    async fn github_webhook_pr_review_approved_is_board_noop() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-review-approved-{}.json",
+                std::process::id()
+            )),
+        ));
+        let pr_url = "https://github.com/honr-app/honr/pull/4245";
+        let id = review_card_with_pr(&b, pr_url);
+        let notes_before = b.get(id).unwrap().notes.len();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request_review".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(
+                serde_json::from_value(review_feedback_payload(
+                    "submitted",
+                    "approved",
+                    "LGTM",
+                    pr_url,
+                    4245,
+                ))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("webhook response");
+
+        assert_eq!(resp.status, "ignored");
+        assert!(!resp.main_advanced);
+        assert!(resp.steered_item_ids.is_empty());
+        assert_eq!(b.get(id).unwrap().state, State::Review);
+        assert_eq!(b.get(id).unwrap().notes.len(), notes_before);
+    }
+
+    #[tokio::test]
+    async fn github_webhook_pr_review_malformed_and_unknown_ignored() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-review-malformed-{}.json",
+                std::process::id()
+            )),
+        ));
+        let pr_url = "https://github.com/honr-app/honr/pull/4246";
+        let id = review_card_with_pr(&b, pr_url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "pull_request_review".parse().unwrap());
+
+        // Non-submitted action — ignore.
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers.clone(),
+            Json(
+                serde_json::from_value(review_feedback_payload(
+                    "edited",
+                    "changes_requested",
+                    "body",
+                    pr_url,
+                    4246,
+                ))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("webhook response");
+        assert_eq!(resp.status, "ignored");
+        assert!(resp.steered_item_ids.is_empty());
+        assert_eq!(b.get(id).unwrap().state, State::Review);
+
+        // Unknown PR URL — Board no-op.
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers.clone(),
+            Json(
+                serde_json::from_value(review_feedback_payload(
+                    "submitted",
+                    "changes_requested",
+                    "body",
+                    "https://github.com/honr-app/honr/pull/99999",
+                    99999,
+                ))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("webhook response");
+        assert_eq!(resp.status, "ignored");
+        assert!(resp.steered_item_ids.is_empty());
+        assert_eq!(b.get(id).unwrap().state, State::Review);
+
+        // Malformed: submitted but missing review.state.
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(
+                serde_json::from_value(serde_json::json!({
+                    "action": "submitted",
+                    "review": { "body": "no state" },
+                    "pull_request": {
+                        "html_url": pr_url,
+                        "number": 4246,
+                        "merged": false
+                    },
+                    "repository": { "full_name": "honr-app/honr" }
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("webhook response");
+        assert_eq!(resp.status, "ignored");
+        assert!(resp.steered_item_ids.is_empty());
+        assert_eq!(b.get(id).unwrap().state, State::Review);
+    }
 
     fn sandbox_profiles_board() -> SharedBoard {
         std::sync::Arc::new(crate::store::Board::new(
