@@ -1046,7 +1046,9 @@ pub struct WorkItem {
     /// by unpark (resume). Cleared on claim, bounce to Backlog, or cancel.
     #[serde(default)]
     pub awaiting_dispatch: bool,
-    /// Indicates that main advanced and this card's PR branch needs a rebase.
+    /// Review catch-up retry queue: GitHub mergeable was UNKNOWN (or the check
+    /// was deferred). Cleared on MERGEABLE (no-op) or CONFLICTING bounce. Not
+    /// set when main advances under a still-MERGEABLE Review PR.
     #[serde(default)]
     pub rebase_requested: bool,
     /// Pull request the agent opened (url + base/head). Approving surfaces it;

@@ -2191,14 +2191,18 @@ type MergeableFetchFut<'a> = std::pin::Pin<
     >,
 >;
 
-/// After MainAdvanced queues Review cards (`rebase_requested`), ask GitHub
-/// whether each open PR is still mergeable. No sandbox recreate, no host
-/// `git rebase` — CONFLICTING bounces to Backlog for a worker to reclaim.
+/// Observe GitHub `mergeable` for Review catch-up candidates.
+///
+/// MERGEABLE: stay in Review with no catch-up work signal (clear retry flags if
+/// any). CONFLICTING: bounce to Backlog with a binding note. UNKNOWN (or a
+/// deferred fetch): queue `rebase_requested` for the next sweep. No sandbox
+/// recreate, no host `git rebase`.
 pub async fn process_awaiting_mergeable_checks(
     board: &SharedBoard,
     cfg: &AgentConfig,
 ) -> Vec<Result<crate::model::WorkItem, String>> {
-    process_awaiting_mergeable_checks_with(board, cfg, |board, pr_url| {
+    let awaiting = board.list_awaiting_rebase();
+    observe_review_catch_up_with(board, cfg, awaiting, |board, pr_url| {
         let board = board.clone();
         let pr_url = pr_url.to_string();
         Box::pin(async move {
@@ -2210,9 +2214,47 @@ pub async fn process_awaiting_mergeable_checks(
     .await
 }
 
-async fn process_awaiting_mergeable_checks_with<F>(
+/// Tip-driven Review catch-up after `MainAdvanced`: observe every open Review PR.
+pub async fn process_main_advanced_review_catch_up(
+    board: &SharedBoard,
+) -> Vec<Result<crate::model::WorkItem, String>> {
+    let agents = board.effective_agents();
+    let candidates = board.identify_all_behind_sibling_prs();
+    observe_review_catch_up_with(board, &agents, candidates, |board, pr_url| {
+        let board = board.clone();
+        let pr_url = pr_url.to_string();
+        Box::pin(async move {
+            crate::github_app::fetch_pr_conflict_check(&board, &pr_url)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+}
+
+/// Same-parent sibling Review catch-up after a merge→Done.
+pub async fn process_sibling_review_catch_up(
+    board: &SharedBoard,
+    near_id: crate::model::ItemId,
+) -> Vec<Result<crate::model::WorkItem, String>> {
+    let agents = board.effective_agents();
+    let candidates = board.identify_behind_sibling_prs(near_id);
+    observe_review_catch_up_with(board, &agents, candidates, |board, pr_url| {
+        let board = board.clone();
+        let pr_url = pr_url.to_string();
+        Box::pin(async move {
+            crate::github_app::fetch_pr_conflict_check(&board, &pr_url)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+}
+
+async fn observe_review_catch_up_with<F>(
     board: &SharedBoard,
     cfg: &AgentConfig,
+    candidates: Vec<crate::model::WorkItem>,
     mut fetch: F,
 ) -> Vec<Result<crate::model::WorkItem, String>>
 where
@@ -2220,9 +2262,8 @@ where
 {
     use crate::github_app::PrMergeableState;
 
-    let awaiting = board.list_awaiting_rebase();
     let mut results = Vec::new();
-    for item in awaiting {
+    for item in candidates {
         let Some(pr_url) = item.pr_url().filter(|u| !u.trim().is_empty()) else {
             tracing::warn!("mergeable check skipped for card #{}: no pr_url", item.id);
             continue;
@@ -2243,11 +2284,14 @@ where
         let check = match fetch(board, pr_url).await {
             Ok(Some(c)) => c,
             Ok(None) => {
-                // App not configured, or PR 404 — retry next sweep.
+                // App not configured, or PR 404 — queue retry for the next sweep.
                 tracing::warn!(
                     "mergeable check deferred for card #{}: no App token or PR not found",
                     item.id
                 );
+                if !item.rebase_requested {
+                    let _ = board.dispatch_rebase(item.id);
+                }
                 continue;
             }
             Err(e) => {
@@ -2255,6 +2299,9 @@ where
                     "mergeable check failed for card #{}: {e}; will retry",
                     item.id
                 );
+                if !item.rebase_requested {
+                    let _ = board.dispatch_rebase(item.id);
+                }
                 continue;
             }
         };
@@ -2265,16 +2312,20 @@ where
                     "mergeable check skipped for card #{}: PR base {base} != {expected_base}",
                     item.id
                 );
-                // Not a same-base catch-up target — clear the queue so Review
-                // does not look idle-queued forever.
-                results.push(board.complete_rebase_clean(item.id));
+                // Not a same-base catch-up target — clear any retry queue.
+                if item.rebase_requested || item.awaiting_dispatch {
+                    results.push(board.complete_rebase_clean(item.id));
+                }
                 continue;
             }
         }
 
         match check.mergeable {
             PrMergeableState::Mergeable => {
-                results.push(board.complete_rebase_clean(item.id));
+                if item.rebase_requested || item.awaiting_dispatch {
+                    results.push(board.complete_rebase_clean(item.id));
+                }
+                // else: silent no-op — no catch-up work signal
             }
             PrMergeableState::Conflicting => {
                 results.push(board.complete_rebase_conflict(
@@ -2284,8 +2335,18 @@ where
                 ));
             }
             PrMergeableState::Unknown => {
-                // GitHub computes mergeable asynchronously — leave queued.
-                tracing::debug!("mergeable UNKNOWN for card #{}; retry next sweep", item.id);
+                // GitHub computes mergeable asynchronously — queue retry.
+                if !item.rebase_requested {
+                    match board.dispatch_rebase(item.id) {
+                        Ok(_) => {}
+                        Err(e) => results.push(Err(e)),
+                    }
+                } else {
+                    tracing::debug!(
+                        "mergeable UNKNOWN for card #{}; retry next sweep",
+                        item.id
+                    );
+                }
             }
         }
     }
@@ -5864,7 +5925,31 @@ mod tests {
         }
     }
 
-    /// MERGEABLE clears the queue and keeps the card in Review.
+    async fn process_awaiting_mergeable_checks_with<F>(
+        board: &SharedBoard,
+        cfg: &AgentConfig,
+        fetch: F,
+    ) -> Vec<Result<crate::model::WorkItem, String>>
+    where
+        F: for<'a> FnMut(&'a SharedBoard, &'a str) -> MergeableFetchFut<'a>,
+    {
+        let awaiting = board.list_awaiting_rebase();
+        observe_review_catch_up_with(board, cfg, awaiting, fetch).await
+    }
+
+    async fn process_main_advanced_review_catch_up_with<F>(
+        board: &SharedBoard,
+        cfg: &AgentConfig,
+        fetch: F,
+    ) -> Vec<Result<crate::model::WorkItem, String>>
+    where
+        F: for<'a> FnMut(&'a SharedBoard, &'a str) -> MergeableFetchFut<'a>,
+    {
+        let candidates = board.identify_all_behind_sibling_prs();
+        observe_review_catch_up_with(board, cfg, candidates, fetch).await
+    }
+
+    /// MERGEABLE clears a retry queue and keeps the card in Review.
     #[tokio::test]
     async fn process_awaiting_mergeable_checks_mergeable_stays_review() {
         let (board, item) = review_awaiting_mergeable_board();
@@ -5941,10 +6026,10 @@ mod tests {
         );
     }
 
-    /// After MainAdvanced, Running is steered (park/unpark) while Review gets
-    /// `rebase_requested`. A MERGEABLE API check clears Review without sandbox work.
+    /// Tip catch-up observes mergeable first: MERGEABLE is a silent Review no-op
+    /// (no rebase_requested), while Running still gets steer + park/unpark.
     #[tokio::test]
-    async fn main_advanced_review_clears_via_mergeable_api_after_running_steered() {
+    async fn main_advanced_review_mergeable_is_noop_while_running_steered() {
         let board = Arc::new(crate::store::Board::new(
             crate::schema::Schema::default(),
             std::env::temp_dir().join(format!(
@@ -6058,22 +6143,22 @@ mod tests {
             running_after.notes
         );
 
-        let review_queued = board.get(review.id).unwrap();
-        assert_eq!(review_queued.state, State::Review);
+        let review_before = board.get(review.id).unwrap();
+        assert_eq!(review_before.state, State::Review);
         assert!(
-            review_queued.rebase_requested,
-            "MainAdvanced + Done sibling must set rebase_requested on Review"
+            !review_before.rebase_requested,
+            "MainAdvanced must not set rebase_requested before mergeable observation"
         );
         assert!(
-            !review_queued
+            !review_before
                 .notes
                 .iter()
                 .any(|n| n.text.contains("Main advanced")),
             "Review must not reuse the Running steer path: {:?}",
-            review_queued.notes
+            review_before.notes
         );
 
-        let results = process_awaiting_mergeable_checks_with(
+        let results = process_main_advanced_review_catch_up_with(
             &board,
             &repo_cfg(),
             fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
@@ -6082,13 +6167,175 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(results.len(), 1);
-        let updated = results[0].as_ref().unwrap();
+        assert!(
+            results.is_empty(),
+            "MERGEABLE with no prior queue is a silent no-op: {results:?}"
+        );
+        let updated = board.get(review.id).unwrap();
         assert_eq!(updated.state, State::Review);
         assert!(
             !updated.rebase_requested,
-            "MERGEABLE must clear the queue so Review does not look idle"
+            "MERGEABLE leaves no catch-up work signal"
         );
         assert!(!updated.awaiting_dispatch);
+    }
+
+    /// Tip catch-up CONFLICTING bounces Review to Backlog with a binding note.
+    #[tokio::test]
+    async fn main_advanced_review_conflicting_bounces_backlog() {
+        let board = Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-adv-conflicting-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+        let project = board
+            .create(
+                None,
+                "Conflict Tip Proj",
+                "why",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let review = board
+            .create(
+                Some(project.id),
+                "Conflicts After Main",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        board
+            .transition(review.id, State::Shaping, "test", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Backlog, "test", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Claimed, "agent", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Review, "agent", None)
+            .unwrap();
+        board.set_pull_request(
+            review.id,
+            Some(crate::model::PullRequest {
+                url: format!("https://github.com/honr-app/honr/pull/{}", review.id),
+                base: Some(crate::model::PullRequestEnd::new("honr-app/honr", "main")),
+                head: Some(crate::model::PullRequestEnd::new(
+                    "honr-app/honr",
+                    crate::schema::card_branch_name("honr", review.id),
+                )),
+            }),
+        );
+
+        board.notify_main_advanced("refs/heads/main", Some("conflict-sha".into()));
+        assert!(!board.get(review.id).unwrap().rebase_requested);
+
+        let results = process_main_advanced_review_catch_up_with(
+            &board,
+            &repo_cfg(),
+            fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
+                mergeable: crate::github_app::PrMergeableState::Conflicting,
+                base_ref: Some("main".into()),
+            }),
+        )
+        .await;
+        assert_eq!(results.len(), 1);
+        let updated = results[0].as_ref().unwrap();
+        assert_eq!(updated.state, State::Backlog);
+        assert!(!updated.rebase_requested);
+        assert!(updated
+            .notes
+            .iter()
+            .any(|n| n.text.contains("BINDING")
+                && n.text.contains("do-not-re-report-while-CONFLICTING")));
+    }
+
+    /// Tip catch-up UNKNOWN queues rebase_requested so the sweeper can retry.
+    #[tokio::test]
+    async fn main_advanced_review_unknown_queues_retry() {
+        let board = Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-adv-unknown-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+        let project = board
+            .create(
+                None,
+                "Unknown Tip Proj",
+                "why",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let review = board
+            .create(
+                Some(project.id),
+                "Mergeable Pending",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        board
+            .transition(review.id, State::Shaping, "test", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Backlog, "test", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Claimed, "agent", None)
+            .unwrap();
+        board
+            .transition(review.id, State::Review, "agent", None)
+            .unwrap();
+        board.set_pull_request(
+            review.id,
+            Some(crate::model::PullRequest {
+                url: format!("https://github.com/honr-app/honr/pull/{}", review.id),
+                base: Some(crate::model::PullRequestEnd::new("honr-app/honr", "main")),
+                head: Some(crate::model::PullRequestEnd::new(
+                    "honr-app/honr",
+                    crate::schema::card_branch_name("honr", review.id),
+                )),
+            }),
+        );
+
+        board.notify_main_advanced("refs/heads/main", Some("unknown-sha".into()));
+        let _ = process_main_advanced_review_catch_up_with(
+            &board,
+            &repo_cfg(),
+            fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
+                mergeable: crate::github_app::PrMergeableState::Unknown,
+                base_ref: Some("main".into()),
+            }),
+        )
+        .await;
+        let still = board.get(review.id).unwrap();
+        assert_eq!(still.state, State::Review);
+        assert!(
+            still.rebase_requested,
+            "UNKNOWN must queue rebase_requested for the next sweep"
+        );
     }
 }
