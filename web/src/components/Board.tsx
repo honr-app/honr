@@ -385,6 +385,8 @@ function Swimlane({
   const [viewMode, setViewMode] = useState<"columns" | "graph">("columns");
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
+  const [confirmUnarchive, setConfirmUnarchive] = useState(false);
+  const [unarchiveBusy, setUnarchiveBusy] = useState(false);
   const [autoBusy, setAutoBusy] = useState(false);
   const autoOn = goal.auto_dispatch === true;
   const story = p.stories.get(goal.id) ?? goal.story;
@@ -424,6 +426,21 @@ function Swimlane({
     }
   };
 
+  const unarchiveProject = async (e: MouseEvent) => {
+    e.stopPropagation();
+    if (unarchiveBusy) return;
+    setUnarchiveBusy(true);
+    try {
+      await api.unarchive(goal.id, "unarchived from board");
+      setConfirmUnarchive(false);
+      p.onChanged?.();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setUnarchiveBusy(false);
+    }
+  };
+
   const toggleAuto = async (e: MouseEvent) => {
     e.stopPropagation();
     if (autoBusy || archived) return;
@@ -451,6 +468,7 @@ function Swimlane({
         className="lane-head"
         onClick={() => {
           setConfirmArchive(false);
+          setConfirmUnarchive(false);
           onOpenChange(!open);
         }}
       >
@@ -516,62 +534,94 @@ function Swimlane({
           </span>
         </div>
 
-        {!archived && (
-          <div className="lane-actions" onClick={(e) => e.stopPropagation()}>
-            {!confirmArchive ? (
+        <div className="lane-actions" onClick={(e) => e.stopPropagation()}>
+          {archived ? (
+            !confirmUnarchive ? (
               <button
                 type="button"
                 className="dispatch-toggle archive-toggle"
-                disabled={archiveBusy}
-                onClick={() => setConfirmArchive(true)}
-                title="Archive this Project and its subtree (retire, not delete)"
+                disabled={unarchiveBusy}
+                onClick={() => setConfirmUnarchive(true)}
+                title="Unarchive this Project — restore from history (not delete)"
+                data-testid="lane-unarchive"
               >
-                Archive
+                Unarchive
               </button>
             ) : (
               <span className="lane-archive-confirm">
-                <span className="dim">Retire project?</span>
+                <span className="dim">Restore project?</span>
                 <button
                   type="button"
                   className="dispatch-toggle archive-confirm"
-                  disabled={archiveBusy}
-                  onClick={archiveProject}
+                  disabled={unarchiveBusy}
+                  onClick={unarchiveProject}
+                  data-testid="lane-unarchive-confirm"
                 >
                   Confirm
                 </button>
                 <button
                   type="button"
                   className="dispatch-toggle"
-                  disabled={archiveBusy}
-                  onClick={() => setConfirmArchive(false)}
+                  disabled={unarchiveBusy}
+                  onClick={() => setConfirmUnarchive(false)}
                 >
                   Cancel
                 </button>
               </span>
-            )}
-            {open && (
-              <div className="lane-view-switcher">
-                <button
-                  type="button"
-                  className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
-                  onClick={() => setViewMode("columns")}
-                  title="Kanban columns"
-                >
-                  Columns
-                </button>
-                <button
-                  type="button"
-                  className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
-                  onClick={() => setViewMode("graph")}
-                  title="Dependency graph"
-                  data-testid="toggle-graph-view"
-                >
-                  Graph
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+            )
+          ) : !confirmArchive ? (
+            <button
+              type="button"
+              className="dispatch-toggle archive-toggle"
+              disabled={archiveBusy}
+              onClick={() => setConfirmArchive(true)}
+              title="Archive this Project and its subtree (retire, not delete)"
+            >
+              Archive
+            </button>
+          ) : (
+            <span className="lane-archive-confirm">
+              <span className="dim">Retire project?</span>
+              <button
+                type="button"
+                className="dispatch-toggle archive-confirm"
+                disabled={archiveBusy}
+                onClick={archiveProject}
+              >
+                Confirm
+              </button>
+              <button
+                type="button"
+                className="dispatch-toggle"
+                disabled={archiveBusy}
+                onClick={() => setConfirmArchive(false)}
+              >
+                Cancel
+              </button>
+            </span>
+          )}
+          {!archived && open && (
+            <div className="lane-view-switcher">
+              <button
+                type="button"
+                className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
+                onClick={() => setViewMode("columns")}
+                title="Kanban columns"
+              >
+                Columns
+              </button>
+              <button
+                type="button"
+                className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
+                onClick={() => setViewMode("graph")}
+                title="Dependency graph"
+                data-testid="toggle-graph-view"
+              >
+                Graph
+              </button>
+            </div>
+          )}
+        </div>
       </header>
 
       {open && (
