@@ -1,8 +1,9 @@
 //! Operator authentication: local admin + GitHub App OAuth allowlist.
 //!
-//! Session cookies gate `/api` (except webhooks). `/auth/*`, `/healthz`, and
-//! MCP OAuth discovery/token endpoints stay reachable without a session.
-//! `/mcp` itself uses Bearer tokens (see `mcp_oauth`) once admin exists.
+//! `/api` (except webhooks) accepts a `honr_session` cookie **or** HTTP Basic
+//! with the local admin username/password. `/auth/*`, `/healthz`, and MCP OAuth
+//! discovery/token endpoints stay reachable without a session. `/mcp` itself
+//! uses Bearer tokens (see `mcp_oauth`) once admin exists.
 
 use crate::secrets::{seal_auth, AuthBundle};
 use crate::store::SharedBoard;
@@ -144,6 +145,7 @@ pub fn path_exempt(path: &str) -> bool {
 pub async fn require_session(
     State(board): State<SharedBoard>,
     jar: CookieJar,
+    headers: HeaderMap,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -156,7 +158,7 @@ pub async fn require_session(
         return next.run(req).await;
     }
 
-    match session_from_jar(&board, &jar) {
+    match operator_from_jar_or_basic(&board, &jar, &headers) {
         Some(user) => {
             req.extensions_mut().insert(user);
             next.run(req).await
@@ -255,6 +257,41 @@ fn session_from_jar(board: &SharedBoard, jar: &CookieJar) -> Option<SessionUser>
     let key = auth.session_key_bytes().ok()?;
     let cookie = jar.get(SESSION_COOKIE)?.value().to_string();
     decode_session(&key, &cookie)
+}
+
+/// Local admin via `Authorization: Basic …`. Cookie sessions stay preferred for
+/// browsers; this is for scripts/`curl` against `/api`.
+fn admin_from_basic(board: &SharedBoard, headers: &HeaderMap) -> Option<SessionUser> {
+    let auth = board.auth_bundle()?;
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, param) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(param.trim())
+        .ok()?;
+    let decoded = std::str::from_utf8(&raw).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    if !username
+        .trim()
+        .eq_ignore_ascii_case(auth.admin_username.trim())
+        || !verify_password(password, &auth.password_hash)
+    {
+        return None;
+    }
+    Some(SessionUser {
+        kind: SessionKind::Admin,
+        login: auth.admin_username.clone(),
+    })
+}
+
+fn operator_from_jar_or_basic(
+    board: &SharedBoard,
+    jar: &CookieJar,
+    headers: &HeaderMap,
+) -> Option<SessionUser> {
+    session_from_jar(board, jar).or_else(|| admin_from_basic(board, headers))
 }
 
 /// Session for MCP authorize consent (and other non-API callers).
@@ -902,8 +939,9 @@ fn require_operator(
 async fn get_auth_settings(
     State(board): State<SharedBoard>,
     jar: CookieJar,
+    headers: HeaderMap,
 ) -> Result<Json<AuthSettingsView>, (StatusCode, Json<serde_json::Value>)> {
-    let user = session_from_jar(&board, &jar);
+    let user = operator_from_jar_or_basic(&board, &jar, &headers);
     require_operator(user.as_ref())?;
     let auth = board.auth_bundle().ok_or_else(|| {
         (
@@ -927,9 +965,10 @@ async fn get_auth_settings(
 async fn put_auth_settings(
     State(board): State<SharedBoard>,
     jar: CookieJar,
+    headers: HeaderMap,
     Json(body): Json<AuthSettingsWrite>,
 ) -> Result<Json<AuthSettingsView>, (StatusCode, Json<serde_json::Value>)> {
-    let user = session_from_jar(&board, &jar);
+    let user = operator_from_jar_or_basic(&board, &jar, &headers);
     require_operator(user.as_ref())?;
     let mut auth = board.auth_bundle().ok_or_else(|| {
         (
@@ -1250,6 +1289,7 @@ mod tests {
         let cookie = set_cookie.split(';').next().unwrap();
 
         let authed = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/board")
@@ -1260,6 +1300,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authed.status(), StatusCode::OK);
+
+        let basic = base64::engine::general_purpose::STANDARD.encode("admin:password123");
+        let via_basic = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/board")
+                    .header(header::AUTHORIZATION, format!("Basic {basic}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(via_basic.status(), StatusCode::OK);
+
+        let bad_basic = base64::engine::general_purpose::STANDARD.encode("admin:wrong-password");
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/board")
+                    .header(header::AUTHORIZATION, format!("Basic {bad_basic}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
