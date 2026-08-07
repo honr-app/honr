@@ -44,10 +44,12 @@ mutate it through `Board`; they do not own lifecycle. Creating the sandbox
 yourself, or keeping conversation ids in a wrapper script, builds a second state
 machine — don't.
 
-Which image, policy, CPU, memory, and engine the seat gets comes from the
-**cockpit sandbox spec** (Settings → OpenShell → Sandbox specs). The seat name
-stays `{branch_prefix}-cockpit` regardless of which spec built it, so you can
-point Cockpit at any spec you like.
+Which image, CPU, memory, engine, and **Policy** (by id) the seat gets comes
+from the **cockpit sandbox spec** (Settings → OpenShell → Sandbox specs). Edit
+allow-list YAML under **Policies**; the spec only references it. Live policy is
+set at create and immutable on the running seat. The seat name stays
+`{branch_prefix}-cockpit` regardless of which spec built it, so you can point
+Cockpit at any spec you like.
 
 ## Driving it from the CLI
 
@@ -144,6 +146,6 @@ mean.
 ## Related
 
 - [Concepts](concepts.md#operator-and-worker) — how the three seats differ
-- [Sandbox](sandbox.md#cockpit-vs-worker-containment) — the two egress policies
-  side by side
+- [Sandbox](sandbox.md#default-vs-cockpit) — default vs Cockpit specs
+- [Configuration](configuration.md#policies) — Policies catalog
 - [Configuration](configuration.md#sandbox-specs) — picking the spec

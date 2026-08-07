@@ -50,20 +50,23 @@ The network policy is a literal allow-list, and binary paths in it are matched
 literally too. Git's real remote helper is `/usr/lib/git-core/git-remote-http`,
 not `git`.
 
-Grep the sandbox log for `DENIED`. Policy lives on the **board sandbox spec**
-(Settings → OpenShell → Sandbox specs). Change it there (or via
-`/api/sandbox-profiles`); then create a new sandbox so the updated policy is
-applied at create time.
+Grep the sandbox log for `DENIED`. Allow-list YAML lives in the **board
+Policies** catalog (Settings → OpenShell → Policies, or
+`/api/openshell/policies`). Sandbox specs only reference a policy by id. Edit
+the Policy, then create a new sandbox so the updated YAML is applied at create
+time.
 
 ### Policy edits are not taking effect
 
 Two separate traps:
 
 - **Policy is immutable on a live sandbox** for the filesystem and process
-  sections. It is set at create time — recreate the sandbox after a policy
-  change.
-- **Board specs are authoritative.** Create starts from the minimal policy in
-  `src/seed_policies.rs`; paste updates into Settings when you change egress.
+  sections. Live policy comes from the board and is set at create time —
+  recreate the sandbox after a policy change.
+- **Board Policies are authoritative.** Create-form defaults select the seeded
+  minimal policy (`src/seed_policies.rs`); edit egress under Settings →
+  OpenShell → Policies (and keep the spec's `policy_id` pointed at the row you
+  mean).
 
 ### The model calls hang
 
