@@ -1,8 +1,6 @@
 # Configuration
 
-Where each knob lives, and which ones are process-boot vs board-owned.
-
-Two layers:
+What is set at process start vs in board Settings.
 
 | Layer | Role |
 |---|---|
@@ -58,9 +56,9 @@ install-time level ladder to configure.
 
 **Settings → Agent runtime** (REST: `/api/agent-runtime`): default engine,
 concurrency, agent timeout, max attempts, branch prefix, and sweep interval.
-Empty boards seed from compiled defaults; edits persist on the board. The
-supervisor always starts dispatch and cockpit; OpenShell gateway + a sandbox
-spec are the practical readiness gates.
+Fresh boards use built-in defaults; edits persist on the board. OpenShell
+gateway + a sandbox spec are the practical readiness gates before dispatch does
+anything useful.
 
 ## Policies
 
@@ -71,7 +69,7 @@ catalog lives on the board and is edited in **Settings → OpenShell → Policie
 
 Live policy always comes from this board catalog. At sandbox create the
 supervisor resolves the selected policy to YAML for OpenShell. Policy is
-**immutable on a running sandbox** for filesystem and process sections —
+**fixed for that sandbox's life** for filesystem and process sections —
 recreate the sandbox after a change.
 
 ## Sandbox specs
@@ -91,7 +89,7 @@ needs.
 ### Cockpit
 
 Cockpit uses the global default sandbox spec unless you set an explicit Cockpit
-profile under Sandbox specs. That spec's `policy_id` is what the seat gets at
+profile under Sandbox specs. That spec's `policy_id` is what the sandbox gets at
 create.
 
 ## OpenShell / Forge / GitHub App provider

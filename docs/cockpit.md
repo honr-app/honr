@@ -1,16 +1,14 @@
 # Cockpit
 
-A durable terminal seat that sits *inside* a sandbox but can reach honr's
-operator tools. Use it when you want an agent that can triage the board with
-you, rather than one working a card.
+A durable terminal inside a sandbox that can reach honr's operator tools. Use
+it when you want an agent that can triage the board with you, rather than one
+working a card.
 
-It is the third seat described in [Concepts](concepts.md#operator-and-worker):
-narrower than you (no merges), far wider than a card worker (which cannot see
-the board at all).
+It is the third role in [Concepts](concepts.md#operator-and-worker): narrower
+than you (no merges), wider than a card worker (which cannot see the board).
 
-**Prerequisites:** the [agents path](first-agent.md) (Welcome/Help OpenShell +
-sandbox onboarding) is live — agents enabled, a healthy OpenShell gateway, and a
-cockpit sandbox spec in the catalog.
+**Prerequisites:** [Your first agent](first-agent.md) setup is live — a healthy
+OpenShell gateway and a cockpit sandbox spec in the catalog.
 
 ## Start one
 
@@ -36,18 +34,17 @@ The session is a singleton record on the Board, not a file or a wrapper script:
 | Field | Meaning |
 |---|---|
 | `environment` | Sandbox name — defaults to `{branch_prefix}-cockpit`, usually `honr-cockpit` |
-| `conversation_id` | Chat id the seat resumes; minted if missing |
+| `conversation_id` | Chat id the session resumes; minted if missing |
 | `status` | `Running`, or `Parked` — a hold that keeps sandbox and conversation |
 
 The terminal and any CLI attach are **faces over that record**. They read and
-mutate it through `Board`; they do not own lifecycle. Creating the sandbox
-yourself, or keeping conversation ids in a wrapper script, builds a second state
-machine — don't.
+mutate it through `Board`; they do not own lifecycle. Create sandboxes through
+Board APIs so inventory reconcile stays consistent.
 
-Which image, CPU, memory, engine, and **Policy** (by id) the seat gets comes
+Which image, CPU, memory, engine, and **Policy** (by id) Cockpit gets comes
 from the **cockpit sandbox spec** (Settings → OpenShell → Sandbox specs). Edit
 allow-list YAML under **Policies**; the spec only references it. Live policy is
-set at create and immutable on the running seat. The seat name stays
+set at create and fixed for that sandbox. The sandbox name stays
 `{branch_prefix}-cockpit` regardless of which spec built it, so you can point
 Cockpit at any spec you like.
 
@@ -101,18 +98,18 @@ complete the OpenSSH ProxyCommand chain that `openshell sandbox connect` uses.
 (That chain is described in [Architecture](architecture.md#how-the-cli-attaches).)
 
 Cursor launches interactive `agent` with `--trust --approve-mcps --sandbox
-disabled` — deliberately no `--force`, so tool calls still prompt for approval.
-OpenCode, Claude, and agy launch their own TUIs.
+disabled` — no `--force`, so tool calls still prompt for approval. OpenCode,
+Claude, and agy launch their own TUIs.
 
-## Credentials inside the seat
+## Credentials inside the sandbox
 
 Model auth comes from OpenShell providers and `inference.local`, never from host
 secrets copied into the sandbox.
 
-MCP auth is the interesting case. Host Cursor uses browser OAuth against `/mcp`,
-and that dance does not work cleanly from inside a sandbox. So honr **mints**
-short-lived MCP JWTs for the static public client `honr-cockpit` and writes them
-into the seat:
+MCP auth from inside the sandbox works differently from the host. Host Cursor
+uses browser OAuth against `/mcp`, and that dance does not work cleanly from
+inside a sandbox. So honr **mints** short-lived MCP JWTs for the static public
+client `honr-cockpit` and writes them into the sandbox:
 
 | Path | Contents |
 |---|---|
@@ -125,27 +122,26 @@ into the seat:
 
 Minting happens when the sandbox becomes Ready, on
 `POST /api/cockpit-session/mcp-cred`, and on terminal attach. Tokens are never
-returned to browser JavaScript. Do not run `agent mcp login` inside the seat
+returned to browser JavaScript. Do not run `agent mcp login` inside the sandbox
 unless you specifically want a separate host-style OAuth flow.
 
 The resource URL (the JWT `aud`) defaults to
 `http://host.docker.internal:8080/mcp`; override with `HONR_MCP_URL`.
 
 For agy the attached `antigravity` provider injects only an
-`openshell:resolve:…` placeholder, and attach writes that into the seat's token
-file — never a host OAuth file. See
+`openshell:resolve:…` placeholder, and attach writes that into the sandbox's
+token file — never a host OAuth file. See
 [Sandbox → Antigravity](sandbox.md#antigravity--agy).
 
-## The seat still cannot merge
+## Cockpit cannot merge either
 
 The cockpit agent prepares and surfaces Review and Needs You. Approving a merge
-stays human, exactly as it does on the host MCP surface. Prefer escalating an
-ambiguous irreversible over widening what `approve_review` / `approve_plan`
-mean.
+stays human, same as on the host MCP surface. Prefer escalating an ambiguous
+irreversible over widening what `approve_review` / `approve_plan` mean.
 
 ## Related
 
-- [Concepts](concepts.md#operator-and-worker) — how the three seats differ
+- [Concepts](concepts.md#operator-and-worker) — how the three roles differ
 - [Sandbox](sandbox.md#default-vs-cockpit) — default vs Cockpit specs
 - [Configuration](configuration.md#policies) — Policies catalog
 - [Configuration](configuration.md#sandbox-specs) — picking the spec

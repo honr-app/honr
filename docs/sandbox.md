@@ -36,7 +36,7 @@ Inside the sandbox honr exports (engine-specific):
 
 | Engine | `ANTHROPIC_BASE_URL` | Notes |
 |---|---|---|
-| `claude` | `https://inference.local` | Claude appends `/v1/messages`; `--bare` + `--mcp-config` for seat MCP |
+| `claude` | `https://inference.local` | Claude appends `/v1/messages`; `--bare` + `--mcp-config` for MCP |
 | `opencode` | `https://inference.local/v1` | OpenCode requires the `/v1` suffix |
 
 Do **not** set `CLAUDE_CODE_USE_VERTEX=1` in the sandbox. That forces direct
@@ -113,17 +113,17 @@ When a checkout exists, the supervisor refreshes in place: fetch the PR-target
 tip, prefer the local card branch (not a hard reset to `origin/`), and rebase
 only when the tree is clean. Dirty mid-run edits stay put — MainAdvanced steer
 asks the agent to rebase. Otherwise it ensures the directory without clearing
-prior contents or caches. The supervisor never clones; agent-owns-clone stays.
+prior contents or caches. The supervisor never clones; the agent does.
 `/sandbox/.honr` is always present at start with at least `report.schema.json`.
 If a clean-tree reuse rebase conflicts, the supervisor backs out and tells the
 agent to resolve it.
 
-**Policy is immutable on a live sandbox** for filesystem and process sections.
-Live policy comes from the board Policies catalog and is materialized at create
-time; `policy set --wait` is expensive.
+**Policy is fixed for a live sandbox** for filesystem and process sections.
+Live policy comes from the board Policies catalog and is applied at create time;
+`policy set --wait` is expensive.
 
-**Binary paths are matched literally** in the policy. Lists are deliberately
-generous (git's real remote helper is `/usr/lib/git-core/git-remote-http`).
+**Binary paths are matched literally** in the policy. Lists include the real git
+helper paths (e.g. `/usr/lib/git-core/git-remote-http`).
 
 ## Default vs Cockpit
 

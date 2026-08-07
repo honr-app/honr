@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="assets/honr-logo.png" alt="honr, the one that hones" width="200" />
+  <img src="assets/honr-logo.png" alt="honr" width="200" />
 </p>
 
 <h1 align="center">honr</h1>
 
 <p align="center">
-  <strong>The board that hones the work.</strong><br />
-  An agent orchestrator whose board is a control plane, not a status report.
+  <strong>A board for agent work.</strong><br />
+  Point it at a repository, dispatch sandboxed coding agents, merge the PRs yourself.
 </p>
 
 <p align="center">
@@ -20,9 +20,9 @@
 **honr** is a board you point at a repository. You describe what you want; it
 runs coding agents in sandboxes; pull requests come back for you to merge.
 
-The board is not a report of work happening elsewhere. It *is* the work. Moving
-a card starts an agent. Answering a question unblocks one. Approving a plan
-creates the tasks.
+Moving a card starts an agent. Answering a question unblocks one. Approving a
+plan creates the tasks. The UI and MCP share one board lifecycle in
+`src/store.rs`.
 
 <p align="center">
   <img src="https://honr-app.github.io/images/desktop-board.png" alt="The honr board: Backlog, Running, Needs You, Review, Done" width="900" />
@@ -32,30 +32,20 @@ creates the tasks.
 [Tour](https://honr-app.github.io/tour.html), which walks one card's life with
 screenshots and needs nothing installed.
 
-## Name
-
-**honr** means **honer**: the one that hones.
-
-To **hone** *(v.)* is to refine: to make a skill, idea, or technique better and
-more effective through practice and time. honr is built for that loop. Intent
-in, agents against real repositories in sandboxed compute, pull requests out, so
-the work gets sharper every turn under human judgement.
-
 ## What makes it different
 
-- **One board, one state machine.** The UI and the MCP API are two faces of the
-  same lifecycle. There is no separate "apply" step, because there is nowhere
-  else for the work to live.
-- **Operator and worker, separated.** You shape Projects and Plans over MCP.
-  Workers run inside OpenShell sandboxes with **no network path back to honr**
-  — an agent that could reach the board could approve its own review.
-- **PRs, not merges.** Approving in honr surfaces the pull request. A human
-  merges on GitHub. There is no autonomy dial that changes this.
-- **Liveness is observed, never self-reported.** Parsed out of the agent's
-  output stream, because a keepalive timer asserts liveness without evidence.
+- **One board lifecycle.** UI and MCP call the same state machine. There is no
+  separate “apply” step.
+- **Workers cannot reach honr.** Card agents run in OpenShell sandboxes with no
+  network path back to the board. The supervisor claims, heartbeats, and reports
+  for them — so a worker cannot approve its own review.
+- **You merge on GitHub.** Approving in honr surfaces the PR. honr does not
+  merge.
+- **Liveness comes from real output.** The supervisor watches the agent’s
+  stream. There is no keepalive timer that pretends a wedged agent is alive.
 
-**honr builds honr.** Cards against this repository are claimed by sandboxed
-agents and land as PRs you review like any other contribution.
+**honr builds honr.** Cards against this repository open same-repo PRs that you
+review like any other contribution.
 
 ```
 you ──chat──> operator agent (Cursor / Claude Code)
@@ -63,7 +53,7 @@ you ──chat──> operator agent (Cursor / Claude Code)
                     ▼
             ┌────────────────────┐
             │  honr (Rust/axum)  │◀── REST + SSE ── React UI
-            │  one state machine │
+            │  board state machine│
             └────────────────────┘
                     ▲
               supervisor ──> worker agent in an OpenShell sandbox
@@ -82,11 +72,11 @@ cargo run                 # http://127.0.0.1:8080  (API, SSE, MCP, UI)
 ```
 
 The board asks you to create an admin on first open, then starts empty. Nothing
-claims cards until you enable agents — deliberately, so the control plane runs
-on a machine with no compute driver and no credentials.
+runs until you set up OpenShell and dispatch a card — so you can explore the UI
+without Docker or credentials.
 
 Full walkthrough: **[Quickstart](https://honr-app.github.io/quickstart.html)**.
-Turning on real sandboxed agents:
+First sandboxed run:
 **[Your first agent](https://honr-app.github.io/first-agent.html)**.
 
 ```bash
@@ -103,7 +93,7 @@ make docs-serve           # this book, at :3000
 | `src/store.rs` | The board — the only write path |
 | `src/machine.rs` | Legal transitions and lifecycle invariants |
 | `src/supervisor.rs` | Dispatch, sandbox lifecycle, lease sweeping |
-| `src/mcp.rs` | Operator-seat tools; the host seat keeps worker verbs |
+| `src/mcp.rs` | Operator MCP tools; supervisor keeps worker verbs |
 | `src/openshell.rs` | In-process gRPC client to the OpenShell gateway |
 | `sandbox/` | Container image, network policy |
 | `web/` | React UI + screenshot harness |
@@ -115,7 +105,7 @@ honr is under active development and already used to ship changes to itself.
 Expect sharp edges: the happy path (board → plan → sandboxed agent → PR) works;
 independent verification gates are still ahead.
 
-The properties we will not break while the surface grows are written down in
+The properties we will not break while the surface grows are in
 **[Invariants](https://honr-app.github.io/invariants.html)**.
 
 ## Contributing
@@ -128,8 +118,8 @@ By hand:
 1. Keep mutations on the board path — do not encode lifecycle rules in
    transports (`api.rs` / `mcp.rs`).
 2. `cargo test` and `cargo clippy --all-targets -- -D warnings` must be clean.
-3. Stage deliberately. `git add -A` has committed `enabled: true` here before,
-   which makes a fresh clone spend money on startup.
+3. Stage specific paths. `git add -A` has committed unintended local state here
+   before.
 
 Agent orientation for work *on* this repo: [`AGENTS.md`](AGENTS.md)
 (`CLAUDE.md` is a symlink) and

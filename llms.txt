@@ -5,8 +5,8 @@ Human docs: /docs (Quickstart, Your first agent, Configuration).
 This file is public and needs no auth.
 
 honr is a board pointed at a repository. Moving a card starts a sandboxed
-coding agent; pull requests come back for a human to merge. Merging is always
-human — honr never merges.
+coding agent; pull requests come back for a human to merge. Approving in honr
+shows the PR; you merge on GitHub.
 
 Work the product path. Do not invent a parallel bootstrap (extra secret stores
 for values the UI already walks, host discovery of credentials, skipping
@@ -20,8 +20,8 @@ the API the same way a human pastes into the UI.
   silence as failure.
 - honr does not read the host keychain or OpenShell files on disk. You (or the
   human) supply PEMs and secrets over the API; the board seals them.
-- `/mcp` is the operator seat (Projects, triage, dispatch, park, steer,
-  approve). Worker verbs (`claim`, `heartbeat`, `report`, …) are supervisor-only.
+- `/mcp` is for operators (Projects, triage, dispatch, park, steer, approve).
+  Worker verbs (`claim`, `heartbeat`, `report`, …) are supervisor-only.
 - Dispatch spends real money and opens PRs. Confirm with the human before the
   first Project loop.
 
@@ -80,7 +80,7 @@ Check: `GET /api/openshell/status` → `healthy: true`, `mtls.complete: true`,
 
 ### 2. Providers — Settings → OpenShell → Providers
 
-Board provider list is desired state; Sync applies it to the gateway.
+Board provider list is the source of truth; Sync applies it to the gateway.
 
 Typical fresh install for Cursor-engine boards:
 
@@ -126,9 +126,9 @@ Policies are named OpenShell YAML allow-lists. Specs reference a policy by id
 
 Create-form default policy is minimal (`network_policies: {}`). Add egress the
 work needs under Policies (Cursor hosts, GitHub, and for cockpit: host honr MCP
-with `protocol: mcp`). This repo’s checked-in starting point for a full seat is
-`sandbox/cockpit-policy.yaml` — use it only when that matches the human’s
-intent; do not silently assume every install wants it.
+with `protocol: mcp`). This repo’s checked-in starting point for a full cockpit
+policy is `sandbox/cockpit-policy.yaml` — use it only when that matches the
+human’s intent; do not silently assume every install wants it.
 
 Attach only providers that exist. Missing attach names get pruned.
 
@@ -151,7 +151,7 @@ Only after Connectivity, Providers, and a default sandbox spec are ready.
 2. `POST /api/items/{id}/dispatch` on the Initial plan (confirm spend with the
    human first).
 3. Card moves Backlog → Running → Review with a proposed breakdown (`plan.json`).
-4. Human (or operator with approval): Approve — creates sibling Tasks. Never merges.
+4. Human (or operator with approval): Approve — creates sibling Tasks. Does not merge.
 5. Dispatch one Task; it opens a PR and lands in Review.
 6. Human merges on GitHub; card moves to Done.
 

@@ -7,8 +7,8 @@ the empty-board **Welcome** or **Help** OpenShell + sandbox guide, then
 ## The happy path
 
 1. **Create a Project** with a `clone_repo` (`owner/name`). That repo is what
-   the planning agent clones. honr auto-seeds a claimable **Initial plan** Task
-   with the target stamped in.
+   the planning agent clones. honr creates an **Initial plan** Task that already
+   names that repo.
 2. **Start** the Initial plan. The agent clones, reads, and writes `plan.json`
    proposing sibling Tasks. The card lands in **Review**.
 3. **Approve** it. The proposal becomes real Tasks under the Project. Approving
@@ -17,8 +17,7 @@ the empty-board **Welcome** or **Help** OpenShell + sandbox guide, then
 5. The worker clones, works, and opens a PR. The card lands in **Review**.
 6. **You merge on GitHub.** A webhook (or Forge polling) moves the card to Done.
 
-Read the proposal before approving. A card that passes every gate can still be
-building the wrong thing, and coherence is not a property any single card has.
+Read the whole plan before approving. One good card can still be the wrong plan.
 
 `propose_breakdown` is for manually replanning a Project. A card that turns out
 too big uses the same path in reverse: the agent writes `split.json`, the card
@@ -27,7 +26,7 @@ goes to Review with a proposal, and Approve creates the siblings.
 ## Which repo an agent clones
 
 Agents clone the repository named in the card's **intent**, **definition of
-done**, or **notes**. The supervisor never clones — agent-owns-clone.
+done**, or **notes**. The supervisor never clones — the agent does.
 
 **Cold start** (brand-new sandbox): the supervisor clears `/sandbox/repo` and
 the agent clones into that empty workdir.
@@ -38,10 +37,9 @@ an existing checkout in place, or ensures the directory without clearing caches
 when no checkout is present. The agent clones only if the workdir still has no
 repo.
 
-This is why `clone_repo` is required when you create a Project: it gets stamped
-into the Project intent and into the seeded Initial plan, so the first agent
-never has to invent a name. Proposed Tasks should each name their clone target
-the same way — the fixture proposals do, and so should yours.
+That is why `clone_repo` is required when you create a Project: it lands in the
+Project intent and the Initial plan, so the first agent does not invent a name.
+Proposed Tasks should each name their clone target the same way.
 
 Resolution at claim time is short:
 
@@ -60,12 +58,8 @@ Project's `project_prompt`, not repeated on every card.
 
 ## Triage order
 
-Urgency genuinely differs between columns:
-
-1. **Needs You** — an agent is stopped and burning nothing while it waits. Every
-   minute is throughput you are not getting. Resolve these first.
-2. **Review** — finished and safe. It can wait until this evening. Sort by blast
-   radius and novelty, not arrival time.
+1. **Needs You** — an agent is stopped and waiting. Resolve these first.
+2. **Review** — finished work. Sort by size and risk, not arrival time.
 3. Everything else waits for a digest (`board_snapshot` / `board_digest`).
 
 If you are driving honr through a chat agent, interrupt the human for three
@@ -159,9 +153,9 @@ and rebase onto upstream main. Because steer alone does not inject mid-turn,
 honr then parks and unparks so the agent acts on resume — sandbox and
 conversation id are preserved.
 
-Review cards are deliberately *not* parked to reuse that path; they stay in
-Review unless GitHub reports CONFLICTING (or a human bounces them). Steering
-Running does not replace Review catch-up: both fire on the same `MainAdvanced`.
+Review cards stay in Review unless GitHub reports CONFLICTING (or a human
+bounces them). Steering Running does not replace Review catch-up: both fire on
+the same `MainAdvanced`.
 
 ### Local webhook forwarding
 
@@ -182,17 +176,16 @@ For a polling fallback instead, see
 
 ## Archive and Unarchive
 
-**Archive** soft-retires a Project (and its subtree). The lane leaves the active
-board unless you toggle **Show archived**; nothing is deleted — history stays in
-state.
+**Archive** hides a Project (and its cards) from the active board. Nothing is
+deleted — toggle **Show archived** to browse them.
 
-**Unarchive** is the reverse: restore from history so the lane rejoins active
-Projects. Prior states that were Claimed/Running (or other in-flight) come back
-as Backlog, not as live work. Confirm-gated on the board and in the Detail
-drawer, same pattern as Archive.
+**Unarchive** restores the Project so it rejoins the active board. Prior states
+that were Claimed/Running (or other in-flight) come back as Backlog, not as live
+work. Confirm-gated on the board and in the Detail drawer, same pattern as
+Archive.
 
 ## Next
 
 - [Troubleshooting](troubleshooting.md) — when a card stops moving
-- [Cockpit](cockpit.md) — a durable terminal seat with operator reach
+- [Cockpit](cockpit.md) — a durable terminal with operator reach
 - [Configuration](configuration.md) — timeouts, concurrency, Policies, sandbox specs
