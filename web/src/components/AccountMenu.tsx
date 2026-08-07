@@ -86,7 +86,7 @@ export function AccountMenu({
             type="button"
             className="account-menu-item"
             role="menuitem"
-            data-testid="nav-settings"
+            data-testid="account-menu-settings"
             onClick={() => {
               setOpen(false);
               onOpenSettings();

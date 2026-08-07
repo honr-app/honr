@@ -523,7 +523,7 @@ const pingPayload = JSON.stringify({ type: "ping" });
 const parsedPing = JSON.parse(pingPayload);
 assert.strictEqual(parsedPing.type, "ping", "Ping frame type must be ping");
 
-// Test 17: App chrome — Board | Help in sidebar; Settings in account menu
+// Test 17: App chrome — Board | Help | Settings in sidebar; account menu keeps Settings
 const sidebarHtml = renderToString(
   React.createElement(PrimarySidebar, {
     view: "board",
@@ -533,18 +533,30 @@ const sidebarHtml = renderToString(
 assert(sidebarHtml.includes("data-testid=\"app-sidebar\""), "App should render primary sidebar");
 assert(sidebarHtml.includes("Board"), "Sidebar should include Board nav");
 assert(sidebarHtml.includes("Help"), "Sidebar should include Help nav");
-assert(!sidebarHtml.includes("Settings"), "Settings lives in the account menu, not the sidebar");
+assert(sidebarHtml.includes("Settings"), "Sidebar should include Settings nav");
 assert(sidebarHtml.includes("data-testid=\"nav-board\""), "Sidebar should expose Board control");
 assert(sidebarHtml.includes("data-testid=\"nav-help\""), "Sidebar should expose Help control");
 assert(
-  !sidebarHtml.includes("data-testid=\"nav-settings\""),
-  "Settings control must not live in the sidebar",
+  sidebarHtml.includes("data-testid=\"nav-settings\""),
+  "Sidebar should expose Settings control",
 );
 assert(
   !sidebarHtml.includes("data-testid=\"nav-cockpit\""),
   "Cockpit must not live in primary nav",
 );
 assert(!sidebarHtml.includes("Cockpit"), "Sidebar must not list Cockpit");
+
+const sidebarSettingsHtml = renderToString(
+  React.createElement(PrimarySidebar, {
+    view: "settings",
+    onNavigate: () => {},
+  }),
+);
+assert(
+  sidebarSettingsHtml.includes('aria-current="page"') &&
+    sidebarSettingsHtml.includes("data-testid=\"nav-settings\""),
+  "Settings nav marks active when view is settings",
+);
 
 const accountHtml = renderToString(
   React.createElement(AccountMenu, {
@@ -559,7 +571,11 @@ const accountHtml = renderToString(
 assert(accountHtml.includes("data-testid=\"auth-user\""), "Account menu trigger shows user");
 assert(accountHtml.includes("shanemcd"), "Account menu shows login");
 assert(accountHtml.includes("data-testid=\"account-menu\""), "Account menu panel opens");
-assert(accountHtml.includes("data-testid=\"nav-settings\""), "Settings lives in the account menu");
+assert(accountHtml.includes("Settings"), "Account menu still exposes Settings as a secondary path");
+assert(
+  accountHtml.includes("data-testid=\"account-menu-settings\""),
+  "Account menu Settings uses a distinct test id from sidebar nav-settings",
+);
 assert(accountHtml.includes("data-testid=\"auth-logout\""), "Sign out lives in the account menu");
 assert(accountHtml.includes("Theme"), "Account menu includes theme switcher");
 assert(accountHtml.includes("Dark"), "Account menu theme select includes Dark");
