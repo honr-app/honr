@@ -825,7 +825,7 @@ impl ResolvedSandboxCreate {
         };
         Self {
             image: agents.image.clone(),
-            // honr.yaml still names a path for bootstrap; profiles store content.
+            // Seed / YAML-fallback only — never a host file read.
             policy: resolve_policy_yaml(&agents.policy),
             cpu: agents.cpu.clone(),
             memory: agents.memory.clone(),
@@ -836,33 +836,42 @@ impl ResolvedSandboxCreate {
     }
 }
 
-/// Heuristic: already-inline YAML vs a short host path from older boards / YAML.
+/// Heuristic: already-inline YAML vs a short marker / legacy path string.
 pub fn is_inline_policy_yaml(s: &str) -> bool {
     let t = s.trim();
     t.contains('\n') || t.starts_with('#') || t.starts_with("version:")
 }
 
-/// Turn `execution.agents.policy` (path or already-inline YAML) into content.
+/// Whether `execution.agents.policy` is a supported seed / YAML-fallback value.
 ///
-/// Live worker policy is the board sandbox profile. This resolves seed /
-/// YAML-fallback text only: inline YAML, the built-in worker default
-/// (`embedded` / legacy `sandbox/policy.yaml` / empty), or an optional path.
+/// Accepts only `embedded`, empty, the legacy `sandbox/policy.yaml` marker, or
+/// already-inline YAML. Host paths are not a config surface here (one-shot
+/// profile migration still inlines old path-valued catalog rows separately).
+pub fn is_supported_agents_policy(policy: &str) -> bool {
+    let t = policy.trim();
+    t.is_empty() || t == "embedded" || t == "sandbox/policy.yaml" || is_inline_policy_yaml(policy)
+}
+
+/// Turn `execution.agents.policy` into seed / YAML-fallback content.
+///
+/// Live worker policy is the board sandbox profile. This never reads a host
+/// policy file: inline YAML is returned as-is; `embedded` / empty / legacy
+/// `sandbox/policy.yaml` (and any other non-inline value) resolve to the
+/// built-in worker default.
 pub fn resolve_policy_yaml(path_or_yaml: &str) -> String {
     if is_inline_policy_yaml(path_or_yaml) {
         return path_or_yaml.to_string();
     }
-    let t = path_or_yaml.trim();
-    if t.is_empty() || t == "embedded" || t == "sandbox/policy.yaml" {
-        return crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY.to_string();
-    }
-    match std::fs::read_to_string(t) {
-        Ok(content) if !content.trim().is_empty() => content,
-        _ => crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY.to_string(),
-    }
+    // Markers and unrecognized short strings → embedded default. Never
+    // `std::fs::read_to_string` for seed / YAML-fallback.
+    crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY.to_string()
 }
 
 /// If a stored profile still holds a host path (pre–inline-policy boards),
 /// replace it with file contents when the path is readable.
+///
+/// One-shot upgrade only — do not reintroduce host paths as a supported
+/// `execution.agents.policy` surface.
 pub fn migrate_profile_policy_to_inline(policy: &str) -> Option<String> {
     if is_inline_policy_yaml(policy) {
         return None;
@@ -1275,5 +1284,37 @@ mod tests {
         assert_ne!(profile.cpu, agents.cpu);
         assert_ne!(profile.memory, agents.memory);
         assert_eq!(profile.policy, cockpit_pol);
+    }
+
+    #[test]
+    fn resolve_policy_yaml_never_reads_host_paths() {
+        let worker = crate::seed_policies::DEFAULT_WORKER_SANDBOX_POLICY;
+        assert_eq!(resolve_policy_yaml("embedded"), worker);
+        assert_eq!(resolve_policy_yaml(""), worker);
+        assert_eq!(resolve_policy_yaml("sandbox/policy.yaml"), worker);
+        assert_eq!(resolve_policy_yaml("version: 1\n# inline\n"), "version: 1\n# inline\n");
+
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-resolve-policy-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("custom.yaml");
+        std::fs::write(&path, "version: 1\n# must-not-load\n").unwrap();
+        assert_eq!(
+            resolve_policy_yaml(path.to_str().unwrap()),
+            worker,
+            "seed/YAML-fallback must not read an arbitrary host path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(is_supported_agents_policy("embedded"));
+        assert!(is_supported_agents_policy("sandbox/policy.yaml"));
+        assert!(is_supported_agents_policy("version: 1\n"));
+        assert!(!is_supported_agents_policy("sandbox/custom.yaml"));
+        assert!(!is_supported_agents_policy(path.to_str().unwrap_or("gone")));
     }
 }
