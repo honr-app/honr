@@ -474,7 +474,8 @@ pub struct PrConflictCheck {
 /// `GET /repos/{owner}/{repo}/pulls/{n}` using the App installation token.
 ///
 /// Returns `Ok(None)` when App/installation are not configured. Used by Review
-/// catch-up after MainAdvanced — observe conflicts; do not rebase in a sandbox.
+/// catch-up after main advances — observe `mergeable` first; MERGEABLE is a
+/// no-op, CONFLICTING bounces, UNKNOWN retries. No sandbox rebase.
 pub async fn fetch_pr_conflict_check(
     board: &SharedBoard,
     pr_url: &str,
