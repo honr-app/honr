@@ -49,8 +49,8 @@ export function OpenShellReadinessStripView({
       <header className="openshell-readiness-head">
         <h2 id="openshell-readiness-title">OpenShell readiness</h2>
         <p className="dim openshell-readiness-lede">
-          Live checks from the board APIs. Not ready means incomplete or
-          unhealthy — fix in Settings before the first Project loop.
+          Gateway and sandbox setup status. Fix anything not ready in Settings
+          before dispatching.
         </p>
       </header>
       <ul className="openshell-readiness-list">

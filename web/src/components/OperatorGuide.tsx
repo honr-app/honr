@@ -27,8 +27,8 @@ export function OperatorGuide() {
       >
         <h2 id="operator-guide-quickstart-title">Quickstart</h2>
         <p className="dim">
-          The in-app first loop: create a Project, plan, Approve, then dispatch.
-          Agents stay idle until you dispatch.
+          Create a Project, approve its plan, then dispatch. Agents stay idle
+          until you dispatch.
         </p>
         <ol
           className="operator-guide-steps"
@@ -36,19 +36,18 @@ export function OperatorGuide() {
         >
           <li>
             Create a Project with required <code>clone_repo</code> (
-            <code>owner/name</code>) — via the board or{" "}
-            <code>create_project</code>. honr auto-seeds a claimable{" "}
-            <strong>Initial plan</strong> Task stamped with that planning clone
-            target.
+            <code>owner/name</code>) — on the board or via{" "}
+            <code>create_project</code>. That creates an{" "}
+            <strong>Initial plan</strong> task for that repo.
           </li>
           <li>
             <code>dispatch</code> the Initial plan — the agent clones{" "}
             <code>clone_repo</code> and writes <code>plan.json</code>. Each
-            proposed task names its clone target in intent/DoD.
+            proposed task should name its clone target in intent/DoD.
           </li>
           <li>
-            <strong>Approve</strong> — creates sibling Tasks under the Project
-            (never merges).
+            <strong>Approve</strong> — creates the Project&apos;s Tasks from the
+            plan.
           </li>
           <li>
             <code>dispatch</code> each Backlog Task (or turn on Project auto
@@ -57,8 +56,7 @@ export function OperatorGuide() {
         </ol>
         <p className="dim" data-testid="operator-guide-idle-note">
           Agents stay idle until you dispatch. Name the repo to clone in each
-          Task&apos;s intent/DoD. After a report, card{" "}
-          <code>pull_request</code> drives resume remotes.
+          Task&apos;s intent/DoD.
         </p>
       </section>
 
@@ -69,12 +67,8 @@ export function OperatorGuide() {
       >
         <h2 id="operator-guide-mcp-title">Connect MCP</h2>
         <p className="dim">
-          Drive Projects and Tasks from any MCP client.{" "}
-          <code>/mcp</code> is the <strong>operator seat</strong>: shape
-          Projects, triage, dispatch, park, steer, approve — operator tools
-          only. Worker verbs (<code>claim</code>, <code>heartbeat</code>,{" "}
-          <code>report</code>, …) are not on this seat. honr must already be
-          listening before you add the server.
+          Drive the board from an MCP client: create Projects, triage, dispatch,
+          park, steer, and approve. Start honr before adding the server.
         </p>
         <ol className="operator-guide-steps" data-testid="operator-guide-mcp-steps">
           <li>
@@ -141,9 +135,9 @@ export function OperatorGuide() {
       >
         <h2 id="operator-guide-openshell-title">OpenShell + sandbox</h2>
         <p className="dim">
-          Before agents can run the Quickstart loop, configure the OpenShell
-          gateway, providers, and a sandbox spec. honr does not discover host
-          credentials — paste them in Settings.
+          Before agents can run, connect the OpenShell gateway and set up
+          providers plus a sandbox spec. Paste credentials in Settings — honr
+          does not find them on the host for you.
         </p>
         <ol
           className="operator-guide-steps"
@@ -168,11 +162,10 @@ export function OperatorGuide() {
               Settings → OpenShell → Providers
             </a>
             {" "}
-            — configure providers (including shipped type{" "}
-            <code>github-app</code> / <code>GH_TOKEN</code>). Sync applies them
-            to the gateway. Provider types lists the shipped{" "}
-            <code>github-app</code> profile next to <code>cursor-agent</code>{" "}
-            and <code>antigravity</code>.
+            — configure providers (including shipped{" "}
+            <code>github-app</code> / <code>GH_TOKEN</code>, alongside{" "}
+            <code>cursor-agent</code> and others). Sync applies them to the
+            gateway.
           </li>
           <li>
             <a
@@ -182,8 +175,8 @@ export function OperatorGuide() {
               Settings → OpenShell → Policies
             </a>
             {" "}
-            — named OpenShell allow-list YAML (filesystem / network). Sandbox
-            specs reference a policy by id.
+            — network / filesystem allow-lists. Sandbox specs pick a policy by
+            id.
           </li>
           <li>
             <a
@@ -202,7 +195,7 @@ export function OperatorGuide() {
               Settings → Agent runtime
             </a>
             {" "}
-            if needed (dispatch starts with the process).
+            if needed.
           </li>
         </ol>
       </section>

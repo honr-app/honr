@@ -718,7 +718,7 @@ assert(!parkedHtml.includes("data-testid=\"cockpit-session-resume\""), "No Resum
 const attachAbsent = renderToString(
   React.createElement(CockpitAttachView, {
     canAttach: false,
-    disabledReason: "Start a cockpit session to open the seat.",
+    disabledReason: "Start a cockpit session to open the terminal.",
   }),
 );
 assert(attachAbsent.includes("data-testid=\"cockpit-attach\""), "Attach root");
@@ -755,7 +755,7 @@ assert.equal(cockpitAttachRetryDelayMs(9), 15_000, "backoff caps at 15s");
 // Gate helpers
 assert.deepEqual(cockpitAttachGate(null), {
   canAttach: false,
-  reason: "Start a cockpit session to open the seat.",
+  reason: "Start a cockpit session to open the terminal.",
 });
 assert.equal(cockpitAttachGate(parkedSession).canAttach, false);
 assert.match(cockpitAttachGate(parkedSession).reason, /Stop it, then Start again/);
@@ -781,8 +781,8 @@ assert(helpHtml.includes("Approve"), "Help should document Approve");
 assert(helpHtml.includes("dispatch"), "Help should document dispatch");
 assert(helpHtml.includes("http://127.0.0.1:8080/mcp"), "Help should show MCP URL");
 assert(helpHtml.includes("Streamable HTTP"), "Help should name Streamable HTTP transport");
-assert(helpHtml.includes("Quickstart"), "Help hero names Quickstart as a Help job");
-assert(helpHtml.includes("Connect MCP"), "Help hero names Connect MCP as a Help job");
+assert(helpHtml.includes("Quickstart"), "Help includes Quickstart");
+assert(helpHtml.includes("Connect MCP"), "Help includes Connect MCP");
 // Help surface order: Quickstart pillar before MCP pillar.
 {
   const helpQuickstartIdx = helpHtml.indexOf("data-testid=\"operator-guide-quickstart\"");
@@ -1381,8 +1381,8 @@ assert(!workspaceHtml.includes("data-testid=\"workspace-webhook-hint\""), "no gh
 assert(!workspaceHtml.includes("gh webhook forward"), "no gh webhook forward copy");
 assert(!workspaceHtml.includes("honr-app/honr"), "Forge panel must not hardcode Shane repo");
 assert(
-  workspaceHtml.includes("pull_request") || workspaceHtml.includes("Work remotes"),
-  "Forge copy must mention card pull_request / work remotes",
+  workspaceHtml.includes("poll") || workspaceHtml.includes("Polling"),
+  "Forge copy mentions polling",
 );
 assert(workspaceHtml.includes("data-testid=\"workspace-save\""), "Forge save control");
 
@@ -1466,8 +1466,8 @@ assert(
   "Warn copy says poll will skip",
 );
 assert(
-  workspaceAuthMissingHtml.includes("Nothing is inferred"),
-  "Copy says nothing is inferred",
+  workspaceAuthMissingHtml.includes("supplies the GitHub token for polling"),
+  "Copy explains choosing a poll credential",
 );
 const fixtureProfiles = [
   {
@@ -1665,7 +1665,8 @@ assert(emptyBoardHtml.includes("plan.json"), "Board empty documents plan.json");
 assert(emptyBoardHtml.includes("Approve"), "Board empty documents Approve");
 assert(emptyBoardHtml.includes("http://127.0.0.1:8080/mcp"), "Board empty shows MCP URL");
 assert(emptyBoardHtml.includes("Streamable HTTP"), "Board empty names Streamable HTTP transport");
-assert(emptyBoardHtml.includes("OpenShell and sandbox"), "Board Welcome lede mentions OpenShell/sandbox");
+assert(emptyBoardHtml.includes("Setup steps"), "Board Welcome lede points at setup below");
+assert(emptyBoardHtml.includes("OpenShell + sandbox"), "Board empty includes OpenShell setup section");
 assert(emptyBoardHtml.includes("/settings/openshell/connectivity"), "Board empty deep-links Connectivity");
 assert(emptyBoardHtml.includes("/settings/agent-runtime"), "Board empty deep-links Agent runtime");
 assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness\""), "Board empty shows OpenShell readiness strip");

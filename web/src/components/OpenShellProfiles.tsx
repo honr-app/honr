@@ -116,12 +116,10 @@ export function SandboxesPanelView({
         <div className="openshell-band-head">
           <h3 id="openshell-profiles-title">Sandbox specs</h3>
           <p className="dim">
-            Create-specs (image, resources, engine) plus a reference to a named{" "}
-            <strong>Policy</strong>, and which providers attach when a sandbox
-            is created from this spec. The first profile becomes the global
-            default; Cockpit uses that default unless you point Cockpit at
-            another profile. Edit allow-list YAML under the Policies tab;
-            attach providers defined under Providers.
+            Image, resources, engine, policy, and which providers attach when a
+            sandbox is created. The first spec is the global default (Cockpit
+            uses it unless you pick another). Policies and Providers are
+            configured in the other tabs.
           </p>
         </div>
 

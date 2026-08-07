@@ -112,11 +112,7 @@ export function Settings({
       <header className="settings-hero">
         <h1>Settings</h1>
         <p className="settings-lede">
-          Control-plane preferences. Forge holds provider and webhook poll. Each
-          card’s <code>pull_request</code> (after report) holds work remotes.
-          OpenShell holds Connectivity, Providers (including GitHub Application
-          Access Token), and Sandbox specs. Agent runtime holds concurrency,
-          timeouts, and the fallback engine.
+          OpenShell, access, forge polling, and agent runtime.
         </p>
       </header>
 
@@ -401,7 +397,7 @@ export function WorkspacePanelView({
   let authLabel = "credential not selected";
   let authClass = "openshell-health-bad";
   let authDetail =
-    "Choose which OpenShell provider supplies the host poll token. Nothing is inferred.";
+    "Choose which OpenShell provider supplies the GitHub token for polling.";
   if (!hasCandidates) {
     authLabel = "no GitHub credentials";
     authDetail =
@@ -428,11 +424,9 @@ export function WorkspacePanelView({
     <section aria-labelledby="workspace-title" data-testid="workspace-panel">
       <h2 id="workspace-title">Forge</h2>
       <p className="dim">
-        Forge provider and webhook poll. Work remotes live on each card’s{" "}
-        <code>pull_request</code> (url / base / head) after the agent reports.
-        Polling needs an explicit GitHub credential provider — App-minted{" "}
-        <code>github-app</code> or a normal <code>github</code> /{" "}
-        <code>GH_TOKEN</code> row.
+        Choose a forge and optionally poll for PR check updates. Polling needs a
+        GitHub credential from OpenShell → Providers (
+        <code>github-app</code> or a <code>GH_TOKEN</code>).
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -693,10 +687,9 @@ export function AgentRuntimePanelView({
     <section aria-labelledby="agent-runtime-title" data-testid="agent-runtime-panel">
       <h2 id="agent-runtime-title">Agent runtime</h2>
       <p className="dim">
-        Process knobs for OpenShell sandboxes: branch prefix, concurrency,
-        timeouts, sweep interval, and the fallback agent engine when a profile
-        omits one. Fresh boards seed from compiled defaults; edits persist on
-        the Board. Per-run engine lives on OpenShell → Sandbox specs.
+        Concurrency, timeouts, branch prefix, sweep interval, and the fallback
+        engine when a sandbox spec does not set one. Per-run engine is on
+        OpenShell → Sandbox specs.
       </p>
 
       {error && <div className="err">{error}</div>}

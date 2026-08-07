@@ -46,10 +46,9 @@ export function OpenShellProviderTypesPanelView({
       <div className="openshell-band-head">
         <h3 id="openshell-provider-types-title">Provider types</h3>
         <p className="dim">
-          Custom OpenShell provider type profiles (YAML) stored on the board.
-          Sync imports these to the gateway before applying provider instances.
-          Builtin types (including egress-only <code>cursor</code>) stay on the
-          gateway and are not editable here.
+          Custom provider type definitions (YAML). Sync uploads them to the
+          gateway before applying provider credentials. Built-in types stay on
+          the gateway and are not editable here.
         </p>
       </div>
 

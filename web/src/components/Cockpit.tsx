@@ -10,7 +10,7 @@ export function cockpitAttachGate(
   session: CockpitSession | null,
 ): { canAttach: boolean; reason: string | null } {
   if (session == null) {
-    return { canAttach: false, reason: "Start a cockpit session to open the seat." };
+    return { canAttach: false, reason: "Start a cockpit session to open the terminal." };
   }
   if (session.status === "parked") {
     return {
@@ -517,7 +517,7 @@ export function CockpitDrop({ open }: { open: boolean }) {
       id="cockpit-drop"
       className={`cockpit-drop${shown ? " open" : ""}`}
       data-testid="cockpit-drop"
-      aria-label="Cockpit cockpit"
+      aria-label="Cockpit"
       aria-hidden={!open}
       inert={!open || undefined}
     >

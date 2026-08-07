@@ -97,9 +97,9 @@ export function OpenShellPanelView({
       <header className="openshell-hero">
         <h2 id="openshell-title">OpenShell</h2>
         <p className="dim openshell-hero-lead">
-          Gateway talk for sandboxes: connect once, define providers and
-          policies, then choose what each sandbox spec attaches at create. Host
-          Docker / Colima stay outside honr.
+          Connect honr to your OpenShell gateway, then configure providers,
+          policies, and sandbox specs. Each spec picks which providers and
+          policy a run gets.
         </p>
         <div
           className="openshell-status-chip"
@@ -161,10 +161,9 @@ export function OpenShellPanelView({
           <div className="openshell-band-head">
             <h3 id="openshell-connectivity-title">Connectivity</h3>
             <p className="dim">
-              Gateway endpoint and mTLS PEMs. Paste or import from the local
-              OpenShell config dir; PEMs seal into the board database (
-              <code>~/.config/honr/master.key</code>). The API never returns
-              private key material.
+              Gateway URL and mTLS certificates. Paste them or import from the
+              local OpenShell config dir. Private keys are stored encrypted and
+              are not returned by the API.
             </p>
           </div>
 

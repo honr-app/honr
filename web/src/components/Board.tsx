@@ -124,10 +124,8 @@ export function Board(props: BoardProps) {
         <header className="board-hero">
           <h1>Welcome to honr</h1>
           <p className="board-lede">
-            This is the control plane for agent work. Connect MCP, set up
-            OpenShell and sandbox prerequisites, then create a Project
-            (auto-seeds Initial plan), dispatch that card, Approve the plan,
-            and dispatch Tasks. Agents stay idle until you dispatch.
+            Create a Project, approve its plan, then dispatch work. Setup steps
+            are below.
           </p>
         </header>
         <div className="board-empty" data-testid="board-empty">
@@ -211,7 +209,7 @@ export function Board(props: BoardProps) {
             type="button"
             className={`filter-btn ${showArchived ? "active" : ""}`}
             onClick={() => setShowArchived((v) => !v)}
-            title="Soft-retired projects stay in state; toggle to browse them"
+            title="Show archived Projects"
           >
             Archived{showArchived ? "" : ` (${archivedGoals.length})`}
           </button>
@@ -248,7 +246,7 @@ export function Board(props: BoardProps) {
         <section className="board-needs" aria-labelledby="board-needs-title">
           <div className="board-section-head">
             <h2 id="board-needs-title">Needs you</h2>
-            <span className="dim">Answer here — work unblocks without opening a drawer</span>
+            <span className="dim">Answer here without opening the card</span>
           </div>
           <NeedsYouList
             items={needsYouItems}
@@ -507,7 +505,7 @@ function Swimlane({
           </button>
         )}
         {archived && (
-          <span className="pill" title="Soft-retired — history only">
+          <span className="pill" title="Archived — hidden from the board by default">
             Archived
           </span>
         )}
@@ -542,7 +540,7 @@ function Swimlane({
                 className="dispatch-toggle archive-toggle"
                 disabled={unarchiveBusy}
                 onClick={() => setConfirmUnarchive(true)}
-                title="Unarchive this Project — restore from history (not delete)"
+                title="Restore this Project to the board"
                 data-testid="lane-unarchive"
               >
                 Unarchive
@@ -575,13 +573,13 @@ function Swimlane({
               className="dispatch-toggle archive-toggle"
               disabled={archiveBusy}
               onClick={() => setConfirmArchive(true)}
-              title="Archive this Project and its subtree (retire, not delete)"
+              title="Archive this Project and its cards"
             >
               Archive
             </button>
           ) : (
             <span className="lane-archive-confirm">
-              <span className="dim">Retire project?</span>
+              <span className="dim">Archive project?</span>
               <button
                 type="button"
                 className="dispatch-toggle archive-confirm"
