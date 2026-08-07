@@ -4706,7 +4706,6 @@ facts are pasted, then unpark";
     ///
     /// Prior Claimed/Running/Splitting/NeedsHuman become Backlog (or Shaping
     /// when a leaf lacks DoD). Leases and `awaiting_dispatch` stay cleared.
-    #[allow(dead_code)] // REST/MCP transports land in the follow-up card
     pub fn unarchive_scope(&self, id: ItemId, reason: Option<String>) -> Result<Vec<ItemId>, String> {
         let root = self
             .get(id)

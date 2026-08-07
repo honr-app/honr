@@ -64,6 +64,7 @@ pub fn routes() -> Router<SharedBoard> {
         .route("/items/{id}/init-plan", post(init_plan))
         .route("/items/{id}/request-changes", post(request_changes))
         .route("/items/{id}/cut", post(cut_scope))
+        .route("/items/{id}/unarchive", post(unarchive_scope))
         .route("/items/{id}/dispatch", post(dispatch_item))
         .route("/items/{id}/auto-dispatch", post(set_auto_dispatch))
         .route(
@@ -559,6 +560,14 @@ async fn cut_scope(
     Json(req): Json<ReasonReq>,
 ) -> ApiResult<Vec<ItemId>> {
     Ok(Json(b.cut_scope(id, req.reason).map_err(ApiError)?))
+}
+
+async fn unarchive_scope(
+    AxState(b): AxState<SharedBoard>,
+    Path(id): Path<ItemId>,
+    Json(req): Json<ReasonReq>,
+) -> ApiResult<Vec<ItemId>> {
+    Ok(Json(b.unarchive_scope(id, req.reason).map_err(ApiError)?))
 }
 
 async fn delete_item(
@@ -2120,6 +2129,94 @@ mod tests {
             "Initial plan carries clone targets in prose"
         );
         assert!(b.children_of(created.id).contains(&seed.id));
+    }
+
+    #[tokio::test]
+    async fn unarchive_scope_restores_retired_project() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-unarchive-ok-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let project = b
+            .create(
+                None,
+                "Archive then restore",
+                "why",
+                None,
+                crate::model::Origin::Human,
+                true,
+                None,
+            )
+            .expect("project");
+        let _ = b.transition(project.id, State::Shaping, "human", None);
+        b.cut_scope(project.id, Some("archived".into()))
+            .expect("cut");
+        assert_eq!(b.get(project.id).unwrap().state, State::Retired);
+
+        let Ok(Json(ids)) = unarchive_scope(
+            AxState(b.clone()),
+            Path(project.id),
+            Json(ReasonReq {
+                reason: Some("restored".into()),
+            }),
+        )
+        .await
+        else {
+            panic!("unarchive_scope should succeed");
+        };
+        assert!(ids.contains(&project.id));
+        assert_eq!(b.get(project.id).unwrap().state, State::Shaping);
+        assert!(
+            b.digest().goals.iter().any(|g| g.goal_id == project.id),
+            "restored Project must reappear in digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn unarchive_scope_rejects_non_retired() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-unarchive-reject-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let project = b
+            .create(
+                None,
+                "Still live",
+                "why",
+                None,
+                crate::model::Origin::Human,
+                true,
+                None,
+            )
+            .expect("project");
+
+        let Err(ApiError(msg)) = unarchive_scope(
+            AxState(b.clone()),
+            Path(project.id),
+            Json(ReasonReq { reason: None }),
+        )
+        .await
+        else {
+            panic!("unarchive on non-retired must fail");
+        };
+        assert!(
+            msg.contains("not retired"),
+            "expected not-retired error, got {msg}"
+        );
     }
 
     #[tokio::test]
