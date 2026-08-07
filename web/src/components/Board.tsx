@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { Card } from "./Card.js";
 import { DependencyGraph } from "./DependencyGraph.js";
 import { OperatorGuide } from "./OperatorGuide.js";
+import { OpenShellReadinessStrip } from "./OpenShellReadiness.js";
 import { humanizeEscalation } from "../humanize.js";
 import { BOARD_COLUMNS, COLUMN_OF, normState } from "../types.js";
 import type { ColumnKey, GoalView, StoryLine, WorkItem } from "../types.js";
@@ -142,6 +143,7 @@ export function Board(props: BoardProps) {
               </button>
             </p>
           )}
+          <OpenShellReadinessStrip />
           <OperatorGuide />
         </div>
       </div>
