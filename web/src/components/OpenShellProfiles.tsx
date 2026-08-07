@@ -62,7 +62,6 @@ export function SandboxesPanelView({
   onDelete,
   onSetDefault,
   onSetCockpit,
-  onClearCockpit,
 }: {
   profiles: SandboxProfile[];
   defaultId: string | null;
@@ -82,7 +81,6 @@ export function SandboxesPanelView({
   onDelete: (id: string) => void;
   onSetDefault: (id: string) => void;
   onSetCockpit: (id: string) => void;
-  onClearCockpit?: () => void;
 }) {
   const isCreate = editingId === "";
   const isEditing = editingId !== null;
@@ -313,7 +311,7 @@ export function SandboxesPanelView({
                     disabled={busy}
                     onChange={(policy) => onDraftChange({ ...draft, policy })}
                     required
-                    rows={10}
+                    rows={18}
                     placeholder={
                       "version: 1\nfilesystem_policy:\n  include_workdir: true\n"
                     }
@@ -421,18 +419,6 @@ export function SandboxesPanelView({
                       data-testid={`sandbox-set-cockpit-${selected.id}`}
                     >
                       Use for Cockpit
-                    </button>
-                  )}
-                  {onClearCockpit &&
-                    cockpitId != null &&
-                    selected.id === cockpitId && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={onClearCockpit}
-                      data-testid="sandbox-clear-cockpit"
-                    >
-                      Cockpit → use default
                     </button>
                   )}
                   {canDeleteSelected && (
@@ -580,7 +566,6 @@ export function SandboxesPanel() {
       }}
       onSetDefault={(id) => run(api.setDefaultSandboxProfile(id))}
       onSetCockpit={(id) => run(api.setCockpitSandboxProfile(id))}
-      onClearCockpit={() => run(api.clearCockpitSandboxProfile())}
     />
   );
 }
