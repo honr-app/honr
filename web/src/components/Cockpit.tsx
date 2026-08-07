@@ -179,7 +179,16 @@ export function CockpitAttachView({
       }, delay);
     };
 
-    void (async () => {
+    // React StrictMode (Vite dev) mount→unmount→remounts effects. Opening the
+    // attach WebSocket in the phantom first mount still hits the server, which
+    // pkills the agent on the real remount — death spiral of exit 143. Defer
+    // past that cleanup so only the surviving mount connects. Production
+    // (:8080 embedded UI) does not double-invoke, which is why attach looked
+    // "Vite-only broken".
+    let startTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      startTimer = null;
+      if (disposed) return;
+      void (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
         import("@xterm/xterm"),
         import("@xterm/addon-fit"),
@@ -370,10 +379,12 @@ export function CockpitAttachView({
         term.dispose();
         setConnected(false);
       };
-    })();
+      })();
+    }, 0);
 
     return () => {
       disposed = true;
+      if (startTimer != null) clearTimeout(startTimer);
       if (retryTimer != null) clearTimeout(retryTimer);
       cleanup?.();
     };

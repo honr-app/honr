@@ -14,6 +14,9 @@ const toHonr = (extra: ProxyOptions = {}): ProxyOptions => ({
   changeOrigin: true,
   configure: (proxy) => {
     proxy.on("proxyReq", (proxyReq, req) => forwardBrowserHost(proxyReq, req));
+    // Upgrade path does not fire proxyReq — keep forwarded host for any
+    // future WS handlers that read X-Forwarded-* during the handshake.
+    proxy.on("proxyReqWs", (proxyReq, req) => forwardBrowserHost(proxyReq, req));
   },
   ...extra,
 });
@@ -29,8 +32,9 @@ export default defineConfig({
       "/api/events": toHonr({ timeout: 0, proxyTimeout: 0 }),
       "/api/ws": toHonr({ ws: true }),
       "/api/cockpit-attach": toHonr({ ws: true, timeout: 0, proxyTimeout: 0 }),
-      // One origin in dev, so SSE and the MCP endpoint behave as they will in prod.
-      "/api": toHonr(),
+      // ws:true so any future /api/* WebSocket is proxied even without a
+      // dedicated rule (Vite skips upgrade when the matching rule lacks ws).
+      "/api": toHonr({ ws: true }),
       "/auth": toHonr(),
       "/mcp": toHonr(),
     },
