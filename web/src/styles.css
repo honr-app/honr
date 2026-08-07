@@ -632,7 +632,6 @@ main.with-side-panes {
   border-radius: var(--radius-sm);
   background: var(--panel);
   padding: 18px 20px;
-  max-width: 640px;
 }
 .settings-panel h2 {
   margin: 0 0 8px;
@@ -694,11 +693,18 @@ main.with-side-panes {
   border-radius: 999px;
   padding: 1px 7px;
 }
+/* Detail pane is wide — keep actions content-sized in a row, not full-bleed. */
 .sandbox-profile-actions {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex-shrink: 0;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 12px;
+}
+.sandbox-profile-actions button {
+  width: auto;
+  flex: 0 0 auto;
 }
 .sandbox-profile-toolbar { margin-top: 4px; }
 .sandbox-profile-form {
@@ -721,14 +727,24 @@ main.with-side-panes {
   color: var(--dim);
   font-size: 12px;
 }
-.sandbox-profile-form input.search-input {
+/* Board .search-input is a fixed 220px chip; forms need full width. */
+.sandbox-profile-form .search-input {
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   color: var(--ink);
+}
+.sandbox-profile-form textarea.search-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  min-height: 5.5rem;
+  resize: vertical;
 }
 .sandbox-profile-form textarea.sandbox-policy-textarea,
 textarea.sandbox-policy-textarea {
   width: 100%;
-  min-height: 140px;
+  min-height: 220px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.4;
@@ -743,6 +759,7 @@ textarea.sandbox-policy-textarea {
 .yaml-editor .cm-editor {
   width: 100%;
   max-width: 100%;
+  min-height: 220px;
 }
 .yaml-editor[data-disabled="true"] .cm-editor,
 .yaml-editor[aria-disabled="true"] .cm-editor {
