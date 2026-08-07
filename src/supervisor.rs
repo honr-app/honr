@@ -51,7 +51,7 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     // Settings can complete merges when `gh webhook forward` is down.
     tokio::spawn(crate::github_poll::poll_loop(board.clone()));
 
-    // Durable Settings overlay (seeded from yaml at board load).
+    // Durable Settings overlay (seeded from compiled defaults at board load).
     let agents = board.effective_agents();
     if !agents.enabled {
         tracing::info!("execution.agents.enabled = false; board runs with no executor");

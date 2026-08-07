@@ -188,17 +188,23 @@ impl RepoConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
+    /// Process boot gate in `honr.yaml` (`execution.agents.enabled`). Off by
+    /// default so the board runs without podman/gateway/credentials. After
+    /// seed, Settings → Agent runtime owns the durable toggle (restart still
+    /// required when enabling a process that started disabled).
     #[serde(default)]
     pub enabled: bool,
-    /// Passed to `--from`. Needs a Rust toolchain to build honr; see
-    /// `sandbox/Containerfile`.
+    /// Sandbox create image. Compiled default seeds empty board profiles;
+    /// live edits are Settings → Profiles (not `honr.yaml`).
     #[serde(default = "d_image")]
     pub image: String,
-    /// Seed / YAML-fallback marker for an empty board catalog: `embedded`
-    /// (default), empty, legacy `sandbox/policy.yaml`, or already-inline YAML.
-    /// Not a host file path — live policy is the board sandbox profile.
+    /// Seed / last-resort policy marker: `embedded` (default), empty, legacy
+    /// `sandbox/policy.yaml`, or already-inline YAML. Not a host file path —
+    /// live policy is the board sandbox profile.
     #[serde(default = "d_policy")]
     pub policy: String,
+    /// Optional legacy remotes stanza. Card work remotes come from
+    /// `pull_request`; not a live create-knob SoT.
     #[serde(default)]
     pub repo: RepoConfig,
     #[serde(default)]
@@ -207,6 +213,7 @@ pub struct AgentConfig {
     pub memory: Option<String>,
     /// Sandboxes are heavy and this is alpha software. Do not start at seven.
     /// Primary agent CLI engine (`cursor`, `agy`, `claude`, or `opencode`).
+    /// Seeded into profiles / Agent runtime from compiled defaults.
     #[serde(default = "d_engine")]
     pub engine: String,
     #[serde(default = "d_concurrent")]
@@ -435,14 +442,18 @@ mod tests {
         assert!(inline.validate().is_ok());
     }
 
-    /// honr.yaml must parse into the config the code expects — the file is the
-    /// real contract, not the struct.
+    /// honr.yaml must parse: boot essentials (board.database, levels, sweep,
+    /// agents.enabled) plus any legacy agent fields with serde defaults.
     #[test]
     fn shipped_honr_yaml_parses() {
         let s = Schema::load("honr.yaml").expect("honr.yaml parses");
         assert!(!s.levels.is_empty(), "levels should be declared");
         assert!(s.levels.iter().any(|l| l.claimable), "something must be claimable");
         s.execution.agents.validate().expect("shipped agent config is valid");
+        assert!(
+            s.execution.agents.enabled,
+            "shipped install keeps agents.enabled boot gate on"
+        );
         let db = s.board.database.parsed().expect("board.database.url parses");
         assert_eq!(db.backend(), crate::db::DatabaseBackend::Sqlite);
     }
