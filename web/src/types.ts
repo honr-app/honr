@@ -77,7 +77,7 @@ export type McpTransport =
   | { kind: "http"; url: string; auth?: McpHttpAuth }
   | { kind: "stdio"; command: string; args?: string[]; cwd?: string | null };
 
-/** Board catalog MCP server (Settings → OpenShell → MCP servers). */
+/** Board catalog MCP server (Settings → MCP servers). */
 export interface McpServerDesired {
   id: string;
   name: string;

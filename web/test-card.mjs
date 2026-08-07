@@ -844,16 +844,19 @@ const settingsHtml = renderToString(React.createElement(Settings));
 assert(settingsHtml.includes("data-testid=\"settings\""), "Settings view should render");
 assert(!settingsHtml.includes("data-testid=\"settings-nav-sandboxes\""), "Sandboxes nav item removed");
 assert(settingsHtml.includes("data-testid=\"settings-nav-openshell\""), "Settings should nav to OpenShell");
+assert(settingsHtml.includes("data-testid=\"settings-nav-mcp-servers\""), "Settings should nav to MCP servers");
 assert(!settingsHtml.includes("data-testid=\"settings-nav-github-app\""), "GitHub App folded into OpenShell Providers");
 assert(settingsHtml.includes("data-testid=\"openshell-panel\""), "Default section is OpenShell");
 assert(settingsHtml.includes("data-testid=\"openshell-subnav\""), "OpenShell has section subnav");
 assert(settingsHtml.includes("data-testid=\"openshell-tab-profiles\""), "OpenShell tab for Profiles");
 assert(settingsHtml.includes("data-testid=\"openshell-tab-policies\""), "OpenShell tab for Policies");
+assert(!settingsHtml.includes("data-testid=\"openshell-tab-mcp-servers\""), "MCP servers is not an OpenShell tab");
 assert(settingsHtml.includes("data-testid=\"openshell-connectivity\""), "Default OpenShell tab is Connectivity");
 assert(settingsHtml.includes("Connectivity"), "Settings OpenShell names Connectivity");
 assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Forge (workspace id)");
 assert(settingsHtml.includes("OpenShell"), "Settings should include OpenShell section");
+assert(settingsHtml.includes("MCP servers"), "Settings should include MCP servers section");
 assert(settingsHtml.includes("Agent runtime"), "Settings should include Agent runtime section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-agent-runtime\""), "Settings should nav to Agent runtime");
 assert(!settingsHtml.includes("data-testid=\"general-stub\""), "General stub must be gone");
@@ -928,9 +931,9 @@ assert(
     openshellHtml.includes("data-testid=\"openshell-tab-providers\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-provider-types\"") &&
     openshellHtml.includes("data-testid=\"openshell-tab-policies\"") &&
-    openshellHtml.includes("data-testid=\"openshell-tab-mcp-servers\"") &&
-    openshellHtml.includes("data-testid=\"openshell-tab-profiles\""),
-  "OpenShell tabs: Connectivity / Providers / Provider types / Policies / MCP servers / Sandbox specs",
+    openshellHtml.includes("data-testid=\"openshell-tab-profiles\"") &&
+    !openshellHtml.includes("data-testid=\"openshell-tab-mcp-servers\""),
+  "OpenShell tabs: Connectivity / Providers / Provider types / Policies / Sandbox specs",
 );
 
 const openshellUnhealthyHtml = renderToString(
@@ -1274,15 +1277,17 @@ const openshellPoliciesTabHtml = renderToString(
 assert(openshellPoliciesTabHtml.includes("data-testid=\"openshell-policies-slot\""), "Policies tab hosts policies slot");
 assert(!openshellPoliciesTabHtml.includes("data-testid=\"openshell-profiles-slot\""), "Profiles slot hidden on Policies tab");
 
-const openshellMcpTabHtml = renderToString(
-  React.createElement(OpenShellPanelView, {
-    ...openshellPanelProps,
-    activeTab: "mcp-servers",
-    status: { healthy: true, summary: "ok", not_configured: false },
-    mcpServers: React.createElement("div", { "data-testid": "openshell-mcp-servers-slot" }, "mcp"),
-  }),
+const mcpServersSectionHtml = renderToString(
+  React.createElement(Settings, { section: "mcp-servers" }),
 );
-assert(openshellMcpTabHtml.includes("data-testid=\"openshell-mcp-servers-slot\""), "MCP servers tab hosts slot");
+assert(
+  mcpServersSectionHtml.includes("data-testid=\"settings-panel-mcp-servers\""),
+  "MCP servers settings panel host",
+);
+assert(
+  mcpServersSectionHtml.includes("data-testid=\"mcp-servers-panel\""),
+  "MCP servers section renders catalog panel",
+);
 
 const fixturePolicies = [
   {
@@ -1920,11 +1925,17 @@ assert.deepStrictEqual(parseChromeLocation("/settings/openshell/policies"), {
   settingsSection: "openshell",
   openShellTab: "policies",
 });
+assert.deepStrictEqual(parseChromeLocation("/settings/mcp-servers"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "mcp-servers",
+  openShellTab: "connectivity",
+});
 assert.deepStrictEqual(parseChromeLocation("/settings/openshell/mcp-servers"), {
   view: "settings",
   cardId: null,
-  settingsSection: "openshell",
-  openShellTab: "mcp-servers",
+  settingsSection: "mcp-servers",
+  openShellTab: "connectivity",
 });
 assert.deepStrictEqual(parseChromeLocation("/settings/openshell/profiles"), {
   view: "settings",
@@ -2050,10 +2061,10 @@ assert.strictEqual(
   formatChromePath({
     view: "settings",
     cardId: null,
-    settingsSection: "openshell",
-    openShellTab: "mcp-servers",
+    settingsSection: "mcp-servers",
+    openShellTab: "connectivity",
   }),
-  "/settings/openshell/mcp-servers",
+  "/settings/mcp-servers",
 );
 assert.strictEqual(
   formatChromePath({
