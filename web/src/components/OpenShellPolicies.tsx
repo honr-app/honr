@@ -64,11 +64,9 @@ export function OpenShellPoliciesPanelView({
       <div className="openshell-band-head">
         <h3 id="openshell-policies-title">Policies</h3>
         <p className="dim">
-          Named OpenShell allow-list YAML stored on the board. Edit egress and
-          filesystem rules here; each{" "}
-          <strong>Sandbox spec</strong> picks one policy by id. Live policy on a
-          running sandbox still comes from the board at create and is immutable
-          for that seat.
+          Network and filesystem allow-lists (YAML). Each{" "}
+          <strong>Sandbox spec</strong> picks one policy. A running sandbox keeps
+          the policy it was created with.
         </p>
       </div>
 

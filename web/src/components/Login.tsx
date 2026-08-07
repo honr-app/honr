@@ -72,7 +72,7 @@ export function Login({
           <h1 id="login-title" className="login-wordmark">
             honr
           </h1>
-          <p className="login-tagline">The board that hones the work.</p>
+          <p className="login-tagline">A board for agent work.</p>
         </header>
 
         {bootstrap && (

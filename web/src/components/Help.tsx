@@ -11,9 +11,8 @@ export function Help() {
       <header className="board-hero">
         <h1>Operator help</h1>
         <p className="board-lede">
-          Two jobs: <strong>Quickstart</strong> for the first Project loop, and{" "}
-          <strong>Connect MCP</strong> to drive the board from a client. Name
-          the clone target in each Task&apos;s intent/DoD.
+          First Project loop, then connect MCP if you want to drive the board
+          from a client. Name the clone target in each Task&apos;s intent/DoD.
         </p>
       </header>
 

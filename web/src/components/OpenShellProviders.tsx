@@ -123,12 +123,10 @@ export function OpenShellProvidersPanelView({
       <div className="openshell-band-head openshell-providers-head">
         <h3 id="openshell-providers-title">Providers</h3>
         <p className="dim">
-          Desired provider catalog on the board (credentials sealed). Save
-          applies to the gateway when reachable; Sync all imports missing
-          provider types, applies credentials, and attaches listed providers to
-          a running cockpit seat. Which providers attach on create is chosen per{" "}
-          <strong>Sandbox spec</strong>. Ship type{" "}
-          <code>{GITHUB_APP_PROVIDER_TYPE}</code> mints sandbox{" "}
+          Credentials for sandboxes (model APIs, GitHub, and so on). Save pushes
+          them to the gateway; Sync refreshes provider types and credentials.
+          Each <strong>Sandbox spec</strong> chooses which providers attach on
+          create. Type <code>{GITHUB_APP_PROVIDER_TYPE}</code> mints sandbox{" "}
           <code>GH_TOKEN</code> from a GitHub App.
         </p>
       </div>

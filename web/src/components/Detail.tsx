@@ -128,7 +128,7 @@ export function PlanEditor({
           />
           <textarea
             rows={2}
-            placeholder="Definition of done (mechanically checkable)"
+            placeholder="Definition of done"
             value={t.definition_of_done}
             onChange={(e) => {
               const next = [...planTasks];
@@ -686,7 +686,7 @@ export function DetailDrawer({
             📦 Archive #{d.id} "{d.title}"?
           </div>
           <div style={{ color: "var(--accent)", fontSize: "11px" }}>
-            This item and its subtree will be retired, not deleted. Archived Projects leave the board; history stays in state.
+            Archives this item and its cards. You can show archived Projects later.
           </div>
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
             <button
@@ -1153,7 +1153,7 @@ export function DetailDrawer({
                   Why
                 </label>
                 <p className="dim" style={{ marginBottom: 4, fontSize: 12 }}>
-                  One sentence — the outcome contract. Not the Task breakdown.
+                  One sentence on what this Project should achieve.
                 </p>
                 <textarea
                   rows={2}
@@ -1183,7 +1183,7 @@ export function DetailDrawer({
               />
               <p className="dim" style={{ marginTop: 6, fontSize: 12 }}>
                 Agent engine comes from the sandbox spec (Settings → OpenShell →
-                Sandbox specs), not per card.
+                Sandbox specs).
               </p>
               <div className="btns">
                 <button
@@ -1205,16 +1205,14 @@ export function DetailDrawer({
 
           <Section title="Project prompt">
             <p className="dim" style={{ marginBottom: 8 }}>
-              Standing instructions every Task agent sees (with the Plan from
-              Initial plan). Quality gates and policy — name clone targets in
-              each Task&apos;s intent/DoD, not here.
+              Instructions every Task agent in this Project sees.
             </p>
             <textarea
               className="search-input"
               style={{ width: "100%", minHeight: 120, marginBottom: 8 }}
               value={editPrompt}
               onChange={(e) => setEditPrompt(e.target.value)}
-              placeholder="Standing agent instructions for this Project…"
+              placeholder="Instructions for agents on this Project…"
             />
           </Section>
         </>
@@ -1333,13 +1331,13 @@ export function DetailDrawer({
           Request changes notes lose to a stale DoD if you cannot rewrite it. */}
       {d.level !== "Project" &&
         (d.state === "shaping" || d.state === "backlog" || d.state === "ready" || d.state === "review") && (
-        <Section title={d.state === "review" ? "Card contract" : "Refine"}>
+        <Section title={d.state === "review" ? "Acceptance criteria" : "Refine"}>
           <p className="dim" style={{ marginBottom: 8 }}>
             {d.state === "shaping"
-              ? "Tweak this Task before moving it into the Backlog."
+              ? "Edit this Task before moving it into the Backlog."
               : d.state === "backlog" || d.state === "ready"
-                ? "Still editable until you Start a run. DoD is what the next run must satisfy."
-                : "If the PR missed the point, fix DoD / Why here — Request changes saves these with your note."}
+                ? "Editable until you start a run. Definition of Done is what the next run must satisfy."
+                : "If the PR missed the point, fix Why / Definition of Done here. Request changes saves these with your note."}
           </p>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
@@ -1367,7 +1365,7 @@ export function DetailDrawer({
               <label className="section-title" style={{ display: "block", marginBottom: 2 }}>Definition of Done</label>
               <textarea
                 rows={3}
-                placeholder="How to mechanically verify success..."
+                placeholder="How to verify this is done…"
                 value={editDod}
                 onChange={(e) => setEditDod(e.target.value)}
               />
@@ -1456,7 +1454,7 @@ export function DetailDrawer({
           <textarea
             rows={2}
             value={text}
-            placeholder="What needs to change? Prefer fixing DoD above when acceptance criteria are wrong — your note still binds over a stale DoD."
+            placeholder="What should change? Update Definition of Done above if the criteria were wrong."
             onChange={(e) => setText(e.target.value)}
           />
           <div className="btns">
@@ -1667,7 +1665,7 @@ export const Head = ({
             fontWeight: 600,
           }}
           onClick={onArchive}
-          title="Archive (soft retire) item and its subtree"
+          title="Archive this item and its cards"
         >
           📦 Archive
         </button>
@@ -1685,7 +1683,7 @@ export const Head = ({
             fontWeight: 600,
           }}
           onClick={onUnarchive}
-          title="Unarchive — restore from history (in-flight work returns to Backlog)"
+          title="Restore this item to the board"
           data-testid="drawer-unarchive"
         >
           Unarchive
