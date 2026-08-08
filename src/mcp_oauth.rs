@@ -181,23 +181,60 @@ fn random_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
 }
 
-/// Public origin for metadata and issuer (loopback honr).
+/// Public origin for OAuth redirect_uri / metadata issuer.
+///
+/// Prefer the origin the browser actually used (Vite/Tailscale/proxy), not the
+/// backend bind address. Never invents `127.0.0.1:8080` — callers that need a
+/// URL must send Host / Origin / X-Forwarded-* (or set `HONR_PUBLIC_URL`).
 pub fn public_origin(headers: &HeaderMap) -> String {
-    if let Ok(base) = std::env::var("HONR_PUBLIC_URL") {
-        let t = base.trim().trim_end_matches('/');
-        if !t.is_empty() {
-            return t.to_string();
+    if let Some(base) = std::env::var("HONR_PUBLIC_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return base;
+    }
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http")
+        .split(',')
+        .next()
+        .unwrap_or("http")
+        .trim();
+    if let Some(host) = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim())
+        .filter(|s| !s.is_empty())
+    {
+        return format!("{proto}://{host}");
+    }
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "null")
+    {
+        return origin.to_string();
+    }
+    if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
+        if let Ok(u) = referer.parse::<axum::http::Uri>() {
+            if let Some(auth) = u.authority() {
+                let scheme = u.scheme_str().unwrap_or(proto);
+                return format!("{scheme}://{auth}");
+            }
         }
     }
-    let host = headers
+    let Some(host) = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("127.0.0.1:8080");
-    // Prefer 127.0.0.1 in advertised resource when Host is localhost — both are
-    // accepted as equivalent audiences below.
-    format!("http://{host}")
+    else {
+        return String::new();
+    };
+    format!("{proto}://{host}")
 }
 
 fn canonical_resource(origin: &str) -> String {
@@ -1202,6 +1239,26 @@ mod tests {
             "http://127.0.0.1:8080/mcp",
             "http://127.0.0.1:8081/mcp"
         ));
+    }
+
+    #[test]
+    fn public_origin_uses_browser_headers_not_invented_loopback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-host", "localhost:5173".parse().unwrap());
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        headers.insert(header::HOST, "127.0.0.1:9999".parse().unwrap());
+        assert_eq!(public_origin(&headers), "http://localhost:5173");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "https://tot.example:5173".parse().unwrap());
+        headers.insert(header::HOST, "127.0.0.1:9999".parse().unwrap());
+        assert_eq!(public_origin(&headers), "https://tot.example:5173");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "localhost:9090".parse().unwrap());
+        assert_eq!(public_origin(&headers), "http://localhost:9090");
+
+        assert!(public_origin(&HeaderMap::new()).is_empty());
     }
 
     #[test]

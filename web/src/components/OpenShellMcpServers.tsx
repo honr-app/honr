@@ -15,8 +15,9 @@ type ServerDraft = {
   name: string;
   kind: Kind;
   url: string;
-  auth: "none" | "cockpit_bearer" | "bearer_env";
-  bearerEnv: string;
+  auth: "none" | "cockpit_bearer" | "oauth";
+  oauthEnv: string;
+  oauthProvider: string;
   command: string;
   argsText: string;
   cwd: string;
@@ -33,7 +34,8 @@ const emptyDraft = (): ServerDraft => ({
   kind: "stdio",
   url: "",
   auth: "none",
-  bearerEnv: "",
+  oauthEnv: "",
+  oauthProvider: "",
   command: "uv",
   argsText:
     "tool run --from context-server@latest context-server serve --db /tmp/kb.db",
@@ -57,10 +59,11 @@ function draftFrom(s: McpServerDesired): ServerDraft {
       auth:
         authKind === "cockpit_bearer"
           ? "cockpit_bearer"
-          : authKind === "bearer_env"
-            ? "bearer_env"
+          : authKind === "oauth"
+            ? "oauth"
             : "none",
-      bearerEnv: t.auth?.kind === "bearer_env" ? t.auth.env : "",
+      oauthEnv: t.auth?.kind === "oauth" ? t.auth.env : "",
+      oauthProvider: t.auth?.kind === "oauth" ? t.auth.provider : "",
       command: "",
       argsText: "",
       cwd: "",
@@ -79,7 +82,8 @@ function draftFrom(s: McpServerDesired): ServerDraft {
     kind: "stdio",
     url: "",
     auth: "none",
-    bearerEnv: "",
+    oauthEnv: "",
+    oauthProvider: "",
     command: t.command,
     argsText: (t.args ?? []).join(" "),
     cwd: t.cwd ?? "",
@@ -110,8 +114,12 @@ function transportFrom(d: ServerDraft): McpTransport {
     const auth =
       d.auth === "cockpit_bearer"
         ? { kind: "cockpit_bearer" as const }
-        : d.auth === "bearer_env"
-          ? { kind: "bearer_env" as const, env: d.bearerEnv.trim() }
+        : d.auth === "oauth"
+          ? {
+              kind: "oauth" as const,
+              provider: d.oauthProvider.trim(),
+              env: d.oauthEnv.trim(),
+            }
           : { kind: "none" as const };
     return { kind: "http", url: d.url.trim(), auth };
   }
@@ -129,7 +137,7 @@ function transportFrom(d: ServerDraft): McpTransport {
 
 function transportLabel(s: McpServerDesired): string {
   if (s.transport.kind === "http") {
-    return `http ${s.transport.url || "(cockpit bearer)"}`;
+    return `http ${s.transport.url || "(cockpit seat)"}`;
   }
   return `stdio ${s.transport.command}`;
 }
@@ -142,12 +150,16 @@ export function OpenShellMcpServersPanelView({
   hint,
   draft,
   editingId,
+  oauthSupported,
+  oauthDiscovering,
   onDraftChange,
   onSave,
   onCancelEdit,
   onEdit,
   onDelete,
   onStartCreate,
+  onOAuthLogin,
+  onOAuthDisconnect,
 }: {
   servers: McpServerDesired[];
   availableProviders: OpenShellProviderView[];
@@ -156,12 +168,17 @@ export function OpenShellMcpServersPanelView({
   hint?: string | null;
   draft: ServerDraft | null;
   editingId: string | null;
+  /** null = not probed / no URL yet */
+  oauthSupported: boolean | null;
+  oauthDiscovering?: boolean;
   onDraftChange: (next: ServerDraft | null) => void;
   onSave: () => void;
   onCancelEdit: () => void;
   onEdit: (s: McpServerDesired) => void;
   onDelete: (id: string) => void;
   onStartCreate: () => void;
+  onOAuthLogin: () => void;
+  onOAuthDisconnect: () => void;
 }) {
   const isCreate = editingId === "";
   const isEditing = editingId !== null && draft != null;
@@ -333,55 +350,75 @@ export function OpenShellMcpServersPanelView({
           </label>
 
           {draft.kind === "http" ? (
-            <>
-              <label>
-                URL
-                <input
-                  className="search-input"
-                  value={draft.url}
-                  disabled={busy}
-                  onChange={(e) =>
-                    onDraftChange({ ...draft, url: e.target.value })
-                  }
-                  placeholder="https://… or empty for cockpit bearer"
-                  data-testid="openshell-mcp-field-url"
-                />
-              </label>
-              <label>
-                Auth
-                <select
-                  className="search-input"
-                  value={draft.auth}
-                  disabled={busy || draft.shipped}
-                  onChange={(e) =>
-                    onDraftChange({
-                      ...draft,
-                      auth: e.target.value as ServerDraft["auth"],
-                    })
-                  }
-                  data-testid="openshell-mcp-field-auth"
-                >
-                  <option value="none">None</option>
-                  <option value="cockpit_bearer">Cockpit Bearer (honr /mcp)</option>
-                  <option value="bearer_env">Bearer from env</option>
-                </select>
-              </label>
-              {draft.auth === "bearer_env" && (
+            draft.auth === "cockpit_bearer" ? (
+              <p className="dim" data-testid="openshell-mcp-seat-auth">
+                Cockpit seat auth is automatic (host-minted Bearer for{" "}
+                <code>/mcp</code>).
+              </p>
+            ) : (
+              <>
                 <label>
-                  Env key
+                  URL
                   <input
                     className="search-input"
-                    value={draft.bearerEnv}
+                    value={draft.url}
                     disabled={busy}
                     onChange={(e) =>
-                      onDraftChange({ ...draft, bearerEnv: e.target.value })
+                      onDraftChange({ ...draft, url: e.target.value })
                     }
-                    required
-                    data-testid="openshell-mcp-field-bearer-env"
+                    placeholder="https://…"
+                    data-testid="openshell-mcp-field-url"
                   />
                 </label>
-              )}
-            </>
+                {draft.auth === "oauth" && (
+                  <p className="dim" data-testid="openshell-mcp-oauth-status">
+                    Connected via provider{" "}
+                    <code>{draft.oauthProvider || "(pending)"}</code>
+                    {draft.oauthEnv ? (
+                      <>
+                        {" "}
+                        (<code>{draft.oauthEnv}</code>)
+                      </>
+                    ) : null}
+                  </p>
+                )}
+                {(draft.auth === "oauth" ||
+                  oauthSupported === true ||
+                  oauthDiscovering) && (
+                  <div className="sandbox-profile-actions">
+                    {(oauthSupported === true || draft.auth === "oauth") && (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy || !draft.url.trim()}
+                        onClick={onOAuthLogin}
+                        data-testid="openshell-mcp-oauth-login"
+                      >
+                        {draft.auth === "oauth"
+                          ? "Re-login with OAuth"
+                          : "Log in with OAuth"}
+                      </button>
+                    )}
+                    {oauthDiscovering && oauthSupported !== true && (
+                      <span className="dim" data-testid="openshell-mcp-oauth-probing">
+                        Checking OAuth support…
+                      </span>
+                    )}
+                    {draft.auth === "oauth" && draft.id && (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        disabled={busy}
+                        onClick={onOAuthDisconnect}
+                        data-testid="openshell-mcp-oauth-disconnect"
+                      >
+                        Disconnect OAuth
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
+            )
           ) : (
             <>
               <label>
@@ -530,6 +567,8 @@ export function OpenShellMcpServersPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+  const [oauthSupported, setOauthSupported] = useState<boolean | null>(null);
+  const [oauthDiscovering, setOauthDiscovering] = useState(false);
 
   const refresh = useCallback(() => {
     return Promise.all([
@@ -551,6 +590,68 @@ export function OpenShellMcpServersPanel() {
     refresh();
   }, [refresh]);
 
+  // Probe RFC 9728 / AS metadata when the HTTP URL settles.
+  useEffect(() => {
+    if (!draft || draft.kind !== "http" || draft.auth === "cockpit_bearer") {
+      setOauthSupported(null);
+      setOauthDiscovering(false);
+      return;
+    }
+    const url = draft.url.trim();
+    if (!url || !/^https?:\/\//i.test(url)) {
+      setOauthSupported(null);
+      setOauthDiscovering(false);
+      return;
+    }
+    let cancelled = false;
+    setOauthDiscovering(true);
+    const t = window.setTimeout(() => {
+      api
+        .discoverMcpOAuth({ url })
+        .then((out) => {
+          if (!cancelled) setOauthSupported(!!out.supported);
+        })
+        .catch(() => {
+          if (!cancelled) setOauthSupported(false);
+        })
+        .finally(() => {
+          if (!cancelled) setOauthDiscovering(false);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [draft?.kind, draft?.url, draft?.auth]);
+
+  // Return from /oauth/mcp-client/callback → open the connected server.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("mcp_oauth");
+    if (!status) return;
+    const id = params.get("id");
+    const message = params.get("message");
+    const clean = () => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("mcp_oauth");
+      url.searchParams.delete("id");
+      url.searchParams.delete("message");
+      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+    };
+    if (status === "ok" && id) {
+      setHint(`OAuth connected for ${id}.`);
+      refresh().then(() =>
+        api.getMcpServer(id).then((s) => {
+          setEditingId(s.id);
+          setDraft(draftFrom(s));
+        }),
+      );
+    } else if (status === "error") {
+      setError(message ? decodeURIComponent(message) : "OAuth failed");
+    }
+    clean();
+  }, [refresh]);
+
   return (
     <OpenShellMcpServersPanelView
       servers={servers}
@@ -560,6 +661,8 @@ export function OpenShellMcpServersPanel() {
       hint={hint}
       draft={draft}
       editingId={editingId}
+      oauthSupported={oauthSupported}
+      oauthDiscovering={oauthDiscovering}
       onDraftChange={setDraft}
       onCancelEdit={() => {
         setDraft(null);
@@ -567,7 +670,7 @@ export function OpenShellMcpServersPanel() {
       }}
       onStartCreate={() => {
         setEditingId("");
-        setDraft(emptyDraft());
+        setDraft({ ...emptyDraft(), kind: "http" });
         setHint(null);
         setError(null);
       }}
@@ -584,11 +687,15 @@ export function OpenShellMcpServersPanel() {
           setError("name is required");
           return;
         }
+        if (draft.auth === "oauth" && (!draft.oauthProvider || !draft.oauthEnv)) {
+          setError("complete OAuth login before saving");
+          return;
+        }
         setBusy(true);
         setError(null);
         setHint(null);
         const body = {
-          ...(editingId ? { id: draft.id.trim() } : {}),
+          ...(draft.id.trim() ? { id: draft.id.trim() } : {}),
           name,
           transport: transportFrom(draft),
           policy_fragment_yaml: draft.policy_fragment_yaml.trim() || null,
@@ -621,6 +728,50 @@ export function OpenShellMcpServersPanel() {
             }
             setHint(`Deleted ${id}.`);
             return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onOAuthLogin={() => {
+        if (!draft) return;
+        const url = draft.url.trim();
+        if (!url) {
+          setError("URL is required for OAuth");
+          return;
+        }
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .startMcpOAuth({
+            url,
+            server_id: draft.id.trim() || undefined,
+            name: draft.name.trim() || undefined,
+            return_path: "/settings/mcp-servers",
+          })
+          .then((out) => {
+            setDraft({ ...draft, id: out.server_id });
+            if (editingId === "") setEditingId(out.server_id);
+            window.location.href = out.authorize_url;
+          })
+          .catch((e) => {
+            setError(String(e));
+            setBusy(false);
+          });
+      }}
+      onOAuthDisconnect={() => {
+        if (!draft?.id) return;
+        if (!window.confirm(`Disconnect OAuth for ${draft.id}?`)) return;
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .disconnectMcpOAuth(draft.id)
+          .then(() => refresh())
+          .then(() => api.getMcpServer(draft.id))
+          .then((s) => {
+            setDraft(draftFrom(s));
+            setHint("OAuth disconnected.");
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));

@@ -130,7 +130,8 @@ The resource URL (the JWT `aud`) defaults to
 
 For agy the attached `antigravity` provider injects only an
 `openshell:resolve:…` placeholder, and attach writes that into the sandbox's
-token file — never a host OAuth file. See
+token file — never a host OAuth file. Connect once via Settings → Providers →
+**Log in with Google** so the gateway can refresh access tokens. See
 [Sandbox → Antigravity](sandbox.md#antigravity--agy).
 
 ## Cockpit cannot merge either

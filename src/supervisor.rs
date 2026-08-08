@@ -2000,6 +2000,12 @@ if [ -z "$TOKEN" ]; then
 fi
 export HONR_AGY_PROJECT={project_q}
 export HONR_AGY_LOCATION={location_q}
+# Override Vertex's GOOGLE_CLOUD_PROJECT so Code Assist quota/model resolve
+# against the antigravity provider project (settings.json gcp.project alone
+# does not fill agy's quotaProject).
+export GOOGLE_CLOUD_PROJECT={project_q}
+export GOOGLE_CLOUD_QUOTA_PROJECT={project_q}
+export GCP_PROJECT_ID={project_q}
 mkdir -p /sandbox/.gemini/antigravity-cli
 python3 - <<'PY'
 import json, os
@@ -2030,6 +2036,14 @@ with open(f"{{cli}}/settings.json", "w", encoding="utf-8") as f:
         }},
         f,
     )
+# Sourced by attach / print wrappers when Vertex has already set the wrong project.
+with open(f"{{cli}}/honr-cloud.env", "w", encoding="utf-8") as f:
+    f.write(f"GOOGLE_CLOUD_PROJECT={{project}}\n")
+    f.write(f"GOOGLE_CLOUD_QUOTA_PROJECT={{project}}\n")
+    f.write(f"GCP_PROJECT_ID={{project}}\n")
+    f.write(f"GCP_LOCATION={{location}}\n")
+    f.write(f"CLOUD_ML_REGION={{location}}\n")
+    f.write(f"VERTEX_LOCATION={{location}}\n")
 PY
 "#
     );
@@ -6111,8 +6125,10 @@ mod tests {
             "must use Board antigravity config project: {script}"
         );
         assert!(
-            !script.contains("GCP_PROJECT_ID") && !script.contains("GOOGLE_CLOUD_PROJECT"),
-            "must not derive project from Vertex seat env: {script}"
+            script.contains("GOOGLE_CLOUD_PROJECT")
+                && script.contains("GOOGLE_CLOUD_QUOTA_PROJECT")
+                && script.contains("honr-cloud.env"),
+            "must export Board project over Vertex seat env: {script}"
         );
         assert!(
             script.contains("enableTelemetry"),

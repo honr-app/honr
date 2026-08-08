@@ -1,6 +1,8 @@
 # OpenShell provider type for Google Antigravity (agy).
 # Bearer injection on Cloud Code / Google API endpoints so the seat only sees
 # openshell:resolve placeholders — never a host OAuth file.
+# Refresh material (client_id / client_secret / refresh_token) is configured by
+# host-mediated Settings → Log in with Google (oauth2_refresh_token).
 id: antigravity
 display_name: Google Antigravity (agy)
 description: Antigravity CLI / Cloud Code assist user OAuth (Bearer access token)
@@ -14,7 +16,35 @@ credentials:
     auth_style: bearer
     header_name: authorization
     query_param: ""
+    refresh:
+      strategy: oauth2_refresh_token
+      token_url: "https://oauth2.googleapis.com/token"
+      refresh_before_seconds: 300
+      max_lifetime_seconds: 3600
+      material:
+        - name: client_id
+          description: Google OAuth client id (Antigravity installed-app client)
+          required: true
+        - name: client_secret
+          description: Google OAuth client secret (installed-app; not a honr secret)
+          required: true
+          secret: true
+        - name: refresh_token
+          description: Google OAuth refresh token
+          required: true
+          secret: true
 endpoints:
+  # generateContent goes to Vertex AI Publisher models, not only Cloud Code.
+  - host: aiplatform.googleapis.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: "*-aiplatform.googleapis.com"
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
   - host: cloudcode-pa.googleapis.com
     port: 443
     protocol: rest
@@ -45,9 +75,22 @@ endpoints:
     protocol: rest
     access: read-write
     enforcement: enforce
+  - host: lh3.googleusercontent.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  # Feature flags; denied here leaves some model tables incomplete.
+  - host: antigravity-unleash.goog
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
 binaries:
   - /usr/local/bin/agy
   - /usr/bin/agy
+  # Seat-local upgrades (image bake can lag the host CLI).
+  - /sandbox/.local/bin/agy
 inference_capable: false
 discovery:
   credentials:

@@ -126,6 +126,11 @@ pub fn routes() -> Router<SharedBoard> {
             get(list_openshell_providers).post(create_openshell_provider),
         )
         .route("/openshell/providers/sync", post(sync_openshell_providers))
+        // Nested before `{name}` so `antigravity` is not captured as a provider name.
+        .nest(
+            "/openshell/providers/antigravity/oauth",
+            crate::antigravity_oauth::api_routes(),
+        )
         .route(
             "/openshell/providers/{name}",
             put(update_openshell_provider).delete(delete_openshell_provider),
@@ -153,6 +158,11 @@ pub fn routes() -> Router<SharedBoard> {
         .route(
             "/openshell/mcp-servers",
             get(list_mcp_servers).post(upsert_mcp_server),
+        )
+        // Nested before `{id}` so `oauth` is not captured as a server id.
+        .nest(
+            "/openshell/mcp-servers/oauth",
+            crate::mcp_client_oauth::api_routes(),
         )
         .route(
             "/openshell/mcp-servers/{id}",
@@ -1649,6 +1659,7 @@ async fn delete_mcp_server(
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
     b.delete_mcp_server(&id).map_err(ApiError)?;
+    crate::mcp_client_oauth::cleanup_for_deleted_server(&b, &id).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

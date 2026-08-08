@@ -84,7 +84,9 @@ pub const ENGINES: &[Engine] = &[
     },
     Engine {
         id: "agy",
-        prefix: "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json",
+        // `--model` before `-p` (FlagP appends `-p …` last). Keep in sync with
+        // [`crate::antigravity::DEFAULT_SEAT_MODEL`].
+        prefix: "agy --dangerously-skip-permissions --model gemini-3.6-flash-high --print-timeout 24h --output-format stream-json",
         trailing: "",
         prompt: PromptStyle::FlagP,
         resume: Some(ResumeFlag::Conversation),
@@ -327,8 +329,15 @@ mod tests {
         let fresh = command_line("agy", PromptEnv::Briefing, None).unwrap();
         assert_eq!(
             fresh,
-            "agy --dangerously-skip-permissions --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\""
+            format!(
+                "agy --dangerously-skip-permissions --model {} --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\"",
+                crate::antigravity::DEFAULT_SEAT_MODEL
+            )
         );
+        // `-p` must not precede `--model` or the model flag becomes the prompt.
+        let model_at = fresh.find("--model").expect("model");
+        let p_at = fresh.find(" -p ").expect("-p");
+        assert!(model_at < p_at, "{fresh}");
         assert!(!fresh.contains("--conversation"));
 
         let resume = command_line("agy", PromptEnv::Briefing, Some("cid")).unwrap();

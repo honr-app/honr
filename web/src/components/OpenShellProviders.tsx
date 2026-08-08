@@ -10,6 +10,8 @@ import type {
 /** Shipped App-minted provider instance / type id. */
 export const GITHUB_APP_PROVIDER_NAME = "github-app";
 export const GITHUB_APP_PROVIDER_TYPE = "github-app";
+export const ANTIGRAVITY_PROVIDER_NAME = "antigravity";
+export const ANTIGRAVITY_PROVIDER_TYPE = "antigravity";
 const CRED_PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY";
 const CONFIG_INSTALLATION_ID = "GITHUB_INSTALLATION_ID";
 
@@ -18,6 +20,10 @@ const VERTEX_FORM_KEYS = ["VERTEX_AI_PROJECT_ID", "VERTEX_AI_LOCATION"];
 
 function isGitHubAppType(type?: string): boolean {
   return (type ?? "").trim() === GITHUB_APP_PROVIDER_TYPE;
+}
+
+function isAntigravityType(type?: string): boolean {
+  return (type ?? "").trim() === ANTIGRAVITY_PROVIDER_TYPE;
 }
 
 function formConfigKeysForType(
@@ -36,6 +42,10 @@ function formCredentialKeys(
 ): string[] {
   if (isGitHubAppType(typeId)) {
     return [CRED_PRIVATE_KEY];
+  }
+  // Host-mediated Google OAuth — no paste field for access token.
+  if (isAntigravityType(typeId)) {
+    return [];
   }
   if (profile?.credential_env_vars?.length) {
     return profile.credential_env_vars;
@@ -63,6 +73,8 @@ export function OpenShellProvidersPanelView({
   onSync,
   installations = [],
   onRefreshInstallations,
+  onAntigravityLogin,
+  onAntigravityDisconnect,
 }: {
   providers: OpenShellProviderView[];
   gatewayReachable: boolean;
@@ -79,6 +91,8 @@ export function OpenShellProvidersPanelView({
   onSync: () => void;
   installations?: GitHubAppInstallation[];
   onRefreshInstallations?: () => void;
+  onAntigravityLogin?: () => void;
+  onAntigravityDisconnect?: () => void;
 }) {
   const typeOptions = profiles.length
     ? profiles.map((p) => ({ id: p.id, label: p.display_name || p.id }))
@@ -98,6 +112,12 @@ export function OpenShellProvidersPanelView({
     ? profiles.find((p) => p.id === draft.type)
     : undefined;
   const draftIsGitHubApp = draft ? isGitHubAppType(draft.type) : false;
+  const draftIsAntigravity = draft ? isAntigravityType(draft.type) : false;
+  const antigravityConnected = providers.some(
+    (p) =>
+      p.name === ANTIGRAVITY_PROVIDER_NAME &&
+      (p.has_refresh || p.has_credentials),
+  );
   const credKeys = draft
     ? formCredentialKeys(draft.type, selectedProfile)
     : [];
@@ -270,13 +290,16 @@ export function OpenShellProvidersPanelView({
               disabled={busy}
               onChange={(e) => {
                 const type = e.target.value;
+                let name = draft.name;
+                if (isGitHubAppType(type) && !draft.name.trim()) {
+                  name = GITHUB_APP_PROVIDER_NAME;
+                } else if (isAntigravityType(type) && !draft.name.trim()) {
+                  name = ANTIGRAVITY_PROVIDER_NAME;
+                }
                 onDraftChange({
                   ...draft,
                   type,
-                  name:
-                    isGitHubAppType(type) && !draft.name.trim()
-                      ? GITHUB_APP_PROVIDER_NAME
-                      : draft.name,
+                  name,
                 });
               }}
               data-testid="openshell-provider-field-type"
@@ -308,6 +331,42 @@ export function OpenShellProvidersPanelView({
               />
             </label>
           ))}
+          {draftIsAntigravity && (
+            <div
+              className="sandbox-profile-actions"
+              data-testid="openshell-provider-antigravity-oauth"
+            >
+              <p className="dim">
+                {antigravityConnected
+                  ? "Connected via Google OAuth (gateway refreshes access tokens)."
+                  : "Log in with Google so the gateway can refresh Antigravity access tokens."}
+              </p>
+              {onAntigravityLogin && (
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={busy}
+                  onClick={onAntigravityLogin}
+                  data-testid="openshell-provider-antigravity-login"
+                >
+                  {antigravityConnected
+                    ? "Re-login with Google"
+                    : "Log in with Google"}
+                </button>
+              )}
+              {antigravityConnected && onAntigravityDisconnect && (
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  disabled={busy}
+                  onClick={onAntigravityDisconnect}
+                  data-testid="openshell-provider-antigravity-disconnect"
+                >
+                  Disconnect Google
+                </button>
+              )}
+            </div>
+          )}
           {configKeys.map((key) => (
             <label key={key}>
               {key}
@@ -484,6 +543,47 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
       .catch(() => setProfiles([]));
   }, [refresh]);
 
+  // Return from /oauth/antigravity/callback.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("agy_oauth");
+    if (!status) return;
+    const message = params.get("message");
+    const clean = () => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("agy_oauth");
+      url.searchParams.delete("message");
+      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+    };
+    if (status === "ok") {
+      setHint("Antigravity Google OAuth connected.");
+      void refresh().then(() =>
+        api.listOpenShellProviders().then((out) => {
+          const p = out.providers.find((x) => x.name === ANTIGRAVITY_PROVIDER_NAME);
+          setEditingName(ANTIGRAVITY_PROVIDER_NAME);
+          setDraft(
+            p
+              ? {
+                  name: p.name,
+                  type: p.type,
+                  config: { ...p.config },
+                  credentials: {},
+                }
+              : {
+                  name: ANTIGRAVITY_PROVIDER_NAME,
+                  type: ANTIGRAVITY_PROVIDER_TYPE,
+                  config: {},
+                  credentials: {},
+                },
+          );
+        }),
+      );
+    } else if (status === "error") {
+      setError(message ? decodeURIComponent(message) : "Antigravity OAuth failed");
+    }
+    clean();
+  }, [refresh]);
+
   useEffect(() => {
     if (draft && isGitHubAppType(draft.type)) {
       void refreshInstallations();
@@ -595,6 +695,34 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
             if (out.errors.length) setError(errBits);
             return refresh();
           })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onAntigravityLogin={() => {
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .startAntigravityOAuth({
+            return_path: "/settings/openshell/providers",
+          })
+          .then((out) => {
+            window.location.href = out.authorize_url;
+          })
+          .catch((e) => {
+            setError(String(e));
+            setBusy(false);
+          });
+      }}
+      onAntigravityDisconnect={() => {
+        if (!window.confirm("Disconnect Google OAuth for antigravity?")) return;
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .disconnectAntigravityOAuth()
+          .then(() => refresh())
+          .then(() => setHint("Antigravity Google OAuth disconnected."))
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));
       }}

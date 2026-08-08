@@ -193,6 +193,30 @@ async fn inject_sandbox_mcp(
             &format!(
                 r#"
 set -e
+# Expand Bearer ${{ENV}} placeholders to the OpenShell resolve token from the
+# process env so Cursor/Claude send a value the egress proxy can rewrite.
+python3 - <<'PY'
+import json, os, re
+from pathlib import Path
+
+def expand(obj):
+    if isinstance(obj, dict):
+        return {{k: expand(v) for k, v in obj.items()}}
+    if isinstance(obj, list):
+        return [expand(v) for v in obj]
+    if isinstance(obj, str):
+        def repl(m):
+            return os.environ.get(m.group(1), m.group(0))
+        return re.sub(r"\$\{{([A-Za-z_][A-Za-z0-9_]*)\}}", repl, obj)
+    return obj
+
+for rel in ("mcp.json", "claude_mcp.json", "opencode.jsonc"):
+    path = Path("{COCKPIT_MCP_DIR}") / rel
+    if not path.exists():
+        continue
+    doc = json.loads(path.read_text())
+    path.write_text(json.dumps(expand(doc), indent=2) + "\n")
+PY
 cp -f {COCKPIT_MCP_DIR}/mcp.json /sandbox/.cursor/mcp.json 2>/dev/null || true
 cp -f {COCKPIT_MCP_DIR}/mcp.json /sandbox/repo/.cursor/mcp.json 2>/dev/null || true
 # Project-scoped Claude MCP (non-bare / discovery); --bare still needs --mcp-config.
@@ -420,9 +444,10 @@ fn http_headers(auth: &McpHttpAuth, tokens: Option<&OpsMcpTokens>) -> Option<Val
             let access = tokens?.access_token.as_str();
             Some(json!({ "Authorization": format!("Bearer {access}") }))
         }
-        McpHttpAuth::BearerEnv { env } => {
+        McpHttpAuth::OAuth { env, .. } => {
             // Engines expand env in headers inconsistently; document as literal
-            // placeholder — providers inject the real value into the process env.
+            // placeholder — providers inject the OpenShell resolve token into
+            // the process env; egress rewrites it to the current access token.
             Some(json!({ "Authorization": format!("Bearer ${{{env}}}") }))
         }
     }
@@ -467,6 +492,31 @@ mod tests {
     use super::*;
     use crate::openshell::{OpenShell, Output};
     use std::sync::Arc;
+
+    #[test]
+    fn mcp_json_oauth_uses_env_placeholder() {
+        let server = McpServerDesired {
+            id: "jira".into(),
+            name: "Jira".into(),
+            transport: McpTransport::Http {
+                url: "https://mcp.example.com/v1".into(),
+                auth: McpHttpAuth::OAuth {
+                    provider: "mcp-jira".into(),
+                    env: "MCP_OAUTH_JIRA_ACCESS_TOKEN".into(),
+                },
+            },
+            policy_fragment_yaml: None,
+            provider_names: vec!["mcp-jira".into()],
+            env: Default::default(),
+            audience: crate::model::McpAudience::Both,
+            shipped: false,
+        };
+        let doc = mcp_json_document(None, std::slice::from_ref(&server));
+        assert_eq!(
+            doc["mcpServers"]["jira"]["headers"]["Authorization"],
+            "Bearer ${MCP_OAUTH_JIRA_ACCESS_TOKEN}"
+        );
+    }
 
     #[test]
     fn mcp_json_includes_bearer_header() {
