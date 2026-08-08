@@ -4,8 +4,8 @@ Orientation for the **operator** agent sitting with the human. If you are an
 agent honr dispatched to work on a card, you already have a briefing — ignore
 this file.
 
-**Operator mode:** drive honr via MCP (`http://127.0.0.1:8080/mcp`) — operator
-tools only; no worker verbs. Do not implement product work by editing this tree;
+**Operator mode:** drive honr via MCP (`{board-origin}/mcp`) — operator tools
+only; no worker verbs. Do not implement product work by editing this tree;
 shape Projects/Plans, triage Needs You / Review, let sandboxed workers open PRs.
 See [`.cursor/rules/honr-operator.mdc`](.cursor/rules/honr-operator.mdc).
 

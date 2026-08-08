@@ -68,7 +68,7 @@ want to build the UI.
 ```bash
 git clone https://github.com/honr-app/honr.git
 cd honr
-cargo run                 # http://127.0.0.1:8080  (API, SSE, MCP, UI)
+cargo run                 # API + SSE + MCP + UI (default bind :8080)
 ```
 
 The board asks you to create an admin on first open, then starts empty. Nothing

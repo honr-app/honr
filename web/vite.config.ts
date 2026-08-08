@@ -2,7 +2,10 @@ import { defineConfig, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 import type { IncomingMessage } from "node:http";
 
-/** So honr builds OAuth redirect_uri on the browser origin (not 127.0.0.1:8080). */
+/**
+ * Forward the browser Host/proto so honr's `public_origin` matches
+ * `window.location` (Vite / Tailscale / reverse proxy), not the bind address.
+ */
 function forwardBrowserHost(proxyReq: { setHeader: (k: string, v: string) => void }, req: IncomingMessage) {
   const host = req.headers.host;
   if (host) proxyReq.setHeader("X-Forwarded-Host", host);
@@ -14,8 +17,17 @@ function forwardBrowserHost(proxyReq: { setHeader: (k: string, v: string) => voi
   );
 }
 
+/**
+ * Backend reachability for the Vite proxy only — not the public board origin.
+ * Public URLs come from X-Forwarded-* / Host (see forwardBrowserHost).
+ * Override with HONR_URL; otherwise loopback + HONR_PORT (cargo run bind).
+ */
+const HONR_PROXY_TARGET =
+  process.env.HONR_URL?.trim() ||
+  `http://127.0.0.1:${process.env.HONR_PORT?.trim() || "8080"}`;
+
 const toHonr = (extra: ProxyOptions = {}): ProxyOptions => ({
-  target: "http://127.0.0.1:8080",
+  target: HONR_PROXY_TARGET,
   changeOrigin: true,
   configure: (proxy) => {
     proxy.on("proxyReq", (proxyReq, req) => forwardBrowserHost(proxyReq, req));

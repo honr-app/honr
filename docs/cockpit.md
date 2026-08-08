@@ -54,15 +54,16 @@ Same Board calls the UI makes. Log in first — the cookie jar is auth, not
 lifecycle.
 
 ```bash
+# HONR_URL = the origin you open the board on (Host / window.location.origin)
 curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"…"}' \
-  http://127.0.0.1:8080/auth/login
+  "$HONR_URL/auth/login"
 
 # Start (empty body; the supervisor fills in `environment`)
 curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
   -H 'Content-Type: application/json' -d '{}' \
-  http://127.0.0.1:8080/api/cockpit-session
+  "$HONR_URL/api/cockpit-session"
 ```
 
 | Intent | Call |
@@ -77,7 +78,7 @@ Attach a host terminal once `environment` is set:
 
 ```bash
 ENV=$(curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  http://127.0.0.1:8080/api/cockpit-session | jq -r '.session.environment // empty')
+  "$HONR_URL/api/cockpit-session" | jq -r '.session.environment // empty')
 openshell sandbox connect "$ENV"
 ```
 

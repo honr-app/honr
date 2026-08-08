@@ -529,7 +529,7 @@ class MockWebSocket {
   }
 }
 
-const mockWs = new MockWebSocket("ws://localhost:8080/api/ws");
+const mockWs = new MockWebSocket("ws://board.example/api/ws");
 const subPayload = JSON.stringify({ type: "subscribe", last_seq: 15 });
 mockWs.send(subPayload);
 assert.strictEqual(mockSent.length, 1, "Mock WebSocket send must record sent message");
@@ -779,7 +779,8 @@ assert(helpHtml.includes("clone_repo"), "Help should document clone_repo");
 assert(helpHtml.includes("plan.json"), "Help should document plan.json");
 assert(helpHtml.includes("Approve"), "Help should document Approve");
 assert(helpHtml.includes("dispatch"), "Help should document dispatch");
-assert(helpHtml.includes("http://127.0.0.1:8080/mcp"), "Help should show MCP URL");
+assert(helpHtml.includes("/mcp"), "Help should show MCP URL");
+assert(!helpHtml.includes("127.0.0.1:8080"), "Help must not hardcode loopback:8080");
 assert(helpHtml.includes("Streamable HTTP"), "Help should name Streamable HTTP transport");
 assert(helpHtml.includes("Quickstart"), "Help includes Quickstart");
 assert(helpHtml.includes("Connect MCP"), "Help includes Connect MCP");
@@ -804,7 +805,8 @@ assert(guideHtml.includes("data-testid=\"operator-guide-client-examples\""), "Op
 assert(guideHtml.includes("data-testid=\"operator-guide-mcp-url\""), "OperatorGuide copyable MCP URL");
 assert(guideHtml.includes("data-testid=\"operator-guide-cursor-snippet\""), "OperatorGuide Cursor snippet");
 assert(guideHtml.includes("data-testid=\"operator-guide-claude-snippet\""), "OperatorGuide Claude snippet");
-assert(guideHtml.includes("http://127.0.0.1:8080/mcp"), "OperatorGuide shows MCP endpoint");
+assert(guideHtml.includes("/mcp"), "OperatorGuide shows MCP endpoint");
+assert(!guideHtml.includes("127.0.0.1:8080"), "OperatorGuide must not hardcode loopback:8080");
 assert(guideHtml.includes("Streamable HTTP"), "OperatorGuide names Streamable HTTP transport");
 assert(guideHtml.includes("create_project"), "OperatorGuide documents create_project");
 assert(guideHtml.includes("clone_repo"), "OperatorGuide documents clone_repo");
@@ -1723,7 +1725,8 @@ assert(emptyBoardHtml.includes("data-testid=\"operator-guide-openshell\""), "Boa
 assert(emptyBoardHtml.includes("clone_repo"), "Board empty documents clone_repo");
 assert(emptyBoardHtml.includes("plan.json"), "Board empty documents plan.json");
 assert(emptyBoardHtml.includes("Approve"), "Board empty documents Approve");
-assert(emptyBoardHtml.includes("http://127.0.0.1:8080/mcp"), "Board empty shows MCP URL");
+assert(emptyBoardHtml.includes("/mcp"), "Board empty shows MCP URL");
+assert(!emptyBoardHtml.includes("127.0.0.1:8080"), "Board empty must not hardcode loopback:8080");
 assert(emptyBoardHtml.includes("Streamable HTTP"), "Board empty names Streamable HTTP transport");
 assert(emptyBoardHtml.includes("Setup steps"), "Board Welcome lede points at setup below");
 assert(emptyBoardHtml.includes("OpenShell + sandbox"), "Board empty includes OpenShell setup section");

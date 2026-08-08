@@ -183,8 +183,8 @@ export function CockpitAttachView({
     // attach WebSocket in the phantom first mount still hits the server, which
     // pkills the agent on the real remount — death spiral of exit 143. Defer
     // past that cleanup so only the surviving mount connects. Production
-    // (:8080 embedded UI) does not double-invoke, which is why attach looked
-    // "Vite-only broken".
+    // (embedded UI without StrictMode) does not double-invoke, which is why
+    // attach looked "Vite-only broken".
     let startTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       startTimer = null;
       if (disposed) return;

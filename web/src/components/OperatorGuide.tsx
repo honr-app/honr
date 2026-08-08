@@ -1,16 +1,4 @@
-const MCP_URL = "http://127.0.0.1:8080/mcp";
-
-const CURSOR_MCP_JSON = `{
-  "mcpServers": {
-    "honr": {
-      "type": "http",
-      "url": "${MCP_URL}",
-      "auth": { "CLIENT_ID": "honr-cursor", "scopes": ["mcp"] }
-    }
-  }
-}`;
-
-const CLAUDE_MCP_ADD = `claude mcp add --transport http honr ${MCP_URL}`;
+import { publicMcpUrl } from "../publicOrigin.js";
 
 /**
  * Reusable operator onboarding — Quickstart (first Project loop), MCP connect,
@@ -18,6 +6,18 @@ const CLAUDE_MCP_ADD = `claude mcp add --transport http honr ${MCP_URL}`;
  * Embed from Board empty state or Help; keep chrome (hero, nav) outside.
  */
 export function OperatorGuide() {
+  const mcpUrl = publicMcpUrl();
+  const cursorMcpJson = `{
+  "mcpServers": {
+    "honr": {
+      "type": "http",
+      "url": "${mcpUrl}",
+      "auth": { "CLIENT_ID": "honr-cursor", "scopes": ["mcp"] }
+    }
+  }
+}`;
+  const claudeMcpAdd = `claude mcp add --transport http honr ${mcpUrl}`;
+
   return (
     <div className="operator-guide" data-testid="operator-guide">
       <section
@@ -72,7 +72,7 @@ export function OperatorGuide() {
         </p>
         <ol className="operator-guide-steps" data-testid="operator-guide-mcp-steps">
           <li>
-            Start honr so it is listening (API + MCP on port 8080 by default).
+            Start honr so it is listening (API + MCP share the board origin).
           </li>
           <li>
             Point your client at the Streamable HTTP endpoint:
@@ -80,7 +80,7 @@ export function OperatorGuide() {
               className="operator-guide-snippet"
               data-testid="operator-guide-mcp-url"
             >
-              {MCP_URL}
+              {mcpUrl}
             </pre>
           </li>
           <li>
@@ -116,14 +116,14 @@ export function OperatorGuide() {
             className="operator-guide-snippet"
             data-testid="operator-guide-cursor-snippet"
           >
-            {CURSOR_MCP_JSON}
+            {cursorMcpJson}
           </pre>
           <p className="operator-guide-example-label">Claude Code</p>
           <pre
             className="operator-guide-snippet"
             data-testid="operator-guide-claude-snippet"
           >
-            {CLAUDE_MCP_ADD}
+            {claudeMcpAdd}
           </pre>
         </aside>
       </section>
