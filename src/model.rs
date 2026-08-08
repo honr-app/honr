@@ -935,7 +935,10 @@ impl McpServerDesired {
                 cwd,
             } => {
                 *command = command.trim().to_string();
-                if command.is_empty() {
+                // Shipped honr placeholder — cockpit_mcp resolves it to the
+                // `nc -U <AGENT_SOCK_PATH>` relay client at inject time, the
+                // same way the shipped Http entry leaves `url` empty.
+                if command.is_empty() && self.id != HONR_MCP_SERVER_ID {
                     return Err("stdio mcp server command must not be empty".into());
                 }
                 *args = args.iter().map(|a| a.to_string()).collect();
@@ -977,15 +980,19 @@ impl McpServerDesired {
         Ok(self)
     }
 
-    /// Shipped host honr MCP (Streamable HTTP + cockpit Bearer).
+    /// Shipped host honr MCP: stdio over the cockpit sandbox's local
+    /// `nc -U <unix socket>` relay (see `cockpit_mcp_tunnel`) — no network
+    /// hop, no Bearer. `command` empty is the inject-time placeholder;
+    /// `cockpit_mcp::render_*` resolve it the same way they resolve an empty
+    /// HTTP `url`.
     pub fn shipped_honr() -> Self {
         Self {
             id: HONR_MCP_SERVER_ID.into(),
             name: "honr".into(),
-            transport: McpTransport::Http {
-                // Resolved at inject from mcp_oauth::cockpit_mcp_resource().
-                url: String::new(),
-                auth: McpHttpAuth::CockpitBearer,
+            transport: McpTransport::Stdio {
+                command: String::new(),
+                args: Vec::new(),
+                cwd: None,
             },
             policy_fragment_yaml: None,
             provider_names: Vec::new(),

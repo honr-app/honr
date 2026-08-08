@@ -1,59 +1,43 @@
-//! Board-owned dial-in tunnel for cockpit MCP.
+//! Board-owned MCP channel for cockpit: serve `Operator` directly over an
+//! `ExecSandboxInteractive` pipe instead of a TCP tunnel.
 //!
-//! OpenShell sandbox SSH (russh) supports LocalForward / `ForwardTcp`
-//! (board → sandbox loopback) but **not** RemoteForward (`ssh -R`). So the
-//! board cannot ask the sandbox to listen and dial out to `:8080`.
+//! OpenShell sandbox SSH has no RemoteForward, and `ForwardTcp` only dials
+//! *into* a sandbox loopback service — either way a TCP-based tunnel needs
+//! an in-sandbox listener plus something to pair it with the agent's own
+//! connection. `ExecSandboxInteractive` (what cockpit's browser terminal
+//! already uses) skips that entirely:
 //!
-//! Instead:
-//! 1. In-sandbox `socat` listens on `127.0.0.1:18081` (uplink, fork) and
-//!    pairs each board dial-in with an agent accept on `127.0.0.1:18080`.
-//! 2. The board keeps a pool of in-process `ForwardTcp` sessions to `:18081`,
-//!    each bridged to host `127.0.0.1:{HONR_PORT}` — no host socat/ssh -R.
-//! 3. Agent MCP uses `http://127.0.0.1:18080/mcp` on local Docker/Podman and
-//!    remote Kubernetes alike. Workers never get a tunnel.
+//! 1. honr spawns `nc -lU <AGENT_SOCK_PATH>` inside the sandbox via a raw
+//!    (non-pty) interactive exec — its stdin/stdout are the gRPC-piped ends
+//!    of that call, right here in this process.
+//! 2. The agent's MCP client is configured for stdio transport:
+//!    `nc -U <AGENT_SOCK_PATH>`. When that client disconnects, the one-shot
+//!    listen `nc` exits (no `-k`), which is how the board sees session end
+//!    and re-spawns for the next connect.
+//! 3. Those piped bytes ARE the MCP JSON-RPC wire: honr wraps them as an
+//!    `AsyncRead`/`AsyncWrite` pair and calls `rmcp::serve_server` with the
+//!    same `Operator` handler the HTTP `/mcp` endpoint uses.
+//!
+//! One board-owned relay task per cockpit sandbox; the listen/`serve_server`
+//! pair restarts across agent MCP reconnects.
 
-use crate::openshell::OpenShell;
+use crate::mcp::Operator;
+use crate::openshell::{InteractiveEvent, InteractiveExec, OpenShell};
+use crate::store::SharedBoard;
 use parking_lot::Mutex;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
-/// Fixed loopback port inside the cockpit sandbox for agent MCP clients.
-pub const REMOTE_MCP_PORT: u16 = 18080;
+/// Unix domain socket the sandbox-side `nc -lU` relay binds. Agent MCP
+/// clients connect to it with `nc -U <AGENT_SOCK_PATH>` (stdio transport).
+pub const AGENT_SOCK_PATH: &str = "/sandbox/.honr/mcp/agent.sock";
 
-/// Board dials this port via ForwardTcp; socat pairs it with an agent conn.
-pub const UPLINK_PORT: u16 = 18081;
-
-/// Warm ForwardTcp bridges kept ready for concurrent MCP HTTP requests.
-const BRIDGE_POOL_SIZE: usize = 8;
-
-/// JWT `aud` / agent URL when the dial-in tunnel is the path (default).
-pub const DEFAULT_TUNNEL_MCP_RESOURCE: &str = "http://127.0.0.1:18080/mcp";
-
-/// Dual-listen socat: uplink first so the board pool can pre-dial.
-///
-/// `reuseport` lets forked children share the agent listen port under load.
-fn socat_relay_command() -> String {
-    format!(
-        "socat \
-TCP-LISTEN:{UPLINK_PORT},fork,reuseaddr,reuseport,bind=127.0.0.1 \
-TCP-LISTEN:{REMOTE_MCP_PORT},reuseaddr,reuseport,bind=127.0.0.1"
-    )
-}
-
-/// True when `/proc/net/tcp{,6}` shows LISTEN on `port`.
-///
-/// Do not use `pgrep -f` against the socat argv: `openshell sandbox exec`
-/// wraps the script in `sh -c '…socat TCP-LISTEN:…'`, so pgrep matches the
-/// checker itself and we skip starting the relay.
-fn port_listening_shell(port: u16) -> String {
-    format!(
-        "awk -v hp={hex} '$4==\"0A\" {{ n=split($2,a,\":\"); if (toupper(a[n])==hp) f=1 }} \
-END {{ print f?\"LISTEN\":\"DOWN\" }}' /proc/net/tcp /proc/net/tcp6 2>/dev/null",
-        hex = format!("{port:04X}")
-    )
-}
+/// Informational label for the (now vestigial) cockpit JWT `aud` / UI
+/// display — nothing sends this over a wire; stdio has no headers.
+pub const MCP_TRANSPORT_LABEL: &str = "stdio:nc -U /sandbox/.honr/mcp/agent.sock";
 
 struct TunnelState {
     sandbox: String,
@@ -66,94 +50,27 @@ fn tunnel_slot() -> &'static Mutex<Option<TunnelState>> {
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
-/// Board HTTP listen port (`HONR_PORT`, default 8080).
-pub fn board_listen_port() -> u16 {
-    std::env::var("HONR_PORT")
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .filter(|p| *p > 0)
-        .unwrap_or(8080)
+fn ensure_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// MCP resource URL minted into cockpit tokens (override with `HONR_MCP_URL`).
-pub fn tunnel_mcp_resource() -> String {
-    std::env::var("HONR_MCP_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_TUNNEL_MCP_RESOURCE.to_string())
+/// One-shot listen: exits when the agent MCP client disconnects so the board
+/// can re-spawn. (`-k` would hide connection boundaries on the gRPC pipe.)
+fn relay_command() -> Vec<String> {
+    let sock = shell_single_quote(AGENT_SOCK_PATH);
+    vec![
+        "sh".into(),
+        "-c".into(),
+        format!("mkdir -p $(dirname {sock}) && rm -f {sock} && exec nc -lU {sock}"),
+    ]
 }
 
-async fn ensure_relay(os: &OpenShell, sandbox: &str) -> Result<(), String> {
-    let have = os
-        .exec(
-            sandbox,
-            "command -v socat >/dev/null && echo OK || echo MISSING_SOCAT",
-            Duration::from_secs(30),
-        )
-        .await
-        .map_err(|e| format!("check socat: {e}"))?;
-    if !have.stdout.contains("OK") {
-        return Err(
-            "socat not found in sandbox (rebuild the cockpit image from sandbox/Containerfile)"
-                .into(),
-        );
-    }
-
-    let listen_uplink = port_listening_shell(UPLINK_PORT);
-    let up = os
-        .exec(sandbox, &listen_uplink, Duration::from_secs(30))
-        .await
-        .map_err(|e| format!("check MCP uplink listen: {e}"))?;
-    if up.stdout.contains("LISTEN") {
-        return Ok(());
-    }
-
-    // Start socat. Use `pkill -x socat` only — never `pkill -f <substring>`:
-    // `bash -lc '…pkill -f relay.py…'` matches itself and kills the starter
-    // (empty stdout, non-zero exit → "start MCP socat relay failed:").
-    let start = format!(
-        "pkill -x socat >/dev/null 2>&1 || true; \
-         sleep 0.2; \
-         nohup {cmd} >/tmp/honr-mcp-relay.log 2>&1 & \
-         echo $! >/tmp/honr-mcp-relay.pid; \
-         sleep 0.5; \
-         if kill -0 \"$(cat /tmp/honr-mcp-relay.pid)\" 2>/dev/null; then echo ALIVE; else echo DEAD; cat /tmp/honr-mcp-relay.log; exit 1; fi",
-        cmd = socat_relay_command(),
-    );
-    let out = os
-        .exec(sandbox, &start, Duration::from_secs(45))
-        .await
-        .map_err(|e| format!("start MCP socat relay: {e}"))?;
-    if !out.stdout.contains("ALIVE") {
-        return Err(format!(
-            "start MCP socat relay failed (code {}): {} {}",
-            out.code,
-            out.stdout.trim(),
-            out.stderr.trim()
-        ));
-    }
-    let up = os
-        .exec(sandbox, &listen_uplink, Duration::from_secs(30))
-        .await
-        .map_err(|e| format!("verify MCP uplink listen: {e}"))?;
-    if !up.stdout.contains("LISTEN") {
-        let log = os
-            .exec(
-                sandbox,
-                "cat /tmp/honr-mcp-relay.log 2>/dev/null || true",
-                Duration::from_secs(15),
-            )
-            .await
-            .map(|o| o.stdout)
-            .unwrap_or_default();
-        return Err(format!(
-            "socat started but port {UPLINK_PORT} not listening: {} {}",
-            up.stdout.trim(),
-            log.trim()
-        ));
-    }
-    Ok(())
+fn readiness_probe() -> String {
+    format!(
+        "test -S {} && echo LISTEN || echo DOWN",
+        shell_single_quote(AGENT_SOCK_PATH)
+    )
 }
 
 fn shell_single_quote(s: &str) -> String {
@@ -165,95 +82,148 @@ fn sandbox_gone(err: &str) -> bool {
     e.contains("sandbox not found") || e.contains("entity was not found")
 }
 
-async fn bridge_one(os: &OpenShell, sandbox: &str) -> Result<(), String> {
-    let board_port = board_listen_port();
-    let board = tokio::net::TcpStream::connect(("127.0.0.1", board_port))
-        .await
-        .map_err(|e| format!("connect board :{board_port}: {e}"))?;
-    let session = os
-        .create_ssh_session(sandbox)
-        .await
-        .map_err(|e| format!("create ForwardTcp session: {e}"))?;
-    let result = os
-        .forward_tcp_bridge(sandbox, "127.0.0.1", UPLINK_PORT, board, &session.token)
-        .await;
-    if let Err(e) = os.revoke_ssh_session(&session.token).await {
-        tracing::debug!(error = %e, "cockpit: revoke MCP uplink session");
-    }
-    result.map_err(|e| e.to_string())
-}
-
-async fn pool_loop(os: OpenShell, sandbox: String, stop: Arc<AtomicBool>) {
-    let mut set = tokio::task::JoinSet::new();
-    let mut logged_gone = false;
-    while !stop.load(Ordering::Relaxed) {
-        while set.len() < BRIDGE_POOL_SIZE && !stop.load(Ordering::Relaxed) {
-            let os2 = os.clone();
-            let sb = sandbox.clone();
-            let stop2 = stop.clone();
-            set.spawn(async move {
-                if stop2.load(Ordering::Relaxed) {
-                    return BridgeOutcome::Stopped;
-                }
-                match bridge_one(&os2, &sb).await {
-                    Ok(()) => BridgeOutcome::Ok,
-                    Err(e) if sandbox_gone(&e) => BridgeOutcome::Gone(e),
-                    Err(e) => {
-                        if !stop2.load(Ordering::Relaxed) {
-                            tracing::debug!(
-                                sandbox = %sb,
-                                error = %e,
-                                "cockpit: MCP uplink bridge ended"
-                            );
-                            tokio::time::sleep(Duration::from_millis(400)).await;
-                        }
-                        BridgeOutcome::Retry
-                    }
-                }
-            });
+/// Bridge `InteractiveExec`'s message-channel shape onto a plain
+/// `AsyncRead`/`AsyncWrite` duplex half so `rmcp` can drive the other half
+/// as a byte stream, unaware any of this exists.
+async fn pump_loop(
+    mut exec: InteractiveExec,
+    driver_side: tokio::io::DuplexStream,
+    stop: Arc<AtomicBool>,
+) {
+    let (mut driver_read, mut driver_write) = tokio::io::split(driver_side);
+    let mut buf = [0u8; 8192];
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
         }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-            Some(joined) = set.join_next() => {
-                match joined {
-                    Ok(BridgeOutcome::Gone(e)) => {
-                        if !logged_gone {
-                            tracing::info!(
-                                sandbox = %sandbox,
-                                error = %e,
-                                "cockpit: MCP uplink pool stopping; sandbox gone"
-                            );
-                            logged_gone = true;
+            ev = exec.next_event() => {
+                match ev {
+                    Some(InteractiveEvent::Stdout(data)) => {
+                        if driver_write.write_all(&data).await.is_err() {
+                            break;
                         }
-                        stop.store(true, Ordering::Relaxed);
+                    }
+                    // `nc -lU` has nothing to say on stderr in normal operation.
+                    Some(InteractiveEvent::Stderr(data)) => {
+                        tracing::debug!(bytes = data.len(), "cockpit: MCP relay stderr");
+                    }
+                    Some(InteractiveEvent::Exit(code)) => {
+                        tracing::debug!(code, "cockpit: MCP relay process exited");
                         break;
                     }
-                    Ok(BridgeOutcome::Stopped | BridgeOutcome::Ok | BridgeOutcome::Retry) => {}
-                    Err(e) if e.is_cancelled() => {}
-                    Err(e) => {
-                        tracing::debug!(error = %e, "cockpit: MCP bridge task join");
+                    None => break,
+                }
+            }
+            n = driver_read.read(&mut buf) => {
+                match n {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if exec.write_stdin(buf[..n].to_vec()).await.is_err() {
+                            break;
+                        }
                     }
+                    Err(_) => break,
                 }
             }
         }
     }
-    set.abort_all();
-    while set.join_next().await.is_some() {}
 }
 
-enum BridgeOutcome {
-    Ok,
-    Retry,
-    Stopped,
-    Gone(String),
+async fn wait_socket_listen(os: &OpenShell, sandbox: &str, pump: &JoinHandle<()>) -> bool {
+    for _ in 0..20 {
+        if pump.is_finished() {
+            return false;
+        }
+        match os
+            .exec(sandbox, &readiness_probe(), Duration::from_secs(15))
+            .await
+        {
+            Ok(out) if out.stdout.trim() == "LISTEN" => return true,
+            Err(e) if sandbox_gone(&e.to_string()) => return false,
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    false
 }
 
-/// Ensure the dial-in tunnel is up for `sandbox`. Idempotent while the pool lives.
-pub async fn ensure_cockpit_mcp_tunnel(os: &OpenShell, sandbox: &str) -> Result<(), String> {
+/// Re-spawn `nc -lU` + `serve_server` for each agent MCP connection until
+/// `stop` is set or the sandbox disappears.
+async fn relay_sessions(os: OpenShell, board: SharedBoard, sandbox: String, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        let exec = match os.exec_interactive_raw(&sandbox, relay_command()).await {
+            Ok(e) => e,
+            Err(e) => {
+                if sandbox_gone(&e.to_string()) {
+                    tracing::info!(%sandbox, "cockpit: MCP relay stop — sandbox gone");
+                    break;
+                }
+                tracing::warn!(%sandbox, "cockpit: spawn MCP relay (nc -lU): {e}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        let (mcp_side, driver_side) = tokio::io::duplex(64 * 1024);
+        let pump_stop = Arc::new(AtomicBool::new(false));
+        let pump = tokio::spawn(pump_loop(exec, driver_side, pump_stop.clone()));
+
+        if !wait_socket_listen(&os, &sandbox, &pump).await {
+            pump_stop.store(true, Ordering::Relaxed);
+            pump.abort();
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            // Socket not up yet — brief backoff then retry (create race, etc.).
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+
+        let operator = Operator::new(board.clone());
+        let mut serve = tokio::spawn(async move {
+            match rmcp::serve_server(operator, mcp_side).await {
+                Ok(running) => {
+                    let _ = running.waiting().await;
+                }
+                Err(e) => {
+                    tracing::warn!("cockpit: MCP serve_server over exec pipe ended: {e}");
+                }
+            }
+        });
+
+        // First bind of this ensure: announce once per outer ensure, not every
+        // reconnect — reconnects are routine when the agent reloads MCP.
+        tracing::debug!(%sandbox, sock = AGENT_SOCK_PATH, "cockpit: MCP stdio session listening");
+
+        let mut pump = pump;
+        tokio::select! {
+            _ = &mut serve => {
+                pump_stop.store(true, Ordering::Relaxed);
+                pump.abort();
+            }
+            _ = &mut pump => {
+                serve.abort();
+            }
+        }
+
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        // Agent disconnected (one-shot nc exited) — loop for the next connect.
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Ensure the cockpit MCP relay task is up for `sandbox`. Idempotent while
+/// the spawned task lives. Serialized so attach + supervisor + mcp-cred
+/// cannot triple-spawn.
+pub async fn ensure_cockpit_mcp_tunnel(
+    os: &OpenShell,
+    board: &SharedBoard,
+    sandbox: &str,
+) -> Result<(), String> {
+    let _guard = ensure_lock().lock().await;
     let sandbox = sandbox.trim();
     if sandbox.is_empty() {
         return Err("sandbox name required for MCP tunnel".into());
@@ -267,79 +237,70 @@ pub async fn ensure_cockpit_mcp_tunnel(os: &OpenShell, sandbox: &str) -> Result<
             }
         }
     }
-    stop_cockpit_mcp_tunnel(os).await;
-
-    ensure_relay(os, sandbox).await?;
+    stop_cockpit_mcp_tunnel_unlocked().await;
 
     let stop = Arc::new(AtomicBool::new(false));
-    let handle = tokio::spawn(pool_loop(os.clone(), sandbox.to_string(), stop.clone()));
-    // Register before readiness so Stop/park can tear the pool down (otherwise
-    // an in-flight ensure orphans the JoinSet and it retries forever).
-    *tunnel_slot().lock() = Some(TunnelState {
-        sandbox: sandbox.to_string(),
-        stop: stop.clone(),
-        handle,
+    let os_c = os.clone();
+    let board_c = board.clone();
+    let sandbox_s = sandbox.to_string();
+    let stop_c = stop.clone();
+    let handle = tokio::spawn(async move {
+        relay_sessions(os_c, board_c, sandbox_s, stop_c).await;
     });
 
-    // Prove an uplink is paired: sandbox loopback must reach board /healthz.
+    // Readiness for *this* ensure: wait until the first listen succeeds (or
+    // the task dies). Reconnects after that are handled inside relay_sessions.
     let mut ready = false;
-    for _ in 0..20 {
-        if tunnel_slot()
-            .lock()
-            .as_ref()
-            .map(|s| s.handle.is_finished() || s.sandbox != sandbox)
-            .unwrap_or(true)
-        {
+    for _ in 0..40 {
+        if handle.is_finished() {
             break;
         }
         match os
-            .exec(
-                sandbox,
-                &format!(
-                    "curl -sS -o /dev/null -w '%{{http_code}}' --max-time 3 http://127.0.0.1:{REMOTE_MCP_PORT}/healthz || true"
-                ),
-                Duration::from_secs(20),
-            )
+            .exec(sandbox, &readiness_probe(), Duration::from_secs(15))
             .await
         {
-            Ok(out) if out.stdout.trim() == "200" => {
+            Ok(out) if out.stdout.trim() == "LISTEN" => {
                 ready = true;
                 break;
             }
             Err(e) if sandbox_gone(&e.to_string()) => break,
             _ => {}
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
+
     if !ready {
-        stop_cockpit_mcp_tunnel(os).await;
+        stop.store(true, Ordering::Relaxed);
+        handle.abort();
         return Err(format!(
-            "MCP dial-in tunnel not reachable at 127.0.0.1:{REMOTE_MCP_PORT} from sandbox `{sandbox}` \
-             (OpenShell ForwardTcp uplink pool failed readiness)"
+            "cockpit MCP relay did not bind {AGENT_SOCK_PATH} in sandbox `{sandbox}`"
         ));
     }
 
-    tracing::info!(
-        sandbox,
-        agent_port = REMOTE_MCP_PORT,
-        uplink_port = UPLINK_PORT,
-        board_port = board_listen_port(),
-        pool = BRIDGE_POOL_SIZE,
-        "cockpit: MCP dial-in tunnel up"
-    );
+    *tunnel_slot().lock() = Some(TunnelState {
+        sandbox: sandbox.to_string(),
+        stop,
+        handle,
+    });
+    tracing::info!(sandbox, sock = AGENT_SOCK_PATH, "cockpit: MCP stdio relay up");
     Ok(())
 }
 
-/// Stop the uplink pool (idempotent). Leaves the in-sandbox socat relay running.
-pub async fn stop_cockpit_mcp_tunnel(_os: &OpenShell) {
+async fn stop_cockpit_mcp_tunnel_unlocked() {
     let prev = tunnel_slot().lock().take();
     let Some(state) = prev else {
         return;
     };
     state.stop.store(true, Ordering::Relaxed);
     state.handle.abort();
-    let _ = state.handle.await;
-    tracing::info!(sandbox = %state.sandbox, "cockpit: MCP dial-in tunnel stopped");
+    tracing::info!(sandbox = %state.sandbox, "cockpit: MCP stdio relay stopped");
+}
+
+/// Stop the relay session (idempotent). The sandbox-side `nc -lU` process
+/// exits once its stdin (the gRPC-piped end) closes.
+pub async fn stop_cockpit_mcp_tunnel(_os: &OpenShell) {
+    let _guard = ensure_lock().lock().await;
+    stop_cockpit_mcp_tunnel_unlocked().await;
 }
 
 #[cfg(test)]
@@ -347,68 +308,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_tunnel_resource_is_loopback_18080() {
-        assert_eq!(
-            DEFAULT_TUNNEL_MCP_RESOURCE,
-            "http://127.0.0.1:18080/mcp"
-        );
+    fn relay_command_binds_configured_socket() {
+        let cmd = relay_command();
+        let script = cmd.last().expect("script");
+        assert!(script.contains("nc -lU"));
+        assert!(!script.contains("nc -lkU"), "one-shot listen so disconnect is visible");
+        assert!(script.contains(AGENT_SOCK_PATH));
+        assert!(script.contains("rm -f"), "must clear a stale socket file: {script}");
     }
 
     #[test]
-    fn uplink_port_is_distinct_from_agent_port() {
-        assert_ne!(REMOTE_MCP_PORT, UPLINK_PORT);
-        assert_eq!(REMOTE_MCP_PORT, 18080);
-        assert_eq!(UPLINK_PORT, 18081);
-    }
-
-    #[test]
-    fn socat_relay_listens_uplink_before_agent() {
-        let cmd = socat_relay_command();
-        let up = cmd.find(&format!("TCP-LISTEN:{UPLINK_PORT}")).expect("uplink");
-        let agent = cmd
-            .find(&format!("TCP-LISTEN:{REMOTE_MCP_PORT}"))
-            .expect("agent");
-        assert!(up < agent, "uplink listen must come first for pre-dial pool: {cmd}");
-        assert!(cmd.contains("fork"));
-        assert!(cmd.contains("reuseport"));
-        assert!(cmd.contains("bind=127.0.0.1"));
-    }
-
-    #[test]
-    fn port_listen_check_does_not_embed_socat_argv() {
-        // Guard the pgrep false-positive: checker must not look like the relay.
-        let s = port_listening_shell(UPLINK_PORT);
-        assert!(!s.contains("socat"));
-        assert!(s.contains(&format!("{UPLINK_PORT:04X}")));
+    fn readiness_probe_checks_socket_file() {
+        let probe = readiness_probe();
+        assert!(probe.contains("-S"));
+        assert!(probe.contains(AGENT_SOCK_PATH));
     }
 
     #[test]
     fn sandbox_gone_matches_openshell_not_found() {
         assert!(sandbox_gone(
-            "create ForwardTcp session: openshell get sandbox: code: 'Some requested entity was not found', message: \"sandbox not found\""
+            "openshell get sandbox: code: 'Some requested entity was not found', message: \"sandbox not found\""
         ));
-        assert!(!sandbox_gone("connect board :8080: Connection refused"));
-    }
-
-    #[test]
-    fn start_script_does_not_pkill_f_self() {
-        // The starter is `bash -lc '<script>'`; `pkill -f needle` matches that
-        // argv when needle appears in the script text.
-        let start = format!(
-            "pkill -x socat >/dev/null 2>&1 || true; nohup {} &",
-            socat_relay_command()
-        );
-        assert!(!start.contains("pkill -f"));
-        assert!(start.contains("pkill -x socat"));
+        assert!(!sandbox_gone("connect timed out"));
     }
 
     #[test]
     fn shell_single_quote_escapes_embedded_quotes() {
         assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
-    }
-
-    #[test]
-    fn board_listen_port_defaults() {
-        assert!(board_listen_port() > 0);
     }
 }

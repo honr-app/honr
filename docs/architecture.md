@@ -83,18 +83,21 @@ without buying server→client streams.
 
 ## How the CLI attaches
 
-There is no `ConnectSandbox` RPC. `openshell sandbox connect` is a chain:
+There is no `ConnectSandbox` RPC. `openshell sandbox connect` (a human at a
+terminal, not honr) is a chain:
 
 1. `GetSandbox(name)` → `sandbox_id`
 2. `CreateSshSession(sandbox_id)` → short-lived token plus gateway host/port
 3. local `ssh -tt sandbox` with `ProxyCommand=openshell ssh-proxy … --token …`
 4. `ssh-proxy` tunnels via `ForwardTcp`
 
-honr wraps steps 1–2 as `OpenShell::create_ssh_session` /
-`revoke_ssh_session` in [`src/openshell.rs`](https://github.com/honr-app/honr/blob/main/src/openshell.rs). A browser
-cannot complete the OpenSSH ProxyCommand chain, which is why the in-browser
-terminal uses `ExecSandboxInteractive` over a WebSocket instead — see
-[Cockpit](cockpit.md#how-the-browser-terminal-works).
+honr itself never runs this chain — no local `ssh`, no `CreateSshSession`. A
+browser cannot complete the OpenSSH ProxyCommand chain anyway, so both the
+in-browser terminal and cockpit's MCP session use `ExecSandboxInteractive`
+directly: the terminal relays it over a WebSocket (see
+[Cockpit](cockpit.md#how-the-browser-terminal-works)), and cockpit MCP wraps
+its stdin/stdout as an `rmcp` transport instead of tunneling TCP (see
+[Cockpit](cockpit.md)).
 
 ## Persistence
 

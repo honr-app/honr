@@ -3,9 +3,11 @@
 # Policies); Sandbox specs reference a policy by id. Adapt this file into a
 # Policy row when it matches the install.
 # honr cockpit sandbox: privileged control-plane seat.
-# Egress: host honr MCP, inference, and GitHub (App `GH_TOKEN` via the `github`
-# provider). Package registries typically stay on the card-worker Policy.
-# Worker sandboxes stay air-gapped from honr (no honr MCP allow-list there).
+# Egress: inference and GitHub (App `GH_TOKEN` via the `github` provider).
+# Host honr MCP is stdio over a local Unix socket (nc -U, see
+# cockpit_mcp_tunnel) — no network hop, so no network_policies entry for it.
+# Package registries typically stay on the card-worker Policy.
+# Worker sandboxes stay air-gapped from honr (no honr MCP at all there).
 version: 1
 
 filesystem_policy:
@@ -21,56 +23,6 @@ landlock:
   compatibility: best_effort
 
 network_policies:
-  # Host honr MCP (Streamable HTTP) via board ForwardTcp dial-in on sandbox
-  # loopback :18080. OpenShell L7 must use protocol: mcp — protocol: rest +
-  # access: full still 403s POST /mcp (policy_denied). Legacy host.docker.internal
-  # kept only for HONR_MCP_URL overrides.
-  honr_mcp:
-    name: honr-mcp
-    endpoints:
-      - host: 127.0.0.1
-        port: 18080
-        protocol: mcp
-        enforcement: enforce
-        mcp:
-          allow_all_known_mcp_methods: true
-        rules:
-          - allow: {}
-      - host: localhost
-        port: 18080
-        protocol: mcp
-        enforcement: enforce
-        mcp:
-          allow_all_known_mcp_methods: true
-        rules:
-          - allow: {}
-      - host: host.docker.internal
-        port: 8080
-        protocol: mcp
-        enforcement: enforce
-        mcp:
-          allow_all_known_mcp_methods: true
-        rules:
-          - allow: {}
-    binaries:
-      - { path: /usr/local/bin/claude }
-      - { path: /usr/local/bin/agy }
-      - { path: /usr/bin/agy }
-      - { path: /usr/local/bin/opencode }
-      - { path: /opt/opencode/bin/opencode }
-      - { path: /usr/bin/node }
-      - { path: /usr/local/bin/node }
-      - { path: /usr/local/bin/agent }
-      - { path: /usr/local/bin/cursor-agent }
-      - { path: /opt/cursor-agent/versions/**/cursor-agent }
-      - { path: /opt/cursor-agent/versions/**/node }
-      - { path: /usr/bin/curl }
-      - { path: /usr/local/bin/curl }
-      - { path: /bin/sh }
-      - { path: /usr/bin/sh }
-      - { path: /bin/bash }
-      - { path: /usr/bin/bash }
-
   vertex_ai:
     name: vertex-ai
     endpoints:

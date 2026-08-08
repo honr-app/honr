@@ -358,7 +358,9 @@ where
         .await
         .map_err(|e| e.to_string())?;
 
-    if let Err(e) = crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(&os, &environment).await {
+    if let Err(e) =
+        crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(&os, &board, &environment).await
+    {
         tracing::warn!("cockpit-attach MCP tunnel: {e}");
     }
 
