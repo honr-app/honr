@@ -1827,6 +1827,9 @@ async fn provision_cockpit_mcp_cred(
         .to_string();
 
     let os = b.openshell_client();
+    crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(&os, &env)
+        .await
+        .map_err(ApiError)?;
     let tokens = crate::cockpit_mcp::provision_cockpit_mcp(&b, &os, &env, &user.login)
         .await
         .map_err(|e| ApiError(e.to_string()))?;

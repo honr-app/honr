@@ -21,23 +21,15 @@ landlock:
   compatibility: best_effort
 
 network_policies:
-  # Host honr MCP (Streamable HTTP). OpenShell L7 must use protocol: mcp —
-  # protocol: rest + access: full still 403s POST /mcp (policy_denied).
-  # Docker/OpenShell reaches the board as host.docker.internal; localhost /
-  # 127.0.0.1 cover the same operator URL on the host.
+  # Host honr MCP (Streamable HTTP) via board ForwardTcp dial-in on sandbox
+  # loopback :18080. OpenShell L7 must use protocol: mcp — protocol: rest +
+  # access: full still 403s POST /mcp (policy_denied). Legacy host.docker.internal
+  # kept only for HONR_MCP_URL overrides.
   honr_mcp:
     name: honr-mcp
     endpoints:
-      - host: host.docker.internal
-        port: 8080
-        protocol: mcp
-        enforcement: enforce
-        mcp:
-          allow_all_known_mcp_methods: true
-        rules:
-          - allow: {}
       - host: 127.0.0.1
-        port: 8080
+        port: 18080
         protocol: mcp
         enforcement: enforce
         mcp:
@@ -45,6 +37,14 @@ network_policies:
         rules:
           - allow: {}
       - host: localhost
+        port: 18080
+        protocol: mcp
+        enforcement: enforce
+        mcp:
+          allow_all_known_mcp_methods: true
+        rules:
+          - allow: {}
+      - host: host.docker.internal
         port: 8080
         protocol: mcp
         enforcement: enforce

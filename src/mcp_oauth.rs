@@ -44,8 +44,6 @@ pub const CURSOR_CLIENT_ID: &str = "honr-cursor";
 pub const COCKPIT_CLIENT_ID: &str = "honr-cockpit";
 
 /// Default MCP URL as seen from inside the cockpit sandbox (Docker/OpenShell).
-pub const DEFAULT_COCKPIT_MCP_RESOURCE: &str = "http://host.docker.internal:8080/mcp";
-
 /// Access token lifetime (seconds) — exported for inject metadata.
 pub const MCP_ACCESS_TTL_SECS: u64 = ACCESS_TTL_SECS;
 
@@ -88,11 +86,7 @@ pub struct OpsMcpTokens {
 
 /// MCP resource URL the sandbox will call (`aud` on the JWT).
 pub fn cockpit_mcp_resource() -> String {
-    std::env::var("HONR_MCP_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_COCKPIT_MCP_RESOURCE.to_string())
+    crate::cockpit_mcp_tunnel::tunnel_mcp_resource()
 }
 
 /// Mint access + refresh JWTs for the cockpit (`honr-cockpit` client).
@@ -1264,7 +1258,7 @@ mod tests {
     #[test]
     fn mint_cockpit_seat_tokens_round_trips_access_verify() {
         let (board, _env) = board_with_admin();
-        let resource = DEFAULT_COCKPIT_MCP_RESOURCE;
+        let resource = crate::cockpit_mcp_tunnel::DEFAULT_TUNNEL_MCP_RESOURCE;
         let tokens = mint_cockpit_seat_tokens(&board, "admin", resource).expect("mint");
         assert_eq!(tokens.client_id, COCKPIT_CLIENT_ID);
         assert_eq!(tokens.sub, "admin");

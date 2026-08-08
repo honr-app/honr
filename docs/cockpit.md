@@ -127,7 +127,11 @@ returned to browser JavaScript. Do not run `agent mcp login` inside the sandbox
 unless you specifically want a separate host-style OAuth flow.
 
 The resource URL (the JWT `aud`) defaults to
-`http://host.docker.internal:8080/mcp`; override with `HONR_MCP_URL`.
+`http://127.0.0.1:18080/mcp`. The cockpit image includes `socat`; the board
+starts it as a loopback pairer and dials in with OpenShell `ForwardTcp`
+(board → sandbox), bridging each uplink to host honr — same path for local
+Docker/Podman and remote Kubernetes. Override with `HONR_MCP_URL` only for
+unusual setups.
 
 For agy the attached `antigravity` provider injects only an
 `openshell:resolve:…` placeholder, and attach writes that into the sandbox's

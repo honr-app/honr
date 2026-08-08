@@ -144,6 +144,13 @@ Attach on create starts empty — add providers under **Providers**, then check
 them on the spec. Add honr MCP / package-registry / toolchain egress under
 **Policies** when you need it.
 
+Cockpit MCP does **not** use `host.docker.internal`. When the seat is Ready,
+honr starts in-sandbox `socat` (`127.0.0.1:18081` ↔ `:18080`) and keeps a
+pool of OpenShell `ForwardTcp` dial-ins from the board onto `:18081` so agent
+MCP reaches host honr — same path on local Docker/Podman and remote
+Kubernetes. The board never runs socat; OpenShell SSH only supports
+board→sandbox forwards, not `ssh -R`. See [Cockpit](cockpit.md).
+
 ## Antigravity / agy
 
 Bare OpenShell `generic` providers do **not** resolve

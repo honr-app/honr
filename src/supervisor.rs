@@ -3001,10 +3001,10 @@ fn sandbox_spec_for_cockpit(
     engine: &str,
 ) -> SandboxSpec {
     let mut env = agent_env(engine);
-    // Cockpit policy allow-lists host.docker.internal:8080 for MCP.
+    // Board dials ForwardTcp into sandbox loopback :18080 (local + remote).
     env.push((
         "HONR_MCP_URL".into(),
-        "http://host.docker.internal:8080/mcp".into(),
+        crate::cockpit_mcp_tunnel::tunnel_mcp_resource(),
     ));
     SandboxSpec {
         name: name.to_string(),
@@ -3238,6 +3238,14 @@ async fn run_cockpit_inside(
         with_cockpit_cancel(board, wait_until_sandbox_ready(os, name)).await?;
     }
 
+    // Reverse-tunnel board MCP onto sandbox loopback before minting tokens.
+    with_cockpit_cancel(board, async {
+        crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(os, name)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .await?;
+
     // Inject MCP Bearer + mcp.json so Cockpit's interactive `agent` (and any
     // manual host attach) can call host /mcp without browser OAuth. Subject
     // `cockpit` is the supervisor fallback when no human cookie is in play.
@@ -3309,6 +3317,7 @@ async fn finalize_cockpit(
 ) {
     match result {
         Ok(_) => {
+            crate::cockpit_mcp_tunnel::stop_cockpit_mcp_tunnel(os).await;
             stop_agent(os, name).await;
             tracing::info!("cockpit: agent finished in {name}; sandbox kept");
         }
@@ -3316,6 +3325,7 @@ async fn finalize_cockpit(
             tracing::info!("cockpit: detaching from {name} without stopping the agent: {e}");
         }
         Err(e) if is_cockpit_parked(&e.to_string()) => {
+            crate::cockpit_mcp_tunnel::stop_cockpit_mcp_tunnel(os).await;
             stop_agent(os, name).await;
             tracing::info!("cockpit: parked; stopped agent in {name}, sandbox kept");
         }
@@ -3328,6 +3338,7 @@ async fn finalize_cockpit(
                 );
                 return;
             }
+            crate::cockpit_mcp_tunnel::stop_cockpit_mcp_tunnel(os).await;
             stop_agent(os, name).await;
             if cockpit_session_wants_sandbox(board, name) {
                 tracing::info!(
@@ -3339,6 +3350,9 @@ async fn finalize_cockpit(
             tracing::info!("cockpit: stopped; reaping sandbox {name}");
         }
         Err(e) => {
+            // Always tear the uplink pool — readiness failures used to leave it
+            // retrying `sandbox not found` forever after a later Stop/reap.
+            crate::cockpit_mcp_tunnel::stop_cockpit_mcp_tunnel(os).await;
             stop_agent(os, name).await;
             tracing::error!("cockpit: keeping sandbox {name} for inspection: {e}");
         }
@@ -3354,9 +3368,9 @@ pub(crate) fn cockpit_briefing() -> String {
     );
     b.push_str(
         "Host honr MCP is preconfigured: `$HONR_MCP_URL` (default \
-         http://host.docker.internal:8080/mcp) with Bearer credentials under \
-         `/sandbox/.honr/mcp/` (`token.json`, `mcp.json`, `env.sh`). Source \
-         `/sandbox/.honr/mcp/env.sh` or use the written mcp.json — do **not** run \
+         http://127.0.0.1:18080/mcp via board ForwardTcp dial-in) with Bearer \
+         credentials under `/sandbox/.honr/mcp/` (`token.json`, `mcp.json`, `env.sh`). \
+         Source `/sandbox/.honr/mcp/env.sh` or use the written mcp.json — do **not** run \
          browser OAuth inside this sandbox. That endpoint is operator tools only: \
          board_snapshot, dispatch, park, steer, approve_*, answer_escalation, and related \
          triage tools. Do not call worker verbs (claim, heartbeat, report, split, escalate, \

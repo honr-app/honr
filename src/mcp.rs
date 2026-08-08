@@ -1186,13 +1186,16 @@ impl ServerHandler for Operator {
 /// without buying us server→client streams.
 pub fn service(board: SharedBoard) -> StreamableHttpService<Operator, NeverSessionManager> {
     // rmcp defaults to localhost/127.0.0.1/::1 only (DNS-rebinding guard).
-    // Docker clients reach us as host.docker.internal — allow that Host.
+    // Cockpit dial-in tunnel uses Host 127.0.0.1:18080; keep host.docker.internal
+    // for legacy HONR_MCP_URL overrides.
     let mcp_http = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_allowed_hosts([
             "localhost",
             "127.0.0.1",
             "::1",
+            "127.0.0.1:18080",
+            "localhost:18080",
             "host.docker.internal",
             "host.docker.internal:8080",
         ]);

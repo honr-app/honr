@@ -41,7 +41,7 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 |---|---|
 | `HONR_PORT` | Listen port (default 8080) |
 | `HONR_DATABASE_URL` | Board database URL (default `sqlite:honr.db`) |
-| `HONR_MCP_URL` | Resource URL minted into cockpit MCP tokens. Defaults to `http://host.docker.internal:8080/mcp` |
+| `HONR_MCP_URL` | Resource URL minted into cockpit MCP tokens. Defaults to `http://127.0.0.1:18080/mcp` (sandbox loopback via board ForwardTcp dial-in) |
 | `HONR_TEST_DATABASE_URL` | Postgres URL for migration tests |
 
 One host secret file: `~/.config/honr/master.key`, which seals credentials

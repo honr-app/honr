@@ -358,6 +358,10 @@ where
         .await
         .map_err(|e| e.to_string())?;
 
+    if let Err(e) = crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(&os, &environment).await {
+        tracing::warn!("cockpit-attach MCP tunnel: {e}");
+    }
+
     if engine.trim() == "agy" {
         if let Err(e) = setup_agy_auth(&os, &environment, &board).await {
             tracing::warn!("cockpit-attach agy auth: {e}");
