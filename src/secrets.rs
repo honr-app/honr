@@ -77,6 +77,51 @@ pub struct OpenShellMtlsStatus {
     pub complete: bool,
 }
 
+/// OpenShell gateway OIDC token bundle (plaintext, in memory only).
+///
+/// Shape matches OpenShell CLI `oidc_token.json` so refresh semantics stay aligned.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenShellOidcBundle {
+    pub access_token: String,
+    pub refresh_token: String,
+    /// Unix seconds; refresh when within ~30s of this instant.
+    pub expires_at: u64,
+    pub issuer: String,
+    pub client_id: String,
+}
+
+impl OpenShellOidcBundle {
+    pub fn validate_for_seal(&self) -> Result<(), SecretsError> {
+        if self.access_token.trim().is_empty() {
+            return Err(SecretsError::Encrypt("access_token: empty".into()));
+        }
+        if self.refresh_token.trim().is_empty() {
+            return Err(SecretsError::Encrypt("refresh_token: empty".into()));
+        }
+        if self.issuer.trim().is_empty() {
+            return Err(SecretsError::Encrypt("issuer: empty".into()));
+        }
+        if self.client_id.trim().is_empty() {
+            return Err(SecretsError::Encrypt("client_id: empty".into()));
+        }
+        Ok(())
+    }
+
+    pub fn access_expiring_soon(&self, skew_secs: u64) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_add(skew_secs) >= self.expires_at
+    }
+}
+
+/// Presence flags for sealed OIDC material (never returns tokens).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenShellOidcStatus {
+    pub logged_in: bool,
+}
+
 impl From<&OpenShellMtlsBundle> for OpenShellMtlsStatus {
     fn from(b: &OpenShellMtlsBundle) -> Self {
         let ca = !b.ca_pem.trim().is_empty();
@@ -350,6 +395,32 @@ pub fn mtls_status_from_sealed(sealed: Option<&str>) -> OpenShellMtlsStatus {
                 client_key: false,
                 complete: false,
             },
+        },
+    }
+}
+
+pub fn seal_oidc(bundle: &OpenShellOidcBundle) -> Result<String, SecretsError> {
+    bundle.validate_for_seal()?;
+    let json = serde_json::to_vec(bundle)?;
+    seal(&json)
+}
+
+pub fn open_oidc(sealed_b64: &str) -> Result<OpenShellOidcBundle, SecretsError> {
+    let plain = open(sealed_b64)?;
+    let bundle: OpenShellOidcBundle = serde_json::from_slice(&plain)?;
+    Ok(bundle)
+}
+
+pub fn oidc_status_from_sealed(sealed: Option<&str>) -> OpenShellOidcStatus {
+    match sealed.map(str::trim).filter(|s| !s.is_empty()) {
+        None => OpenShellOidcStatus::default(),
+        Some(s) => match open_oidc(s) {
+            Ok(b) => OpenShellOidcStatus {
+                logged_in: b.validate_for_seal().is_ok(),
+            },
+            // Blob present but unreadable — treat as logged out so the
+            // operator re-auths rather than thinking they're still in.
+            Err(_) => OpenShellOidcStatus { logged_in: false },
         },
     }
 }

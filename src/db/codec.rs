@@ -85,6 +85,15 @@ pub const META_OPENSHELL_GATEWAY_ENDPOINT: &str = "openshell_gateway_endpoint";
 /// Sealed OpenShell mTLS PEM bundle (ChaCha20-Poly1305 via `secrets`). Never log.
 pub const META_OPENSHELL_MTLS_SEALED: &str = "openshell_mtls_sealed";
 
+/// Explicit gateway auth mode: `mtls` or `oidc`.
+pub const META_OPENSHELL_AUTH_MODE: &str = "openshell_auth_mode";
+
+/// JSON [`crate::model::OpenShellOidcConfig`] (issuer / client_id / audience).
+pub const META_OPENSHELL_OIDC_CONFIG: &str = "openshell_oidc_config";
+
+/// Sealed OpenShell OIDC token bundle. Never log.
+pub const META_OPENSHELL_OIDC_SEALED: &str = "openshell_oidc_sealed";
+
 /// Sealed GitHub App credentials (ChaCha20-Poly1305 via `secrets`). Never log.
 pub const META_GITHUB_APP_SEALED: &str = "github_app_sealed";
 

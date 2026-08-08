@@ -648,6 +648,78 @@ pub struct WorkspaceBinding {
     pub forge: String,
 }
 
+/// How honr authenticates to the OpenShell gateway. Explicit Settings choice —
+/// never inferred from PEMs, tokens, or URL scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenShellAuthMode {
+    Mtls,
+    Oidc,
+}
+
+impl OpenShellAuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mtls => "mtls",
+            Self::Oidc => "oidc",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mtls" => Some(Self::Mtls),
+            "oidc" => Some(Self::Oidc),
+            _ => None,
+        }
+    }
+}
+
+/// Non-secret OIDC client settings for gateway auth (Settings → OpenShell).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenShellOidcConfig {
+    #[serde(default)]
+    pub issuer: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub audience: String,
+}
+
+impl OpenShellOidcConfig {
+    pub fn trimmed(self) -> Self {
+        Self {
+            issuer: self.issuer.trim().trim_end_matches('/').to_string(),
+            client_id: self.client_id.trim().to_string(),
+            audience: self.audience.trim().to_string(),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        !self.issuer.trim().is_empty() && !self.client_id.trim().is_empty()
+    }
+
+    /// Issuer must be an `https://` URL (same rule as the gateway endpoint).
+    pub fn validate(&self) -> Result<(), String> {
+        let issuer = self.issuer.trim();
+        if issuer.is_empty() {
+            return Err("OIDC issuer is required".into());
+        }
+        if issuer.starts_with("http://") {
+            return Err(
+                "OIDC issuer must be https:// (Keycloak is not reachable over plaintext HTTP)"
+                    .into(),
+            );
+        }
+        if !issuer.starts_with("https://") {
+            return Err("OIDC issuer must be an https:// URL".into());
+        }
+        if self.client_id.trim().is_empty() {
+            return Err("OIDC client id is required".into());
+        }
+        Ok(())
+    }
+}
+
 fn default_forge() -> String {
     "github".into()
 }

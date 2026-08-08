@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "../api.js";
-import type { OpenShellSettings, OpenShellStatus } from "../types.js";
+import type {
+  OpenShellAuthMode,
+  OpenShellOidcConfig,
+  OpenShellSettings,
+  OpenShellStatus,
+} from "../types.js";
 import { OpenShellPoliciesPanel } from "./OpenShellPolicies.js";
 import { OpenShellProvidersPanel } from "./OpenShellProviders.js";
 import { OpenShellProviderTypesPanel } from "./OpenShellProviderTypes.js";
@@ -21,9 +26,18 @@ const TABS: { id: OpenShellTab; label: string }[] = [
   { id: "profiles", label: "Sandbox specs" },
 ];
 
+const EMPTY_OIDC: OpenShellOidcConfig = {
+  issuer: "",
+  client_id: "",
+  audience: "",
+};
+
 export function OpenShellPanelView({
   status,
   gatewayEndpoint,
+  authMode,
+  oidc,
+  oidcStatus,
   caPem,
   clientCertPem,
   clientKeyPem,
@@ -34,12 +48,16 @@ export function OpenShellPanelView({
   activeTab: activeTabProp,
   onTabChange,
   onGatewayEndpointChange,
+  onAuthModeChange,
+  onOidcChange,
   onCaPemChange,
   onClientCertPemChange,
   onClientKeyPemChange,
   onRefresh,
   onSave,
   onClearMtls,
+  onOidcLogin,
+  onOidcLogout,
   providers,
   providerTypes,
   policies,
@@ -47,6 +65,9 @@ export function OpenShellPanelView({
 }: {
   status: OpenShellStatus | null;
   gatewayEndpoint: string;
+  authMode: OpenShellAuthMode | "";
+  oidc: OpenShellOidcConfig;
+  oidcStatus?: OpenShellSettings["oidc_status"];
   caPem: string;
   clientCertPem: string;
   clientKeyPem: string;
@@ -58,12 +79,16 @@ export function OpenShellPanelView({
   activeTab?: OpenShellTab;
   onTabChange?: (tab: OpenShellTab) => void;
   onGatewayEndpointChange: (next: string) => void;
+  onAuthModeChange: (next: OpenShellAuthMode | "") => void;
+  onOidcChange: (next: OpenShellOidcConfig) => void;
   onCaPemChange: (next: string) => void;
   onClientCertPemChange: (next: string) => void;
   onClientKeyPemChange: (next: string) => void;
   onRefresh: () => void;
   onSave: () => void;
   onClearMtls: () => void;
+  onOidcLogin: () => void;
+  onOidcLogout: () => void;
   providers?: ReactNode;
   providerTypes?: ReactNode;
   policies?: ReactNode;
@@ -86,11 +111,16 @@ export function OpenShellPanelView({
     : status.healthy
       ? "openshell-health-ok"
       : "openshell-health-bad";
-  const mtlsLabel = mtls?.complete
-    ? "Configured (encrypted in board DB)"
-    : mtls?.ca || mtls?.client_cert || mtls?.client_key
-      ? "Incomplete"
-      : "Not configured";
+  const authLabel =
+    authMode === "mtls"
+      ? mtls?.complete
+        ? "mTLS configured"
+        : "mTLS incomplete"
+      : authMode === "oidc"
+        ? oidcStatus?.logged_in
+          ? "OIDC logged in"
+          : "OIDC not logged in"
+        : "Pick auth mode";
 
   return (
     <section aria-labelledby="openshell-title" data-testid="openshell-panel">
@@ -111,8 +141,8 @@ export function OpenShellPanelView({
             {healthLabel}
           </strong>
           <span className="dim">·</span>
-          <span className="dim">mTLS</span>
-          <strong data-testid="openshell-mtls-label">{mtlsLabel}</strong>
+          <span className="dim">Auth</span>
+          <strong data-testid="openshell-auth-label">{authLabel}</strong>
           <button
             type="button"
             disabled={busy}
@@ -161,9 +191,10 @@ export function OpenShellPanelView({
           <div className="openshell-band-head">
             <h3 id="openshell-connectivity-title">Connectivity</h3>
             <p className="dim">
-              Gateway URL and mTLS certificates. Paste them or import from the
-              local OpenShell config dir. Private keys are stored encrypted and
-              are not returned by the API.
+              HTTPS gateway URL and an explicit auth mode (mTLS or OIDC). The
+              endpoint must match that mode — a local mTLS gateway URL will not
+              work with OIDC. Secrets are stored encrypted and are not returned
+              by the API.
             </p>
           </div>
 
@@ -190,76 +221,185 @@ export function OpenShellPanelView({
                 className="search-input"
                 value={gatewayEndpoint}
                 disabled={busy}
-                placeholder="https://127.0.0.1:17670"
+                placeholder="https://gateway.example.com"
                 onChange={(e) => onGatewayEndpointChange(e.target.value)}
                 data-testid="openshell-field-endpoint"
               />
             </label>
-            <label>
-              CA certificate (PEM)
-              <textarea
-                className="search-input"
-                rows={4}
-                value={caPem}
-                disabled={busy}
-                placeholder={
-                  mtls?.ca
-                    ? "Configured — paste to replace"
-                    : "-----BEGIN CERTIFICATE-----"
-                }
-                onChange={(e) => onCaPemChange(e.target.value)}
-                data-testid="openshell-field-ca"
-              />
-            </label>
-            <label>
-              Client certificate (PEM)
-              <textarea
-                className="search-input"
-                rows={4}
-                value={clientCertPem}
-                disabled={busy}
-                placeholder={
-                  mtls?.client_cert
-                    ? "Configured — paste to replace"
-                    : "-----BEGIN CERTIFICATE-----"
-                }
-                onChange={(e) => onClientCertPemChange(e.target.value)}
-                data-testid="openshell-field-client-cert"
-              />
-            </label>
-            <label>
-              Client private key (PEM)
-              <textarea
-                className="search-input"
-                rows={4}
-                value={clientKeyPem}
-                disabled={busy}
-                placeholder={
-                  mtls?.client_key
-                    ? "Configured — paste to replace"
-                    : "-----BEGIN PRIVATE KEY-----"
-                }
-                onChange={(e) => onClientKeyPemChange(e.target.value)}
-                data-testid="openshell-field-client-key"
-              />
-            </label>
+
+            <fieldset
+              className="openshell-auth-mode"
+              data-testid="openshell-auth-mode"
+            >
+              <legend>Auth mode</legend>
+              <label className="openshell-auth-mode-option">
+                <input
+                  type="radio"
+                  name="openshell-auth-mode"
+                  value="mtls"
+                  checked={authMode === "mtls"}
+                  disabled={busy}
+                  onChange={() => onAuthModeChange("mtls")}
+                  data-testid="openshell-auth-mtls"
+                />
+                mTLS
+              </label>
+              <label className="openshell-auth-mode-option">
+                <input
+                  type="radio"
+                  name="openshell-auth-mode"
+                  value="oidc"
+                  checked={authMode === "oidc"}
+                  disabled={busy}
+                  onChange={() => onAuthModeChange("oidc")}
+                  data-testid="openshell-auth-oidc"
+                />
+                OIDC
+              </label>
+            </fieldset>
+
+            {authMode === "mtls" && (
+              <>
+                <label>
+                  CA certificate (PEM)
+                  <textarea
+                    className="search-input"
+                    rows={4}
+                    value={caPem}
+                    disabled={busy}
+                    placeholder={
+                      mtls?.ca
+                        ? "Configured — paste to replace"
+                        : "-----BEGIN CERTIFICATE-----"
+                    }
+                    onChange={(e) => onCaPemChange(e.target.value)}
+                    data-testid="openshell-field-ca"
+                  />
+                </label>
+                <label>
+                  Client certificate (PEM)
+                  <textarea
+                    className="search-input"
+                    rows={4}
+                    value={clientCertPem}
+                    disabled={busy}
+                    placeholder={
+                      mtls?.client_cert
+                        ? "Configured — paste to replace"
+                        : "-----BEGIN CERTIFICATE-----"
+                    }
+                    onChange={(e) => onClientCertPemChange(e.target.value)}
+                    data-testid="openshell-field-client-cert"
+                  />
+                </label>
+                <label>
+                  Client private key (PEM)
+                  <textarea
+                    className="search-input"
+                    rows={4}
+                    value={clientKeyPem}
+                    disabled={busy}
+                    placeholder={
+                      mtls?.client_key
+                        ? "Configured — paste to replace"
+                        : "-----BEGIN PRIVATE KEY-----"
+                    }
+                    onChange={(e) => onClientKeyPemChange(e.target.value)}
+                    data-testid="openshell-field-client-key"
+                  />
+                </label>
+              </>
+            )}
+
+            {authMode === "oidc" && (
+              <>
+                <label>
+                  OIDC issuer
+                  <input
+                    className="search-input"
+                    value={oidc.issuer}
+                    disabled={busy}
+                    placeholder="https://idp.example.com/realms/openshell"
+                    onChange={(e) =>
+                      onOidcChange({ ...oidc, issuer: e.target.value })
+                    }
+                    data-testid="openshell-field-oidc-issuer"
+                  />
+                </label>
+                <label>
+                  Client ID
+                  <input
+                    className="search-input"
+                    value={oidc.client_id}
+                    disabled={busy}
+                    placeholder="openshell-cli"
+                    onChange={(e) =>
+                      onOidcChange({ ...oidc, client_id: e.target.value })
+                    }
+                    data-testid="openshell-field-oidc-client-id"
+                  />
+                </label>
+                <label>
+                  Audience
+                  <input
+                    className="search-input"
+                    value={oidc.audience}
+                    disabled={busy}
+                    placeholder="openshell-cli"
+                    onChange={(e) =>
+                      onOidcChange({ ...oidc, audience: e.target.value })
+                    }
+                    data-testid="openshell-field-oidc-audience"
+                  />
+                </label>
+                <p className="dim" data-testid="openshell-oidc-login-status">
+                  {oidcStatus?.logged_in
+                    ? "Logged in (tokens encrypted in board DB)."
+                    : "Not logged in — Save settings, then Log in."}
+                </p>
+              </>
+            )}
+
             <div className="btns">
               <button
                 type="submit"
                 className="primary"
-                disabled={busy}
+                disabled={busy || !authMode}
                 data-testid="openshell-save"
               >
                 Save
               </button>
-              <button
-                type="button"
-                disabled={busy || !mtls?.complete}
-                onClick={onClearMtls}
-                data-testid="openshell-clear-mtls"
-              >
-                Clear mTLS
-              </button>
+              {authMode === "mtls" && (
+                <button
+                  type="button"
+                  disabled={busy || !mtls?.complete}
+                  onClick={onClearMtls}
+                  data-testid="openshell-clear-mtls"
+                >
+                  Clear mTLS
+                </button>
+              )}
+              {authMode === "oidc" && (
+                <>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={busy || !oidc.issuer.trim() || !oidc.client_id.trim()}
+                    onClick={onOidcLogin}
+                    data-testid="openshell-oidc-login"
+                  >
+                    Log in
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !oidcStatus?.logged_in}
+                    onClick={onOidcLogout}
+                    data-testid="openshell-oidc-logout"
+                  >
+                    Log out
+                  </button>
+                </>
+              )}
             </div>
           </form>
         </div>
@@ -304,6 +444,10 @@ export function OpenShellPanel({
 } = {}) {
   const [status, setStatus] = useState<OpenShellStatus | null>(null);
   const [gatewayEndpoint, setGatewayEndpoint] = useState("");
+  const [authMode, setAuthMode] = useState<OpenShellAuthMode | "">("");
+  const [oidc, setOidc] = useState<OpenShellOidcConfig>(EMPTY_OIDC);
+  const [oidcStatus, setOidcStatus] =
+    useState<OpenShellSettings["oidc_status"]>();
   const [caPem, setCaPem] = useState("");
   const [clientCertPem, setClientCertPem] = useState("");
   const [clientKeyPem, setClientKeyPem] = useState("");
@@ -316,6 +460,9 @@ export function OpenShellPanel({
 
   const applySaved = useCallback((cfg: OpenShellSettings, st?: OpenShellStatus) => {
     setGatewayEndpoint(cfg.gateway_endpoint ?? st?.gateway_endpoint ?? "");
+    setAuthMode(cfg.auth_mode ?? st?.auth_mode ?? "");
+    setOidc(cfg.oidc ?? EMPTY_OIDC);
+    setOidcStatus(cfg.oidc_status ?? st?.oidc_status);
     setMtls(cfg.mtls ?? st?.mtls);
     setCaPem("");
     setClientCertPem("");
@@ -361,6 +508,9 @@ export function OpenShellPanel({
     <OpenShellPanelView
       status={status}
       gatewayEndpoint={gatewayEndpoint}
+      authMode={authMode}
+      oidc={oidc}
+      oidcStatus={oidcStatus}
       caPem={caPem}
       clientCertPem={clientCertPem}
       clientKeyPem={clientKeyPem}
@@ -376,6 +526,14 @@ export function OpenShellPanel({
       onGatewayEndpointChange={(next) => {
         setSavedHint(null);
         setGatewayEndpoint(next);
+      }}
+      onAuthModeChange={(next) => {
+        setSavedHint(null);
+        setAuthMode(next);
+      }}
+      onOidcChange={(next) => {
+        setSavedHint(null);
+        setOidc(next);
       }}
       onCaPemChange={(next) => {
         setSavedHint(null);
@@ -394,22 +552,78 @@ export function OpenShellPanel({
         refresh();
       }}
       onSave={() => {
+        if (!authMode) {
+          setError("Pick an auth mode (mTLS or OIDC).");
+          return;
+        }
         const body: OpenShellSettings = {
           gateway_endpoint: gatewayEndpoint.trim() || null,
+          auth_mode: authMode,
         };
-        if (caPem.trim()) body.ca_pem = caPem;
-        if (clientCertPem.trim()) body.client_cert_pem = clientCertPem;
-        if (clientKeyPem.trim()) body.client_key_pem = clientKeyPem;
-        put(body, "Saved. mTLS PEMs are sealed in the board database.");
+        if (authMode === "mtls") {
+          if (caPem.trim()) body.ca_pem = caPem;
+          if (clientCertPem.trim()) body.client_cert_pem = clientCertPem;
+          if (clientKeyPem.trim()) body.client_key_pem = clientKeyPem;
+        }
+        if (authMode === "oidc") {
+          body.oidc = {
+            issuer: oidc.issuer.trim(),
+            client_id: oidc.client_id.trim(),
+            audience: oidc.audience.trim(),
+          };
+        }
+        put(
+          body,
+          authMode === "mtls"
+            ? "Saved. mTLS PEMs are sealed in the board database."
+            : "Saved. Log in to store OIDC tokens.",
+        );
       }}
       onClearMtls={() => {
         put(
           {
             gateway_endpoint: gatewayEndpoint.trim() || null,
+            auth_mode: "mtls",
             clear_mtls: true,
           },
           "Cleared sealed mTLS material.",
         );
+      }}
+      onOidcLogin={() => {
+        setBusy(true);
+        setError(null);
+        setSavedHint(null);
+        const body: OpenShellSettings = {
+          gateway_endpoint: gatewayEndpoint.trim() || null,
+          auth_mode: "oidc",
+          oidc: {
+            issuer: oidc.issuer.trim(),
+            client_id: oidc.client_id.trim(),
+            audience: oidc.audience.trim(),
+          },
+        };
+        api
+          .putOpenShell(body)
+          .then(() => api.openshellOidcLogin())
+          .then((out) => {
+            if (!out.ok) throw new Error(out.error || "OIDC login failed");
+            setSavedHint("OIDC login complete.");
+            return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onOidcLogout={() => {
+        setBusy(true);
+        setError(null);
+        api
+          .openshellOidcLogout()
+          .then(() => {
+            setSavedHint("Logged out of OpenShell OIDC.");
+            return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
       }}
       providers={<OpenShellProvidersPanel gatewayHealthy={!!status?.healthy} />}
       providerTypes={<OpenShellProviderTypesPanel />}
