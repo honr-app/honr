@@ -1126,6 +1126,47 @@ const openshellProvidersEmptyHtml = renderToString(
 assert(openshellProvidersEmptyHtml.includes("data-testid=\"openshell-providers-empty\""), "Empty providers state");
 assert(openshellProvidersEmptyHtml.includes("gateway offline"), "Offline gateway badge");
 
+const openshellProvidersAddBlankTypeHtml = renderToString(
+  React.createElement(OpenShellProvidersPanelView, {
+    providers: [],
+    gatewayReachable: true,
+    profiles: [
+      {
+        id: "cursor-agent",
+        display_name: "Cursor Agent",
+        description: "CURSOR_API_KEY",
+        source: "board",
+        credential_env_vars: ["CURSOR_API_KEY"],
+        form_config_keys: [],
+      },
+      {
+        id: "google-vertex-ai",
+        display_name: "Google Vertex AI",
+        description: "vertex",
+        source: "gateway",
+        credential_env_vars: [],
+        form_config_keys: ["VERTEX_AI_PROJECT_ID"],
+      },
+    ],
+    draft: { name: "", type: "", config: {}, credentials: {} },
+    onDraftChange: () => {},
+    onSave: () => {},
+    onCancelEdit: () => {},
+    onEdit: () => {},
+    onDelete: () => {},
+    onSync: () => {},
+  }),
+);
+assert(
+  openshellProvidersAddBlankTypeHtml.includes("Select a provider type…"),
+  "Add provider starts with no type selected",
+);
+assert(
+  openshellProvidersAddBlankTypeHtml.includes('value=""') &&
+    openshellProvidersAddBlankTypeHtml.includes("disabled=\"\""),
+  "Type placeholder option is disabled empty value",
+);
+
 const openshellCursorAgentHtml = renderToString(
   React.createElement(OpenShellProvidersPanelView, {
     providers: [],

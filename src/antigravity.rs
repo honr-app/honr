@@ -23,8 +23,8 @@ pub const CONFIG_LOCATION: &str = "ANTIGRAVITY_GCP_LOCATION";
 /// Seat default model. Put `--model` **before** `-p` — `-p` consumes the next
 /// argv as the prompt.
 ///
-/// Requires the consumer Antigravity OAuth client (see [`crate::antigravity_oauth`]);
-/// the Business client returns Gemini Flash rows without `vertexModelId`.
+/// Pair with consumer-client OAuth (`auth_method: gcp` + board project).
+/// Business-client tokens leave this label without `vertexModelId`.
 pub const DEFAULT_SEAT_MODEL: &str = "gemini-3.6-flash-high";
 
 /// GCP project/location from Board provider config (never host files).

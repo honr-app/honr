@@ -286,8 +286,20 @@ export const api = {
     post("/openshell/providers/sync"),
   startAntigravityOAuth: (body?: {
     return_path?: string;
-  }): Promise<{ authorize_url: string }> =>
+  }): Promise<{ authorize_url: string; redirect_uri: string }> =>
     post("/openshell/providers/antigravity/oauth/start", body ?? {}),
+  completeAntigravityOAuth: (body: {
+    authorization_code: string;
+  }): Promise<{
+    ok: boolean;
+    projects: { id: string; name?: string }[];
+    needs_project: boolean;
+    selected_project?: string;
+  }> => post("/openshell/providers/antigravity/oauth/complete", body),
+  selectAntigravityProject: (body: {
+    project_id: string;
+  }): Promise<{ ok: boolean; project_id: string }> =>
+    post("/openshell/providers/antigravity/oauth/select-project", body),
   disconnectAntigravityOAuth: (): Promise<{ ok: boolean }> =>
     post("/openshell/providers/antigravity/oauth/disconnect", {}),
   listOpenShellProviderProfiles: (): Promise<ProviderTypeProfile[]> =>
