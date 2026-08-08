@@ -36,9 +36,8 @@ const emptyDraft = (): ServerDraft => ({
   auth: "none",
   oauthEnv: "",
   oauthProvider: "",
-  command: "uv",
-  argsText:
-    "tool run --from context-server@latest context-server serve --db /tmp/kb.db",
+  command: "",
+  argsText: "",
   cwd: "",
   policy_fragment_yaml: "",
   provider_names: [],
