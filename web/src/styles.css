@@ -1134,6 +1134,29 @@ a.button-link:hover {
 .openshell-provider-form {
   margin-top: 8px;
 }
+/* Google Cloud login: stack copy above actions (not a side-by-side toolbar). */
+.openshell-provider-antigravity-oauth {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--bg));
+}
+.openshell-provider-antigravity-oauth > p {
+  margin: 0;
+}
+.openshell-provider-antigravity-oauth .btns {
+  margin-top: 2px;
+}
+.openshell-provider-antigravity-oauth label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 
 .openshell-profiles h3 {
   margin: 0 0 4px;

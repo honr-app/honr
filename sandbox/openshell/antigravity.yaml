@@ -2,10 +2,12 @@
 # Bearer injection on Cloud Code / Google API endpoints so the seat only sees
 # openshell:resolve placeholders — never a host OAuth file.
 # Refresh material (client_id / client_secret / refresh_token) is configured by
-# host-mediated Settings → Log in with Google (oauth2_refresh_token).
+# host-mediated Settings → Log in with Google Cloud (paste authorization code,
+# then pick a GCP project; oauth2_refresh_token with the consumer Antigravity
+# client — business-client tokens break seat Vertex model resolution).
 id: antigravity
 display_name: Google Antigravity (agy)
-description: Antigravity CLI / Cloud Code assist user OAuth (Bearer access token)
+description: Antigravity CLI OAuth (paste-code + GCP project)
 category: agent
 credentials:
   - name: access_token
@@ -23,7 +25,7 @@ credentials:
       max_lifetime_seconds: 3600
       material:
         - name: client_id
-          description: Google OAuth client id (Antigravity installed-app client)
+          description: Google OAuth client id (Antigravity consumer installed-app client)
           required: true
         - name: client_secret
           description: Google OAuth client secret (installed-app; not a honr secret)

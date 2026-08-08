@@ -1,9 +1,18 @@
 //! Host-mediated Google OAuth for the Antigravity (`agy`) OpenShell provider.
 //!
 //! Distinct from [`crate::mcp_client_oauth`] (outbound MCP servers). Here honr
-//! is the OAuth client for Google's Antigravity / Cloud Code installed-app
-//! client: PKCE + offline access → seal refresh on board provider `antigravity`
-//! → gateway `oauth2_refresh_token` so the seat only sees `openshell:resolve:…`.
+//! is the OAuth client for Google's Antigravity **consumer** installed-app client:
+//! open Google auth → paste the short authorization code from the hosted
+//! callback page → pick a GCP project → seal refresh on board provider
+//! `antigravity` → gateway `oauth2_refresh_token` so the seat only sees
+//! `openshell:resolve:…`.
+//!
+//! Redirect is `https://antigravity.google/oauth-callback` (paste-code), not
+//! loopback — so a remote board works from the operator's browser.
+//!
+//! The business / Cloud Code client (`1071006060591-…`) also accepts this
+//! redirect, but `fetchAvailableModels` then returns Gemini Flash rows without
+//! `vertexModelId` → cockpit dies with "Could not determine Vertex model ID".
 
 use crate::antigravity::{self, CONFIG_LOCATION, CONFIG_PROJECT};
 use crate::model::{
@@ -15,10 +24,9 @@ use crate::secrets::{open_string_map, seal_string_map};
 use crate::store::SharedBoard;
 use crate::supervisor::setup_agy_auth;
 
-use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::extract::State;
+use axum::http::{header, StatusCode};
+use axum::routing::post;
 use axum::{Json, Router};
 use base64::Engine;
 use parking_lot::Mutex;
@@ -29,22 +37,19 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CALLBACK_PATH: &str = "/oauth/antigravity/callback";
 const PENDING_TTL_SECS: u64 = 600;
 const DEFAULT_RETURN_PATH: &str = "/settings/openshell/providers";
 
-/// Google OAuth client id embedded in the Antigravity CLI (`agy` binary).
-/// Installed-app credential — not a honr secret.
-///
-/// The CLI ships two clients. This is the consumer client the host `agy`
-/// login uses. The other (`1071006060591-…`) is a Business/Cloud Code client
-/// whose `fetchAvailableModels` rows for Gemini Flash are `MODEL_PLACEHOLDER_*`
-/// without `vertexModelId`, which makes agy die with "Could not determine
-/// Vertex model ID" before any aiplatform call — on the host and in the seat.
+/// Consumer Antigravity client embedded in the CLI (`agy`). Installed-app
+/// credential — not a honr secret. Prefer this over the business client so
+/// seat `fetchAvailableModels` rows include `vertexModelId`.
 const AGY_CLIENT_ID: &str =
     "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com";
 /// Matching client secret from the same installed-app client (public in `agy`).
 const AGY_CLIENT_SECRET: &str = "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";
+
+/// Hosted page that displays the authorization code for paste-back.
+const REDIRECT_URI: &str = "https://antigravity.google/oauth-callback";
 
 const AGY_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
@@ -54,30 +59,36 @@ const AGY_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/experimentsandconfigs",
 ];
 
+/// Standard Google OAuth authorize + hosted paste-code redirect.
+/// (`auth.cloud.google/authorize` returns `invalid_client` for these ids.)
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const LIST_PROJECTS_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:listCloudAICompanionProjects";
 
-fn pending() -> &'static Mutex<HashMap<String, PendingOAuth>> {
-    static STORE: OnceLock<Mutex<HashMap<String, PendingOAuth>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+/// Single in-flight login — the paste-code page returns only `code`, not `state`.
+fn pending_slot() -> &'static Mutex<Option<PendingOAuth>> {
+    static STORE: OnceLock<Mutex<Option<PendingOAuth>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Clone)]
 struct PendingOAuth {
     code_verifier: String,
-    redirect_uri: String,
-    return_path: String,
     created_at: u64,
 }
 
 pub fn api_routes() -> Router<SharedBoard> {
     Router::new()
         .route("/start", post(oauth_start))
+        .route("/complete", post(oauth_complete))
+        .route("/select-project", post(oauth_select_project))
         .route("/disconnect", post(oauth_disconnect))
 }
 
+/// No loopback callback — Cloud paste-code redirects to antigravity.google.
 pub fn callback_routes() -> Router<SharedBoard> {
-    Router::new().route("/callback", get(oauth_callback))
+    Router::new()
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +100,35 @@ pub struct OAuthStartReq {
 #[derive(Debug, Serialize)]
 pub struct OAuthStartOut {
     pub authorize_url: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthCompleteReq {
+    /// Short authorization code from the Google / Antigravity paste page.
+    /// Also accepts a full redirect URL containing `code=` (tolerant).
+    pub authorization_code: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CloudProject {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OAuthCompleteOut {
+    pub ok: bool,
+    pub projects: Vec<CloudProject>,
+    pub needs_project: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_project: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthSelectProjectReq {
+    pub project_id: String,
 }
 
 type ApiErr = (StatusCode, Json<serde_json::Value>);
@@ -98,98 +138,140 @@ fn api_err(status: StatusCode, msg: impl Into<String>) -> ApiErr {
 }
 
 async fn oauth_start(
-    headers: HeaderMap,
     Json(req): Json<OAuthStartReq>,
 ) -> Result<Json<OAuthStartOut>, ApiErr> {
-    let origin = crate::mcp_oauth::public_origin(&headers);
-    if origin.is_empty() {
-        return Err(api_err(
-            StatusCode::BAD_REQUEST,
-            "cannot resolve public origin (Host / Origin / X-Forwarded-Host, or HONR_PUBLIC_URL)",
-        ));
-    }
-    let redirect_uri = format!("{}{CALLBACK_PATH}", origin.trim_end_matches('/'));
-    let return_path = sanitize_return_path(req.return_path.as_deref());
+    let _ = sanitize_return_path(req.return_path.as_deref());
 
     let code_verifier = pkce_verifier();
     let code_challenge = pkce_challenge_s256(&code_verifier);
     let state = random_token(32);
 
     {
-        let mut st = pending().lock();
-        st.retain(|_, p| now_secs().saturating_sub(p.created_at) < PENDING_TTL_SECS);
-        st.insert(
-            state.clone(),
-            PendingOAuth {
-                code_verifier,
-                redirect_uri: redirect_uri.clone(),
-                return_path,
-                created_at: now_secs(),
-            },
-        );
+        let mut slot = pending_slot().lock();
+        *slot = Some(PendingOAuth {
+            code_verifier,
+            created_at: now_secs(),
+        });
     }
 
     let scope = AGY_SCOPES.join(" ");
+    // `state` is sent for Google's CSRF check; paste-complete does not echo it back.
     let authorize_url = format!(
         "{AUTHORIZE_URL}?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256&scope={}&access_type=offline&prompt=consent",
         urlencoding(AGY_CLIENT_ID),
-        urlencoding(&redirect_uri),
+        urlencoding(REDIRECT_URI),
         urlencoding(&state),
         urlencoding(&code_challenge),
         urlencoding(&scope),
     );
-    Ok(Json(OAuthStartOut { authorize_url }))
+    Ok(Json(OAuthStartOut {
+        authorize_url,
+        redirect_uri: REDIRECT_URI.into(),
+    }))
 }
 
-#[derive(Debug, Deserialize)]
-struct CallbackQuery {
-    code: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
-    error_description: Option<String>,
-}
-
-async fn oauth_callback(
+async fn oauth_complete(
     State(board): State<SharedBoard>,
-    Query(q): Query<CallbackQuery>,
-) -> Response {
-    let (pending, return_path) = {
-        let Some(state) = q.state.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-            return redirect_err(DEFAULT_RETURN_PATH, "missing state");
+    Json(req): Json<OAuthCompleteReq>,
+) -> Result<Json<OAuthCompleteOut>, ApiErr> {
+    let code = parse_authorization_code(&req.authorization_code)
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
+
+    let pending = {
+        let mut slot = pending_slot().lock();
+        let Some(p) = slot.take() else {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "no in-flight login — click Log in with Google Cloud again",
+            ));
         };
-        let mut st = pending().lock();
-        match st.remove(state) {
-            Some(p) => {
-                let path = p.return_path.clone();
-                (p, path)
-            }
-            None => return redirect_err(DEFAULT_RETURN_PATH, "unknown or expired state"),
+        if now_secs().saturating_sub(p.created_at) >= PENDING_TTL_SECS {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "login expired — click Log in with Google Cloud again",
+            ));
         }
+        p
     };
 
-    if let Some(err) = q.error.as_deref().filter(|s| !s.is_empty()) {
-        let detail = q
-            .error_description
-            .as_deref()
-            .unwrap_or(err)
-            .to_string();
-        return redirect_err(&return_path, &detail);
+    let tokens = exchange_code(&code, &pending)
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
+    finish_oauth_connect(&board, &tokens)
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
+
+    let access = tokens
+        .access_token
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let projects = if access.is_empty() {
+        Vec::new()
+    } else {
+        list_cloud_projects(access).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "agy oauth: listCloudAICompanionProjects failed");
+            Vec::new()
+        })
+    };
+
+    let selected = board
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == ANTIGRAVITY_PROVIDER)
+        .and_then(|p| {
+            p.config
+                .get(CONFIG_PROJECT)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    let needs_project = selected.is_none();
+
+    Ok(Json(OAuthCompleteOut {
+        ok: true,
+        projects,
+        needs_project,
+        selected_project: selected,
+    }))
+}
+
+async fn oauth_select_project(
+    State(board): State<SharedBoard>,
+    Json(req): Json<OAuthSelectProjectReq>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    let project_id = req.project_id.trim();
+    if project_id.is_empty() {
+        return Err(api_err(StatusCode::BAD_REQUEST, "project_id is required"));
     }
+    select_project(&board, project_id)
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({ "ok": true, "project_id": project_id })))
+}
 
-    let Some(code) = q.code.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-        return redirect_err(&return_path, "missing code");
-    };
-
-    let tokens = match exchange_code(code, &pending).await {
-        Ok(t) => t,
-        Err(e) => return redirect_err(&return_path, &e),
-    };
-
-    if let Err(e) = finish_oauth_connect(&board, &tokens).await {
-        return redirect_err(&return_path, &e);
+/// Pull a bare authorization code, or `code=` from a pasted redirect URL.
+fn parse_authorization_code(raw: &str) -> Result<String, String> {
+    let raw = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    if raw.is_empty() {
+        return Err("paste the authorization code from Google".into());
     }
-
-    Redirect::temporary(&format!("{return_path}?agy_oauth=ok")).into_response()
+    if raw.contains("://") || raw.contains('?') {
+        let uri: axum::http::Uri = raw
+            .parse()
+            .map_err(|e| format!("not a URL: {e}"))?;
+        let query = uri.query().unwrap_or("");
+        if query.is_empty() {
+            return Err("URL has no code — paste the authorization code shown on the page".into());
+        }
+        let q: HashMap<String, String> =
+            serde_urlencoded::from_str(query).map_err(|e| format!("query parse: {e}"))?;
+        return q
+            .get("code")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "URL missing code=".into());
+    }
+    Ok(raw.to_string())
 }
 
 async fn oauth_disconnect(
@@ -223,8 +305,6 @@ pub async fn disconnect_oauth(board: &SharedBoard) -> Result<(), String> {
     .normalized();
     let stored = board.upsert_openshell_provider(desired);
 
-    // Re-apply without credentials when possible; otherwise leave gateway stale
-    // until the next login (apply may fail without credentials — that's ok).
     let os = board.openshell_client();
     let _ = os
         .apply_provider(
@@ -235,6 +315,64 @@ pub async fn disconnect_oauth(board: &SharedBoard) -> Result<(), String> {
             None,
         )
         .await;
+    Ok(())
+}
+
+async fn select_project(board: &SharedBoard, project_id: &str) -> Result<(), String> {
+    let existing = board
+        .openshell_providers()
+        .into_iter()
+        .find(|p| p.name == ANTIGRAVITY_PROVIDER)
+        .ok_or_else(|| {
+            "no Board provider `antigravity` — complete Google login first".to_string()
+        })?;
+
+    let mut config = existing.config.clone();
+    config.insert(CONFIG_PROJECT.into(), project_id.to_string());
+    if config
+        .get(CONFIG_LOCATION)
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+    {
+        config.insert(CONFIG_LOCATION.into(), "global".into());
+    }
+
+    let desired = OpenShellProviderDesired {
+        name: existing.name.clone(),
+        provider_type: existing.provider_type.clone(),
+        config,
+        credentials_sealed: existing.credentials_sealed.clone(),
+        credential_keys: existing.credential_keys.clone(),
+        refresh: existing.refresh.clone(),
+    }
+    .normalized();
+    let stored = board.upsert_openshell_provider(desired);
+
+    let os = board.openshell_client();
+    let credentials = match stored.credentials_sealed.as_deref() {
+        Some(sealed) => open_string_map(sealed).map_err(|e| e.to_string())?,
+        None => BTreeMap::new(),
+    };
+    let refresh_spec = stored.refresh.as_ref().map(|r| {
+        let material = open_string_map(&r.material_sealed).unwrap_or_default();
+        crate::openshell::ProviderRefreshSpec {
+            credential_key: r.credential_key.clone(),
+            strategy: r.strategy.clone(),
+            material,
+            secret_material_keys: r.secret_material_keys.clone(),
+        }
+    });
+    os.apply_provider(
+        &stored.name,
+        &stored.provider_type,
+        credentials,
+        stored.config.clone(),
+        refresh_spec.as_ref(),
+    )
+    .await
+    .map_err(|e| format!("gateway apply antigravity: {e}"))?;
+
+    refresh_cockpit_agy_auth(board).await;
     Ok(())
 }
 
@@ -252,7 +390,6 @@ async fn finish_oauth_connect(board: &SharedBoard, tokens: &TokenResponse) -> Re
             "token response missing refresh_token (need access_type=offline + consent)".to_string()
         })?;
 
-    // Ensure board type YAML includes refresh (shipped seed only inserts when missing).
     let yaml = include_str!("../sandbox/openshell/antigravity.yaml").trim();
     provider_types::parse_provider_type_yaml(yaml, Some(ANTIGRAVITY_PROVIDER))?;
     board.upsert_openshell_provider_type(OpenShellProviderTypeDesired {
@@ -280,7 +417,6 @@ async fn finish_oauth_connect(board: &SharedBoard, tokens: &TokenResponse) -> Re
         .map(|s| s.trim().is_empty())
         .unwrap_or(true)
     {
-        // Prefer an existing board project; otherwise leave empty for Settings.
         let _ = config
             .entry(CONFIG_PROJECT.into())
             .or_insert_with(String::new);
@@ -349,7 +485,11 @@ async fn finish_oauth_connect(board: &SharedBoard, tokens: &TokenResponse) -> Re
     .await
     .map_err(|e| format!("gateway apply antigravity: {e}"))?;
 
-    // Refresh cockpit seat token file when agy is the live engine.
+    refresh_cockpit_agy_auth(board).await;
+    Ok(())
+}
+
+async fn refresh_cockpit_agy_auth(board: &SharedBoard) {
     if let Some(session) = board.cockpit_session() {
         if session.status == CockpitSessionStatus::Running {
             if let Some(env) = session
@@ -360,6 +500,7 @@ async fn finish_oauth_connect(board: &SharedBoard, tokens: &TokenResponse) -> Re
             {
                 let resolved = board.resolve_cockpit_sandbox_create();
                 if resolved.engine.as_deref().map(str::trim) == Some("agy") {
+                    let os = board.openshell_client();
                     let _ = antigravity::attach_to_running_cockpit(board).await;
                     if let Err(e) = setup_agy_auth(&os, env, board).await {
                         tracing::warn!(error = %e, "agy oauth: setup_agy_auth after login failed");
@@ -368,8 +509,6 @@ async fn finish_oauth_connect(board: &SharedBoard, tokens: &TokenResponse) -> Re
             }
         }
     }
-
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,7 +529,7 @@ async fn exchange_code(code: &str, pending: &PendingOAuth) -> Result<TokenRespon
     let body = serde_urlencoded::to_string([
         ("grant_type", "authorization_code"),
         ("code", code),
-        ("redirect_uri", pending.redirect_uri.as_str()),
+        ("redirect_uri", REDIRECT_URI),
         ("client_id", AGY_CLIENT_ID),
         ("client_secret", AGY_CLIENT_SECRET),
         ("code_verifier", pending.code_verifier.as_str()),
@@ -412,9 +551,92 @@ async fn exchange_code(code: &str, pending: &PendingOAuth) -> Result<TokenRespon
     serde_json::from_str(&text).map_err(|e| format!("token json: {e}"))
 }
 
-fn redirect_err(return_path: &str, message: &str) -> Response {
-    let msg = urlencoding(message);
-    Redirect::temporary(&format!("{return_path}?agy_oauth=error&message={msg}")).into_response()
+async fn list_cloud_projects(access_token: &str) -> Result<Vec<CloudProject>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    // Proto HTTP annotation is GET; some clients POST — try GET then POST.
+    let get_resp = client
+        .get(LIST_PROJECTS_URL)
+        .bearer_auth(access_token)
+        .header(header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("list projects GET: {e}"))?;
+    let get_status = get_resp.status();
+    let get_text = get_resp
+        .text()
+        .await
+        .map_err(|e| format!("list projects GET body: {e}"))?;
+    if get_status.is_success() {
+        return parse_projects_json(&get_text);
+    }
+
+    let post_resp = client
+        .post(LIST_PROJECTS_URL)
+        .bearer_auth(access_token)
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .map_err(|e| format!("list projects POST: {e}"))?;
+    let post_status = post_resp.status();
+    let post_text = post_resp
+        .text()
+        .await
+        .map_err(|e| format!("list projects POST body: {e}"))?;
+    if !post_status.is_success() {
+        return Err(format!(
+            "list projects failed GET {get_status}: {get_text}; POST {post_status}: {post_text}"
+        ));
+    }
+    parse_projects_json(&post_text)
+}
+
+fn parse_projects_json(text: &str) -> Result<Vec<CloudProject>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("projects json: {e}"))?;
+    let arr = v
+        .get("projects")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for item in arr {
+        if let Some(id) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            out.push(CloudProject {
+                id: id.to_string(),
+                name: None,
+            });
+            continue;
+        }
+        let id = item
+            .get("id")
+            .or_else(|| item.get("projectId"))
+            .or_else(|| item.get("project_id"))
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(id) = id else {
+            continue;
+        };
+        let name = item
+            .get("name")
+            .or_else(|| item.get("displayName"))
+            .or_else(|| item.get("display_name"))
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        out.push(CloudProject {
+            id: id.to_string(),
+            name,
+        });
+    }
+    Ok(out)
 }
 
 fn sanitize_return_path(raw: Option<&str>) -> String {
@@ -463,6 +685,20 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Build the Cloud-project authorize URL (exported for tests).
+#[cfg(test)]
+fn build_authorize_url(state: &str, code_challenge: &str) -> String {
+    let scope = AGY_SCOPES.join(" ");
+    format!(
+        "{AUTHORIZE_URL}?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256&scope={}&access_type=offline&prompt=consent",
+        urlencoding(AGY_CLIENT_ID),
+        urlencoding(REDIRECT_URI),
+        urlencoding(state),
+        urlencoding(code_challenge),
+        urlencoding(&scope),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +723,52 @@ mod tests {
             DEFAULT_RETURN_PATH
         );
         assert_eq!(sanitize_return_path(None), DEFAULT_RETURN_PATH);
+    }
+
+    #[test]
+    fn authorize_url_uses_accounts_google_and_paste_redirect() {
+        let url = build_authorize_url("st", "ch");
+        assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(url.contains(&urlencoding(AGY_CLIENT_ID)));
+        assert!(url.contains(&urlencoding(REDIRECT_URI)));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("access_type=offline"));
+        assert!(!url.contains("127.0.0.1"));
+        assert!(!url.contains("auth.cloud.google"));
+        assert!(url.contains("884354919052"));
+        assert!(!url.contains("1071006060591"));
+    }
+
+    #[test]
+    fn parse_authorization_code_bare_and_url() {
+        assert_eq!(
+            parse_authorization_code("4/0AeanS").unwrap(),
+            "4/0AeanS"
+        );
+        assert_eq!(
+            parse_authorization_code(
+                "https://antigravity.google/oauth-callback?code=4%2Fxyz&scope=email"
+            )
+            .unwrap(),
+            "4/xyz"
+        );
+        assert!(parse_authorization_code("").is_err());
+        assert!(parse_authorization_code("https://antigravity.google/oauth-callback").is_err());
+    }
+
+    #[test]
+    fn parse_projects_json_shapes() {
+        let a = parse_projects_json(
+            r#"{"projects":[{"id":"p1","displayName":"One"},{"projectId":"p2"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].id, "p1");
+        assert_eq!(a[0].name.as_deref(), Some("One"));
+        assert_eq!(a[1].id, "p2");
+
+        let b = parse_projects_json(r#"{"projects":["plain-id"]}"#).unwrap();
+        assert_eq!(b[0].id, "plain-id");
     }
 
     #[test]

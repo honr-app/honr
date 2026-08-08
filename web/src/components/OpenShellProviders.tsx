@@ -75,6 +75,15 @@ export function OpenShellProvidersPanelView({
   onRefreshInstallations,
   onAntigravityLogin,
   onAntigravityDisconnect,
+  antigravityPasteCode = "",
+  onAntigravityPasteCodeChange,
+  onAntigravityCompletePaste,
+  antigravityAwaitingPaste = false,
+  antigravityProjects = [],
+  antigravityProjectPick = "",
+  onAntigravityProjectPickChange,
+  onAntigravitySelectProject,
+  antigravityAwaitingProject = false,
 }: {
   providers: OpenShellProviderView[];
   gatewayReachable: boolean;
@@ -93,6 +102,17 @@ export function OpenShellProvidersPanelView({
   onRefreshInstallations?: () => void;
   onAntigravityLogin?: () => void;
   onAntigravityDisconnect?: () => void;
+  antigravityPasteCode?: string;
+  onAntigravityPasteCodeChange?: (next: string) => void;
+  onAntigravityCompletePaste?: () => void;
+  /** True after Log in opened Google — show paste field for the authorization code. */
+  antigravityAwaitingPaste?: boolean;
+  antigravityProjects?: { id: string; name?: string }[];
+  antigravityProjectPick?: string;
+  onAntigravityProjectPickChange?: (next: string) => void;
+  onAntigravitySelectProject?: () => void;
+  /** True after code exchange when a GCP project still needs selecting. */
+  antigravityAwaitingProject?: boolean;
 }) {
   const typeOptions = profiles.length
     ? profiles.map((p) => ({ id: p.id, label: p.display_name || p.id }))
@@ -103,32 +123,55 @@ export function OpenShellProvidersPanelView({
         { id: "cursor-agent", label: "cursor-agent" },
         { id: "antigravity", label: "antigravity" },
       ];
-  const defaultAddType =
-    typeOptions.find((t) => t.id === "google-vertex-ai")?.id ??
-    typeOptions.find((t) => t.id !== GITHUB_APP_PROVIDER_TYPE)?.id ??
-    typeOptions[0]?.id ??
-    "google-vertex-ai";
   const selectedProfile = draft
     ? profiles.find((p) => p.id === draft.type)
     : undefined;
   const draftIsGitHubApp = draft ? isGitHubAppType(draft.type) : false;
   const draftIsAntigravity = draft ? isAntigravityType(draft.type) : false;
-  const antigravityConnected = providers.some(
-    (p) =>
-      p.name === ANTIGRAVITY_PROVIDER_NAME &&
-      (p.has_refresh || p.has_credentials),
+  const antigravityProvider = providers.find(
+    (p) => p.name === ANTIGRAVITY_PROVIDER_NAME,
   );
+  const antigravityConnected = Boolean(
+    antigravityProvider &&
+      (antigravityProvider.has_refresh || antigravityProvider.has_credentials),
+  );
+  const antigravitySelectedProject =
+    antigravityProvider?.config?.ANTIGRAVITY_GCP_PROJECT?.trim() ||
+    draft?.config?.ANTIGRAVITY_GCP_PROJECT?.trim() ||
+    "";
+  /** Project not chosen yet — drive a single step, not a second empty config field. */
+  const antigravityNeedsProject =
+    antigravityAwaitingProject ||
+    (antigravityConnected && !antigravitySelectedProject);
   const credKeys = draft
     ? formCredentialKeys(draft.type, selectedProfile)
     : [];
   const configKeys = draft
-    ? formConfigKeysForType(draft.type, selectedProfile).filter(
-        (k) => !(draftIsGitHubApp && k === CONFIG_INSTALLATION_ID && installations.length > 0),
-      )
+    ? formConfigKeysForType(draft.type, selectedProfile).filter((k) => {
+        if (
+          draftIsGitHubApp &&
+          k === CONFIG_INSTALLATION_ID &&
+          installations.length > 0
+        ) {
+          return false;
+        }
+        // Shown in the Google Cloud step instead of a duplicate empty input.
+        if (
+          draftIsAntigravity &&
+          antigravityNeedsProject &&
+          (k === "ANTIGRAVITY_GCP_PROJECT" || k === "ANTIGRAVITY_GCP_LOCATION")
+        ) {
+          return false;
+        }
+        return true;
+      })
     : [];
   const knownConfig = new Set([
     ...configKeys,
     ...(draftIsGitHubApp ? [CONFIG_INSTALLATION_ID] : []),
+    ...(draftIsAntigravity
+      ? ["ANTIGRAVITY_GCP_PROJECT", "ANTIGRAVITY_GCP_LOCATION"]
+      : []),
   ]);
   const extraConfigEntries = Object.entries(draft?.config ?? {}).filter(
     ([k]) => !knownConfig.has(k),
@@ -158,43 +201,52 @@ export function OpenShellProvidersPanelView({
         </p>
       )}
 
-      <div className="btns" style={{ marginBottom: 12 }}>
-        <button
-          type="button"
-          className="primary"
-          disabled={busy}
-          onClick={() =>
-            onDraftChange({
-              name: "",
-              type: defaultAddType,
-              config: {},
-              credentials: {},
-            })
-          }
-          data-testid="openshell-providers-add"
-        >
-          Add provider
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onSync}
-          data-testid="openshell-providers-sync"
-        >
-          Sync all to gateway
-        </button>
-        <span className="dim" data-testid="openshell-providers-gateway-badge">
-          {gatewayReachable ? "gateway reachable" : "gateway offline — local only"}
-        </span>
-      </div>
+      {!draft && (
+        <div className="btns" style={{ marginBottom: 12 }}>
+          <button
+            type="button"
+            className="primary"
+            disabled={busy}
+            onClick={() =>
+              onDraftChange({
+                name: "",
+                type: "",
+                config: {},
+                credentials: {},
+              })
+            }
+            data-testid="openshell-providers-add"
+          >
+            Add provider
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onSync}
+            data-testid="openshell-providers-sync"
+          >
+            Sync all to gateway
+          </button>
+          <span className="dim" data-testid="openshell-providers-gateway-badge">
+            {gatewayReachable
+              ? "gateway reachable"
+              : "gateway offline — local only"}
+          </span>
+        </div>
+      )}
 
-      {providers.length === 0 && !draft ? (
+      {!draft && providers.length === 0 ? (
         <p className="dim" data-testid="openshell-providers-empty">
           No providers yet. Add one here, then attach it on a Sandbox spec for
           create.
         </p>
-      ) : (
-        <ul className="openshell-provider-list" data-testid="openshell-provider-list">
+      ) : null}
+
+      {!draft && providers.length > 0 ? (
+        <ul
+          className="openshell-provider-list"
+          data-testid="openshell-provider-list"
+        >
           {providers.map((p) => {
             const secretKeys = (p.credential_keys ?? []).filter(
               (k) => k !== "GH_TOKEN" || p.type !== GITHUB_APP_PROVIDER_TYPE,
@@ -261,7 +313,7 @@ export function OpenShellProvidersPanelView({
             );
           })}
         </ul>
-      )}
+      ) : null}
 
       {draft && (
         <form
@@ -304,6 +356,9 @@ export function OpenShellProvidersPanelView({
               }}
               data-testid="openshell-provider-field-type"
             >
+              <option value="" disabled>
+                Select a provider type…
+              </option>
               {typeOptions.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.label}
@@ -333,37 +388,155 @@ export function OpenShellProvidersPanelView({
           ))}
           {draftIsAntigravity && (
             <div
-              className="sandbox-profile-actions"
+              className="openshell-provider-antigravity-oauth"
               data-testid="openshell-provider-antigravity-oauth"
             >
-              <p className="dim">
-                {antigravityConnected
-                  ? "Connected via Google OAuth (gateway refreshes access tokens)."
-                  : "Log in with Google so the gateway can refresh Antigravity access tokens."}
-              </p>
-              {onAntigravityLogin && (
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={busy}
-                  onClick={onAntigravityLogin}
-                  data-testid="openshell-provider-antigravity-login"
-                >
-                  {antigravityConnected
-                    ? "Re-login with Google"
-                    : "Log in with Google"}
-                </button>
-              )}
-              {antigravityConnected && onAntigravityDisconnect && (
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  disabled={busy}
-                  onClick={onAntigravityDisconnect}
-                  data-testid="openshell-provider-antigravity-disconnect"
-                >
-                  Disconnect Google
-                </button>
+              {antigravityNeedsProject ? (
+                <>
+                  <p data-testid="openshell-provider-antigravity-step-project">
+                    Google is connected. Enter the GCP project id agy should use
+                    (same as <code>gcloud config get-value project</code>), then
+                    continue.
+                  </p>
+                  {onAntigravityProjectPickChange && (
+                    <label data-testid="openshell-provider-antigravity-project">
+                      GCP project id
+                      {antigravityProjects.length > 0 ? (
+                        <select
+                          className="search-input"
+                          value={antigravityProjectPick}
+                          disabled={busy}
+                          onChange={(e) =>
+                            onAntigravityProjectPickChange(e.target.value)
+                          }
+                          data-testid="openshell-provider-antigravity-project-select"
+                        >
+                          <option value="">Select a project…</option>
+                          {antigravityProjects.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name ? `${p.name} (${p.id})` : p.id}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          className="search-input"
+                          value={antigravityProjectPick}
+                          disabled={busy}
+                          autoFocus
+                          placeholder="e.g. my-gcp-project"
+                          onChange={(e) =>
+                            onAntigravityProjectPickChange(e.target.value)
+                          }
+                          data-testid="openshell-provider-antigravity-project-input"
+                        />
+                      )}
+                    </label>
+                  )}
+                  <div className="btns" style={{ marginTop: 0 }}>
+                    {onAntigravitySelectProject && (
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={busy || !antigravityProjectPick.trim()}
+                        onClick={onAntigravitySelectProject}
+                        data-testid="openshell-provider-antigravity-project-save"
+                      >
+                        Continue
+                      </button>
+                    )}
+                    {onAntigravityDisconnect && (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        disabled={busy}
+                        onClick={onAntigravityDisconnect}
+                        data-testid="openshell-provider-antigravity-disconnect"
+                      >
+                        Disconnect Google
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : antigravityAwaitingPaste ? (
+                <>
+                  <p className="dim" data-testid="openshell-provider-antigravity-paste-hint">
+                    Paste the short authorization code from the Google tab, then
+                    complete login.
+                  </p>
+                  {onAntigravityPasteCodeChange && (
+                    <label data-testid="openshell-provider-antigravity-paste">
+                      Authorization code
+                      <input
+                        className="search-input"
+                        value={antigravityPasteCode}
+                        disabled={busy}
+                        autoFocus
+                        placeholder="Paste the code from Google"
+                        onChange={(e) =>
+                          onAntigravityPasteCodeChange(e.target.value)
+                        }
+                        data-testid="openshell-provider-antigravity-paste-code"
+                      />
+                    </label>
+                  )}
+                  <div className="btns" style={{ marginTop: 0 }}>
+                    {onAntigravityCompletePaste && (
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={busy || !antigravityPasteCode.trim()}
+                        onClick={onAntigravityCompletePaste}
+                        data-testid="openshell-provider-antigravity-complete"
+                      >
+                        Complete login
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="dim">
+                    {antigravityConnected
+                      ? `Connected to Google Cloud (project ${antigravitySelectedProject}).`
+                      : "Connect Google Cloud so the gateway can refresh Antigravity tokens."}
+                  </p>
+                  {!antigravityConnected && (
+                    <p
+                      className="dim"
+                      data-testid="openshell-provider-antigravity-paste-hint"
+                    >
+                      Opens a Google sign-in tab; you paste back a short code
+                      (not a URL), then choose a GCP project.
+                    </p>
+                  )}
+                  <div className="btns" style={{ marginTop: 0 }}>
+                    {onAntigravityLogin && (
+                      <button
+                        type="button"
+                        className={antigravityConnected ? "btn" : "primary"}
+                        disabled={busy}
+                        onClick={onAntigravityLogin}
+                        data-testid="openshell-provider-antigravity-login"
+                      >
+                        {antigravityConnected
+                          ? "Re-login with Google Cloud"
+                          : "Log in with Google Cloud"}
+                      </button>
+                    )}
+                    {antigravityConnected && onAntigravityDisconnect && (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        disabled={busy}
+                        onClick={onAntigravityDisconnect}
+                        data-testid="openshell-provider-antigravity-disconnect"
+                      >
+                        Disconnect Google
+                      </button>
+                    )}
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -491,7 +664,12 @@ export function OpenShellProvidersPanelView({
             >
               Add config key
             </button>
-            <button type="submit" className="primary" disabled={busy} data-testid="openshell-provider-save">
+            <button
+              type="submit"
+              className="primary"
+              disabled={busy || !draft.type.trim()}
+              data-testid="openshell-provider-save"
+            >
               Save provider
             </button>
             <button type="button" disabled={busy} onClick={onCancelEdit}>
@@ -509,6 +687,13 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
   const [gatewayReachable, setGatewayReachable] = useState(gatewayHealthy);
   const [profiles, setProfiles] = useState<OpenShellProviderTypeEntry[]>([]);
   const [draft, setDraft] = useState<OpenShellProviderWrite | null>(null);
+  const [agyPasteCode, setAgyPasteCode] = useState("");
+  const [agyAwaitingPaste, setAgyAwaitingPaste] = useState(false);
+  const [agyProjects, setAgyProjects] = useState<{ id: string; name?: string }[]>(
+    [],
+  );
+  const [agyProjectPick, setAgyProjectPick] = useState("");
+  const [agyAwaitingProject, setAgyAwaitingProject] = useState(false);
   const [editingName, setEditingName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -541,47 +726,6 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
       .listOpenShellProviderTypes()
       .then(setProfiles)
       .catch(() => setProfiles([]));
-  }, [refresh]);
-
-  // Return from /oauth/antigravity/callback.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const status = params.get("agy_oauth");
-    if (!status) return;
-    const message = params.get("message");
-    const clean = () => {
-      const url = new URL(window.location.href);
-      url.searchParams.delete("agy_oauth");
-      url.searchParams.delete("message");
-      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
-    };
-    if (status === "ok") {
-      setHint("Antigravity Google OAuth connected.");
-      void refresh().then(() =>
-        api.listOpenShellProviders().then((out) => {
-          const p = out.providers.find((x) => x.name === ANTIGRAVITY_PROVIDER_NAME);
-          setEditingName(ANTIGRAVITY_PROVIDER_NAME);
-          setDraft(
-            p
-              ? {
-                  name: p.name,
-                  type: p.type,
-                  config: { ...p.config },
-                  credentials: {},
-                }
-              : {
-                  name: ANTIGRAVITY_PROVIDER_NAME,
-                  type: ANTIGRAVITY_PROVIDER_TYPE,
-                  config: {},
-                  credentials: {},
-                },
-          );
-        }),
-      );
-    } else if (status === "error") {
-      setError(message ? decodeURIComponent(message) : "Antigravity OAuth failed");
-    }
-    clean();
   }, [refresh]);
 
   useEffect(() => {
@@ -635,6 +779,10 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
       onSave={() => {
         if (!draft) return;
         const body = stripEmptyCreds(draft);
+        if (!body.type) {
+          setError("provider type is required");
+          return;
+        }
         if (!body.name) {
           setError("name is required");
           return;
@@ -698,21 +846,109 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));
       }}
+      antigravityPasteCode={agyPasteCode}
+      antigravityAwaitingPaste={agyAwaitingPaste}
+      onAntigravityPasteCodeChange={setAgyPasteCode}
+      antigravityProjects={agyProjects}
+      antigravityProjectPick={agyProjectPick}
+      onAntigravityProjectPickChange={setAgyProjectPick}
+      antigravityAwaitingProject={agyAwaitingProject}
       onAntigravityLogin={() => {
         setBusy(true);
         setError(null);
         setHint(null);
+        setAgyPasteCode("");
+        setAgyAwaitingProject(false);
+        setAgyProjects([]);
+        setAgyProjectPick("");
         api
           .startAntigravityOAuth({
             return_path: "/settings/openshell/providers",
           })
           .then((out) => {
-            window.location.href = out.authorize_url;
+            window.open(out.authorize_url, "_blank", "noopener,noreferrer");
+            setAgyAwaitingPaste(true);
+            setHint(
+              "Google Cloud auth opened in a new tab. Paste the authorization code here when it appears.",
+            );
           })
-          .catch((e) => {
-            setError(String(e));
-            setBusy(false);
-          });
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onAntigravityCompletePaste={() => {
+        const authorization_code = agyPasteCode.trim();
+        if (!authorization_code) {
+          setError("paste the authorization code from Google");
+          return;
+        }
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .completeAntigravityOAuth({ authorization_code })
+          .then((out) =>
+            refresh().then(() => {
+              setAgyAwaitingPaste(false);
+              setAgyPasteCode("");
+              setEditingName(ANTIGRAVITY_PROVIDER_NAME);
+              if (out.needs_project) {
+                setAgyProjects(out.projects ?? []);
+                setAgyProjectPick(out.selected_project ?? "");
+                setAgyAwaitingProject(true);
+                setHint(null);
+              } else {
+                setAgyAwaitingProject(false);
+                setHint("Antigravity connected to Google Cloud.");
+              }
+              return api.listOpenShellProviders().then((list) => {
+                const p = list.providers.find(
+                  (x) => x.name === ANTIGRAVITY_PROVIDER_NAME,
+                );
+                if (p) {
+                  setDraft({
+                    name: p.name,
+                    type: p.type,
+                    config: { ...p.config },
+                    credentials: {},
+                  });
+                }
+              });
+            }),
+          )
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+      onAntigravitySelectProject={() => {
+        const project_id = agyProjectPick.trim();
+        if (!project_id) {
+          setError("select or enter a GCP project id");
+          return;
+        }
+        setBusy(true);
+        setError(null);
+        setHint(null);
+        api
+          .selectAntigravityProject({ project_id })
+          .then(() => refresh())
+          .then(() => {
+            setAgyAwaitingProject(false);
+            setHint(`Using GCP project ${project_id}.`);
+            setDraft((prev) =>
+              prev && prev.name === ANTIGRAVITY_PROVIDER_NAME
+                ? {
+                    ...prev,
+                    config: {
+                      ...(prev.config ?? {}),
+                      ANTIGRAVITY_GCP_PROJECT: project_id,
+                      ANTIGRAVITY_GCP_LOCATION:
+                        prev.config?.ANTIGRAVITY_GCP_LOCATION || "global",
+                    },
+                  }
+                : prev,
+            );
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
       }}
       onAntigravityDisconnect={() => {
         if (!window.confirm("Disconnect Google OAuth for antigravity?")) return;
@@ -722,7 +958,14 @@ export function OpenShellProvidersPanel({ gatewayHealthy }: { gatewayHealthy: bo
         api
           .disconnectAntigravityOAuth()
           .then(() => refresh())
-          .then(() => setHint("Antigravity Google OAuth disconnected."))
+          .then(() => {
+            setAgyAwaitingPaste(false);
+            setAgyPasteCode("");
+            setAgyAwaitingProject(false);
+            setAgyProjects([]);
+            setAgyProjectPick("");
+            setHint("Antigravity Google OAuth disconnected.");
+          })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));
       }}
