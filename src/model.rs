@@ -752,10 +752,17 @@ impl McpAudience {
 pub enum McpHttpAuth {
     /// No Authorization header.
     None,
-    /// Mint cockpit Bearer via `mcp_oauth` at inject time (host `/mcp` only).
+    /// Host-minted cockpit seat Bearer for the shipped `honr` MCP only.
+    /// Not an operator-facing auth choice — inject/`ensure_cockpit_honr_mcp_attach`
+    /// wire this behind the scenes.
     CockpitBearer,
-    /// `Authorization: Bearer ${env}` — env supplied by an attached provider.
-    BearerEnv { env: String },
+    /// Host-mediated MCP OAuth: OpenShell provider holds refresh; inject uses
+    /// the credential env placeholder (gateway rewrites on egress).
+    ///
+    /// Serialized as `oauth` (not snake_case `o_auth`). `o_auth` remains an
+    /// alias for rows written before the rename.
+    #[serde(rename = "oauth", alias = "o_auth")]
+    OAuth { provider: String, env: String },
 }
 
 /// How an MCP server is exposed to the agent engine.
@@ -839,10 +846,14 @@ impl McpServerDesired {
                 if url.is_empty() && !matches!(auth, McpHttpAuth::CockpitBearer) {
                     return Err("http mcp server url must not be empty".into());
                 }
-                if let McpHttpAuth::BearerEnv { env } = auth {
+                if let McpHttpAuth::OAuth { provider, env } = auth {
+                    *provider = provider.trim().to_string();
                     *env = env.trim().to_string();
+                    if provider.is_empty() {
+                        return Err("oauth auth requires provider".into());
+                    }
                     if env.is_empty() {
-                        return Err("bearer_env auth requires env".into());
+                        return Err("oauth auth requires env".into());
                     }
                 }
             }
@@ -866,17 +877,30 @@ impl McpServerDesired {
                 }
             }
         }
+        if let McpTransport::Http {
+            auth: McpHttpAuth::OAuth { provider, .. },
+            ..
+        } = &self.transport
+        {
+            if !self.provider_names.iter().any(|n| n == provider) {
+                self.provider_names.push(provider.clone());
+            }
+        }
         if matches!(
-            (&self.transport, self.audience),
-            (
-                McpTransport::Http {
-                    auth: McpHttpAuth::CockpitBearer,
-                    ..
-                },
-                McpAudience::Worker
-            )
+            &self.transport,
+            McpTransport::Http {
+                auth: McpHttpAuth::CockpitBearer,
+                ..
+            }
         ) {
-            return Err("cockpit_bearer auth cannot target worker audience".into());
+            if self.id != HONR_MCP_SERVER_ID {
+                return Err(
+                    "cockpit_bearer is reserved for the shipped honr cockpit MCP".into(),
+                );
+            }
+            if !matches!(self.audience, McpAudience::Cockpit) {
+                return Err("shipped honr MCP must use cockpit audience".into());
+            }
         }
         Ok(self)
     }
@@ -1484,6 +1508,52 @@ mod tests {
         assert_eq!(slugify_sandbox_profile_id("!!!"), "profile");
         assert_eq!(slugify_sandbox_profile_id(""), "profile");
         assert_eq!(slugify_sandbox_profile_id("A"), "a");
+    }
+
+    #[test]
+    fn mcp_oauth_auth_auto_attaches_provider_name() {
+        let s = McpServerDesired {
+            id: "jira".into(),
+            name: "Jira".into(),
+            transport: McpTransport::Http {
+                url: "https://mcp.example.com/v1".into(),
+                auth: McpHttpAuth::OAuth {
+                    provider: "mcp-jira".into(),
+                    env: "MCP_OAUTH_JIRA_ACCESS_TOKEN".into(),
+                },
+            },
+            policy_fragment_yaml: None,
+            provider_names: vec![],
+            env: BTreeMap::new(),
+            audience: McpAudience::Both,
+            shipped: false,
+        }
+        .normalized()
+        .expect("normalize");
+        assert_eq!(s.provider_names, vec!["mcp-jira".to_string()]);
+    }
+
+    #[test]
+    fn cockpit_bearer_reserved_for_shipped_honr() {
+        let err = McpServerDesired {
+            id: "other".into(),
+            name: "Other".into(),
+            transport: McpTransport::Http {
+                url: String::new(),
+                auth: McpHttpAuth::CockpitBearer,
+            },
+            policy_fragment_yaml: None,
+            provider_names: vec![],
+            env: BTreeMap::new(),
+            audience: McpAudience::Cockpit,
+            shipped: false,
+        }
+        .normalized()
+        .expect_err("foreign cockpit_bearer");
+        assert!(err.contains("reserved"), "{err}");
+        McpServerDesired::shipped_honr()
+            .normalized()
+            .expect("shipped honr ok");
     }
 
     #[test]

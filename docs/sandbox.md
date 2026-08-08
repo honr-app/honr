@@ -150,17 +150,23 @@ endpoints declared by a **provider type**. Honr ships board provider types
 **Settings → OpenShell → Provider types** and import on provider Sync when
 missing. Builtin OpenShell `cursor` remains egress-only (no credentials).
 
-Create the provider yourself under **Settings → OpenShell → Providers** with an
-`ANTIGRAVITY_ACCESS_TOKEN` credential. honr does not read the host keychain —
-it makes no assumptions about credentials sitting on the machine it runs on, and
-configuration arrives over the API like everything else.
+Under **Settings → OpenShell → Providers**, use **Log in with Google** on the
+`antigravity` provider (host-mediated PKCE against Google’s Antigravity
+installed-app client). That seals the access token plus refresh material on the
+board; the gateway’s `oauth2_refresh_token` strategy keeps `ya29` fresh. honr
+does not read the host keychain — it makes no assumptions about credentials
+sitting on the machine it runs on.
 
 | Layer | Holds |
 |---|---|
-| Board provider `antigravity` | Sealed `ANTIGRAVITY_ACCESS_TOKEN`, supplied via the API |
-| Gateway | Real credential; injects placeholder env into attached sandboxes |
-| Seat token file | Placeholder only + far-future expiry; **no** `refresh_token` |
-| Seat `settings.json` | `enableTelemetry: false`, `gcp.project` / `gcp.location` from Board provider config `ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION` (Settings → Providers; not Vertex/`GOOGLE_CLOUD_PROJECT`) |
+| Board provider `antigravity` | Sealed `ANTIGRAVITY_ACCESS_TOKEN` + refresh material (`client_id` / `client_secret` / `refresh_token`) from Log in with Google |
+| Gateway | Live credential + refresh; injects placeholder env into attached sandboxes |
+| Seat token file | Placeholder only + far-future expiry; **no** seat-side `refresh_token` |
+| Seat `settings.json` | `enableTelemetry: false`, `gcp.project` / `gcp.location` from Board provider config `ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION` (Settings → Providers) |
+| Seat env (agy launch) | `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_QUOTA_PROJECT` set from the same Board project so they win over Vertex’s injected project — agy otherwise leaves `quotaProject` empty |
+| Seat default model | `gemini-3.6-flash-high` (`DEFAULT_SEAT_MODEL`) — requires the consumer Antigravity OAuth client from Settings → Log in with Google (the Business Cloud Code client returns Flash rows without `vertexModelId`) |
+
+Provider type YAML must list `aiplatform.googleapis.com` (and `*-aiplatform.googleapis.com`) so `streamGenerateContent` / OpenAI-compat chat is allowed under `_provider_antigravity`, not only the cockpit `vertex_ai` policy group. Put `--model` **before** `-p` when invoking agy — `-p` takes the next argv as the prompt.
 
 Attach names that are not in the Providers catalog are pruned on board load.
 

@@ -257,6 +257,19 @@ export const api = {
   }): Promise<McpServerDesired> => post("/openshell/mcp-servers", body),
   deleteMcpServer: (id: string): Promise<{ ok: boolean }> =>
     del(`/openshell/mcp-servers/${encodeURIComponent(id)}`),
+  discoverMcpOAuth: (body: {
+    url: string;
+  }): Promise<{ supported: boolean; error?: string }> =>
+    post("/openshell/mcp-servers/oauth/discover", body),
+  startMcpOAuth: (body: {
+    url: string;
+    server_id?: string;
+    name?: string;
+    return_path?: string;
+  }): Promise<{ authorize_url: string; server_id: string }> =>
+    post("/openshell/mcp-servers/oauth/start", body),
+  disconnectMcpOAuth: (server_id: string): Promise<{ ok: boolean }> =>
+    post("/openshell/mcp-servers/oauth/disconnect", { server_id }),
 
   listOpenShellProviders: (): Promise<OpenShellProvidersOut> =>
     fetch("/api/openshell/providers", fetchOpts).then(jsonOrThrow),
@@ -271,6 +284,12 @@ export const api = {
     del(`/openshell/providers/${encodeURIComponent(name)}`),
   syncOpenShellProviders: (): Promise<SyncProvidersOut> =>
     post("/openshell/providers/sync"),
+  startAntigravityOAuth: (body?: {
+    return_path?: string;
+  }): Promise<{ authorize_url: string }> =>
+    post("/openshell/providers/antigravity/oauth/start", body ?? {}),
+  disconnectAntigravityOAuth: (): Promise<{ ok: boolean }> =>
+    post("/openshell/providers/antigravity/oauth/disconnect", {}),
   listOpenShellProviderProfiles: (): Promise<ProviderTypeProfile[]> =>
     fetch("/api/openshell/provider-profiles", fetchOpts).then(jsonOrThrow),
   listOpenShellProviderTypes: (): Promise<OpenShellProviderTypeEntry[]> =>

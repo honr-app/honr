@@ -71,7 +71,7 @@ export type McpAudience = "cockpit" | "worker" | "both";
 export type McpHttpAuth =
   | { kind: "none" }
   | { kind: "cockpit_bearer" }
-  | { kind: "bearer_env"; env: string };
+  | { kind: "oauth"; provider: string; env: string };
 
 export type McpTransport =
   | { kind: "http"; url: string; auth?: McpHttpAuth }

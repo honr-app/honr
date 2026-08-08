@@ -339,50 +339,7 @@ fn github_login_enabled(board: &SharedBoard) -> bool {
 /// Prefer proxy-forwarded host so Vite (`localhost:5173`) and direct `:8080`
 /// both round-trip OAuth on the origin the browser actually uses.
 fn public_base_url(headers: &HeaderMap) -> String {
-    if let Some(base) = std::env::var("HONR_PUBLIC_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return base;
-    }
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http")
-        .split(',')
-        .next()
-        .unwrap_or("http")
-        .trim();
-    if let Some(host) = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim())
-        .filter(|s| !s.is_empty())
-    {
-        return format!("{proto}://{host}");
-    }
-    if let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != "null")
-    {
-        return origin.to_string();
-    }
-    if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
-        if let Ok(u) = referer.parse::<axum::http::Uri>() {
-            if let Some(auth) = u.authority() {
-                let scheme = u.scheme_str().unwrap_or("http");
-                return format!("{scheme}://{auth}");
-            }
-        }
-    }
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("127.0.0.1:8080");
-    format!("http://{}", host.trim())
+    crate::mcp_oauth::public_origin(headers)
 }
 
 fn redirect_uri(headers: &HeaderMap) -> String {

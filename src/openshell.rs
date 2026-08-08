@@ -18,14 +18,14 @@ use openshell_core::proto::open_shell_client::OpenShellClient;
 use openshell_core::proto::datamodel::v1::{ObjectMeta, Provider};
 use openshell_core::proto::{
     AttachSandboxProviderRequest, ConfigureProviderRefreshRequest, CreateProviderRequest,
-    CreateSandboxRequest, CreateSshSessionRequest, DeleteProviderRequest, DeleteSandboxRequest,
-    DetachSandboxProviderRequest, ExecSandboxEvent, ExecSandboxInput, ExecSandboxRequest,
-    ExecSandboxWindowResize, GetSandboxLogsRequest, GetSandboxRequest, HealthRequest,
-    ImportProviderProfilesRequest, ListProviderProfilesRequest, ListProvidersRequest,
-    ListSandboxesRequest, ProviderCredentialRefreshStrategy, ProviderProfile as ProtoProviderProfile,
-    ProviderProfileImportItem, RevokeSshSessionRequest, SandboxPhase,
-    SandboxSpec as ProtoSandboxSpec, SandboxTemplate, ServiceStatus, UpdateProviderRequest,
-    exec_sandbox_event, exec_sandbox_input,
+    CreateSandboxRequest, CreateSshSessionRequest, DeleteProviderProfileRequest,
+    DeleteProviderRequest, DeleteSandboxRequest, DetachSandboxProviderRequest, ExecSandboxEvent,
+    ExecSandboxInput, ExecSandboxRequest, ExecSandboxWindowResize, GetSandboxLogsRequest,
+    GetSandboxRequest, HealthRequest, ImportProviderProfilesRequest, ListProviderProfilesRequest,
+    ListProvidersRequest, ListSandboxesRequest, ProviderCredentialRefreshStrategy,
+    ProviderProfile as ProtoProviderProfile, ProviderProfileImportItem, RevokeSshSessionRequest,
+    SandboxPhase, SandboxSpec as ProtoSandboxSpec, SandboxTemplate, ServiceStatus,
+    UpdateProviderProfilesRequest, UpdateProviderRequest, exec_sandbox_event, exec_sandbox_input,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -859,6 +859,185 @@ impl OpenShell {
             })
         })
         .await
+    }
+
+    /// Delete a custom provider type profile from the gateway.
+    pub async fn delete_provider_type(&self, id: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let out = mock(&[
+                "provider".into(),
+                "profile".into(),
+                "delete".into(),
+                id.into(),
+            ]);
+            if !out.ok() {
+                return Err(Error::Failed {
+                    op: "provider profile delete".into(),
+                    message: out.stderr.trim().to_string(),
+                });
+            }
+            return Ok(());
+        }
+
+        self.with_timeout("provider profile delete", self.default_timeout, || async {
+            let mut client = self.connect().await?;
+            let resp = client
+                .delete_provider_profile(DeleteProviderProfileRequest {
+                    id: id.to_string(),
+                    workspace: "default".into(),
+                })
+                .await
+                .map_err(|e| Error::Failed {
+                    op: "provider profile delete".into(),
+                    message: e.to_string(),
+                })?;
+            if !resp.into_inner().deleted {
+                return Err(Error::Failed {
+                    op: "provider profile delete".into(),
+                    message: format!("profile {id:?} not deleted"),
+                });
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Current `resource_version` for a workspace custom provider type, if present.
+    async fn provider_type_resource_version(&self, id: &str) -> Result<Option<u64>> {
+        #[cfg(test)]
+        if self.mock.is_some() {
+            return Ok(Some(1));
+        }
+
+        self.with_timeout("provider profile version", self.default_timeout, || async {
+            let mut client = self.connect().await?;
+            let resp = client
+                .list_provider_profiles(ListProviderProfilesRequest {
+                    limit: 0,
+                    offset: 0,
+                    workspace: "default".into(),
+                })
+                .await
+                .map_err(|e| Error::Failed {
+                    op: "provider profile version".into(),
+                    message: e.to_string(),
+                })?;
+            Ok(resp
+                .into_inner()
+                .profiles
+                .into_iter()
+                .find(|p| p.id == id)
+                .map(|p| p.resource_version))
+        })
+        .await
+    }
+
+    /// Update an existing custom provider type (OpenShell `UpdateProviderProfiles`).
+    pub async fn update_provider_type_yaml(
+        &self,
+        id: &str,
+        yaml: &str,
+        expected_resource_version: u64,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if let Some(mock) = &self.mock {
+            let out = mock(&[
+                "provider".into(),
+                "profile".into(),
+                "update".into(),
+                id.into(),
+            ]);
+            if !out.ok() {
+                return Err(Error::Failed {
+                    op: "provider profile update".into(),
+                    message: out.stderr.trim().to_string(),
+                });
+            }
+            return Ok(());
+        }
+
+        if expected_resource_version == 0 {
+            return Err(Error::Failed {
+                op: "provider profile update".into(),
+                message: "expected_resource_version must be non-zero".into(),
+            });
+        }
+
+        let mut dto = openshell_providers::parse_profile_yaml(yaml).map_err(|e| Error::Failed {
+            op: "provider profile update".into(),
+            message: format!("parse {id}: {e}"),
+        })?;
+        if dto.id.trim() != id {
+            return Err(Error::Failed {
+                op: "provider profile update".into(),
+                message: format!("yaml id {:?} does not match {id:?}", dto.id),
+            });
+        }
+        dto.resource_version = expected_resource_version;
+        let item = ProviderProfileImportItem {
+            profile: Some(dto.to_proto()),
+            source: id.to_string(),
+        };
+        self.with_timeout("provider profile update", self.default_timeout, || async {
+            let mut client = self.connect().await?;
+            let resp = client
+                .update_provider_profiles(UpdateProviderProfilesRequest {
+                    profile: Some(item),
+                    expected_resource_version,
+                    id: id.to_string(),
+                    workspace: "default".into(),
+                })
+                .await
+                .map_err(|e| Error::Failed {
+                    op: "provider profile update".into(),
+                    message: e.to_string(),
+                })?;
+            let inner = resp.into_inner();
+            if inner.updated {
+                return Ok(());
+            }
+            let diag = inner
+                .diagnostics
+                .into_iter()
+                .map(|d| format!("{}: {}", d.field, d.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(Error::Failed {
+                op: "provider profile update".into(),
+                message: if diag.is_empty() {
+                    "update rejected".into()
+                } else {
+                    diag
+                },
+            })
+        })
+        .await
+    }
+
+    /// Import a provider type, or update it when the gateway already has that id.
+    ///
+    /// Delete+reimport is wrong here: an existing provider instance pins the type,
+    /// so delete is ignored and the second import fails with "already exists".
+    pub async fn upsert_provider_type_yaml(&self, id: &str, yaml: &str) -> Result<()> {
+        match self.import_provider_type_yaml(id, yaml).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.to_ascii_lowercase().contains("already exists") {
+                    return Err(e);
+                }
+                let Some(rv) = self.provider_type_resource_version(id).await? else {
+                    return Err(Error::Failed {
+                        op: "provider profile upsert".into(),
+                        message: format!(
+                            "profile {id:?} reports already exists but is missing from list"
+                        ),
+                    });
+                };
+                self.update_provider_type_yaml(id, yaml, rv).await
+            }
+        }
     }
 
     /// Attach a provider instance to a running sandbox (Providers v2).

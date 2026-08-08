@@ -43,6 +43,11 @@ export default defineConfig({
       // dedicated rule (Vite skips upgrade when the matching rule lacks ws).
       "/api": toHonr({ ws: true }),
       "/auth": toHonr(),
+      // Host-mediated OAuth callbacks (MCP client, Antigravity, board AS).
+      // Without this, Google/Atlassian redirect_uri on :5173 falls through to
+      // the SPA and looks like a silent bounce to home.
+      "/oauth": toHonr(),
+      "/.well-known": toHonr(),
       "/mcp": toHonr(),
       "/healthz": toHonr(),
       // Public agent bootstrap guide — must not fall through to the SPA shell.

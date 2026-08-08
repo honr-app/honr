@@ -1,6 +1,7 @@
 //! honr — an agent orchestrator whose board is a control plane, not a report.
 
 mod antigravity;
+mod antigravity_oauth;
 mod api;
 mod auth;
 mod db;
@@ -10,6 +11,7 @@ mod github_app;
 mod github_poll;
 mod machine;
 mod mcp;
+mod mcp_client_oauth;
 mod mcp_oauth;
 mod model;
 mod openshell;
@@ -141,7 +143,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .route("/llms.txt", get(llms_txt))
         .nest("/.well-known", mcp_oauth::well_known_routes())
-        .nest("/oauth", mcp_oauth::oauth_routes());
+        .nest("/oauth", mcp_oauth::oauth_routes())
+        .nest("/oauth/mcp-client", mcp_client_oauth::callback_routes())
+        .nest("/oauth/antigravity", antigravity_oauth::callback_routes());
 
     // Operator MCP: Bearer via MCP OAuth once admin exists (bootstrap stays open).
     app = app.nest(

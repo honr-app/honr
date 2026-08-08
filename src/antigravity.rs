@@ -20,6 +20,13 @@ use crate::store::SharedBoard;
 pub const CONFIG_PROJECT: &str = "ANTIGRAVITY_GCP_PROJECT";
 pub const CONFIG_LOCATION: &str = "ANTIGRAVITY_GCP_LOCATION";
 
+/// Seat default model. Put `--model` **before** `-p` — `-p` consumes the next
+/// argv as the prompt.
+///
+/// Requires the consumer Antigravity OAuth client (see [`crate::antigravity_oauth`]);
+/// the Business client returns Gemini Flash rows without `vertexModelId`.
+pub const DEFAULT_SEAT_MODEL: &str = "gemini-3.6-flash-high";
+
 /// GCP project/location from Board provider config (never host files).
 pub fn gcp_from_board(board: &SharedBoard) -> Result<(String, String), String> {
     let provider = board
@@ -44,6 +51,32 @@ pub fn gcp_from_board(board: &SharedBoard) -> Result<(String, String), String> {
         .filter(|s| !s.is_empty())
         .unwrap_or("global");
     Ok((project.to_string(), location.to_string()))
+}
+
+/// Shell exports so agy uses the antigravity provider project, not Vertex's
+/// `GOOGLE_CLOUD_PROJECT` (cockpit often attaches both). Empty when Board
+/// config is incomplete — caller skips.
+///
+/// Agy leaves `quotaProject` empty unless these are set; `settings.json`
+/// `gcp.project` alone is not enough.
+pub fn cloud_env_exports(board: &SharedBoard) -> String {
+    let Ok((project, location)) = gcp_from_board(board) else {
+        return String::new();
+    };
+    let p = shell_single_quote(&project);
+    let l = shell_single_quote(&location);
+    format!(
+        "export GOOGLE_CLOUD_PROJECT={p}\n\
+         export GOOGLE_CLOUD_QUOTA_PROJECT={p}\n\
+         export GCP_PROJECT_ID={p}\n\
+         export GCP_LOCATION={l}\n\
+         export CLOUD_ML_REGION={l}\n\
+         export VERTEX_LOCATION={l}\n"
+    )
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Attach `antigravity` to the running cockpit sandbox when the cockpit
@@ -107,5 +140,11 @@ mod tests {
         let (project, location) = gcp_from_board(&board).unwrap();
         assert_eq!(project, "my-gcp");
         assert_eq!(location, "us-central1");
+        let exports = cloud_env_exports(&board);
+        assert!(exports.contains("GOOGLE_CLOUD_PROJECT='my-gcp'"), "{exports}");
+        assert!(
+            exports.contains("GOOGLE_CLOUD_QUOTA_PROJECT='my-gcp'"),
+            "{exports}"
+        );
     }
 }
