@@ -27,7 +27,9 @@ use openshell_core::proto::{
     ListProvidersRequest, ListSandboxesRequest, ProviderCredentialRefreshStrategy,
     ProviderProfile as ProtoProviderProfile, ProviderProfileImportItem, RevokeSshSessionRequest,
     SandboxPhase, SandboxSpec as ProtoSandboxSpec, SandboxTemplate, ServiceStatus,
-    UpdateProviderProfilesRequest, UpdateProviderRequest, exec_sandbox_event, exec_sandbox_input,
+    TcpForwardFrame, TcpForwardInit, TcpRelayTarget, UpdateProviderProfilesRequest,
+    UpdateProviderRequest, exec_sandbox_event, exec_sandbox_input, tcp_forward_frame,
+    tcp_forward_init,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -192,16 +194,16 @@ pub struct GatewayProvider {
 /// before spawning local `ssh` with an `openshell ssh-proxy` ProxyCommand.
 /// Token is secret; do not echo to untrusted clients.
 ///
-/// Typed gRPC surface for the host CLI connect path; Cockpit attach uses
-/// `exec_interactive` and honr does not shell out to launch editors.
+/// Typed gRPC surface for SSH connect / cockpit MCP ForwardTcp dial-in.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // exercised in unit tests; not on the Cockpit hot path
 pub struct SshSession {
     pub sandbox_id: String,
     pub token: String,
     pub gateway_host: String,
     pub gateway_port: u32,
     pub gateway_scheme: String,
+    /// From the gateway; unused by the reverse-tunnel path (ssh-proxy skips host key pinning).
+    #[allow(dead_code)]
     pub host_key_fingerprint: String,
     pub expires_at_ms: i64,
 }
@@ -355,6 +357,22 @@ impl OpenShell {
             #[cfg(test)]
             mock: None,
         }
+    }
+
+    /// Configured gateway HTTPS endpoint (Settings → OpenShell), if any.
+    pub fn endpoint(&self) -> Option<String> {
+        self.endpoint.clone()
+    }
+
+    /// Current OIDC tokens (refreshed if needed). Used by callers that mirror
+    /// board auth into out-of-process tools.
+    pub async fn oidc_bundle_snapshot(&self) -> Option<crate::secrets::OpenShellOidcBundle> {
+        let GatewayAuth::Oidc { tokens, .. } = self.auth.as_ref()? else {
+            return None;
+        };
+        // Touch refresh path used by normal RPCs.
+        let _ = self.oidc_access_token().await.ok()?;
+        Some(tokens.lock().await.clone())
     }
 
     /// In-process stand-in — no network. Handler sees argv-shaped calls
@@ -1655,11 +1673,10 @@ impl OpenShell {
         .await
     }
 
-    /// Issue a short-lived SSH session for `sandbox connect` / ssh-proxy.
+    /// Issue a short-lived SSH session for `sandbox connect` / ForwardTcp.
     ///
     /// Same gRPC path the CLI uses: `GetSandbox` by name → `CreateSshSession`.
-    /// The token is for host-side ProxyCommand only — do not ship it to browsers.
-    #[allow(dead_code)] // unit-tested; host CLI owns connect, not honr
+    /// The token is for host-side session auth only — do not ship it to browsers.
     pub async fn create_ssh_session(&self, name: &str) -> Result<SshSession> {
         #[cfg(test)]
         if let Some(mock) = &self.mock {
@@ -1737,7 +1754,6 @@ impl OpenShell {
     }
 
     /// Revoke a previously issued SSH session token.
-    #[allow(dead_code)] // unit-tested; host CLI owns connect, not honr
     pub async fn revoke_ssh_session(&self, token: &str) -> Result<bool> {
         let token = token.trim();
         if token.is_empty() {
@@ -1780,6 +1796,104 @@ impl OpenShell {
             Ok(resp.revoked)
         })
         .await
+    }
+
+    /// Bridge one local TCP stream to a loopback target inside a Ready sandbox
+    /// via `ForwardTcp` (same direction as `openshell forward service`).
+    ///
+    /// Consumes `local` for the lifetime of the forward. Caller mints/revokes
+    /// the session token around this call when it needs a longer-lived pool.
+    pub async fn forward_tcp_bridge(
+        &self,
+        name: &str,
+        target_host: &str,
+        target_port: u16,
+        local: tokio::net::TcpStream,
+        authorization_token: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self.mock.is_some() {
+            let _ = (name, target_host, target_port, local, authorization_token);
+            return Err(Error::Failed {
+                op: "forward tcp".into(),
+                message: "mock client has no ForwardTcp".into(),
+            });
+        }
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let sandbox_id = {
+            let mut client = self.connect().await?;
+            let sb = get_sandbox(&mut client, name).await?;
+            sb.object_id().to_string()
+        };
+
+        let (tx, rx) = mpsc::channel::<TcpForwardFrame>(16);
+        tx.send(TcpForwardFrame {
+            payload: Some(tcp_forward_frame::Payload::Init(TcpForwardInit {
+                sandbox_id: sandbox_id.clone(),
+                service_id: format!("honr-mcp-uplink:{name}:{target_host}:{target_port}"),
+                target: Some(tcp_forward_init::Target::Tcp(TcpRelayTarget {
+                    host: target_host.to_string(),
+                    port: u32::from(target_port),
+                })),
+                authorization_token: authorization_token.to_string(),
+            })),
+        })
+        .await
+        .map_err(|_| Error::Failed {
+            op: "forward tcp".into(),
+            message: "failed to queue ForwardTcp init".into(),
+        })?;
+
+        let mut client = self.connect().await?;
+        let mut response = client
+            .forward_tcp(ReceiverStream::new(rx))
+            .await
+            .map_err(|e| Error::Failed {
+                op: "forward tcp".into(),
+                message: e.to_string(),
+            })?
+            .into_inner();
+
+        let (mut local_read, mut local_write) = local.into_split();
+        let to_gateway = tokio::spawn(async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = match local_read.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                if tx
+                    .send(TcpForwardFrame {
+                        payload: Some(tcp_forward_frame::Payload::Data(buf[..n].to_vec())),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        while let Some(frame) = response.message().await.map_err(|e| Error::Failed {
+            op: "forward tcp".into(),
+            message: e.to_string(),
+        })? {
+            let Some(tcp_forward_frame::Payload::Data(data)) = frame.payload else {
+                continue;
+            };
+            if data.is_empty() {
+                continue;
+            }
+            local_write.write_all(&data).await.map_err(|e| Error::Failed {
+                op: "forward tcp".into(),
+                message: e.to_string(),
+            })?;
+        }
+        let _ = local_write.shutdown().await;
+        to_gateway.abort();
+        Ok(())
     }
 
     /// Interactive TTY attach via `ExecSandboxInteractive` (no local OpenSSH).

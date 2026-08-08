@@ -525,7 +525,7 @@ mod tests {
             refresh_token: "tok-refresh".into(),
             expires_in: 3600,
             expires_at: 999,
-            resource: "http://host.docker.internal:8080/mcp".into(),
+            resource: crate::cockpit_mcp_tunnel::DEFAULT_TUNNEL_MCP_RESOURCE.into(),
             client_id: mcp_oauth::COCKPIT_CLIENT_ID.into(),
             sub: "admin".into(),
         };
@@ -537,7 +537,7 @@ mod tests {
         );
         assert_eq!(
             doc["mcpServers"]["honr"]["url"],
-            "http://host.docker.internal:8080/mcp"
+            crate::cockpit_mcp_tunnel::DEFAULT_TUNNEL_MCP_RESOURCE
         );
         let oc = opencode_jsonc_document(Some(&tokens), std::slice::from_ref(&honr));
         assert_eq!(oc["mcp"]["honr"]["type"], "remote");
@@ -605,7 +605,7 @@ mod tests {
             refresh_token: "r".into(),
             expires_in: 3600,
             expires_at: 1,
-            resource: mcp_oauth::DEFAULT_COCKPIT_MCP_RESOURCE.into(),
+            resource: crate::cockpit_mcp_tunnel::DEFAULT_TUNNEL_MCP_RESOURCE.into(),
             client_id: mcp_oauth::COCKPIT_CLIENT_ID.into(),
             sub: "cockpit".into(),
         };

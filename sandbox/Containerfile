@@ -17,6 +17,13 @@ FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
 USER root
 
+# Cockpit MCP dial-in: board ForwardTcp → sandbox :18081, socat pairs with
+# agent clients on :18080. Host never runs socat.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends socat \
+ && rm -rf /var/lib/apt/lists/* \
+ && socat -V | head -1
+
 # Match the host toolchain. Cargo.toml declares rust-version = "1.88", so this
 # only needs to be >= that; pinning keeps sandbox builds reproducible.
 ARG RUST_VERSION=1.97.1
