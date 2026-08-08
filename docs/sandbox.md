@@ -43,14 +43,20 @@ Do **not** set `CLAUDE_CODE_USE_VERTEX=1` in the sandbox. That forces direct
 Vertex + ADC/metadata discovery, which OpenShell blocks (real GCE metadata is
 SSRF-hardened). Use `inference.local` instead.
 
-## Gateway client (gRPC + mTLS)
+## Gateway client (gRPC + mTLS or OIDC)
 
-`src/openshell.rs` talks to the gateway in-process over gRPC with client
-certificates. Endpoint + sealed PEMs live in Settings (board DB); the only host
-secret file is `~/.config/honr/master.key`. Upload/download use exec + tar over
-that same channel — no `openshell` CLI spawn. Upstream `openshell-sdk` still
-omits mTLS; we build the channel ourselves and use `openshell-core` /
-`openshell-policy` for protos and YAML policy.
+`src/openshell.rs` talks to the gateway in-process over gRPC. Settings require
+an explicit auth mode:
+
+- **mTLS** — HTTPS with sealed client PEMs (board DB).
+- **OIDC** — HTTPS with `authorization: Bearer` (via
+  `openshell_core::auth::EdgeAuthInterceptor`); browser PKCE login seals tokens
+  in the board DB; refresh uses `openshell-sdk` OIDC helpers.
+
+Endpoint must be `https://`. The only host secret file is
+`~/.config/honr/master.key`. Upload/download use exec + tar over that same
+channel — no `openshell` CLI spawn. We build the tonic channel ourselves and use
+`openshell-core` / `openshell-policy` for protos and YAML policy.
 
 ## Agent surface
 

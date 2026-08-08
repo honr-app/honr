@@ -157,15 +157,32 @@ export interface OpenShellMtlsStatus {
   complete: boolean;
 }
 
-/** Settings → OpenShell connectivity (gateway endpoint + mTLS). */
+/** Explicit gateway auth mode — operator must pick; never inferred. */
+export type OpenShellAuthMode = "mtls" | "oidc";
+
+export interface OpenShellOidcConfig {
+  issuer: string;
+  client_id: string;
+  audience: string;
+}
+
+export interface OpenShellOidcStatus {
+  logged_in: boolean;
+}
+
+/** Settings → OpenShell connectivity (gateway endpoint + mTLS or OIDC). */
 export interface OpenShellSettings {
   gateway_endpoint?: string | null;
+  auth_mode?: OpenShellAuthMode | null;
+  oidc?: OpenShellOidcConfig | null;
   /** Write-only on PUT. */
   ca_pem?: string | null;
   client_cert_pem?: string | null;
   client_key_pem?: string | null;
   clear_mtls?: boolean;
+  clear_oidc?: boolean;
   mtls?: OpenShellMtlsStatus;
+  oidc_status?: OpenShellOidcStatus;
 }
 
 /** Presence flags for sealed GitHub App credentials (GET never returns secrets). */
@@ -249,7 +266,9 @@ export interface OpenShellStatus {
   not_configured: boolean;
   error?: string | null;
   gateway_endpoint?: string | null;
+  auth_mode?: OpenShellAuthMode | null;
   mtls?: OpenShellMtlsStatus;
+  oidc_status?: OpenShellOidcStatus;
 }
 
 /** GET /api/openshell/providers — desired provider (secrets never included). */

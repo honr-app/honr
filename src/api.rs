@@ -121,6 +121,10 @@ pub fn routes() -> Router<SharedBoard> {
         .merge(crate::cockpit_chat::routes())
         .route("/openshell/status", get(openshell_status))
         .route("/openshell", get(get_openshell).put(put_openshell))
+        .nest(
+            "/openshell/oidc",
+            crate::openshell_oauth::routes(),
+        )
         .route(
             "/openshell/providers",
             get(list_openshell_providers).post(create_openshell_provider),
@@ -655,9 +659,15 @@ fn runtime_seed_fallback(_agents: &crate::schema::AgentConfig) -> AgentRuntimeCo
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenShellSettings {
-    /// Gateway URL (`https://127.0.0.1:17670`). Not secret.
+    /// Gateway URL (`https://…`). Not secret. Must be https.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_endpoint: Option<String>,
+    /// Explicit auth mode — required for a healthy client. Never inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<crate::model::OpenShellAuthMode>,
+    /// Non-secret OIDC client settings (when auth_mode is oidc).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<crate::model::OpenShellOidcConfig>,
     /// Write-only PEM fields — accepted on PUT, never returned on GET.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_pem: Option<String>,
@@ -668,32 +678,45 @@ pub struct OpenShellSettings {
     /// When true on PUT, wipe sealed mTLS material.
     #[serde(default)]
     pub clear_mtls: bool,
+    /// When true on PUT, wipe sealed OIDC tokens.
+    #[serde(default)]
+    pub clear_oidc: bool,
     /// Read-only presence flags (GET / after PUT).
     #[serde(default)]
     pub mtls: crate::secrets::OpenShellMtlsStatus,
+    /// Read-only OIDC login presence.
+    #[serde(default)]
+    pub oidc_status: crate::secrets::OpenShellOidcStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenShellStatusOut {
     pub healthy: bool,
     pub summary: String,
-    /// True when endpoint or mTLS material is missing.
+    /// True when endpoint or selected auth material is missing.
     pub not_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<crate::model::OpenShellAuthMode>,
     pub mtls: crate::secrets::OpenShellMtlsStatus,
+    pub oidc_status: crate::secrets::OpenShellOidcStatus,
 }
 
 fn openshell_settings_view(b: &SharedBoard) -> OpenShellSettings {
     OpenShellSettings {
         gateway_endpoint: b.openshell_gateway_endpoint(),
+        auth_mode: b.openshell_auth_mode(),
+        oidc: b.openshell_oidc_config(),
         ca_pem: None,
         client_cert_pem: None,
         client_key_pem: None,
         clear_mtls: false,
+        clear_oidc: false,
         mtls: b.openshell_mtls_status(),
+        oidc_status: b.openshell_oidc_status(),
     }
 }
 
@@ -705,7 +728,33 @@ async fn put_openshell(
     AxState(b): AxState<SharedBoard>,
     Json(req): Json<OpenShellSettings>,
 ) -> Result<Json<OpenShellSettings>, (axum::http::StatusCode, String)> {
+    if let Some(ref ep) = req.gateway_endpoint {
+        let ep = ep.trim();
+        if !ep.is_empty() && ep.starts_with("http://") {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "gateway endpoint must be https:// (plaintext HTTP is not supported)".into(),
+            ));
+        }
+    }
     let _ = b.set_openshell_gateway_endpoint(req.gateway_endpoint);
+
+    // Auth mode is explicit. `Some` sets; omit leaves existing (incl. mTLS migration).
+    if req.auth_mode.is_some() {
+        b.set_openshell_auth_mode(req.auth_mode);
+    }
+
+    if let Some(oidc) = req.oidc {
+        let oidc = oidc.trimmed();
+        if oidc.is_complete() {
+            oidc.validate().map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+        }
+        b.set_openshell_oidc_config(Some(oidc));
+    }
+
+    if req.clear_oidc {
+        b.set_openshell_oidc_sealed(None);
+    }
 
     if req.clear_mtls {
         b.set_openshell_mtls_sealed(None);
@@ -765,7 +814,9 @@ async fn openshell_status(AxState(b): AxState<SharedBoard>) -> Json<OpenShellSta
         not_configured: st.not_configured,
         error: st.error,
         gateway_endpoint: b.openshell_gateway_endpoint(),
+        auth_mode: b.openshell_auth_mode(),
         mtls: b.openshell_mtls_status(),
+        oidc_status: b.openshell_oidc_status(),
     })
 }
 
@@ -3765,6 +3816,7 @@ mod tests {
             AxState(b.clone()),
             Json(OpenShellSettings {
                 gateway_endpoint: Some("https://127.0.0.1:17670".into()),
+                auth_mode: Some(crate::model::OpenShellAuthMode::Mtls),
                 ca_pem: Some("-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n".into()),
                 client_cert_pem: Some(
                     "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----\n".into(),

@@ -15,6 +15,7 @@ mod mcp_client_oauth;
 mod mcp_oauth;
 mod model;
 mod openshell;
+mod openshell_oauth;
 mod provider_types;
 mod cockpit_attach;
 mod cockpit_chat;
@@ -64,6 +65,10 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // OpenShell CLI does the same — rustls 0.23 needs an explicit process-wide
+    // CryptoProvider before tonic/reqwest TLS. Harmless if already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

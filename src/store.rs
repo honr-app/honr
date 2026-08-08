@@ -51,12 +51,21 @@ pub struct BoardState {
     /// Per-install forge binding. Seeded to `github` when unset; Board is SoT after.
     #[serde(default)]
     pub workspace: Option<WorkspaceBinding>,
-    /// Gateway URL for direct mTLS clients (Settings → OpenShell). Not secret.
+    /// Gateway URL for OpenShell clients (Settings → OpenShell). Not secret. Must be https.
     #[serde(default)]
     pub openshell_gateway_endpoint: Option<String>,
+    /// Explicit auth mode (`mtls` | `oidc`). Never inferred.
+    #[serde(default)]
+    pub openshell_auth_mode: Option<crate::model::OpenShellAuthMode>,
+    /// Non-secret OIDC issuer/client/audience when mode is oidc.
+    #[serde(default)]
+    pub openshell_oidc_config: Option<crate::model::OpenShellOidcConfig>,
     /// Sealed mTLS PEMs (DB ciphertext). Decrypt only via `secrets`; never expose on GET.
     #[serde(default)]
     pub openshell_mtls_sealed: Option<String>,
+    /// Sealed OIDC tokens (DB ciphertext). Decrypt only via `secrets`; never expose on GET.
+    #[serde(default)]
+    pub openshell_oidc_sealed: Option<String>,
     /// Sealed GitHub App credentials (DB ciphertext). Decrypt only via `secrets`.
     #[serde(default)]
     pub github_app_sealed: Option<String>,
@@ -125,7 +134,10 @@ impl BoardState {
             cockpit_sandbox_profile_id: self.cockpit_sandbox_profile_id.clone(),
             workspace: self.workspace.clone(),
             openshell_gateway_endpoint: self.openshell_gateway_endpoint.clone(),
+            openshell_auth_mode: self.openshell_auth_mode,
+            openshell_oidc_config: self.openshell_oidc_config.clone(),
             openshell_mtls_sealed: self.openshell_mtls_sealed.clone(),
+            openshell_oidc_sealed: self.openshell_oidc_sealed.clone(),
             github_app_sealed: self.github_app_sealed.clone(),
             github_app_installation_id: self.github_app_installation_id,
             auth_sealed: self.auth_sealed.clone(),
@@ -1212,7 +1224,7 @@ impl Board {
         self.emit(&item);
 
         if let Some(env) = env_to_delete {
-            let os = self.openshell_client();
+            let os = self.openshell_client_local();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     let _ = os.delete(&env).await;
@@ -2322,6 +2334,78 @@ impl Board {
         crate::secrets::mtls_status_from_sealed(self.openshell_mtls_sealed().as_deref())
     }
 
+    /// Resolved auth mode. Legacy boards with mTLS material and no mode → `mtls`.
+    pub fn openshell_auth_mode(&self) -> Option<crate::model::OpenShellAuthMode> {
+        let s = self.state.read();
+        if let Some(mode) = s.openshell_auth_mode {
+            return Some(mode);
+        }
+        // Migration: existing mTLS installs did not store a mode.
+        if s.openshell_mtls_sealed
+            .as_ref()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            return Some(crate::model::OpenShellAuthMode::Mtls);
+        }
+        None
+    }
+
+    pub fn set_openshell_auth_mode(
+        &self,
+        mode: Option<crate::model::OpenShellAuthMode>,
+    ) -> Option<crate::model::OpenShellAuthMode> {
+        {
+            let mut s = self.state.write();
+            s.openshell_auth_mode = mode;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        mode
+    }
+
+    pub fn openshell_oidc_config(&self) -> Option<crate::model::OpenShellOidcConfig> {
+        self.state.read().openshell_oidc_config.clone()
+    }
+
+    pub fn set_openshell_oidc_config(
+        &self,
+        cfg: Option<crate::model::OpenShellOidcConfig>,
+    ) -> Option<crate::model::OpenShellOidcConfig> {
+        let stored = cfg.map(|c| c.trimmed()).filter(|c| {
+            !c.issuer.is_empty() || !c.client_id.is_empty() || !c.audience.is_empty()
+        });
+        {
+            let mut s = self.state.write();
+            s.openshell_oidc_config = stored.clone();
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    pub fn openshell_oidc_sealed(&self) -> Option<String> {
+        self.state
+            .read()
+            .openshell_oidc_sealed
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn set_openshell_oidc_sealed(&self, sealed: Option<String>) -> Option<String> {
+        let stored = sealed
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        {
+            let mut s = self.state.write();
+            s.openshell_oidc_sealed = stored.clone();
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        stored
+    }
+
+    pub fn openshell_oidc_status(&self) -> crate::secrets::OpenShellOidcStatus {
+        crate::secrets::oidc_status_from_sealed(self.openshell_oidc_sealed().as_deref())
+    }
+
     pub fn github_app_sealed(&self) -> Option<String> {
         self.state
             .read()
@@ -2736,20 +2820,73 @@ impl Board {
             .collect()
     }
 
-    /// Client using Settings gateway endpoint + sealed mTLS (or an injected mock).
-    pub fn openshell_client(&self) -> crate::openshell::OpenShell {
+    /// Client using Settings gateway endpoint + selected auth (or an injected mock).
+    ///
+    /// Prefer [`Self::openshell_client`] on a `SharedBoard` (`Arc<Board>`) so OIDC
+    /// refresh can re-seal rotated refresh tokens. This `&self` path is for
+    /// in-board helpers (sandbox delete on halt) where persist is optional.
+    pub fn openshell_client_local(&self) -> crate::openshell::OpenShell {
+        self.openshell_client_with_persist(None)
+    }
+
+    /// Gateway client that re-seals OIDC tokens after refresh (needs `Arc`).
+    pub fn openshell_client(self: &std::sync::Arc<Self>) -> crate::openshell::OpenShell {
+        let board = std::sync::Arc::clone(self);
+        self.openshell_client_with_persist(Some(std::sync::Arc::new(move |next| {
+            if let Ok(sealed) = crate::secrets::seal_oidc(&next) {
+                board.set_openshell_oidc_sealed(Some(sealed));
+            }
+        })))
+    }
+
+    fn openshell_client_with_persist(
+        &self,
+        on_refresh: Option<
+            std::sync::Arc<dyn Fn(crate::secrets::OpenShellOidcBundle) + Send + Sync>,
+        >,
+    ) -> crate::openshell::OpenShell {
         if let Some(os) = &self.openshell {
             return os.clone();
         }
-        let mtls = self
-            .openshell_mtls_sealed()
-            .as_deref()
-            .and_then(|s| crate::secrets::open_mtls(s).ok());
-        crate::openshell::OpenShell::new(
-            self.openshell_gateway_endpoint(),
-            mtls,
-            std::time::Duration::from_secs(120),
-        )
+        let endpoint = self.openshell_gateway_endpoint();
+        let auth = match self.openshell_auth_mode() {
+            Some(crate::model::OpenShellAuthMode::Mtls) => {
+                let mtls = self
+                    .openshell_mtls_sealed()
+                    .as_deref()
+                    .and_then(|s| crate::secrets::open_mtls(s).ok())
+                    .unwrap_or(crate::secrets::OpenShellMtlsBundle {
+                        ca_pem: String::new(),
+                        client_cert_pem: String::new(),
+                        client_key_pem: String::new(),
+                    });
+                Some(crate::openshell::GatewayAuth::Mtls(mtls))
+            }
+            Some(crate::model::OpenShellAuthMode::Oidc) => {
+                let cfg = self.openshell_oidc_config().unwrap_or_default();
+                let server_ca_pem = self
+                    .openshell_mtls_sealed()
+                    .as_deref()
+                    .and_then(|s| crate::secrets::open_mtls(s).ok())
+                    .map(|b| b.ca_pem)
+                    .filter(|s| !s.trim().is_empty());
+                let tokens = self
+                    .openshell_oidc_sealed()
+                    .as_deref()
+                    .and_then(|s| crate::secrets::open_oidc(s).ok());
+                match tokens {
+                    Some(bundle) => Some(crate::openshell::GatewayAuth::oidc(
+                        cfg,
+                        bundle,
+                        on_refresh,
+                        server_ca_pem,
+                    )),
+                    None => Some(crate::openshell::GatewayAuth::OidcIncomplete { config: cfg }),
+                }
+            }
+            None => None,
+        };
+        crate::openshell::OpenShell::new(endpoint, auth, std::time::Duration::from_secs(120))
     }
 
     // ------------------------------------------------ agent runtime (board state)
@@ -4949,7 +5086,7 @@ facts are pasted, then unpark";
             )
             .map_err(|e| e.to_string())?;
         if let Some(env) = env_to_delete {
-            let os = self.openshell_client();
+            let os = self.openshell_client_local();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     let _ = os.delete(&env).await;
@@ -5070,7 +5207,7 @@ facts are pasted, then unpark";
     pub fn delete_item(&self, id: ItemId) -> Result<(), String> {
         // Build the client before taking the write lock — openshell_client reads
         // board state, and parking_lot RwLock is not reentrant.
-        let os = self.openshell_client();
+        let os = self.openshell_client_local();
         let mut s = self.state.write();
         if !s.items.contains_key(&id) {
             return Err(format!("item #{id} not found"));

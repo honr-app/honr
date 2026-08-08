@@ -1,8 +1,8 @@
-//! In-process OpenShell gateway client (gRPC + mTLS).
+//! In-process OpenShell gateway client (gRPC + mTLS or OIDC).
 //!
 //! One place that knows the gateway surface, so the supervisor never builds an
-//! argv and never shells out. Certs come from the sealed Settings bundle; the
-//! endpoint is board state. See `docs/sandbox.md`.
+//! argv and never shells out. Auth comes from the sealed Settings bundle
+//! (mTLS PEMs or OIDC tokens); the endpoint is board state. See `docs/sandbox.md`.
 //!
 //! **Everything here takes a timeout, and that is not defensive style.** Every
 //! failure mode observed in phase 0 — blocked metadata server, denied egress,
@@ -10,8 +10,10 @@
 //! call without a deadline is a supervisor that stops making progress and
 //! never says why.
 
-use crate::secrets::OpenShellMtlsBundle;
+use crate::model::OpenShellOidcConfig;
+use crate::secrets::{OpenShellMtlsBundle, OpenShellOidcBundle};
 use futures::StreamExt;
+use openshell_core::auth::EdgeAuthInterceptor;
 use openshell_core::forward::validate_ssh_session_response;
 use openshell_core::metadata::{ObjectId, ObjectLabels, ObjectName};
 use openshell_core::proto::open_shell_client::OpenShellClient;
@@ -33,8 +35,72 @@ use prost_types::{Struct, Value, value::Kind};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
+
+/// Skew matching OpenShell CLI `is_token_expired` (refresh within 30s of expiry).
+const OIDC_EXPIRY_SKEW_SECS: u64 = 30;
+
+type OsClient = OpenShellClient<InterceptedService<Channel, EdgeAuthInterceptor>>;
+
+/// How this client authenticates. Selected explicitly in Settings — not inferred.
+#[derive(Clone)]
+pub enum GatewayAuth {
+    Mtls(OpenShellMtlsBundle),
+    Oidc {
+        config: OpenShellOidcConfig,
+        tokens: Arc<tokio::sync::Mutex<OpenShellOidcBundle>>,
+        on_refresh: Option<Arc<dyn Fn(OpenShellOidcBundle) + Send + Sync>>,
+        /// Optional server CA (e.g. leftover local-gateway PEMs). OpenShell CLI
+        /// also pins mTLS CA material when present alongside OIDC Bearer auth.
+        server_ca_pem: Option<String>,
+    },
+    /// Mode is OIDC but tokens are missing — `configured()` fails with a login hint.
+    OidcIncomplete {
+        config: OpenShellOidcConfig,
+    },
+}
+
+impl GatewayAuth {
+    pub fn oidc(
+        config: OpenShellOidcConfig,
+        bundle: OpenShellOidcBundle,
+        on_refresh: Option<Arc<dyn Fn(OpenShellOidcBundle) + Send + Sync>>,
+        server_ca_pem: Option<String>,
+    ) -> Self {
+        Self::Oidc {
+            config,
+            tokens: Arc::new(tokio::sync::Mutex::new(bundle)),
+            on_refresh,
+            server_ca_pem,
+        }
+    }
+}
+
+impl std::fmt::Debug for GatewayAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mtls(_) => f.write_str("GatewayAuth::Mtls"),
+            Self::Oidc {
+                config,
+                server_ca_pem,
+                ..
+            } => f
+                .debug_struct("GatewayAuth::Oidc")
+                .field("issuer", &config.issuer)
+                .field("client_id", &config.client_id)
+                .field("has_server_ca", &server_ca_pem.is_some())
+                .finish_non_exhaustive(),
+            Self::OidcIncomplete { config } => f
+                .debug_struct("GatewayAuth::OidcIncomplete")
+                .field("issuer", &config.issuer)
+                .field("client_id", &config.client_id)
+                .finish(),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -60,7 +126,7 @@ pub struct GatewayStatus {
     pub healthy: bool,
     /// Short human summary.
     pub summary: String,
-    /// True when endpoint or mTLS material is missing (Settings incomplete).
+    /// True when endpoint or selected auth material is missing (Settings incomplete).
     pub not_configured: bool,
     /// Optional detail when unhealthy.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,7 +308,7 @@ type MockHandler = std::sync::Arc<dyn Fn(&[String]) -> Output + Send + Sync>;
 #[derive(Clone)]
 pub struct OpenShell {
     endpoint: Option<String>,
-    mtls: Option<OpenShellMtlsBundle>,
+    auth: Option<GatewayAuth>,
     /// Applies to control-plane calls (create, list, delete). Exec carries its
     /// own, because an agent legitimately runs for minutes.
     default_timeout: Duration,
@@ -256,7 +322,7 @@ impl std::fmt::Debug for OpenShell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenShell")
             .field("endpoint", &self.endpoint)
-            .field("mtls_configured", &self.mtls.is_some())
+            .field("auth", &self.auth)
             .field("default_timeout", &self.default_timeout)
             .finish()
     }
@@ -266,7 +332,7 @@ impl Default for OpenShell {
     fn default() -> Self {
         Self {
             endpoint: None,
-            mtls: None,
+            auth: None,
             default_timeout: Duration::from_secs(120),
             #[cfg(test)]
             mock: None,
@@ -277,14 +343,14 @@ impl Default for OpenShell {
 impl OpenShell {
     pub fn new(
         endpoint: Option<String>,
-        mtls: Option<OpenShellMtlsBundle>,
+        auth: Option<GatewayAuth>,
         default_timeout: Duration,
     ) -> Self {
         Self {
             endpoint: endpoint
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
-            mtls,
+            auth,
             default_timeout,
             #[cfg(test)]
             mock: None,
@@ -300,31 +366,100 @@ impl OpenShell {
     ) -> Self {
         Self {
             endpoint: Some("mock://openshell".into()),
-            mtls: None,
+            auth: None,
             default_timeout,
             mock: Some(std::sync::Arc::new(handler)),
         }
     }
 
     fn configured(&self) -> Result<()> {
-        if self.endpoint.is_none() {
-            return Err(Error::NotConfigured(
-                "set gateway endpoint in Settings → OpenShell".into(),
-            ));
-        }
+        let endpoint = self.endpoint.as_deref().ok_or_else(|| {
+            Error::NotConfigured("set gateway endpoint in Settings → OpenShell".into())
+        })?;
         #[cfg(test)]
         if self.mock.is_some() {
             return Ok(());
         }
-        match &self.mtls {
-            Some(b) if mtls_bundle_complete(b) => Ok(()),
-            _ => Err(Error::NotConfigured(
-                "paste or import mTLS PEMs in Settings → OpenShell".into(),
+        if endpoint.starts_with("http://") {
+            return Err(Error::NotConfigured(
+                "gateway endpoint must be https:// (plaintext HTTP is not supported)".into(),
+            ));
+        }
+        if !endpoint.starts_with("https://") {
+            return Err(Error::NotConfigured(
+                "gateway endpoint must be an https:// URL".into(),
+            ));
+        }
+        match &self.auth {
+            Some(GatewayAuth::Mtls(b)) if mtls_bundle_complete(b) => Ok(()),
+            Some(GatewayAuth::Mtls(_)) => Err(Error::NotConfigured(
+                "paste mTLS PEMs in Settings → OpenShell (auth mode: mTLS)".into(),
+            )),
+            Some(GatewayAuth::Oidc { config, .. }) if config.is_complete() => Ok(()),
+            Some(GatewayAuth::Oidc { .. }) | Some(GatewayAuth::OidcIncomplete { .. }) => {
+                Err(Error::NotConfigured(
+                    "set OIDC issuer/client and Log in (Settings → OpenShell, auth mode: OIDC)"
+                        .into(),
+                ))
+            }
+            None => Err(Error::NotConfigured(
+                "pick auth mode (mTLS or OIDC) in Settings → OpenShell".into(),
             )),
         }
     }
 
-    async fn connect(&self) -> Result<OpenShellClient<Channel>> {
+    async fn oidc_access_token(&self) -> Result<String> {
+        let Some(GatewayAuth::Oidc {
+            config,
+            tokens,
+            on_refresh,
+            ..
+        }) = &self.auth
+        else {
+            return Err(Error::NotConfigured(
+                "OIDC auth is not configured".into(),
+            ));
+        };
+        if !config.is_complete() {
+            return Err(Error::NotConfigured(
+                "set OIDC issuer and client id in Settings → OpenShell".into(),
+            ));
+        }
+        let mut guard = tokens.lock().await;
+        if !guard.access_expiring_soon(OIDC_EXPIRY_SKEW_SECS) {
+            return Ok(guard.access_token.clone());
+        }
+        let input = openshell_sdk::oidc::RefreshTokenInput::new(
+            guard.refresh_token.clone(),
+            config.issuer.clone(),
+            config.client_id.clone(),
+        );
+        let refreshed = openshell_sdk::oidc::refresh_token(&input)
+            .await
+            .map_err(|e| Error::Connect(format!("OIDC refresh: {e}")))?;
+        guard.access_token = refreshed.access_token;
+        if let Some(rt) = refreshed.refresh_token {
+            guard.refresh_token = rt;
+        }
+        if let Some(exp) = refreshed.expires_at {
+            guard.expires_at = exp;
+        } else {
+            // Provider omitted expiry — assume one hour so we still refresh.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            guard.expires_at = now.saturating_add(3600);
+        }
+        let next = guard.clone();
+        drop(guard);
+        if let Some(persist) = on_refresh {
+            persist(next.clone());
+        }
+        Ok(next.access_token)
+    }
+
+    async fn connect(&self) -> Result<OsClient> {
         self.configured()?;
         #[cfg(test)]
         if self.mock.is_some() {
@@ -334,13 +469,43 @@ impl OpenShell {
             });
         }
         let endpoint = self.endpoint.as_deref().unwrap();
-        let mtls = self.mtls.as_ref().unwrap();
-        let tls = ClientTlsConfig::new()
-            .ca_certificate(Certificate::from_pem(mtls.ca_pem.as_bytes()))
-            .identity(Identity::from_pem(
-                mtls.client_cert_pem.as_bytes(),
-                mtls.client_key_pem.as_bytes(),
-            ));
+        let (tls, interceptor) = match &self.auth {
+            Some(GatewayAuth::Mtls(mtls)) => {
+                let tls = ClientTlsConfig::new()
+                    .ca_certificate(Certificate::from_pem(mtls.ca_pem.as_bytes()))
+                    .identity(Identity::from_pem(
+                        mtls.client_cert_pem.as_bytes(),
+                        mtls.client_key_pem.as_bytes(),
+                    ));
+                let interceptor = EdgeAuthInterceptor::noop();
+                (tls, interceptor)
+            }
+            Some(GatewayAuth::Oidc { server_ca_pem, .. }) => {
+                let access = self.oidc_access_token().await?;
+                let interceptor = EdgeAuthInterceptor::new(Some(&access), None).map_err(|e| {
+                    Error::Connect(format!("OIDC bearer interceptor: {e}"))
+                })?;
+                // System/webpki roots + Let's Encrypt Generation Y roots.
+                // Gen Y (ISRG Root YE/YR) is not in Mozilla/OS stores yet.
+                // Optional server_ca_pem covers private-CA gateways (local
+                // OpenShell) the same way the CLI pins mTLS CA with OIDC.
+                let mut tls = ClientTlsConfig::new()
+                    .with_enabled_roots()
+                    .ca_certificate(Certificate::from_pem(LETS_ENCRYPT_GEN_Y_ROOTS.as_bytes()));
+                if let Some(ca) = server_ca_pem.as_ref().filter(|s| !s.trim().is_empty()) {
+                    tls = tls.ca_certificate(Certificate::from_pem(ca.as_bytes()));
+                }
+                if let Some(host) = tls_domain_name(endpoint) {
+                    tls = tls.domain_name(host);
+                }
+                (tls, interceptor)
+            }
+            _ => {
+                return Err(Error::NotConfigured(
+                    "pick auth mode (mTLS or OIDC) in Settings → OpenShell".into(),
+                ));
+            }
+        };
         let channel = Endpoint::from_shared(endpoint.to_string())
             .map_err(|e| Error::Connect(format!("invalid gateway URL: {e}")))?
             .connect_timeout(Duration::from_secs(10))
@@ -351,8 +516,8 @@ impl OpenShell {
             .map_err(|e| Error::Connect(format!("tls config: {e}")))?
             .connect()
             .await
-            .map_err(|e| Error::Connect(e.to_string()))?;
-        Ok(OpenShellClient::new(channel))
+            .map_err(|e| Error::Connect(format_transport_error(&e)))?;
+        Ok(OpenShellClient::with_interceptor(channel, interceptor))
     }
 
     async fn with_timeout<T, F, Fut>(&self, op: &str, timeout: Duration, f: F) -> Result<T>
@@ -644,6 +809,7 @@ impl OpenShell {
                         config: config.clone().into_iter().collect(),
                         credential_expires_at_ms: Default::default(),
                         profile_workspace: String::new(),
+                        credential_handles: Default::default(),
                     }),
                     workspace: String::new(),
                 })
@@ -705,6 +871,7 @@ impl OpenShell {
                         config: config.clone().into_iter().collect(),
                         credential_expires_at_ms: Default::default(),
                         profile_workspace: String::new(),
+                        credential_handles: Default::default(),
                     }),
                     credential_expires_at_ms: Default::default(),
                     workspace: String::new(),
@@ -1748,10 +1915,53 @@ impl OpenShell {
     }
 }
 
+/// Let's Encrypt Generation Y trust anchors (public roots). See
+/// https://letsencrypt.org/ca/certificates/ — not yet in webpki-roots.
+const LETS_ENCRYPT_GEN_Y_ROOTS: &str = concat!(
+    include_str!("tls_roots/isrg-root-ye.pem"),
+    "\n",
+    include_str!("tls_roots/isrg-root-yr.pem"),
+);
+
 fn mtls_bundle_complete(b: &OpenShellMtlsBundle) -> bool {
     !b.ca_pem.trim().is_empty()
         && !b.client_cert_pem.trim().is_empty()
         && !b.client_key_pem.trim().is_empty()
+}
+
+/// Host for TLS SNI — tonic usually infers this, but edge proxies are happier
+/// when it is explicit.
+fn tls_domain_name(endpoint: &str) -> Option<String> {
+    let rest = endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))?;
+    let authority = rest.split('/').next().unwrap_or("");
+    // userinfo@host:port → host
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = hostport
+        .strip_prefix('[')
+        .and_then(|s| s.split(']').next())
+        .unwrap_or_else(|| hostport.split(':').next().unwrap_or(""));
+    let host = host.trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// tonic's Display for transport failures is just "transport error"; the useful
+/// bit (cert, DNS, reset) lives in `source()`.
+fn format_transport_error(err: &tonic::transport::Error) -> String {
+    let mut out = err.to_string();
+    let mut src = std::error::Error::source(err);
+    while let Some(e) = src {
+        out.push_str(": ");
+        out.push_str(&e.to_string());
+        src = e.source();
+    }
+    if out.contains("UnknownIssuer") {
+        out.push_str(
+            " (is Gateway endpoint the OIDC HTTPS URL? a local mTLS gateway needs auth mode mTLS, or its CA pinned)",
+        );
+    }
+    out
 }
 
 fn apply_exec_event(
@@ -1769,7 +1979,7 @@ fn apply_exec_event(
 }
 
 async fn get_sandbox(
-    client: &mut OpenShellClient<Channel>,
+    client: &mut OsClient,
     name: &str,
 ) -> Result<openshell_core::proto::Sandbox> {
     let resp = client
@@ -1802,7 +2012,7 @@ fn phase_label(phase: i32) -> String {
 }
 
 async fn wait_ready(
-    client: &mut OpenShellClient<Channel>,
+    client: &mut OsClient,
     name: &str,
     timeout: Duration,
 ) -> Result<()> {
@@ -2151,6 +2361,46 @@ mod tests {
         assert!(!os.healthy().await);
     }
 
+    #[tokio::test]
+    async fn gateway_status_rejects_http_plaintext() {
+        let os = OpenShell::new(
+            Some("http://gateway.example.com".into()),
+            Some(GatewayAuth::OidcIncomplete {
+                config: crate::model::OpenShellOidcConfig {
+                    issuer: "https://idp.example.com".into(),
+                    client_id: "openshell-cli".into(),
+                    audience: "openshell-cli".into(),
+                },
+            }),
+            Duration::from_secs(5),
+        );
+        let st = os.gateway_status().await;
+        assert!(!st.healthy);
+        assert!(st.not_configured, "summary={}", st.summary);
+        assert!(
+            st.summary.contains("https://"),
+            "summary={}",
+            st.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_status_requires_explicit_auth_mode() {
+        let os = OpenShell::new(
+            Some("https://gateway.example.com".into()),
+            None,
+            Duration::from_secs(5),
+        );
+        let st = os.gateway_status().await;
+        assert!(!st.healthy);
+        assert!(st.not_configured, "summary={}", st.summary);
+        assert!(
+            st.summary.contains("auth mode") || st.summary.contains("mTLS"),
+            "summary={}",
+            st.summary
+        );
+    }
+
     /// The image flag is `--from` in the mock argv surface (and in CreateSandbox
     /// template.image for the real client). Getting this wrong used to yield a
     /// confusing registry lookup.
@@ -2353,8 +2603,50 @@ mod tests {
             client_cert_pem: read("HONR_TEST_MTLS_CERT"),
             client_key_pem: read("HONR_TEST_MTLS_KEY"),
         };
-        let os = OpenShell::new(Some(endpoint), Some(bundle), Duration::from_secs(30));
+        let os = OpenShell::new(
+            Some(endpoint),
+            Some(GatewayAuth::Mtls(bundle)),
+            Duration::from_secs(30),
+        );
         assert!(os.healthy().await);
+        os.list().await.expect("sandbox list");
+    }
+
+    /// Live OIDC probe. Tokens come from env JSON (never from `~/.config/openshell`
+    /// inside honr itself — paste after `openshell gateway login` if needed):
+    /// `HONR_TEST_OIDC_TOKEN_JSON={"access_token":…,"refresh_token":…,"expires_at":…,"issuer":…,"client_id":…}`
+    #[tokio::test]
+    #[ignore = "needs HTTPS OIDC gateway + HONR_TEST_OIDC_TOKEN_JSON"]
+    async fn real_gateway_oidc_health_and_list() {
+        let endpoint = std::env::var("HONR_OPENSHELL_ENDPOINT")
+            .unwrap_or_else(|_| "https://microshift-openshell.tail43beb.ts.net".into());
+        let issuer = std::env::var("HONR_TEST_OIDC_ISSUER").unwrap_or_else(|_| {
+            "https://microshift-keycloak.tail43beb.ts.net/realms/openshell".into()
+        });
+        let client_id =
+            std::env::var("HONR_TEST_OIDC_CLIENT_ID").unwrap_or_else(|_| "openshell-cli".into());
+        let audience =
+            std::env::var("HONR_TEST_OIDC_AUDIENCE").unwrap_or_else(|_| client_id.clone());
+        let raw = std::env::var("HONR_TEST_OIDC_TOKEN_JSON")
+            .expect("set HONR_TEST_OIDC_TOKEN_JSON to an OIDC token bundle JSON object");
+        let bundle: crate::secrets::OpenShellOidcBundle =
+            serde_json::from_str(&raw).expect("parse HONR_TEST_OIDC_TOKEN_JSON");
+        let os = OpenShell::new(
+            Some(endpoint),
+            Some(GatewayAuth::oidc(
+                crate::model::OpenShellOidcConfig {
+                    issuer,
+                    client_id,
+                    audience,
+                },
+                bundle,
+                None,
+                None,
+            )),
+            Duration::from_secs(30),
+        );
+        let st = os.gateway_status().await;
+        assert!(st.healthy, "status={st:?}");
         os.list().await.expect("sandbox list");
     }
 }

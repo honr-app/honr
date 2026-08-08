@@ -3,9 +3,10 @@
 use super::codec::{
     item_from_row, item_to_row, parent_first, META_AGENT_RUNTIME,
     META_COCKPIT_SANDBOX_PROFILE_ID, META_DEFAULT_SANDBOX_PROFILE_ID, META_JSON_IMPORTED,
-    META_NEXT_ID, META_OPENSHELL_GATEWAY_ENDPOINT, META_AUTH_ALLOWED_TEAMS,
-    META_AUTH_ALLOWED_USERS, META_AUTH_SEALED, META_GITHUB_APP_INSTALLATION_ID,
-    META_GITHUB_APP_SEALED, META_MCP_SERVERS, META_OPENSHELL_MTLS_SEALED,
+    META_NEXT_ID, META_OPENSHELL_AUTH_MODE, META_OPENSHELL_GATEWAY_ENDPOINT,
+    META_AUTH_ALLOWED_TEAMS, META_AUTH_ALLOWED_USERS, META_AUTH_SEALED,
+    META_GITHUB_APP_INSTALLATION_ID, META_GITHUB_APP_SEALED, META_MCP_SERVERS,
+    META_OPENSHELL_MTLS_SEALED, META_OPENSHELL_OIDC_CONFIG, META_OPENSHELL_OIDC_SEALED,
     META_OPENSHELL_POLICIES, META_OPENSHELL_PROVIDERS, META_OPENSHELL_PROVIDER_TYPES,
     META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES, META_COCKPIT_SESSION, META_SANDBOX_PROFILES,
     META_WEBHOOK_POLL, META_WEBHOOK_POLL_PR_REVIEWS, META_WEBHOOK_POLL_TIPS,
@@ -15,8 +16,9 @@ use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
 use super::{connect_postgres_migrated, parse_database_url};
 use crate::model::{
-    AgentRuntimeConfig, CockpitSession, ItemId, McpServerDesired, OpenShellPolicy,
-    OpenShellProviderDesired, SandboxProfile, WebhookPollConfig, WorkItem, WorkspaceBinding,
+    AgentRuntimeConfig, CockpitSession, ItemId, McpServerDesired, OpenShellAuthMode,
+    OpenShellOidcConfig, OpenShellPolicy, OpenShellProviderDesired, SandboxProfile,
+    WebhookPollConfig, WorkItem, WorkspaceBinding,
 };
 use crate::store::{BoardState, StoryLine};
 use async_trait::async_trait;
@@ -67,7 +69,10 @@ impl PostgresBoardStore {
         let cockpit_sandbox_profile_id = self.load_cockpit_sandbox_profile_id().await?;
         let workspace = self.load_workspace_binding().await?;
         let openshell_gateway_endpoint = self.load_openshell_gateway_endpoint().await?;
+        let openshell_auth_mode = self.load_openshell_auth_mode().await?;
+        let openshell_oidc_config = self.load_openshell_oidc_config().await?;
         let openshell_mtls_sealed = self.load_openshell_mtls_sealed().await?;
+        let openshell_oidc_sealed = self.load_openshell_oidc_sealed().await?;
         let github_app_sealed = self.load_github_app_sealed().await?;
         let github_app_installation_id = self.load_github_app_installation_id().await?;
         let auth_sealed = self.load_auth_sealed().await?;
@@ -93,7 +98,10 @@ impl PostgresBoardStore {
             cockpit_sandbox_profile_id,
             workspace,
             openshell_gateway_endpoint,
+            openshell_auth_mode,
+            openshell_oidc_config,
             openshell_mtls_sealed,
+            openshell_oidc_sealed,
             github_app_sealed,
             github_app_installation_id,
             auth_sealed,
@@ -198,8 +206,30 @@ impl PostgresBoardStore {
         .await?;
         set_meta_tx(
             &mut tx,
+            META_OPENSHELL_AUTH_MODE,
+            state
+                .openshell_auth_mode
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default()
+                .as_str(),
+        )
+        .await?;
+        let oidc_cfg_json = match &state.openshell_oidc_config {
+            None => String::new(),
+            Some(cfg) => serde_json::to_string(cfg)
+                .map_err(|e| StoreError::Query(format!("serialize openshell_oidc_config: {e}")))?,
+        };
+        set_meta_tx(&mut tx, META_OPENSHELL_OIDC_CONFIG, &oidc_cfg_json).await?;
+        set_meta_tx(
+            &mut tx,
             META_OPENSHELL_MTLS_SEALED,
             state.openshell_mtls_sealed.as_deref().unwrap_or(""),
+        )
+        .await?;
+        set_meta_tx(
+            &mut tx,
+            META_OPENSHELL_OIDC_SEALED,
+            state.openshell_oidc_sealed.as_deref().unwrap_or(""),
         )
         .await?;
         set_meta_tx(
@@ -363,9 +393,34 @@ impl PostgresBoardStore {
             .filter(|s| !s.is_empty()))
     }
 
+    async fn load_openshell_auth_mode(&self) -> Result<Option<OpenShellAuthMode>, StoreError> {
+        Ok(self
+            .meta_get(META_OPENSHELL_AUTH_MODE)
+            .await?
+            .as_deref()
+            .and_then(OpenShellAuthMode::parse))
+    }
+
+    async fn load_openshell_oidc_config(&self) -> Result<Option<OpenShellOidcConfig>, StoreError> {
+        match self.meta_get(META_OPENSHELL_OIDC_CONFIG).await? {
+            None => Ok(None),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(None),
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode openshell_oidc_config: {e}"))),
+        }
+    }
+
     async fn load_openshell_mtls_sealed(&self) -> Result<Option<String>, StoreError> {
         Ok(self
             .meta_get(META_OPENSHELL_MTLS_SEALED)
+            .await?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
+    }
+
+    async fn load_openshell_oidc_sealed(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .meta_get(META_OPENSHELL_OIDC_SEALED)
             .await?
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()))
