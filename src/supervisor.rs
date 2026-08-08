@@ -3000,12 +3000,10 @@ fn sandbox_spec_for_cockpit(
     attach_providers: &[String],
     engine: &str,
 ) -> SandboxSpec {
-    let mut env = agent_env(engine);
-    // Board dials ForwardTcp into sandbox loopback :18080 (local + remote).
-    env.push((
-        "HONR_MCP_URL".into(),
-        crate::cockpit_mcp_tunnel::tunnel_mcp_resource(),
-    ));
+    let env = agent_env(engine);
+    // Cockpit's honr MCP entry is stdio over a local Unix socket
+    // (cockpit_mcp_tunnel::AGENT_SOCK_PATH baked into mcp.json) — no URL,
+    // no env var to inject.
     SandboxSpec {
         name: name.to_string(),
         from: resolved.image.clone(),
@@ -3238,9 +3236,11 @@ async fn run_cockpit_inside(
         with_cockpit_cancel(board, wait_until_sandbox_ready(os, name)).await?;
     }
 
-    // Reverse-tunnel board MCP onto sandbox loopback before minting tokens.
+    // Start the cockpit MCP relay (nc -lU over exec_interactive) before
+    // minting/injecting mcp.json so the agent's stdio config has somewhere
+    // to connect.
     with_cockpit_cancel(board, async {
-        crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(os, name)
+        crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(os, board, name)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     })
@@ -3367,14 +3367,12 @@ pub(crate) fn cockpit_briefing() -> String {
          over operator MCP tools. You are not a card worker.\n\n",
     );
     b.push_str(
-        "Host honr MCP is preconfigured: `$HONR_MCP_URL` (default \
-         http://127.0.0.1:18080/mcp via board ForwardTcp dial-in) with Bearer \
-         credentials under `/sandbox/.honr/mcp/` (`token.json`, `mcp.json`, `env.sh`). \
-         Source `/sandbox/.honr/mcp/env.sh` or use the written mcp.json — do **not** run \
-         browser OAuth inside this sandbox. That endpoint is operator tools only: \
-         board_snapshot, dispatch, park, steer, approve_*, answer_escalation, and related \
-         triage tools. Do not call worker verbs (claim, heartbeat, report, split, escalate, \
-         release, list_ready) — they are denied on this seat.\n\n",
+        "Host honr MCP is preconfigured in `mcp.json`/`claude_mcp.json` — stdio, no login, \
+         no Bearer. Do **not** run browser OAuth inside this sandbox. That endpoint is \
+         operator tools only: board_snapshot, dispatch, park, steer, approve_*, \
+         answer_escalation, and related triage tools. Do not call worker verbs (claim, \
+         heartbeat, report, split, escalate, release, list_ready) — they are denied on \
+         this seat.\n\n",
     );
     b.push_str(
         "Every mutation goes through the Board. Chat is a face; do not invent a second \
@@ -3398,8 +3396,8 @@ pub(crate) fn cockpit_briefing() -> String {
 fn cockpit_resume_briefing() -> String {
     "You were parked mid-session. The agent process was stopped; the sandbox and \
      conversation were kept. Continue as the cockpit over host honr MCP \
-     (`$HONR_MCP_URL`, credentials in `/sandbox/.honr/mcp/`) — operator tools only, \
-     no worker verbs, no browser OAuth. Start with board_snapshot.\n"
+     (stdio, preconfigured in mcp.json) — operator tools only, no worker verbs, \
+     no browser OAuth. Start with board_snapshot.\n"
         .into()
 }
 
@@ -4648,11 +4646,11 @@ mod tests {
             "must not use card honr.item label: {:?}",
             spec.labels
         );
+        // Host MCP is stdio over a local Unix socket now (mcp.json bakes in
+        // `nc -U <AGENT_SOCK_PATH>`) — no env var to point at it.
         assert!(
-            spec.env
-                .iter()
-                .any(|(k, v)| k == "HONR_MCP_URL" && v.contains("/mcp")),
-            "cockpit env must point at host MCP: {:?}",
+            !spec.env.iter().any(|(k, _)| k == "HONR_MCP_URL"),
+            "HONR_MCP_URL is stale; cockpit MCP is stdio now: {:?}",
             spec.env
         );
         assert!(spec.providers.is_empty(), "test passes empty providers");
@@ -4669,8 +4667,8 @@ mod tests {
             "briefing must require create_project clone_repo: {cold}"
         );
         assert!(
-            cold.contains("/sandbox/.honr/mcp/"),
-            "briefing must point at injected MCP creds: {cold}"
+            cold.contains("mcp.json"),
+            "briefing must point at injected MCP config: {cold}"
         );
         assert!(
             cold.contains("do **not** run") || cold.contains("browser OAuth"),
@@ -4704,7 +4702,7 @@ mod tests {
         assert!(resume.contains("cockpit"), "{resume}");
         assert!(resume.contains("worker verbs"), "{resume}");
         assert!(
-            resume.contains("/sandbox/.honr/mcp/"),
+            resume.contains("mcp.json"),
             "resume briefing must mention MCP inject path: {resume}"
         );
     }

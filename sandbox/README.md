@@ -20,10 +20,11 @@ them at create time.
 
 ## Cockpit network policy (board Policies)
 
-The **cockpit** sandbox uses the same catalog: a Policy for egress (host honr
-MCP on sandbox loopback `127.0.0.1:18080` via the board's ForwardTcp dial-in,
-plus inference and GitHub App `GH_TOKEN`) and a Sandbox spec that selects that
-policy. Package registries typically stay on the worker Policy.
+The **cockpit** sandbox uses the same catalog: a Policy for egress (inference
+and GitHub App `GH_TOKEN`) and a Sandbox spec that selects that policy. Host
+honr MCP is stdio over a local Unix socket (`nc -U`, see
+`src/cockpit_mcp_tunnel.rs`) — no network hop, so no policy entry for it.
+Package registries typically stay on the worker Policy.
 
 `sandbox/cockpit-policy.yaml` is a checked-in starting point for a full cockpit
 policy;

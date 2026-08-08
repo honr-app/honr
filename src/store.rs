@@ -3125,21 +3125,38 @@ impl Board {
         true
     }
 
-    /// Seed shipped MCP catalog rows (honr HTTP seat) when missing.
-    /// Does not overwrite operator-edited entries.
+    /// Seed / migrate the shipped `honr` MCP catalog row.
+    ///
+    /// Inserts when missing. When the existing row is still `shipped` but not
+    /// the current stdio placeholder (legacy HTTP + CockpitBearer), rewrites
+    /// it — operator-edited non-shipped entries are left alone.
     pub fn ensure_shipped_mcp_servers(&self) -> bool {
         let mut s = self.state.write();
-        let mut added = false;
+        let mut changed = false;
         let honr = McpServerDesired::shipped_honr();
-        if !s.mcp_servers.contains_key(&honr.id) {
-            s.mcp_servers.insert(honr.id.clone(), honr);
-            added = true;
+        match s.mcp_servers.get(&honr.id) {
+            None => {
+                s.mcp_servers.insert(honr.id.clone(), honr);
+                changed = true;
+            }
+            Some(existing) if existing.shipped => {
+                let is_stdio_placeholder = matches!(
+                    &existing.transport,
+                    McpTransport::Stdio { command, args, cwd: None }
+                        if command.is_empty() && args.is_empty()
+                );
+                if !is_stdio_placeholder {
+                    s.mcp_servers.insert(honr.id.clone(), honr);
+                    changed = true;
+                }
+            }
+            _ => {}
         }
         drop(s);
-        if added {
+        if changed {
             self.dirty.store(true, Ordering::Relaxed);
         }
-        added
+        changed
     }
 
     /// Attach shipped `honr` to the Cockpit sandbox profile's `mcp_server_ids`.
@@ -11870,6 +11887,34 @@ mod tests {
         );
         ensure_seed_policy(&b);
         assert!(b.ensure_shipped_mcp_servers());
+        assert!(!b.ensure_shipped_mcp_servers());
+        // Legacy shipped HTTP + CockpitBearer must migrate to stdio placeholder.
+        {
+            let mut s = b.state.write();
+            s.mcp_servers.insert(
+                HONR_MCP_SERVER_ID.into(),
+                McpServerDesired {
+                    id: HONR_MCP_SERVER_ID.into(),
+                    name: "honr".into(),
+                    transport: McpTransport::Http {
+                        url: String::new(),
+                        auth: McpHttpAuth::CockpitBearer,
+                    },
+                    policy_fragment_yaml: None,
+                    provider_names: Vec::new(),
+                    env: Default::default(),
+                    audience: McpAudience::Cockpit,
+                    shipped: true,
+                },
+            );
+        }
+        assert!(b.ensure_shipped_mcp_servers());
+        let migrated = b.get_mcp_server(HONR_MCP_SERVER_ID).expect("honr");
+        assert!(matches!(
+            migrated.transport,
+            McpTransport::Stdio { ref command, ref args, cwd: None }
+                if command.is_empty() && args.is_empty()
+        ));
         assert!(!b.ensure_shipped_mcp_servers());
         b.upsert_openshell_provider(OpenShellProviderDesired {
             name: "gcp-adc".into(),

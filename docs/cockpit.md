@@ -109,29 +109,29 @@ secrets copied into the sandbox.
 
 MCP auth from inside the sandbox works differently from the host. Host Cursor
 uses browser OAuth against `/mcp`, and that dance does not work cleanly from
-inside a sandbox. So honr **mints** short-lived MCP JWTs for the static public
-client `honr-cockpit` and writes them into the sandbox:
+inside a sandbox. So the shipped `honr` MCP entry is **stdio**, not HTTP: no
+login, no Bearer, no OAuth dance to skip.
 
 | Path | Contents |
 |---|---|
-| `/sandbox/.honr/mcp/token.json` | access + refresh, mode 0600 |
-| `/sandbox/.honr/mcp/mcp.json` | HTTP MCP entry with a Bearer header (Cursor) |
+| `/sandbox/.honr/mcp/mcp.json` | `honr` → `nc -U /sandbox/.honr/mcp/agent.sock` (Cursor) |
 | `/sandbox/.honr/mcp/claude_mcp.json` | same shape; Claude loads it via `--mcp-config` |
 | `/sandbox/.gemini/config/mcp_config.json` | same, for Antigravity |
-| `/sandbox/.config/opencode/opencode.jsonc` | OpenCode `mcp.honr`, remote + Bearer |
-| `/sandbox/.honr/mcp/env.sh` | exports `HONR_MCP_URL`, `HONR_MCP_ACCESS_TOKEN` |
+| `/sandbox/.config/opencode/opencode.jsonc` | OpenCode `mcp.honr`, `type: local` |
 
-Minting happens when the sandbox becomes Ready, on
-`POST /api/cockpit-session/mcp-cred`, and on terminal attach. Tokens are never
-returned to browser JavaScript. Do not run `agent mcp login` inside the sandbox
-unless you specifically want a separate host-style OAuth flow.
+Injection happens when the sandbox becomes Ready, on
+`POST /api/cockpit-session/mcp-cred`, and on terminal attach. Do not run
+`agent mcp login` inside the sandbox unless you specifically want a separate
+host-style OAuth flow.
 
-The resource URL (the JWT `aud`) defaults to
-`http://127.0.0.1:18080/mcp`. The cockpit image includes `socat`; the board
-starts it as a loopback pairer and dials in with OpenShell `ForwardTcp`
-(board → sandbox), bridging each uplink to host honr — same path for local
-Docker/Podman and remote Kubernetes. Override with `HONR_MCP_URL` only for
-unusual setups.
+honr keeps a board-owned `ExecSandboxInteractive` relay running `nc -lU
+/sandbox/.honr/mcp/agent.sock` inside the sandbox — its gRPC-piped
+stdin/stdout are wired straight into the same `Operator` MCP handler that
+serves the HTTP `/mcp` endpoint (`rmcp::serve_server` over the pipe). The
+listen is one-shot so agent disconnect is visible; the board re-spawns for
+the next connect. No port, no network policy entry, no Bearer to mint — same
+path on local Docker/Podman and remote Kubernetes, since it never leaves the
+sandbox's own netns. See [Sandbox](sandbox.md).
 
 For agy the attached `antigravity` provider injects only an
 `openshell:resolve:…` placeholder, and attach writes that into the sandbox's

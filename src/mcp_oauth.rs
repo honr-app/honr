@@ -84,9 +84,11 @@ pub struct OpsMcpTokens {
     pub sub: String,
 }
 
-/// MCP resource URL the sandbox will call (`aud` on the JWT).
+/// Informational `aud` for the (vestigial) cockpit JWT. Cockpit's shipped
+/// `honr` MCP entry is stdio over a local Unix socket now — nothing sends
+/// this Bearer over a wire. See `cockpit_mcp_tunnel`.
 pub fn cockpit_mcp_resource() -> String {
-    crate::cockpit_mcp_tunnel::tunnel_mcp_resource()
+    crate::cockpit_mcp_tunnel::MCP_TRANSPORT_LABEL.to_string()
 }
 
 /// Mint access + refresh JWTs for the cockpit (`honr-cockpit` client).
@@ -1258,7 +1260,7 @@ mod tests {
     #[test]
     fn mint_cockpit_seat_tokens_round_trips_access_verify() {
         let (board, _env) = board_with_admin();
-        let resource = crate::cockpit_mcp_tunnel::DEFAULT_TUNNEL_MCP_RESOURCE;
+        let resource = crate::cockpit_mcp_tunnel::MCP_TRANSPORT_LABEL;
         let tokens = mint_cockpit_seat_tokens(&board, "admin", resource).expect("mint");
         assert_eq!(tokens.client_id, COCKPIT_CLIENT_ID);
         assert_eq!(tokens.sub, "admin");

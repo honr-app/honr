@@ -1827,7 +1827,7 @@ async fn provision_cockpit_mcp_cred(
         .to_string();
 
     let os = b.openshell_client();
-    crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(&os, &env)
+    crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(&os, &b, &env)
         .await
         .map_err(ApiError)?;
     let tokens = crate::cockpit_mcp::provision_cockpit_mcp(&b, &os, &env, &user.login)
@@ -4127,10 +4127,19 @@ mod tests {
     #[tokio::test]
     async fn mcp_cred_succeeds_with_cookie_and_mock_openshell() {
         let os = crate::openshell::OpenShell::mock(
-            |_| crate::openshell::Output {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
+            |args| {
+                // Cockpit MCP relay readiness probe (`test -S <sock> && echo
+                // LISTEN`) — everything else is a no-op success.
+                let stdout = if args.iter().any(|a| a.contains("agent.sock")) {
+                    "LISTEN\n".to_string()
+                } else {
+                    String::new()
+                };
+                crate::openshell::Output {
+                    code: 0,
+                    stdout,
+                    stderr: String::new(),
+                }
             },
             std::time::Duration::from_secs(5),
         );

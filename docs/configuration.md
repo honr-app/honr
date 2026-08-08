@@ -41,8 +41,10 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 |---|---|
 | `HONR_PORT` | Listen port (default 8080) |
 | `HONR_DATABASE_URL` | Board database URL (default `sqlite:honr.db`) |
-| `HONR_MCP_URL` | Resource URL minted into cockpit MCP tokens. Defaults to `http://127.0.0.1:18080/mcp` (sandbox loopback via board ForwardTcp dial-in) |
 | `HONR_TEST_DATABASE_URL` | Postgres URL for migration tests |
+
+Cockpit's shipped `honr` MCP entry is stdio over a local Unix socket
+(`nc -U`, see [Cockpit](cockpit.md)) — no URL, no env var.
 
 One host secret file: `~/.config/honr/master.key`, which seals credentials
 stored on the board.

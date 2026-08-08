@@ -14,22 +14,19 @@ use crate::model::OpenShellOidcConfig;
 use crate::secrets::{OpenShellMtlsBundle, OpenShellOidcBundle};
 use futures::StreamExt;
 use openshell_core::auth::EdgeAuthInterceptor;
-use openshell_core::forward::validate_ssh_session_response;
 use openshell_core::metadata::{ObjectId, ObjectLabels, ObjectName};
 use openshell_core::proto::open_shell_client::OpenShellClient;
 use openshell_core::proto::datamodel::v1::{ObjectMeta, Provider};
 use openshell_core::proto::{
     AttachSandboxProviderRequest, ConfigureProviderRefreshRequest, CreateProviderRequest,
-    CreateSandboxRequest, CreateSshSessionRequest, DeleteProviderProfileRequest,
-    DeleteProviderRequest, DeleteSandboxRequest, DetachSandboxProviderRequest, ExecSandboxEvent,
-    ExecSandboxInput, ExecSandboxRequest, ExecSandboxWindowResize, GetSandboxLogsRequest,
-    GetSandboxRequest, HealthRequest, ImportProviderProfilesRequest, ListProviderProfilesRequest,
+    CreateSandboxRequest, DeleteProviderProfileRequest, DeleteProviderRequest,
+    DeleteSandboxRequest, DetachSandboxProviderRequest, ExecSandboxEvent, ExecSandboxInput,
+    ExecSandboxRequest, ExecSandboxWindowResize, GetSandboxLogsRequest, GetSandboxRequest,
+    HealthRequest, ImportProviderProfilesRequest, ListProviderProfilesRequest,
     ListProvidersRequest, ListSandboxesRequest, ProviderCredentialRefreshStrategy,
-    ProviderProfile as ProtoProviderProfile, ProviderProfileImportItem, RevokeSshSessionRequest,
-    SandboxPhase, SandboxSpec as ProtoSandboxSpec, SandboxTemplate, ServiceStatus,
-    TcpForwardFrame, TcpForwardInit, TcpRelayTarget, UpdateProviderProfilesRequest,
-    UpdateProviderRequest, exec_sandbox_event, exec_sandbox_input, tcp_forward_frame,
-    tcp_forward_init,
+    ProviderProfile as ProtoProviderProfile, ProviderProfileImportItem, SandboxPhase,
+    SandboxSpec as ProtoSandboxSpec, SandboxTemplate, ServiceStatus,
+    UpdateProviderProfilesRequest, UpdateProviderRequest, exec_sandbox_event, exec_sandbox_input,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -190,24 +187,6 @@ pub struct GatewayProvider {
     pub config_keys: Vec<String>,
 }
 
-/// Short-lived SSH session from `CreateSshSession` — what `sandbox connect` uses
-/// before spawning local `ssh` with an `openshell ssh-proxy` ProxyCommand.
-/// Token is secret; do not echo to untrusted clients.
-///
-/// Typed gRPC surface for SSH connect / cockpit MCP ForwardTcp dial-in.
-#[derive(Debug, Clone)]
-pub struct SshSession {
-    pub sandbox_id: String,
-    pub token: String,
-    pub gateway_host: String,
-    pub gateway_port: u32,
-    pub gateway_scheme: String,
-    /// From the gateway; unused by the reverse-tunnel path (ssh-proxy skips host key pinning).
-    #[allow(dead_code)]
-    pub host_key_fingerprint: String,
-    pub expires_at_ms: i64,
-}
-
 /// One event from an interactive (`ExecSandboxInteractive`) attach stream.
 #[derive(Debug, Clone)]
 pub enum InteractiveEvent {
@@ -357,22 +336,6 @@ impl OpenShell {
             #[cfg(test)]
             mock: None,
         }
-    }
-
-    /// Configured gateway HTTPS endpoint (Settings → OpenShell), if any.
-    pub fn endpoint(&self) -> Option<String> {
-        self.endpoint.clone()
-    }
-
-    /// Current OIDC tokens (refreshed if needed). Used by callers that mirror
-    /// board auth into out-of-process tools.
-    pub async fn oidc_bundle_snapshot(&self) -> Option<crate::secrets::OpenShellOidcBundle> {
-        let GatewayAuth::Oidc { tokens, .. } = self.auth.as_ref()? else {
-            return None;
-        };
-        // Touch refresh path used by normal RPCs.
-        let _ = self.oidc_access_token().await.ok()?;
-        Some(tokens.lock().await.clone())
     }
 
     /// In-process stand-in — no network. Handler sees argv-shaped calls
@@ -1673,229 +1636,6 @@ impl OpenShell {
         .await
     }
 
-    /// Issue a short-lived SSH session for `sandbox connect` / ForwardTcp.
-    ///
-    /// Same gRPC path the CLI uses: `GetSandbox` by name → `CreateSshSession`.
-    /// The token is for host-side session auth only — do not ship it to browsers.
-    pub async fn create_ssh_session(&self, name: &str) -> Result<SshSession> {
-        #[cfg(test)]
-        if let Some(mock) = &self.mock {
-            let args = [
-                "sandbox".into(),
-                "create-ssh-session".into(),
-                "-n".into(),
-                name.into(),
-            ];
-            let out = mock(&args);
-            if !out.ok() {
-                return Err(Error::Failed {
-                    op: "create ssh session".into(),
-                    message: out.stderr.trim().to_string(),
-                });
-            }
-            // Mock returns JSON on stdout for tests that need fields.
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(out.stdout.trim()) {
-                return Ok(SshSession {
-                    sandbox_id: v["sandbox_id"].as_str().unwrap_or("mock-sb").into(),
-                    token: v["token"].as_str().unwrap_or("mock-token").into(),
-                    gateway_host: v["gateway_host"].as_str().unwrap_or("127.0.0.1").into(),
-                    gateway_port: v["gateway_port"].as_u64().unwrap_or(443) as u32,
-                    gateway_scheme: v["gateway_scheme"].as_str().unwrap_or("https").into(),
-                    host_key_fingerprint: v["host_key_fingerprint"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .into(),
-                    expires_at_ms: v["expires_at_ms"].as_i64().unwrap_or(0),
-                });
-            }
-            return Ok(SshSession {
-                sandbox_id: "mock-sb".into(),
-                token: "mock-token".into(),
-                gateway_host: "127.0.0.1".into(),
-                gateway_port: 443,
-                gateway_scheme: "https".into(),
-                host_key_fingerprint: String::new(),
-                expires_at_ms: 0,
-            });
-        }
-
-        self.with_timeout(
-            &format!("create ssh session {name}"),
-            self.default_timeout,
-            || async {
-                let mut client = self.connect().await?;
-                let sb = get_sandbox(&mut client, name).await?;
-                let resp = client
-                    .create_ssh_session(CreateSshSessionRequest {
-                        sandbox_id: sb.object_id().to_string(),
-                    })
-                    .await
-                    .map_err(|e| Error::Failed {
-                        op: "create ssh session".into(),
-                        message: e.to_string(),
-                    })?
-                    .into_inner();
-                validate_ssh_session_response(&resp).map_err(|e| Error::Failed {
-                    op: "create ssh session".into(),
-                    message: format!("gateway returned invalid SSH session: {e}"),
-                })?;
-                Ok(SshSession {
-                    sandbox_id: resp.sandbox_id,
-                    token: resp.token,
-                    gateway_host: resp.gateway_host,
-                    gateway_port: resp.gateway_port,
-                    gateway_scheme: resp.gateway_scheme,
-                    host_key_fingerprint: resp.host_key_fingerprint,
-                    expires_at_ms: resp.expires_at_ms,
-                })
-            },
-        )
-        .await
-    }
-
-    /// Revoke a previously issued SSH session token.
-    pub async fn revoke_ssh_session(&self, token: &str) -> Result<bool> {
-        let token = token.trim();
-        if token.is_empty() {
-            return Err(Error::Failed {
-                op: "revoke ssh session".into(),
-                message: "token required".into(),
-            });
-        }
-
-        #[cfg(test)]
-        if let Some(mock) = &self.mock {
-            let args = [
-                "sandbox".into(),
-                "revoke-ssh-session".into(),
-                "--token".into(),
-                token.into(),
-            ];
-            let out = mock(&args);
-            if !out.ok() {
-                return Err(Error::Failed {
-                    op: "revoke ssh session".into(),
-                    message: out.stderr.trim().to_string(),
-                });
-            }
-            return Ok(true);
-        }
-
-        self.with_timeout("revoke ssh session", self.default_timeout, || async {
-            let mut client = self.connect().await?;
-            let resp = client
-                .revoke_ssh_session(RevokeSshSessionRequest {
-                    token: token.to_string(),
-                })
-                .await
-                .map_err(|e| Error::Failed {
-                    op: "revoke ssh session".into(),
-                    message: e.to_string(),
-                })?
-                .into_inner();
-            Ok(resp.revoked)
-        })
-        .await
-    }
-
-    /// Bridge one local TCP stream to a loopback target inside a Ready sandbox
-    /// via `ForwardTcp` (same direction as `openshell forward service`).
-    ///
-    /// Consumes `local` for the lifetime of the forward. Caller mints/revokes
-    /// the session token around this call when it needs a longer-lived pool.
-    pub async fn forward_tcp_bridge(
-        &self,
-        name: &str,
-        target_host: &str,
-        target_port: u16,
-        local: tokio::net::TcpStream,
-        authorization_token: &str,
-    ) -> Result<()> {
-        #[cfg(test)]
-        if self.mock.is_some() {
-            let _ = (name, target_host, target_port, local, authorization_token);
-            return Err(Error::Failed {
-                op: "forward tcp".into(),
-                message: "mock client has no ForwardTcp".into(),
-            });
-        }
-
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let sandbox_id = {
-            let mut client = self.connect().await?;
-            let sb = get_sandbox(&mut client, name).await?;
-            sb.object_id().to_string()
-        };
-
-        let (tx, rx) = mpsc::channel::<TcpForwardFrame>(16);
-        tx.send(TcpForwardFrame {
-            payload: Some(tcp_forward_frame::Payload::Init(TcpForwardInit {
-                sandbox_id: sandbox_id.clone(),
-                service_id: format!("honr-mcp-uplink:{name}:{target_host}:{target_port}"),
-                target: Some(tcp_forward_init::Target::Tcp(TcpRelayTarget {
-                    host: target_host.to_string(),
-                    port: u32::from(target_port),
-                })),
-                authorization_token: authorization_token.to_string(),
-            })),
-        })
-        .await
-        .map_err(|_| Error::Failed {
-            op: "forward tcp".into(),
-            message: "failed to queue ForwardTcp init".into(),
-        })?;
-
-        let mut client = self.connect().await?;
-        let mut response = client
-            .forward_tcp(ReceiverStream::new(rx))
-            .await
-            .map_err(|e| Error::Failed {
-                op: "forward tcp".into(),
-                message: e.to_string(),
-            })?
-            .into_inner();
-
-        let (mut local_read, mut local_write) = local.into_split();
-        let to_gateway = tokio::spawn(async move {
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = match local_read.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                if tx
-                    .send(TcpForwardFrame {
-                        payload: Some(tcp_forward_frame::Payload::Data(buf[..n].to_vec())),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
-        while let Some(frame) = response.message().await.map_err(|e| Error::Failed {
-            op: "forward tcp".into(),
-            message: e.to_string(),
-        })? {
-            let Some(tcp_forward_frame::Payload::Data(data)) = frame.payload else {
-                continue;
-            };
-            if data.is_empty() {
-                continue;
-            }
-            local_write.write_all(&data).await.map_err(|e| Error::Failed {
-                op: "forward tcp".into(),
-                message: e.to_string(),
-            })?;
-        }
-        let _ = local_write.shutdown().await;
-        to_gateway.abort();
-        Ok(())
-    }
-
     /// Interactive TTY attach via `ExecSandboxInteractive` (no local OpenSSH).
     ///
     /// This is the in-process path Cockpit uses — same interactive shell shape
@@ -1904,6 +1644,31 @@ impl OpenShell {
         &self,
         name: &str,
         command: Vec<String>,
+        cols: u32,
+        rows: u32,
+    ) -> Result<InteractiveExec> {
+        self.exec_interactive_inner(name, command, true, cols, rows)
+            .await
+    }
+
+    /// Same gRPC path as [`exec_interactive`](Self::exec_interactive) but
+    /// without a pty — no line/echo mangling, no window size. For driving a
+    /// byte-oriented protocol over the pipe (cockpit MCP's `nc -lU` relay)
+    /// rather than a terminal.
+    pub async fn exec_interactive_raw(
+        &self,
+        name: &str,
+        command: Vec<String>,
+    ) -> Result<InteractiveExec> {
+        self.exec_interactive_inner(name, command, false, 0, 0)
+            .await
+    }
+
+    async fn exec_interactive_inner(
+        &self,
+        name: &str,
+        command: Vec<String>,
+        tty: bool,
         cols: u32,
         rows: u32,
     ) -> Result<InteractiveExec> {
@@ -1966,7 +1731,7 @@ impl OpenShell {
                             environment: Default::default(),
                             timeout_seconds: 0,
                             stdin: Vec::new(),
-                            tty: true,
+                            tty,
                             cols,
                             rows,
                         })),
@@ -2596,61 +2361,6 @@ mod tests {
         assert_eq!(name2, "Containerfile");
     }
 
-    /// Connect's first gRPC step is CreateSshSession after GetSandbox — mock
-    /// argv surface must stay named so we do not silently shell out again.
-    #[tokio::test]
-    async fn create_ssh_session_uses_mock_argv_surface() {
-        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
-        let seen_c = seen.clone();
-        let os = OpenShell::mock(
-            move |args| {
-                *seen_c.lock() = args.to_vec();
-                Output {
-                    code: 0,
-                    stdout: r#"{"sandbox_id":"sb-1","token":"tok.abc","gateway_host":"127.0.0.1","gateway_port":17670,"gateway_scheme":"https"}"#.into(),
-                    stderr: String::new(),
-                }
-            },
-            Duration::from_secs(5),
-        );
-        let session = os.create_ssh_session("honr-cockpit").await.expect("session");
-        assert_eq!(session.sandbox_id, "sb-1");
-        assert_eq!(session.token, "tok.abc");
-        assert_eq!(session.gateway_port, 17670);
-        let args = seen.lock().clone();
-        assert_eq!(
-            args,
-            vec![
-                "sandbox",
-                "create-ssh-session",
-                "-n",
-                "honr-cockpit",
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn revoke_ssh_session_uses_mock_argv_surface() {
-        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
-        let seen_c = seen.clone();
-        let os = OpenShell::mock(
-            move |args| {
-                *seen_c.lock() = args.to_vec();
-                Output {
-                    code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                }
-            },
-            Duration::from_secs(5),
-        );
-        assert!(os.revoke_ssh_session("tok.abc").await.expect("revoke"));
-        assert_eq!(
-            seen.lock().as_slice(),
-            ["sandbox", "revoke-ssh-session", "--token", "tok.abc"]
-        );
-    }
-
     #[tokio::test]
     async fn exec_interactive_mock_streams_stdout_then_exit() {
         let os = OpenShell::mock(
@@ -2683,20 +2393,6 @@ mod tests {
             Some(InteractiveEvent::Exit(0)) => {}
             other => panic!("expected exit 0, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn validate_ssh_session_rejects_shell_metacharacters_in_token() {
-        let bad = openshell_core::proto::CreateSshSessionResponse {
-            sandbox_id: "sb-1".into(),
-            token: "tok`id`".into(),
-            gateway_host: "127.0.0.1".into(),
-            gateway_port: 443,
-            gateway_scheme: "https".into(),
-            host_key_fingerprint: String::new(),
-            expires_at_ms: 0,
-        };
-        assert!(validate_ssh_session_response(&bad).is_err());
     }
 
     // ---- gateway-backed. `cargo test -- --ignored` against a real gateway.

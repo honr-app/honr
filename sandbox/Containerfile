@@ -17,12 +17,10 @@ FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
 USER root
 
-# Cockpit MCP dial-in: board ForwardTcp → sandbox :18081, socat pairs with
-# agent clients on :18080. Host never runs socat.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends socat \
- && rm -rf /var/lib/apt/lists/* \
- && socat -V | head -1
+# Cockpit MCP needs nothing added here: the board reaches the agent's stdio
+# MCP client through `nc -lU`/`nc -U` on a local Unix socket
+# (cockpit_mcp_tunnel::AGENT_SOCK_PATH), and `nc` (OpenBSD netcat) already
+# ships in the base image.
 
 # Match the host toolchain. Cargo.toml declares rust-version = "1.88", so this
 # only needs to be >= that; pinning keeps sandbox builds reproducible.

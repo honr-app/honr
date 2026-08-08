@@ -1,8 +1,9 @@
 //! Inject MCP client config into sandboxes (cockpit + optional workers).
 //!
 //! Catalog entries (`McpServerDesired`) render into Cursor/Claude/agy/OpenCode
-//! shapes under `/sandbox/.honr/mcp/`. Cockpit also mints JWTs for the shipped
-//! `honr` HTTP seat (`mcp_oauth`).
+//! shapes under `/sandbox/.honr/mcp/`. Cockpit's shipped `honr` entry is stdio
+//! over a local Unix socket (`cockpit_mcp_tunnel`); vestigial JWTs may still be
+//! minted for older HTTP paths (`mcp_oauth`).
 
 use crate::mcp_oauth::{self, OpsMcpTokens};
 use crate::model::{
@@ -141,18 +142,10 @@ async fn inject_sandbox_mcp(
         .map_err(|e| Error::Msg(e.to_string()))?;
     std::fs::write(&opencode_path, &opencode_bytes)?;
 
-    let env_sh = match tokens {
-        Some(t) => format!(
-            "# honr sandbox MCP — sourced from ~/.bashrc when present\n\
-             export HONR_MCP_URL={url}\n\
-             export HONR_MCP_ACCESS_TOKEN={token}\n\
-             export HONR_MCP_CLIENT_ID={client}\n",
-            url = shell_single_quote(&t.resource),
-            token = shell_single_quote(&t.access_token),
-            client = shell_single_quote(&t.client_id),
-        ),
-        None => "# honr sandbox MCP (no cockpit Bearer)\n".to_string(),
-    };
+    // Nothing to export: the shipped honr entry is stdio over a local Unix
+    // socket (see mcp.json / cockpit_mcp_tunnel::AGENT_SOCK_PATH) — no URL,
+    // no Bearer.
+    let env_sh = "# honr sandbox MCP — stdio transport, see /sandbox/.honr/mcp/mcp.json\n";
     std::fs::write(&env_path, env_sh)?;
 
     // Ensure destination exists; upload takes a directory.
@@ -217,6 +210,7 @@ for rel in ("mcp.json", "claude_mcp.json", "opencode.jsonc"):
     doc = json.loads(path.read_text())
     path.write_text(json.dumps(expand(doc), indent=2) + "\n")
 PY
+mkdir -p /sandbox/.cursor /sandbox/repo/.cursor
 cp -f {COCKPIT_MCP_DIR}/mcp.json /sandbox/.cursor/mcp.json 2>/dev/null || true
 cp -f {COCKPIT_MCP_DIR}/mcp.json /sandbox/repo/.cursor/mcp.json 2>/dev/null || true
 # Project-scoped Claude MCP (non-bare / discovery); --bare still needs --mcp-config.
@@ -319,10 +313,6 @@ fn staging_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// Build Cursor/Claude/agy JSON bodies (testable without upload).
 pub fn mcp_json_document(
     tokens: Option<&OpsMcpTokens>,
@@ -374,10 +364,21 @@ fn render_cursor_entry(server: &McpServerDesired, tokens: Option<&OpsMcpTokens>)
             args,
             cwd,
         } => {
+            let (command, args) = resolve_stdio_command(command, args)?;
             let mut entry = Map::new();
+            // Cursor requires type for stdio; omitting it leaves the server out
+            // of the live MCP catalog while HTTP siblings still show up.
+            entry.insert("type".into(), json!("stdio"));
             entry.insert("command".into(), json!(command));
             entry.insert("args".into(), json!(args));
-            let env = stdio_env(&server.env);
+            // Local unix-socket relay must not inherit OpenShell proxy env —
+            // Cursor replaces the process env with this map, and `nc` then
+            // tries ALL_PROXY for the UDS connect (connection refused).
+            let env = if is_honr_uds_relay(&command, &args) {
+                local_stdio_env()
+            } else {
+                stdio_env(&server.env)
+            };
             entry.insert("env".into(), json!(env));
             if let Some(c) = cwd {
                 entry.insert("cwd".into(), json!(c));
@@ -404,12 +405,17 @@ fn render_opencode_entry(server: &McpServerDesired, tokens: Option<&OpsMcpTokens
             args,
             cwd,
         } => {
+            let (command, args) = resolve_stdio_command(command, args)?;
             let mut entry = Map::new();
             entry.insert("type".into(), json!("local"));
             let mut cmdline = vec![command.clone()];
             cmdline.extend(args.iter().cloned());
             entry.insert("command".into(), json!(cmdline));
-            let env = stdio_env(&server.env);
+            let env = if is_honr_uds_relay(&command, &args) {
+                local_stdio_env()
+            } else {
+                stdio_env(&server.env)
+            };
             entry.insert("environment".into(), json!(env));
             if let Some(c) = cwd {
                 entry.insert("cwd".into(), json!(c));
@@ -417,6 +423,41 @@ fn render_opencode_entry(server: &McpServerDesired, tokens: Option<&OpsMcpTokens
             Some(Value::Object(entry))
         }
     }
+}
+
+/// Fill in the shipped honr entry's placeholder (empty `command`) with the
+/// cockpit MCP relay's stdio client — mirrors `resolve_http_url`'s empty-URL
+/// placeholder for the same reason: model.rs stays free of a dependency on
+/// the inject layer.
+fn resolve_stdio_command(command: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+    let t = command.trim();
+    if !t.is_empty() {
+        return Some((t.to_string(), args.to_vec()));
+    }
+    Some((
+        "nc".into(),
+        vec!["-U".into(), crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH.into()],
+    ))
+}
+
+fn is_honr_uds_relay(command: &str, args: &[String]) -> bool {
+    command == "nc"
+        && args.len() == 2
+        && args[0] == "-U"
+        && args[1] == crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH
+}
+
+/// Minimal env for the local `nc -U` relay client. No proxy/CA — those break
+/// Unix-domain connects when the MCP client replaces the process environment.
+fn local_stdio_env() -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert(
+        "PATH".into(),
+        "/usr/local/bin:/usr/bin:/bin:/sandbox/.local/bin".into(),
+    );
+    env.insert("HOME".into(), "/sandbox".into());
+    env.insert("USER".into(), "sandbox".into());
+    env
 }
 
 fn resolve_http_url(
@@ -519,32 +560,39 @@ mod tests {
     }
 
     #[test]
-    fn mcp_json_includes_bearer_header() {
+    fn mcp_json_resolves_shipped_honr_to_stdio_nc_relay() {
         let tokens = OpsMcpTokens {
             access_token: "tok-access".into(),
             refresh_token: "tok-refresh".into(),
             expires_in: 3600,
             expires_at: 999,
-            resource: crate::cockpit_mcp_tunnel::DEFAULT_TUNNEL_MCP_RESOURCE.into(),
+            resource: mcp_oauth::cockpit_mcp_resource(),
             client_id: mcp_oauth::COCKPIT_CLIENT_ID.into(),
             sub: "admin".into(),
         };
         let honr = McpServerDesired::shipped_honr();
         let doc = mcp_json_document(Some(&tokens), std::slice::from_ref(&honr));
+        assert_eq!(doc["mcpServers"]["honr"]["type"], "stdio");
+        assert_eq!(doc["mcpServers"]["honr"]["command"], "nc");
         assert_eq!(
-            doc["mcpServers"]["honr"]["headers"]["Authorization"],
-            "Bearer tok-access"
+            doc["mcpServers"]["honr"]["args"],
+            json!(["-U", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH])
         );
-        assert_eq!(
-            doc["mcpServers"]["honr"]["url"],
-            crate::cockpit_mcp_tunnel::DEFAULT_TUNNEL_MCP_RESOURCE
-        );
+        // Stdio transport has no headers/Authorization at all.
+        assert!(doc["mcpServers"]["honr"].get("headers").is_none());
+        assert!(doc["mcpServers"]["honr"].get("url").is_none());
+        // Must not ship proxy env — Cursor replaces process env and `nc -U` breaks.
+        assert!(doc["mcpServers"]["honr"]["env"].get("ALL_PROXY").is_none());
+        assert!(doc["mcpServers"]["honr"]["env"].get("HTTP_PROXY").is_none());
+        assert_eq!(doc["mcpServers"]["honr"]["env"]["HOME"], "/sandbox");
+
         let oc = opencode_jsonc_document(Some(&tokens), std::slice::from_ref(&honr));
-        assert_eq!(oc["mcp"]["honr"]["type"], "remote");
+        assert_eq!(oc["mcp"]["honr"]["type"], "local");
         assert_eq!(
-            oc["mcp"]["honr"]["headers"]["Authorization"],
-            "Bearer tok-access"
+            oc["mcp"]["honr"]["command"],
+            json!(["nc", "-U", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH])
         );
+        assert!(oc["mcp"]["honr"]["environment"].get("ALL_PROXY").is_none());
     }
 
     #[test]
@@ -605,7 +653,7 @@ mod tests {
             refresh_token: "r".into(),
             expires_in: 3600,
             expires_at: 1,
-            resource: crate::cockpit_mcp_tunnel::DEFAULT_TUNNEL_MCP_RESOURCE.into(),
+            resource: mcp_oauth::cockpit_mcp_resource(),
             client_id: mcp_oauth::COCKPIT_CLIENT_ID.into(),
             sub: "cockpit".into(),
         };
