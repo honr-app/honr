@@ -165,7 +165,7 @@ gh extension install cli/gh-webhook   # once
 gh webhook forward \
   --repo=<owner/name> \
   --events=pull_request,pull_request_review,push \
-  --url=http://127.0.0.1:8080/api/webhooks/github
+  --url="$HONR_URL/api/webhooks/github"
 ```
 
 `pull_request` and `push` cover merge → Done and main-advanced;

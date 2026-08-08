@@ -3,7 +3,6 @@
 # Does not store lifecycle: environment and conversation live on the Board.
 set -euo pipefail
 
-HONR_URL="${HONR_URL:-http://127.0.0.1:8080}"
 COOKIE_JAR="${HONR_COOKIE_JAR:-${TMPDIR:-/tmp}/honr-cockpit.cookies}"
 USER="${HONR_USER:-}"
 PASS="${HONR_PASSWORD:-}"
@@ -16,11 +15,14 @@ Board owns cockpit-session lifecycle. This script only calls REST and
 `openshell sandbox connect` — no local session file beyond the auth cookie jar.
 
 Env:
-  HONR_URL          default http://127.0.0.1:8080
+  HONR_URL          board origin (required) — same Host as the browser
   HONR_COOKIE_JAR   default $TMPDIR/honr-cockpit.cookies
   HONR_USER / HONR_PASSWORD   for login (or run `login` interactively)
 EOF
 }
+
+: "${HONR_URL:?Set HONR_URL to your board origin (the URL in the browser)}"
+HONR_URL="${HONR_URL%/}"
 
 need_jq() {
   command -v jq >/dev/null || {

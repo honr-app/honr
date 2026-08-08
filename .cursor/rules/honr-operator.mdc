@@ -11,7 +11,7 @@ You are the **operator** agent: lead developer and scrum master. Worker agents i
 
 ## Do
 
-- Use the **honr** MCP server (`http://127.0.0.1:8080/mcp`) for all product work.
+- Use the **honr** MCP server (`{board-origin}/mcp`, see `.cursor/mcp.json`) for all product work.
   Operator tools only — you cannot call worker verbs (`claim`, `heartbeat`,
   `report`, `split`, `escalate`, `release`, `list_ready`). Prefer escalating
   ambiguous irreversibles; merging stays human.
@@ -33,4 +33,4 @@ MCP/Cursor wiring, docs the human explicitly asked for, or emergencies they auth
 
 ## Prerequisites
 
-`cargo run` on :8080. Real dispatch needs OpenShell ready + a sandbox spec (see `docs/first-agent.md`). Day-to-day loop: `docs/workflow.md`.
+`cargo run` (default bind port 8080). Real dispatch needs OpenShell ready + a sandbox spec (see `docs/first-agent.md`). Day-to-day loop: `docs/workflow.md`.

@@ -18,8 +18,9 @@ cd honr
 cargo run
 ```
 
-That serves the API, SSE, MCP, and the built UI on
-<http://127.0.0.1:8080>. `HONR_PORT` overrides the port.
+That serves the API, SSE, MCP, and the built UI. Bind port defaults to `8080`
+(`HONR_PORT` overrides). Open the board at whatever Host you use — UI copy and
+OAuth redirect URIs come from that origin, not a hardcoded loopback URL.
 
 If `web/dist` does not exist yet, build the UI once:
 
@@ -59,7 +60,7 @@ For an agent bringing up a **fresh** board (admin, OpenShell, providers, sandbox
 spec, first Project), point it at the public bootstrap guide first:
 
 ```bash
-curl -sS http://127.0.0.1:8080/llms.txt
+curl -sS "$HONR_URL/llms.txt"   # HONR_URL = the origin you open the board on
 ```
 
 `GET /llms.txt` needs no auth. Source lives at [`llms.txt`](../llms.txt) in the
@@ -67,16 +68,17 @@ repo; Vite’s `:5173` proxy forwards the same path in `make dev-ui`.
 
 `/mcp` is for operators: create Projects, triage, dispatch, park, steer,
 approve. Worker verbs (`claim`, `heartbeat`, `report`, …) stay with the
-supervisor.
+supervisor. The Help / Board empty guide shows `{origin}/mcp` from
+`window.location`.
 
-**Cursor** — project config is already in [`.cursor/mcp.json`](https://github.com/honr-app/honr/blob/main/.cursor/mcp.json):
+**Cursor** — point `.cursor/mcp.json` at your board origin:
 
 ```json
 {
   "mcpServers": {
     "honr": {
       "type": "http",
-      "url": "http://127.0.0.1:8080/mcp",
+      "url": "http://YOUR_HOST:PORT/mcp",
       "auth": { "CLIENT_ID": "honr-cursor", "scopes": ["mcp"] }
     }
   }
@@ -90,7 +92,7 @@ agent mcp login honr
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http honr http://localhost:8080/mcp
+claude mcp add --transport http honr "$HONR_URL/mcp"
 ```
 
 Either way a browser opens for login and consent, using the same account you
