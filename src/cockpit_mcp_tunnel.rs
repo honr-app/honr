@@ -251,11 +251,14 @@ async fn wait_until_listen(os: &OpenShell, sandbox: &str, dead: impl Fn() -> boo
 }
 
 /// Ensure the cockpit MCP relay task is up for `sandbox`. Idempotent while
-/// the spawned task lives. Serialized so attach + supervisor + mcp-cred
-/// cannot triple-spawn.
+/// the spawned task lives — a warm task short-circuits with no extra probe
+/// or log, since callers (attach, supervisor reconcile, mcp-cred) call this
+/// on every tick. Serialized so those cannot triple-spawn.
 ///
-/// Always waits for a live LISTEN — a warm task mid-reconnect must not be
-/// treated as ready (that was the empty-tool-catalog race on Start).
+/// A *fresh* spawn waits for a live LISTEN before returning — the caller's
+/// mcp.json inject races the agent onto the socket immediately after, and a
+/// task handle alone (without serve_server armed and the socket bound) was
+/// the empty-tool-catalog race on Start.
 pub async fn ensure_cockpit_mcp_tunnel(
     os: &OpenShell,
     board: &SharedBoard,
@@ -267,32 +270,30 @@ pub async fn ensure_cockpit_mcp_tunnel(
         return Err("sandbox name required for MCP tunnel".into());
     }
 
-    let warm = {
-        let slot = tunnel_slot().lock();
-        matches!(
-            slot.as_ref(),
-            Some(state) if state.sandbox == sandbox && !state.handle.is_finished()
-        )
-    };
-
-    if !warm {
-        stop_cockpit_mcp_tunnel_unlocked().await;
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let os_c = os.clone();
-        let board_c = board.clone();
-        let sandbox_s = sandbox.to_string();
-        let stop_c = stop.clone();
-        let handle = tokio::spawn(async move {
-            relay_sessions(os_c, board_c, sandbox_s, stop_c).await;
-        });
-
-        *tunnel_slot().lock() = Some(TunnelState {
-            sandbox: sandbox.to_string(),
-            stop,
-            handle,
-        });
+    {
+        let mut slot = tunnel_slot().lock();
+        if let Some(state) = slot.as_mut() {
+            if state.sandbox == sandbox && !state.handle.is_finished() {
+                return Ok(());
+            }
+        }
     }
+    stop_cockpit_mcp_tunnel_unlocked().await;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let os_c = os.clone();
+    let board_c = board.clone();
+    let sandbox_s = sandbox.to_string();
+    let stop_c = stop.clone();
+    let handle = tokio::spawn(async move {
+        relay_sessions(os_c, board_c, sandbox_s, stop_c).await;
+    });
+
+    *tunnel_slot().lock() = Some(TunnelState {
+        sandbox: sandbox.to_string(),
+        stop,
+        handle,
+    });
 
     let ready = {
         let dead = || {
