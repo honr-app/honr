@@ -3,21 +3,20 @@
 # Does not store lifecycle: environment and conversation live on the Board.
 set -euo pipefail
 
-COOKIE_JAR="${HONR_COOKIE_JAR:-${TMPDIR:-/tmp}/honr-cockpit.cookies}"
 USER="${HONR_USER:-}"
 PASS="${HONR_PASSWORD:-}"
 
 usage() {
   cat <<'EOF'
-Usage: cockpit.sh <start|status|attach|park|resume|stop|login>
+Usage: cockpit.sh <start|status|attach|park|resume|stop>
 
-Board owns cockpit-session lifecycle. This script only calls REST and
-`openshell sandbox connect` — no local session file beyond the auth cookie jar.
+Board owns cockpit-session lifecycle. This script only calls REST (HTTP
+Basic auth, no session state on disk) and `openshell sandbox connect`.
 
 Env:
   HONR_URL          board origin (required) — same Host as the browser
-  HONR_COOKIE_JAR   default $TMPDIR/honr-cockpit.cookies
-  HONR_USER / HONR_PASSWORD   for login (or run `login` interactively)
+  HONR_USER         admin username (prompted if unset)
+  HONR_PASSWORD     admin password (prompted if unset)
 EOF
 }
 
@@ -31,41 +30,25 @@ need_jq() {
   }
 }
 
+ensure_creds() {
+  if [[ -z "$USER" ]]; then
+    read -r -p "honr username: " USER
+  fi
+  if [[ -z "$PASS" ]]; then
+    read -r -s -p "honr password: " PASS
+    echo >&2
+  fi
+}
+
 api() {
   local method=$1 path=$2
   shift 2
-  curl -sS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+  ensure_creds
+  curl -sS -u "${USER}:${PASS}" \
     -X "$method" \
     -H 'Content-Type: application/json' \
     "$@" \
     "${HONR_URL}${path}"
-}
-
-login() {
-  local u=${USER:-} p=${PASS:-}
-  if [[ -z "$u" ]]; then
-    read -r -p "honr username: " u
-  fi
-  if [[ -z "$p" ]]; then
-    read -r -s -p "honr password: " p
-    echo >&2
-  fi
-  api POST /auth/login -d "$(jq -nc --arg u "$u" --arg p "$p" '{username:$u,password:$p}')" >/dev/null
-  echo "logged in → cookie jar $COOKIE_JAR" >&2
-}
-
-ensure_auth() {
-  local code
-  code=$(curl -sS -o /dev/null -w '%{http_code}' -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
-    "${HONR_URL}/api/cockpit-session" || true)
-  if [[ "$code" == "401" ]]; then
-    if [[ -n "${USER:-}" && -n "${PASS:-}" ]]; then
-      login
-    else
-      echo "not authenticated (HTTP $code). Set HONR_USER/HONR_PASSWORD or run: $0 login" >&2
-      exit 1
-    fi
-  fi
 }
 
 session_json() {
@@ -78,13 +61,8 @@ environment() {
 
 cmd=${1:-}
 case "$cmd" in
-  login)
-    need_jq
-    login
-    ;;
   start)
     need_jq
-    ensure_auth
     api POST /api/cockpit-session -d '{}'
     echo >&2
     echo "Board session created; supervisor materializes the cockpit sandbox." >&2
@@ -92,12 +70,10 @@ case "$cmd" in
     ;;
   status)
     need_jq
-    ensure_auth
     session_json | jq .
     ;;
   attach)
     need_jq
-    ensure_auth
     env_name=$(environment)
     if [[ -z "$env_name" ]]; then
       echo "no session.environment yet — start the seat and wait for the supervisor" >&2
@@ -109,21 +85,18 @@ case "$cmd" in
     ;;
   park)
     need_jq
-    ensure_auth
     api POST /api/cockpit-session/park -d ''
     echo >&2
     ;;
   resume)
     need_jq
-    ensure_auth
     api POST /api/cockpit-session/resume -d ''
     echo >&2
     ;;
   stop)
     need_jq
-    ensure_auth
     api DELETE /api/cockpit-session
-    echo "cockpit session cleared (supervisor stcockpit agent + deletes sandbox)" >&2
+    echo "cockpit session cleared (supervisor stops cockpit agent + deletes sandbox)" >&2
     ;;
   ""|-h|--help|help)
     usage
