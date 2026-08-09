@@ -227,36 +227,45 @@ export function OpenShellPanelView({
               />
             </label>
 
-            <fieldset
-              className="openshell-auth-mode"
-              data-testid="openshell-auth-mode"
-            >
-              <legend>Auth mode</legend>
-              <label className="openshell-auth-mode-option">
-                <input
-                  type="radio"
-                  name="openshell-auth-mode"
-                  value="mtls"
-                  checked={authMode === "mtls"}
+            <div className="openshell-auth-mode" data-testid="openshell-auth-mode">
+              <span className="openshell-auth-mode-label">Auth mode</span>
+              <div
+                className="openshell-auth-mode-options"
+                role="radiogroup"
+                aria-label="Auth mode"
+              >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={authMode === "mtls"}
+                  className={
+                    authMode === "mtls"
+                      ? "openshell-auth-mode-btn active"
+                      : "openshell-auth-mode-btn"
+                  }
                   disabled={busy}
-                  onChange={() => onAuthModeChange("mtls")}
+                  onClick={() => onAuthModeChange("mtls")}
                   data-testid="openshell-auth-mtls"
-                />
-                mTLS
-              </label>
-              <label className="openshell-auth-mode-option">
-                <input
-                  type="radio"
-                  name="openshell-auth-mode"
-                  value="oidc"
-                  checked={authMode === "oidc"}
+                >
+                  mTLS
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={authMode === "oidc"}
+                  className={
+                    authMode === "oidc"
+                      ? "openshell-auth-mode-btn active"
+                      : "openshell-auth-mode-btn"
+                  }
                   disabled={busy}
-                  onChange={() => onAuthModeChange("oidc")}
+                  onClick={() => onAuthModeChange("oidc")}
                   data-testid="openshell-auth-oidc"
-                />
-                OIDC
-              </label>
-            </fieldset>
+                >
+                  OIDC
+                </button>
+              </div>
+            </div>
 
             {authMode === "mtls" && (
               <>
