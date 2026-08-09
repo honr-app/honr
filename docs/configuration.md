@@ -44,7 +44,7 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 | `HONR_TEST_DATABASE_URL` | Postgres URL for migration tests |
 
 Cockpit's shipped `honr` MCP entry is stdio over a local Unix socket
-(`nc -U`, see [Cockpit](cockpit.md)) — no URL, no env var.
+(`socat`, see [Cockpit](cockpit.md#how-the-mcp-relay-works)) — no URL, no env var.
 
 One host secret file: `~/.config/honr/master.key`, which seals credentials
 stored on the board.
