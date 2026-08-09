@@ -217,8 +217,10 @@ export const api = {
     put("/openshell", settings),
   getOpenShellStatus: (): Promise<OpenShellStatus> =>
     fetch("/api/openshell/status", fetchOpts).then(jsonOrThrow),
-  openshellOidcLogin: (): Promise<{ ok: boolean; error?: string | null }> =>
-    post("/openshell/oidc/login"),
+  openshellOidcLogin: (): Promise<{
+    authorize_url: string;
+    redirect_uri: string;
+  }> => post("/openshell/oidc/login"),
   openshellOidcLogout: (): Promise<{ ok: boolean; error?: string | null }> =>
     post("/openshell/oidc/logout"),
 

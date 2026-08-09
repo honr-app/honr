@@ -151,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/.well-known", mcp_oauth::well_known_routes())
         .nest("/oauth", mcp_oauth::oauth_routes())
         .nest("/oauth/mcp-client", mcp_client_oauth::callback_routes())
+        .nest("/oauth/openshell", openshell_oauth::callback_routes())
         .nest("/oauth/antigravity", antigravity_oauth::callback_routes());
 
     // Operator MCP: Bearer via MCP OAuth once admin exists (bootstrap stays open).

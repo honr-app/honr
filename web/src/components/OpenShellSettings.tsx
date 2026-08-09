@@ -357,6 +357,15 @@ export function OpenShellPanelView({
                     ? "Logged in (tokens encrypted in board DB)."
                     : "Not logged in — Save settings, then Log in."}
                 </p>
+                <p className="dim" data-testid="openshell-oidc-redirect-hint">
+                  Keycloak Valid Redirect URIs must include{" "}
+                  <code>
+                    {typeof window !== "undefined"
+                      ? `${window.location.origin}/oauth/openshell/callback`
+                      : "/oauth/openshell/callback"}
+                  </code>
+                  .
+                </p>
               </>
             )}
 
@@ -488,6 +497,27 @@ export function OpenShellPanel({
     refresh();
   }, [refresh]);
 
+  // Return from /oauth/openshell/callback after IdP login.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("openshell_oidc");
+    if (!status) return;
+    const message = params.get("message");
+    const clean = () => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("openshell_oidc");
+      url.searchParams.delete("message");
+      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+    };
+    if (status === "ok") {
+      setSavedHint("OIDC login complete.");
+      refresh();
+    } else if (status === "error") {
+      setError(message ? decodeURIComponent(message) : "OIDC login failed");
+    }
+    clean();
+  }, [refresh]);
+
   const put = (body: OpenShellSettings, hint: string) => {
     setBusy(true);
     setError(null);
@@ -606,12 +636,12 @@ export function OpenShellPanel({
           .putOpenShell(body)
           .then(() => api.openshellOidcLogin())
           .then((out) => {
-            if (!out.ok) throw new Error(out.error || "OIDC login failed");
-            setSavedHint("OIDC login complete.");
-            return refresh();
+            window.location.href = out.authorize_url;
           })
-          .catch((e) => setError(String(e)))
-          .finally(() => setBusy(false));
+          .catch((e) => {
+            setError(String(e));
+            setBusy(false);
+          });
       }}
       onOidcLogout={() => {
         setBusy(true);
