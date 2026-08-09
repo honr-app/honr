@@ -890,11 +890,15 @@ assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-save\""), "Agent r
 
 const openshellPanelProps = {
   gatewayEndpoint: "https://127.0.0.1:17670",
+  authMode: "mtls",
+  oidc: { issuer: "", client_id: "", audience: "" },
   caPem: "",
   clientCertPem: "",
   clientKeyPem: "",
   mtls: { ca: false, client_cert: false, client_key: false, complete: false },
   onGatewayEndpointChange: () => {},
+  onAuthModeChange: () => {},
+  onOidcChange: () => {},
   onCaPemChange: () => {},
   onClientCertPemChange: () => {},
   onClientKeyPemChange: () => {},
@@ -902,6 +906,8 @@ const openshellPanelProps = {
   onSave: () => {},
   onImportCliMtls: () => {},
   onClearMtls: () => {},
+  onOidcLogin: () => {},
+  onOidcLogout: () => {},
 };
 
 const openshellHtml = renderToString(
