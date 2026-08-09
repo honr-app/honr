@@ -50,18 +50,14 @@ Cockpit at any spec you like.
 
 ## Driving it from the CLI
 
-Same Board calls the UI makes. Log in first — the cookie jar is auth, not
-lifecycle.
+Same Board calls the UI makes. Scripts authenticate with HTTP Basic
+(`Authorization: Basic base64(admin:password)`), not the browser session
+cookie — no login step, no cookie jar to manage.
 
 ```bash
 # HONR_URL = the origin you open the board on (Host / window.location.origin)
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"…"}' \
-  "$HONR_URL/auth/login"
-
 # Start (empty body; the supervisor fills in `environment`)
-curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
+curl -sS -u admin:"$HONR_PASSWORD" \
   -H 'Content-Type: application/json' -d '{}' \
   "$HONR_URL/api/cockpit-session"
 ```
@@ -77,7 +73,7 @@ curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
 Attach a host terminal once `environment` is set:
 
 ```bash
-ENV=$(curl -sS -c /tmp/honr.cookies -b /tmp/honr.cookies \
+ENV=$(curl -sS -u admin:"$HONR_PASSWORD" \
   "$HONR_URL/api/cockpit-session" | jq -r '.session.environment // empty')
 openshell sandbox connect "$ENV"
 ```
