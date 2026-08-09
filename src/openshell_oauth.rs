@@ -27,10 +27,15 @@ const CALLBACK_PATH: &str = "/oauth/openshell/callback";
 const RETURN_PATH: &str = "/settings/openshell/connectivity";
 const PENDING_TTL_SECS: u64 = 600;
 
-/// Default scopes matching the OpenShell CLI when `oidc_scopes` is unset:
-/// only `openid`. Extra scopes (profile/email/offline_access/openshell:all)
-/// must be assigned on the IdP client or Keycloak returns `invalid_scope`.
-const DEFAULT_SCOPES: &[&str] = &["openid"];
+/// `offline_access` gets a refresh token independent of the IdP's SSO
+/// session (Keycloak default `ssoSessionIdleTimeout` is commonly 30
+/// minutes; an offline token instead lives for `offlineSessionIdleTimeout`,
+/// commonly 30 days). Without it, login looks fine and then silently starts
+/// failing token refresh after the first idle gap — same failure the
+/// OpenShell CLI hits without `--oidc-scopes "openid offline_access"`.
+/// Requesting a scope the client isn't allowed returns `invalid_scope`, so
+/// this is opt-in on the IdP client, not assumed.
+const DEFAULT_SCOPES: &[&str] = &["openid", "offline_access"];
 
 fn pending() -> &'static Mutex<HashMap<String, PendingOAuth>> {
     static STORE: OnceLock<Mutex<HashMap<String, PendingOAuth>>> = OnceLock::new();
