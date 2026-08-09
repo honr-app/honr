@@ -146,14 +146,15 @@ them on the spec. Add honr MCP / package-registry / toolchain egress under
 
 Cockpit MCP does **not** use `host.docker.internal` and does not cross the
 network at all. When the seat is Ready, honr keeps a board-owned
-`ExecSandboxInteractive` relay running one-shot `nc -lU` on a local Unix
-socket inside the sandbox, and wires its gRPC-piped stdin/stdout straight into
-the same `Operator` MCP handler that serves host `/mcp` (`rmcp::serve_server`
-over the pipe). Disconnect ends the listen so the board can re-spawn; the
-agent's MCP client is stdio (`nc -U <socket>`) — same path on local
-Docker/Podman and remote Kubernetes, since it never leaves the sandbox's own
-netns. OpenShell SSH has no RemoteForward either way, so this was never a
-`ssh -R` option. See [Cockpit](cockpit.md).
+`ExecSandboxInteractive` relay running one-shot `socat UNIX-LISTEN:… STDIO`
+on a local Unix socket inside the sandbox, and wires its gRPC-piped
+stdin/stdout straight into the same `Operator` MCP handler that serves host
+`/mcp` (`rmcp::serve_server` over the pipe). Disconnect ends the listen so
+the board can re-spawn; the agent's MCP client is stdio (`socat -
+UNIX-CONNECT:<socket>`) — same path on local Docker/Podman and remote
+Kubernetes, since it never leaves the sandbox's own netns. OpenShell SSH has
+no RemoteForward either way, so this was never a `ssh -R` option. Not `nc`:
+see [Cockpit](cockpit.md#how-the-mcp-relay-works) for why.
 
 ## Antigravity / agy
 

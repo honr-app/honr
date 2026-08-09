@@ -114,7 +114,7 @@ login, no Bearer, no OAuth dance to skip.
 
 | Path | Contents |
 |---|---|
-| `/sandbox/.honr/mcp/mcp.json` | `honr` → `nc -U /sandbox/.honr/mcp/agent.sock` (Cursor) |
+| `/sandbox/.honr/mcp/mcp.json` | `honr` → `socat - UNIX-CONNECT:/sandbox/.honr/mcp/agent.sock` (Cursor) |
 | `/sandbox/.honr/mcp/claude_mcp.json` | same shape; Claude loads it via `--mcp-config` |
 | `/sandbox/.gemini/config/mcp_config.json` | same, for Antigravity |
 | `/sandbox/.config/opencode/opencode.jsonc` | OpenCode `mcp.honr`, `type: local` |
@@ -124,14 +124,53 @@ Injection happens when the sandbox becomes Ready, on
 `agent mcp login` inside the sandbox unless you specifically want a separate
 host-style OAuth flow.
 
-honr keeps a board-owned `ExecSandboxInteractive` relay running `nc -lU
-/sandbox/.honr/mcp/agent.sock` inside the sandbox — its gRPC-piped
-stdin/stdout are wired straight into the same `Operator` MCP handler that
-serves the HTTP `/mcp` endpoint (`rmcp::serve_server` over the pipe). The
-listen is one-shot so agent disconnect is visible; the board re-spawns for
-the next connect. No port, no network policy entry, no Bearer to mint — same
-path on local Docker/Podman and remote Kubernetes, since it never leaves the
-sandbox's own netns. See [Sandbox](sandbox.md).
+### How the MCP relay works
+
+honr keeps a board-owned `ExecSandboxInteractive` relay running `socat
+UNIX-LISTEN:/sandbox/.honr/mcp/agent.sock STDIO` inside the sandbox — its
+gRPC-piped stdin/stdout are wired straight into the same `Operator` MCP
+handler that serves the HTTP `/mcp` endpoint (`rmcp::serve_server` over the
+pipe). No port, no network policy entry, no Bearer to mint — same path on
+local Docker/Podman and remote Kubernetes, since it never leaves the
+sandbox's own netns.
+
+```mermaid
+flowchart TB
+  subgraph sandbox ["Sandbox (honr-cockpit)"]
+    agent["Agent MCP client<br/>(reads mcp.json)"]
+    socatClient["socat - UNIX-CONNECT:agent.sock"]
+    sock[["agent.sock"]]
+    socatServer["socat UNIX-LISTEN:agent.sock STDIO"]
+
+    agent <--> socatClient
+    socatClient <-->|"Unix domain socket"| sock
+    sock <--> socatServer
+  end
+
+  subgraph host ["honr host process"]
+    grpcClient["exec_interactive_raw()"]
+    pumpLoop["pump_loop()"]
+    duplexPair[["tokio::io::duplex()"]]
+    serveServer["rmcp::serve_server"]
+    operator["Operator"]
+    board["Board"]
+
+    grpcClient <--> pumpLoop
+    pumpLoop <--> duplexPair
+    duplexPair <-->|"newline-delimited<br/>JSON-RPC"| serveServer
+    serveServer <--> operator
+    operator <--> board
+  end
+
+  socatServer <-->|"exec's own stdin/stdout<br/>= gRPC stream"| grpcClient
+```
+
+The one-shot listen means agent disconnect is visible on the socket, not
+just inferred: `socat` exits, and the board re-spawns for the next connect.
+(Not `nc` — the sandbox image's OpenBSD-netcat build accepts the connection
+but never forwards bytes written to its stdin *after* accept out to the
+socket, which is exactly the `serve_server`-response direction.) See
+[Sandbox](sandbox.md).
 
 For agy the attached `antigravity` provider injects only an
 `openshell:resolve:…` placeholder, and attach writes that into the sandbox's
