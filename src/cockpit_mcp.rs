@@ -145,7 +145,7 @@ async fn inject_sandbox_mcp(
     // Nothing to export: the shipped honr entry is stdio over a local Unix
     // socket (see mcp.json / cockpit_mcp_tunnel::AGENT_SOCK_PATH) — no URL,
     // no Bearer.
-    let env_sh = "# honr sandbox MCP — stdio transport, see /sandbox/.honr/mcp/mcp.json\n";
+    let env_sh = "# honr sandbox MCP — socat stdio relay, see /sandbox/.honr/mcp/mcp.json\n";
     std::fs::write(&env_path, env_sh)?;
 
     // Ensure destination exists; upload takes a directory.
@@ -372,8 +372,8 @@ fn render_cursor_entry(server: &McpServerDesired, tokens: Option<&OpsMcpTokens>)
             entry.insert("command".into(), json!(command));
             entry.insert("args".into(), json!(args));
             // Local unix-socket relay must not inherit OpenShell proxy env —
-            // Cursor replaces the process env with this map, and `nc` then
-            // tries ALL_PROXY for the UDS connect (connection refused).
+            // Cursor replaces the process env with this map, and `socat`
+            // then tries ALL_PROXY for the UDS connect (connection refused).
             let env = if is_honr_uds_relay(&command, &args) {
                 local_stdio_env()
             } else {
@@ -428,26 +428,30 @@ fn render_opencode_entry(server: &McpServerDesired, tokens: Option<&OpsMcpTokens
 /// Fill in the shipped honr entry's placeholder (empty `command`) with the
 /// cockpit MCP relay's stdio client — mirrors `resolve_http_url`'s empty-URL
 /// placeholder for the same reason: model.rs stays free of a dependency on
-/// the inject layer.
+/// the inject layer. `socat`, not `nc`: see `cockpit_mcp_tunnel` module docs
+/// for the delayed-write relay bug this avoids.
 fn resolve_stdio_command(command: &str, args: &[String]) -> Option<(String, Vec<String>)> {
     let t = command.trim();
     if !t.is_empty() {
         return Some((t.to_string(), args.to_vec()));
     }
     Some((
-        "nc".into(),
-        vec!["-U".into(), crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH.into()],
+        "socat".into(),
+        vec![
+            "-".into(),
+            format!("UNIX-CONNECT:{}", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH),
+        ],
     ))
 }
 
 fn is_honr_uds_relay(command: &str, args: &[String]) -> bool {
-    command == "nc"
+    command == "socat"
         && args.len() == 2
-        && args[0] == "-U"
-        && args[1] == crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH
+        && args[0] == "-"
+        && args[1] == format!("UNIX-CONNECT:{}", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH)
 }
 
-/// Minimal env for the local `nc -U` relay client. No proxy/CA — those break
+/// Minimal env for the local `socat` relay client. No proxy/CA — those break
 /// Unix-domain connects when the MCP client replaces the process environment.
 fn local_stdio_env() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
@@ -560,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_json_resolves_shipped_honr_to_stdio_nc_relay() {
+    fn mcp_json_resolves_shipped_honr_to_stdio_socat_relay() {
         let tokens = OpsMcpTokens {
             access_token: "tok-access".into(),
             refresh_token: "tok-refresh".into(),
@@ -573,15 +577,16 @@ mod tests {
         let honr = McpServerDesired::shipped_honr();
         let doc = mcp_json_document(Some(&tokens), std::slice::from_ref(&honr));
         assert_eq!(doc["mcpServers"]["honr"]["type"], "stdio");
-        assert_eq!(doc["mcpServers"]["honr"]["command"], "nc");
+        assert_eq!(doc["mcpServers"]["honr"]["command"], "socat");
+        let uds_connect = format!("UNIX-CONNECT:{}", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH);
         assert_eq!(
             doc["mcpServers"]["honr"]["args"],
-            json!(["-U", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH])
+            json!(["-", uds_connect])
         );
         // Stdio transport has no headers/Authorization at all.
         assert!(doc["mcpServers"]["honr"].get("headers").is_none());
         assert!(doc["mcpServers"]["honr"].get("url").is_none());
-        // Must not ship proxy env — Cursor replaces process env and `nc -U` breaks.
+        // Must not ship proxy env — Cursor replaces process env and `socat` breaks.
         assert!(doc["mcpServers"]["honr"]["env"].get("ALL_PROXY").is_none());
         assert!(doc["mcpServers"]["honr"]["env"].get("HTTP_PROXY").is_none());
         assert_eq!(doc["mcpServers"]["honr"]["env"]["HOME"], "/sandbox");
@@ -590,7 +595,7 @@ mod tests {
         assert_eq!(oc["mcp"]["honr"]["type"], "local");
         assert_eq!(
             oc["mcp"]["honr"]["command"],
-            json!(["nc", "-U", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH])
+            json!(["socat", "-", uds_connect])
         );
         assert!(oc["mcp"]["honr"]["environment"].get("ALL_PROXY").is_none());
     }

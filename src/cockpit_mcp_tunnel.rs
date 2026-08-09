@@ -7,16 +7,25 @@
 //! connection. `ExecSandboxInteractive` (what cockpit's browser terminal
 //! already uses) skips that entirely:
 //!
-//! 1. honr spawns `nc -lU <AGENT_SOCK_PATH>` inside the sandbox via a raw
-//!    (non-pty) interactive exec — its stdin/stdout are the gRPC-piped ends
-//!    of that call, right here in this process.
+//! 1. honr spawns `socat UNIX-LISTEN:<AGENT_SOCK_PATH> STDIO` inside the
+//!    sandbox via a raw (non-pty) interactive exec — its stdin/stdout are
+//!    the gRPC-piped ends of that call, right here in this process.
 //! 2. The agent's MCP client is configured for stdio transport:
-//!    `nc -U <AGENT_SOCK_PATH>`. When that client disconnects, the one-shot
-//!    listen `nc` exits (no `-k`), which is how the board sees session end
-//!    and re-spawns for the next connect.
+//!    `socat - UNIX-CONNECT:<AGENT_SOCK_PATH>`. When that client
+//!    disconnects, the one-shot listen `socat` exits, which is how the
+//!    board sees session end and re-spawns for the next connect.
 //! 3. Those piped bytes ARE the MCP JSON-RPC wire: honr wraps them as an
 //!    `AsyncRead`/`AsyncWrite` pair and calls `rmcp::serve_server` with the
 //!    same `Operator` handler the HTTP `/mcp` endpoint uses.
+//!
+//! **Why `socat`, not `nc`:** the Debian OpenBSD-netcat build in the sandbox
+//! image accepts a UDS connection fine and relays client→relay bytes, but
+//! never forwards bytes written to its stdin *after* accept out to the
+//! socket — confirmed with a plain shell repro (delayed write into a
+//! long-lived pipe feeding `nc -lU`, already-connected peer sees nothing).
+//! That is exactly the relay→client direction `serve_server`'s responses
+//! need. `socat UNIX-LISTEN:…,STDIO` relays both directions correctly for
+//! the same delayed-write shape.
 //!
 //! One board-owned relay task per cockpit sandbox; the listen/`serve_server`
 //! pair restarts across agent MCP reconnects.
@@ -31,13 +40,14 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
-/// Unix domain socket the sandbox-side `nc -lU` relay binds. Agent MCP
-/// clients connect to it with `nc -U <AGENT_SOCK_PATH>` (stdio transport).
+/// Unix domain socket the sandbox-side `socat` relay binds. Agent MCP
+/// clients connect to it with `socat - UNIX-CONNECT:<AGENT_SOCK_PATH>`
+/// (stdio transport).
 pub const AGENT_SOCK_PATH: &str = "/sandbox/.honr/mcp/agent.sock";
 
 /// Informational label for the (now vestigial) cockpit JWT `aud` / UI
 /// display — nothing sends this over a wire; stdio has no headers.
-pub const MCP_TRANSPORT_LABEL: &str = "stdio:nc -U /sandbox/.honr/mcp/agent.sock";
+pub const MCP_TRANSPORT_LABEL: &str = "stdio:socat - UNIX-CONNECT:/sandbox/.honr/mcp/agent.sock";
 
 struct TunnelState {
     sandbox: String,
@@ -56,13 +66,15 @@ fn ensure_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 /// One-shot listen: exits when the agent MCP client disconnects so the board
-/// can re-spawn. (`-k` would hide connection boundaries on the gRPC pipe.)
+/// can re-spawn. (`fork` would hide connection boundaries on the gRPC pipe.)
 fn relay_command() -> Vec<String> {
     let sock = shell_single_quote(AGENT_SOCK_PATH);
     vec![
         "sh".into(),
         "-c".into(),
-        format!("mkdir -p $(dirname {sock}) && rm -f {sock} && exec nc -lU {sock}"),
+        format!(
+            "mkdir -p $(dirname {sock}) && rm -f {sock} && exec socat UNIX-LISTEN:{sock} STDIO"
+        ),
     ]
 }
 
@@ -104,7 +116,7 @@ async fn pump_loop(
                             break;
                         }
                     }
-                    // `nc -lU` has nothing to say on stderr in normal operation.
+                    // `socat` has nothing to say on stderr in normal operation.
                     Some(InteractiveEvent::Stderr(data)) => {
                         tracing::debug!(bytes = data.len(), "cockpit: MCP relay stderr");
                     }
@@ -148,7 +160,7 @@ async fn wait_socket_listen(os: &OpenShell, sandbox: &str, pump: &JoinHandle<()>
     false
 }
 
-/// Re-spawn `nc -lU` + `serve_server` for each agent MCP connection until
+/// Re-spawn `socat` + `serve_server` for each agent MCP connection until
 /// `stop` is set or the sandbox disappears.
 async fn relay_sessions(os: OpenShell, board: SharedBoard, sandbox: String, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
@@ -159,7 +171,7 @@ async fn relay_sessions(os: OpenShell, board: SharedBoard, sandbox: String, stop
                     tracing::info!(%sandbox, "cockpit: MCP relay stop — sandbox gone");
                     break;
                 }
-                tracing::warn!(%sandbox, "cockpit: spawn MCP relay (nc -lU): {e}");
+                tracing::warn!(%sandbox, "cockpit: spawn MCP relay (socat): {e}");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -169,17 +181,10 @@ async fn relay_sessions(os: OpenShell, board: SharedBoard, sandbox: String, stop
         let pump_stop = Arc::new(AtomicBool::new(false));
         let pump = tokio::spawn(pump_loop(exec, driver_side, pump_stop.clone()));
 
-        if !wait_socket_listen(&os, &sandbox, &pump).await {
-            pump_stop.store(true, Ordering::Relaxed);
-            pump.abort();
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-            // Socket not up yet — brief backoff then retry (create race, etc.).
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            continue;
-        }
-
+        // Arm serve_server *before* advertising LISTEN. ensure() / mcp.json
+        // inject race the agent onto the socket as soon as the inode exists;
+        // if we wait for LISTEN first, the client's initialize can land on a
+        // duplex with nobody reading yet.
         let operator = Operator::new(board.clone());
         let mut serve = tokio::spawn(async move {
             match rmcp::serve_server(operator, mcp_side).await {
@@ -192,8 +197,18 @@ async fn relay_sessions(os: OpenShell, board: SharedBoard, sandbox: String, stop
             }
         });
 
-        // First bind of this ensure: announce once per outer ensure, not every
-        // reconnect — reconnects are routine when the agent reloads MCP.
+        if !wait_socket_listen(&os, &sandbox, &pump).await {
+            pump_stop.store(true, Ordering::Relaxed);
+            pump.abort();
+            serve.abort();
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            // Socket not up yet — brief backoff then retry (create race, etc.).
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+
         tracing::debug!(%sandbox, sock = AGENT_SOCK_PATH, "cockpit: MCP stdio session listening");
 
         let mut pump = pump;
@@ -210,14 +225,37 @@ async fn relay_sessions(os: OpenShell, board: SharedBoard, sandbox: String, stop
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        // Agent disconnected (one-shot nc exited) — loop for the next connect.
+        // Agent disconnected (one-shot socat exited) — loop for the next connect.
         tokio::task::yield_now().await;
     }
+}
+
+/// Poll until the sandbox-side socket is listening (or `dead` reports the
+/// relay task is gone).
+async fn wait_until_listen(os: &OpenShell, sandbox: &str, dead: impl Fn() -> bool) -> bool {
+    for _ in 0..40 {
+        if dead() {
+            return false;
+        }
+        match os
+            .exec(sandbox, &readiness_probe(), Duration::from_secs(15))
+            .await
+        {
+            Ok(out) if out.stdout.trim() == "LISTEN" => return true,
+            Err(e) if sandbox_gone(&e.to_string()) => return false,
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    false
 }
 
 /// Ensure the cockpit MCP relay task is up for `sandbox`. Idempotent while
 /// the spawned task lives. Serialized so attach + supervisor + mcp-cred
 /// cannot triple-spawn.
+///
+/// Always waits for a live LISTEN — a warm task mid-reconnect must not be
+/// treated as ready (that was the empty-tool-catalog race on Start).
 pub async fn ensure_cockpit_mcp_tunnel(
     os: &OpenShell,
     board: &SharedBoard,
@@ -229,59 +267,51 @@ pub async fn ensure_cockpit_mcp_tunnel(
         return Err("sandbox name required for MCP tunnel".into());
     }
 
-    {
-        let mut slot = tunnel_slot().lock();
-        if let Some(state) = slot.as_mut() {
-            if state.sandbox == sandbox && !state.handle.is_finished() {
-                return Ok(());
-            }
-        }
-    }
-    stop_cockpit_mcp_tunnel_unlocked().await;
+    let warm = {
+        let slot = tunnel_slot().lock();
+        matches!(
+            slot.as_ref(),
+            Some(state) if state.sandbox == sandbox && !state.handle.is_finished()
+        )
+    };
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let os_c = os.clone();
-    let board_c = board.clone();
-    let sandbox_s = sandbox.to_string();
-    let stop_c = stop.clone();
-    let handle = tokio::spawn(async move {
-        relay_sessions(os_c, board_c, sandbox_s, stop_c).await;
-    });
+    if !warm {
+        stop_cockpit_mcp_tunnel_unlocked().await;
 
-    // Readiness for *this* ensure: wait until the first listen succeeds (or
-    // the task dies). Reconnects after that are handled inside relay_sessions.
-    let mut ready = false;
-    for _ in 0..40 {
-        if handle.is_finished() {
-            break;
-        }
-        match os
-            .exec(sandbox, &readiness_probe(), Duration::from_secs(15))
-            .await
-        {
-            Ok(out) if out.stdout.trim() == "LISTEN" => {
-                ready = true;
-                break;
-            }
-            Err(e) if sandbox_gone(&e.to_string()) => break,
-            _ => {}
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        let stop = Arc::new(AtomicBool::new(false));
+        let os_c = os.clone();
+        let board_c = board.clone();
+        let sandbox_s = sandbox.to_string();
+        let stop_c = stop.clone();
+        let handle = tokio::spawn(async move {
+            relay_sessions(os_c, board_c, sandbox_s, stop_c).await;
+        });
+
+        *tunnel_slot().lock() = Some(TunnelState {
+            sandbox: sandbox.to_string(),
+            stop,
+            handle,
+        });
     }
+
+    let ready = {
+        let dead = || {
+            tunnel_slot()
+                .lock()
+                .as_ref()
+                .map(|s| s.handle.is_finished() || s.sandbox != sandbox)
+                .unwrap_or(true)
+        };
+        wait_until_listen(os, sandbox, dead).await
+    };
 
     if !ready {
-        stop.store(true, Ordering::Relaxed);
-        handle.abort();
+        stop_cockpit_mcp_tunnel_unlocked().await;
         return Err(format!(
             "cockpit MCP relay did not bind {AGENT_SOCK_PATH} in sandbox `{sandbox}`"
         ));
     }
 
-    *tunnel_slot().lock() = Some(TunnelState {
-        sandbox: sandbox.to_string(),
-        stop,
-        handle,
-    });
     tracing::info!(sandbox, sock = AGENT_SOCK_PATH, "cockpit: MCP stdio relay up");
     Ok(())
 }
@@ -296,7 +326,7 @@ async fn stop_cockpit_mcp_tunnel_unlocked() {
     tracing::info!(sandbox = %state.sandbox, "cockpit: MCP stdio relay stopped");
 }
 
-/// Stop the relay session (idempotent). The sandbox-side `nc -lU` process
+/// Stop the relay session (idempotent). The sandbox-side `socat` process
 /// exits once its stdin (the gRPC-piped end) closes.
 pub async fn stop_cockpit_mcp_tunnel(_os: &OpenShell) {
     let _guard = ensure_lock().lock().await;
@@ -311,8 +341,11 @@ mod tests {
     fn relay_command_binds_configured_socket() {
         let cmd = relay_command();
         let script = cmd.last().expect("script");
-        assert!(script.contains("nc -lU"));
-        assert!(!script.contains("nc -lkU"), "one-shot listen so disconnect is visible");
+        assert!(script.contains("socat UNIX-LISTEN:"));
+        assert!(
+            !script.contains("fork"),
+            "one-shot listen so disconnect is visible: {script}"
+        );
         assert!(script.contains(AGENT_SOCK_PATH));
         assert!(script.contains("rm -f"), "must clear a stale socket file: {script}");
     }

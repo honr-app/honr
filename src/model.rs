@@ -936,8 +936,9 @@ impl McpServerDesired {
             } => {
                 *command = command.trim().to_string();
                 // Shipped honr placeholder — cockpit_mcp resolves it to the
-                // `nc -U <AGENT_SOCK_PATH>` relay client at inject time, the
-                // same way the shipped Http entry leaves `url` empty.
+                // `socat - UNIX-CONNECT:<AGENT_SOCK_PATH>` relay client at
+                // inject time, the same way the shipped Http entry leaves
+                // `url` empty.
                 if command.is_empty() && self.id != HONR_MCP_SERVER_ID {
                     return Err("stdio mcp server command must not be empty".into());
                 }
@@ -981,7 +982,7 @@ impl McpServerDesired {
     }
 
     /// Shipped host honr MCP: stdio over the cockpit sandbox's local
-    /// `nc -U <unix socket>` relay (see `cockpit_mcp_tunnel`) — no network
+    /// `socat`-over-unix-socket relay (see `cockpit_mcp_tunnel`) — no network
     /// hop, no Bearer. `command` empty is the inject-time placeholder;
     /// `cockpit_mcp::render_*` resolve it the same way they resolve an empty
     /// HTTP `url`.

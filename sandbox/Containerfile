@@ -17,10 +17,13 @@ FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
 USER root
 
-# Cockpit MCP needs nothing added here: the board reaches the agent's stdio
-# MCP client through `nc -lU`/`nc -U` on a local Unix socket
-# (cockpit_mcp_tunnel::AGENT_SOCK_PATH), and `nc` (OpenBSD netcat) already
-# ships in the base image.
+# Cockpit MCP reaches the agent's stdio MCP client through `socat` on a
+# local Unix socket (cockpit_mcp_tunnel::AGENT_SOCK_PATH). Not `nc`: the
+# base image's OpenBSD-netcat build accepts a UDS connection fine but never
+# forwards bytes written to its stdin *after* accept out to the socket —
+# exactly the relay->client direction serve_server's responses need. Layer
+# lives after the warm caches below so re-running this apt-get does not
+# invalidate the expensive rustup/cargo/npm layers.
 
 # Match the host toolchain. Cargo.toml declares rust-version = "1.88", so this
 # only needs to be >= that; pinning keeps sandbox builds reproducible.
@@ -119,6 +122,10 @@ RUN npm ci --ignore-scripts \
 RUN mkdir -p /opt/cargo /opt/cargo-target /opt/npm-cache \
  && chmod -R a+rX /opt/rust \
  && chmod -R a+rwX /opt/cargo /opt/cargo-target /opt/npm-cache
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends socat \
+ && rm -rf /var/lib/apt/lists/*
 
 USER sandbox
 WORKDIR /sandbox
