@@ -4647,7 +4647,7 @@ mod tests {
             spec.labels
         );
         // Host MCP is stdio over a local Unix socket now (mcp.json bakes in
-        // `nc -U <AGENT_SOCK_PATH>`) — no env var to point at it.
+        // `socat - UNIX-CONNECT:<AGENT_SOCK_PATH>`) — no env var to point at it.
         assert!(
             !spec.env.iter().any(|(k, _)| k == "HONR_MCP_URL"),
             "HONR_MCP_URL is stale; cockpit MCP is stdio now: {:?}",
