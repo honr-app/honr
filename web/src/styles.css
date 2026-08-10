@@ -693,6 +693,15 @@ main.with-side-panes {
   border-radius: 999px;
   padding: 1px 7px;
 }
+.sandbox-warn-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  border-radius: 999px;
+  padding: 1px 7px;
+}
 /* Detail pane is wide — keep actions content-sized in a row, not full-bleed. */
 .sandbox-profile-actions {
   display: flex;

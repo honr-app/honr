@@ -40,6 +40,7 @@ locally, point `HONR_TEST_DATABASE_URL` at a reachable Postgres URL.
 | Variable | Effect |
 |---|---|
 | `HONR_PORT` | Listen port (default 8080) |
+| `HONR_BIND_ADDR` | Bind host (default `127.0.0.1`; containers use `0.0.0.0`) |
 | `HONR_DATABASE_URL` | Board database URL (default `sqlite:honr.db`) |
 | `HONR_TEST_DATABASE_URL` | Postgres URL for migration tests |
 

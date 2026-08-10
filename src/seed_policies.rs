@@ -82,6 +82,8 @@ network_policies:
       - { path: /opt/cursor-agent/versions/**/node }
       - { path: /usr/bin/node }
       - { path: /usr/local/bin/node }
+      # Cockpit honr MCP stdio relay client (mcp.json → agent.sock).
+      - { path: /usr/bin/socat }
 
   cargo_npm:
     name: cargo-npm
@@ -129,6 +131,7 @@ network_policies:
       - { path: /usr/local/bin/node }
       - { path: /usr/bin/bash }
       - { path: /bin/bash }
+      - { path: /usr/bin/socat }
 "#;
 
 /// Minimal Cockpit policy for `sandbox-agy`: card-work toolchain + GitHub

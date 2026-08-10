@@ -19,6 +19,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const COCKPIT_MCP_DIR: &str = "/sandbox/.honr/mcp";
 
+/// Stdio client for the shipped `honr` MCP: retries until the one-shot
+/// board relay is listening, then `exec`s `socat`. Direct `socat` races the
+/// listen respawn (inject `agent mcp enable`, prior disconnect) and Cursor
+/// reports "MCP is not connected" / "Connection closed" after a single miss.
+pub const HONR_MCP_STDIO_WRAPPER: &str = "/sandbox/.honr/mcp/honr-mcp-stdio";
+
 /// Claude `--bare` does not auto-discover project MCP; attach / engine argv
 /// pass this path via `--mcp-config`.
 pub const COCKPIT_CLAUDE_MCP_CONFIG: &str = "/sandbox/.honr/mcp/claude_mcp.json";
@@ -148,6 +154,14 @@ async fn inject_sandbox_mcp(
     let env_sh = "# honr sandbox MCP — socat stdio relay, see /sandbox/.honr/mcp/mcp.json\n";
     std::fs::write(&env_path, env_sh)?;
 
+    let wrapper_path = staging.join("honr-mcp-stdio");
+    std::fs::write(&wrapper_path, honr_mcp_stdio_wrapper_script())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
     // Ensure destination exists; upload takes a directory.
     let mkdir = os
         .exec(
@@ -179,6 +193,8 @@ async fn inject_sandbox_mcp(
         .await?;
     os.upload(sandbox, env_path.to_str().unwrap(), COCKPIT_MCP_DIR)
         .await?;
+    os.upload(sandbox, wrapper_path.to_str().unwrap(), COCKPIT_MCP_DIR)
+        .await?;
 
     let out = os
         .exec(
@@ -186,6 +202,7 @@ async fn inject_sandbox_mcp(
             &format!(
                 r#"
 set -e
+chmod 755 {HONR_MCP_STDIO_WRAPPER}
 # Expand Bearer ${{ENV}} placeholders to the OpenShell resolve token from the
 # process env so Cursor/Claude send a value the egress proxy can rewrite.
 python3 - <<'PY'
@@ -241,6 +258,28 @@ p.write_text(json.dumps(doc, indent=2) + "\n")
 PY
 if ! grep -q 'honr/mcp/env.sh' /sandbox/.bashrc 2>/dev/null; then
   printf '\n# honr MCP\n[ -f %s/env.sh ] && . %s/env.sh\n' {COCKPIT_MCP_DIR} {COCKPIT_MCP_DIR} >> /sandbox/.bashrc
+fi
+# Cursor 2026.08+: project mcp.json servers stay "needs approval" / unloaded
+# even with `agent --approve-mcps` (observed on Cockpit attach + resume).
+# `agent mcp enable <id>` writes the project approval Cursor actually checks
+# (`~/.cursor/projects/<id>/mcp-approvals.json`). Best-effort — images
+# without the Cursor CLI (agy/claude/opencode-only) skip this.
+if command -v agent >/dev/null 2>&1; then
+  (
+    export HOME=/sandbox USER=sandbox
+    cd /sandbox/repo 2>/dev/null || cd /sandbox
+    python3 - <<'PY'
+import json, subprocess
+from pathlib import Path
+doc = json.loads(Path("/sandbox/.cursor/mcp.json").read_text())
+for name in (doc.get("mcpServers") or {{}}):
+    subprocess.run(
+        ["agent", "mcp", "enable", name],
+        check=False,
+        env={{**dict(__import__("os").environ), "HOME": "/sandbox", "USER": "sandbox"}},
+    )
+PY
+  ) || true
 fi
 true
 "#
@@ -425,26 +464,45 @@ fn render_opencode_entry(server: &McpServerDesired, tokens: Option<&OpsMcpTokens
     }
 }
 
+/// Retrying stdio client for the one-shot `UNIX-LISTEN` relay in
+/// `cockpit_mcp_tunnel`. Uploaded beside `mcp.json` on inject.
+fn honr_mcp_stdio_wrapper_script() -> String {
+    format!(
+        r#"#!/bin/sh
+# Board MCP relay listens one-shot; brief gaps between accepts are normal.
+sock='{sock}'
+i=0
+while [ "$i" -lt 50 ]; do
+  if [ -S "$sock" ]; then
+    exec /usr/bin/socat - "UNIX-CONNECT:$sock"
+  fi
+  i=$((i + 1))
+  sleep 0.1
+done
+echo "honr-mcp-stdio: $sock not listening after retries" >&2
+exit 1
+"#,
+        sock = crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH
+    )
+}
+
 /// Fill in the shipped honr entry's placeholder (empty `command`) with the
 /// cockpit MCP relay's stdio client — mirrors `resolve_http_url`'s empty-URL
 /// placeholder for the same reason: model.rs stays free of a dependency on
-/// the inject layer. `socat`, not `nc`: see `cockpit_mcp_tunnel` module docs
-/// for the delayed-write relay bug this avoids.
+/// the inject layer. Wrapper (not bare `socat`): see `HONR_MCP_STDIO_WRAPPER`.
 fn resolve_stdio_command(command: &str, args: &[String]) -> Option<(String, Vec<String>)> {
     let t = command.trim();
     if !t.is_empty() {
         return Some((t.to_string(), args.to_vec()));
     }
-    Some((
-        "socat".into(),
-        vec![
-            "-".into(),
-            format!("UNIX-CONNECT:{}", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH),
-        ],
-    ))
+    Some((HONR_MCP_STDIO_WRAPPER.into(), Vec::new()))
 }
 
 fn is_honr_uds_relay(command: &str, args: &[String]) -> bool {
+    if command == HONR_MCP_STDIO_WRAPPER && args.is_empty() {
+        return true;
+    }
+    // Pre-wrapper mcp.json shape (hot-patched sandboxes / older injects).
     command == "socat"
         && args.len() == 2
         && args[0] == "-"
@@ -457,7 +515,7 @@ fn local_stdio_env() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert(
         "PATH".into(),
-        "/usr/local/bin:/usr/bin:/bin:/sandbox/.local/bin".into(),
+        "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin:/sandbox/.local/bin".into(),
     );
     env.insert("HOME".into(), "/sandbox".into());
     env.insert("USER".into(), "sandbox".into());
@@ -577,12 +635,11 @@ mod tests {
         let honr = McpServerDesired::shipped_honr();
         let doc = mcp_json_document(Some(&tokens), std::slice::from_ref(&honr));
         assert_eq!(doc["mcpServers"]["honr"]["type"], "stdio");
-        assert_eq!(doc["mcpServers"]["honr"]["command"], "socat");
-        let uds_connect = format!("UNIX-CONNECT:{}", crate::cockpit_mcp_tunnel::AGENT_SOCK_PATH);
         assert_eq!(
-            doc["mcpServers"]["honr"]["args"],
-            json!(["-", uds_connect])
+            doc["mcpServers"]["honr"]["command"],
+            HONR_MCP_STDIO_WRAPPER
         );
+        assert_eq!(doc["mcpServers"]["honr"]["args"], json!([]));
         // Stdio transport has no headers/Authorization at all.
         assert!(doc["mcpServers"]["honr"].get("headers").is_none());
         assert!(doc["mcpServers"]["honr"].get("url").is_none());
@@ -595,7 +652,7 @@ mod tests {
         assert_eq!(oc["mcp"]["honr"]["type"], "local");
         assert_eq!(
             oc["mcp"]["honr"]["command"],
-            json!(["socat", "-", uds_connect])
+            json!([HONR_MCP_STDIO_WRAPPER])
         );
         assert!(oc["mcp"]["honr"]["environment"].get("ALL_PROXY").is_none());
     }
@@ -679,8 +736,8 @@ mod tests {
             .filter(|a| a.iter().any(|s| s == "upload"))
             .count();
         assert!(
-            uploads >= 5,
-            "expected >=5 uploads, got {uploads}: {calls:?}"
+            uploads >= 6,
+            "expected >=6 uploads (token/mcp/claude/opencode/env/wrapper), got {uploads}: {calls:?}"
         );
         let place = calls
             .iter()

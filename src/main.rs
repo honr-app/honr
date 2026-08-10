@@ -181,9 +181,12 @@ async fn main() -> anyhow::Result<()> {
         .with_state(board);
 
     // Overridable so a scratch instance (the UI screenshot harness) can run
-    // alongside the real one instead of fighting it for the port.
+    // alongside the real one instead of fighting it for the port. Bind host
+    // stays loopback by default; containers set HONR_BIND_ADDR=0.0.0.0 so the
+    // Service can reach the pod.
+    let host = std::env::var("HONR_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
     let port = std::env::var("HONR_PORT").unwrap_or_else(|_| "8080".into());
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("honr listening on http://{addr}  (MCP at /mcp)");
 

@@ -2079,9 +2079,17 @@ fn agent_env(engine: &str) -> Vec<(String, String)> {
         // Shared with the image warm step so agents reuse precompiled debug deps.
         ("CARGO_TARGET_DIR".into(), "/opt/cargo-target".into()),
         ("NPM_CONFIG_CACHE".into(), "/opt/npm-cache".into()),
+        // Force HOME for Cursor MCP discovery (`~/.cursor/mcp.json`). OpenShell
+        // usually derives this from passwd when run_as=sandbox, but exec paths
+        // that inherit the supervisor's HOME=/root look for /root/.cursor and
+        // miss the injected config (MCP server "honr" not found).
+        ("HOME".into(), "/sandbox".into()),
+        ("USER".into(), "sandbox".into()),
         (
             "PATH".into(),
-            "/opt/cargo/bin:/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin".into(),
+            // No /sandbox/.venv — that was the old Ubuntu community image.
+            // Include /usr/sbin for UBI tools (ss from iproute lives there).
+            "/opt/cargo/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin".into(),
         ),
         // Cursor Agent CLI compile cache (defaults to $HOME/Library/... on darwin
         // host builds of the wrapper; keep it under the writable sandbox tree).
@@ -4252,7 +4260,7 @@ mod tests {
         let s = start_script(&repo_cfg(), "do the thing", "cursor", None).unwrap();
         assert!(s.contains("timeout --foreground"), "{s}");
         assert!(
-            s.contains("agent -p --force --trust --sandbox disabled"),
+            s.contains("agent -p --force --trust --approve-mcps --sandbox disabled"),
             "{s}"
         );
         assert!(s.contains("--output-format stream-json"), "{s}");
@@ -4416,6 +4424,19 @@ mod tests {
             env.iter()
                 .any(|(k, v)| k == "CARGO_TARGET_DIR" && v == "/opt/cargo-target"),
             "agent_env must point at the image precompile dir: {env:?}"
+        );
+        assert!(
+            env.iter().any(|(k, v)| k == "HOME" && v == "/sandbox"),
+            "agent_env must force HOME=/sandbox for Cursor MCP discovery: {env:?}"
+        );
+        let path = env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !path.contains("/sandbox/.venv"),
+            "agent_env PATH must not reference removed Ubuntu venv: {path}"
         );
         let script = start_script(&repo_cfg(), "briefing", "claude", None).unwrap();
         assert!(

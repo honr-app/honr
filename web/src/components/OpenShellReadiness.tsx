@@ -2,13 +2,30 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import type { OpenShellStatus, SandboxProfilesOut } from "../types.js";
 
-/** Fail-closed: healthy gateway + complete mTLS only. */
-export function gatewayMtlsReady(status: OpenShellStatus | null | undefined): boolean {
+/**
+ * Fail-closed gateway readiness for Welcome.
+ * mTLS boards need complete PEMs; OIDC boards need a logged-in session.
+ * Healthy alone is not enough — an OIDC gateway can report healthy while
+ * the strip still required mtls.complete (always false in OIDC mode).
+ */
+export function gatewayReady(status: OpenShellStatus | null | undefined): boolean {
   if (!status) return false;
   if (status.not_configured) return false;
   if (!status.healthy) return false;
-  if (!status.mtls?.complete) return false;
-  return true;
+  if (status.auth_mode === "oidc") {
+    return !!status.oidc_status?.logged_in;
+  }
+  if (status.auth_mode === "mtls") {
+    return !!status.mtls?.complete;
+  }
+  // Legacy: no explicit mode but mTLS material present (server may still
+  // resolve auth_mode; if not, require complete mTLS).
+  return !!status.mtls?.complete;
+}
+
+/** @deprecated Use gatewayReady — kept for existing test imports. */
+export function gatewayMtlsReady(status: OpenShellStatus | null | undefined): boolean {
+  return gatewayReady(status);
 }
 
 /** Fail-closed: a configured default sandbox profile id. */
@@ -56,7 +73,7 @@ export function OpenShellReadinessStripView({
       <ul className="openshell-readiness-list">
         <ReadinessItem
           testId="openshell-readiness-gateway"
-          label="Gateway / mTLS"
+          label="Gateway"
           row={gateway}
           href="/settings/openshell/connectivity"
           cta="Settings → Connectivity"
@@ -144,7 +161,7 @@ export function OpenShellReadinessStrip() {
       ]);
       if (cancelled) return;
 
-      const gwReady = gatewayMtlsReady(st);
+      const gwReady = gatewayReady(st);
       setGateway({
         ready: gwReady,
         checking: false,
