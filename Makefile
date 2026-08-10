@@ -6,7 +6,7 @@
 #   make dev-ui   Vite hot-reload on :5173 (proxies API to :8080)
 #   make test     cargo + web unit tests
 
-.PHONY: all build api release ui install-ui run dev dev-ui docs docs-serve test test-api test-ui clippy sandbox sandbox-push clean help
+.PHONY: all build api release ui install-ui run dev dev-ui docs docs-serve test test-api test-ui clippy sandbox sandbox-push image image-push clean help
 
 all: build
 
@@ -23,6 +23,8 @@ help:
 	@echo "  make docs-serve     mdbook serve (http://localhost:3000)"
 	@echo "  make sandbox        Rebuild all sandbox-<engine> images via podman (CONTAINER_ENGINE=docker to override)"
 	@echo "  make sandbox-push   Build and push all sandbox-<engine> images to REGISTRY"
+	@echo "  make image          Build the honr board image ($(REGISTRY)/honr:latest)"
+	@echo "  make image-push     Build and push the honr board image"
 	@echo "  make test           cargo nextest/test + web tests"
 	@echo "  make clippy         cargo clippy -D warnings"
 	@echo "  make clean          cargo clean + remove web/dist"
@@ -119,6 +121,14 @@ sandbox-push: sandbox
 		echo "==> pushing $(REGISTRY)/sandbox-$$e:latest"; \
 		$(CONTAINER_ENGINE) push $(REGISTRY)/sandbox-$$e:latest || exit 1; \
 	done
+
+# Board image (API + web/dist) for in-cluster / container deploys.
+# Distinct from sandbox-* (agent sandboxes). See Containerfile.
+image:
+	$(CONTAINER_ENGINE) build -f Containerfile -t $(REGISTRY)/honr:latest .
+
+image-push: image
+	$(CONTAINER_ENGINE) push $(REGISTRY)/honr:latest
 
 clean:
 	cargo clean

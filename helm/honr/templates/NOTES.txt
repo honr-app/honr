@@ -1,0 +1,20 @@
+honr is installed in namespace {{ .Release.Namespace }}.
+
+  Board URL:  {{ .Values.ingress.publicUrl }}
+  Health:     {{ .Values.ingress.publicUrl }}/healthz
+
+This is a fresh board (generated master key + empty Postgres). After the
+Ingress hostname resolves:
+
+  1. Open the Board URL and create the admin account.
+  2. Settings → OpenShell — point the gateway at your in-cluster OpenShell
+     (e.g. https://microshift-openshell.tail43beb.ts.net) and complete OIDC.
+     OpenShell login uses redirect_uri
+       {{ .Values.ingress.publicUrl }}/oauth/openshell/callback
+     which must be listed on Keycloak client openshell-cli (realm openshell).
+  3. Settings → OpenShell Providers / Forge — wire the GitHub App provider
+     and a sandbox spec before dispatching cards.
+
+Check status:
+
+  kubectl get pods,ingress,pvc -n {{ .Release.Namespace }}

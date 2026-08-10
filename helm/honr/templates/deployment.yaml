@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "honr.fullname" . }}
+  labels:
+    {{- include "honr.labels" . | nindent 4 }}
+    {{- include "honr.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "honr.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "honr.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: honr
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: HONR_BIND_ADDR
+              value: "0.0.0.0"
+            - name: HONR_PORT
+              value: {{ .Values.service.port | quote }}
+            - name: HONR_PUBLIC_URL
+              value: {{ .Values.ingress.publicUrl | quote }}
+            - name: HONR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "honr.secretName" . }}
+                  key: database-url
+            - name: HONR_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "honr.secretName" . }}
+                  key: master-key
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

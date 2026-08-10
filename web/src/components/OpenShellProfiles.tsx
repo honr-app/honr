@@ -55,6 +55,16 @@ function policyLabel(
   return match ? match.name : policyId || "none";
 }
 
+/** True when the spec attaches no OpenShell providers on sandbox create. */
+export function sandboxHasNoProviders(
+  profile: { provider_names?: string[] | null } | null | undefined,
+): boolean {
+  return (profile?.provider_names ?? []).length === 0;
+}
+
+const NO_PROVIDERS_WARNING =
+  "No providers attached — nothing is injected into the sandbox on create. Attach the providers this run needs (model credentials for the engine, and usually github-app for git/gh) before dispatching.";
+
 export function SandboxesPanelView({
   profiles,
   policies,
@@ -191,6 +201,15 @@ export function SandboxesPanelView({
                               data-testid="sandbox-cockpit-badge"
                             >
                               Cockpit
+                            </span>
+                          )}
+                          {sandboxHasNoProviders(p) && (
+                            <span
+                              className="sandbox-warn-badge"
+                              data-testid="sandbox-no-providers-badge"
+                              title={NO_PROVIDERS_WARNING}
+                            >
+                              no providers
                             </span>
                           )}
                         </span>
@@ -358,6 +377,15 @@ export function SandboxesPanelView({
                       })}
                     </ul>
                   )}
+                  {sandboxHasNoProviders(draft) && (
+                    <p
+                      className="info"
+                      role="status"
+                      data-testid="sandbox-no-providers-warn"
+                    >
+                      {NO_PROVIDERS_WARNING}
+                    </p>
+                  )}
                 </div>
 
                 <div
@@ -502,6 +530,15 @@ export function SandboxesPanelView({
                       : (selected.provider_names ?? []).join(", ")}
                   </strong>
                 </div>
+                {sandboxHasNoProviders(selected) && (
+                  <p
+                    className="info"
+                    role="status"
+                    data-testid="sandbox-no-providers-warn"
+                  >
+                    {NO_PROVIDERS_WARNING}
+                  </p>
+                )}
                 <div className="btns sandbox-profile-actions">
                   <button
                     type="button"
@@ -730,6 +767,12 @@ export function ProjectSandboxPicker({
       ? profiles.find((p) => p.id === defaultId)?.name ?? defaultId
       : "none configured";
 
+  const effectiveId = value ?? defaultId;
+  const effectiveProfile =
+    effectiveId != null
+      ? profiles.find((p) => p.id === effectiveId)
+      : undefined;
+
   return (
     <div className="project-sandbox-picker" data-testid="project-sandbox-picker">
       <label className="section-title" style={{ display: "block", marginBottom: 2 }}>
@@ -760,9 +803,19 @@ export function ProjectSandboxPicker({
         {profiles.map((p) => (
           <option key={p.id} value={p.id}>
             {p.id === defaultId ? `${p.name} · global default` : p.name}
+            {sandboxHasNoProviders(p) ? " · no providers" : ""}
           </option>
         ))}
       </select>
+      {sandboxHasNoProviders(effectiveProfile) && (
+        <p
+          className="info"
+          role="status"
+          data-testid="project-sandbox-no-providers-warn"
+        >
+          {NO_PROVIDERS_WARNING}
+        </p>
+      )}
     </div>
   );
 }

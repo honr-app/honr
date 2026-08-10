@@ -95,8 +95,11 @@ complete the OpenSSH ProxyCommand chain that `openshell sandbox connect` uses.
 (That chain is described in [Architecture](architecture.md#how-the-cli-attaches).)
 
 Cursor launches interactive `agent` with `--trust --approve-mcps --sandbox
-disabled` — no `--force`, so tool calls still prompt for approval. OpenCode,
-Claude, and agy launch their own TUIs.
+disabled` — no `--force`, so tool calls still prompt for approval. Headless
+Cockpit chat / card runs use the same `--approve-mcps` (with `--force` and
+`-p`); without it, Cursor 2026.08+ leaves `mcp.json` servers unloaded
+(`needs approval`) and tools look missing even when the socat relay is up.
+OpenCode, Claude, and agy launch their own TUIs.
 
 ## Credentials inside the sandbox
 
@@ -110,7 +113,7 @@ login, no Bearer, no OAuth dance to skip.
 
 | Path | Contents |
 |---|---|
-| `/sandbox/.honr/mcp/mcp.json` | `honr` → `socat - UNIX-CONNECT:/sandbox/.honr/mcp/agent.sock` (Cursor) |
+| `/sandbox/.honr/mcp/mcp.json` | `honr` → `/sandbox/.honr/mcp/honr-mcp-stdio` (retries, then `socat` → `agent.sock`) |
 | `/sandbox/.honr/mcp/claude_mcp.json` | same shape; Claude loads it via `--mcp-config` |
 | `/sandbox/.gemini/config/mcp_config.json` | same, for Antigravity |
 | `/sandbox/.config/opencode/opencode.jsonc` | OpenCode `mcp.honr`, `type: local` |

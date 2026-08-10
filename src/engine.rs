@@ -75,7 +75,12 @@ const OPENCODE_SESSION_KEYS: &[&str] = &["/sessionID", "/part/sessionID"];
 pub const ENGINES: &[Engine] = &[
     Engine {
         id: "cursor",
-        prefix: "agent -p --force --trust --sandbox disabled --output-format stream-json",
+        // --approve-mcps: Cursor 2026.08+ leaves project mcp.json servers as
+        // "needs approval" / unloaded unless this flag (or `agent mcp enable`)
+        // runs. Cockpit attach already passes it; print/headless must too or
+        // GetMcpTools returns "MCP server honr not found" while the socat
+        // relay is healthy.
+        prefix: "agent -p --force --trust --approve-mcps --sandbox disabled --output-format stream-json",
         trailing: "",
         prompt: PromptStyle::Positional,
         resume: Some(ResumeFlag::Resume),
@@ -352,7 +357,7 @@ mod tests {
         let fresh = command_line("cursor", PromptEnv::Briefing, None).unwrap();
         assert_eq!(
             fresh,
-            "agent -p --force --trust --sandbox disabled --output-format stream-json \"$HONR_BRIEFING\""
+            "agent -p --force --trust --approve-mcps --sandbox disabled --output-format stream-json \"$HONR_BRIEFING\""
         );
         assert!(!fresh.contains("--resume"));
 

@@ -1,0 +1,55 @@
+# honr board image (API + built UI)
+image:
+  repository: quay.io/honr-app/honr
+  tag: latest
+  # Always — :latest + IfNotPresent leaves a stale node cache after push.
+  pullPolicy: Always
+
+# Replica count. Keep at 1 — board state is not multi-writer safe yet, and
+# Postgres is a single RWO volume.
+replicaCount: 1
+
+# Tailscale Ingress hostname (tls.hosts entry). The operator appends
+# .<tailnet>.ts.net → e.g. microshift-honr.tail43beb.ts.net
+ingress:
+  enabled: true
+  hostname: microshift-honr
+  # Full public URL for HONR_PUBLIC_URL (MCP Host allow-list + OpenShell OIDC
+  # redirect_uri = {publicUrl}/oauth/openshell/callback). Must match the
+  # Tailscale hostname. When you change this, also add that callback (and the
+  # origin) to Keycloak realm `openshell` client `openshell-cli` redirectUris /
+  # webOrigins — Keycloak rejects anything not on that allow-list.
+  publicUrl: https://microshift-honr.tail43beb.ts.net
+
+service:
+  port: 8080
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# Board Postgres (single-replica StatefulSet in this chart)
+postgres:
+  image: docker.io/library/postgres:16-alpine
+  user: honr
+  database: honr
+  # Empty → chart generates and stores in Secret (stable across upgrades).
+  password: ""
+  persistence:
+    size: 5Gi
+    # Empty → cluster default StorageClass (topolvm-provisioner on microshift).
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+# Empty → chart generates a fresh 64-hex-char key and stores it in Secret.
+# Do not reuse the host ~/.config/honr/master.key unless you intentionally
+# want to decrypt Settings sealed on that machine.
+masterKey: ""

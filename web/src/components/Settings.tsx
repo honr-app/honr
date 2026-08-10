@@ -22,12 +22,14 @@ export { OpenShellProviderTypesPanelView } from "./OpenShellProviderTypes.js";
 export { OpenShellMcpServersPanelView } from "./OpenShellMcpServers.js";
 export {
   OpenShellReadinessStripView,
+  gatewayReady,
   gatewayMtlsReady,
   sandboxSpecReady,
 } from "./OpenShellReadiness.js";
 export {
   ProjectSandboxPicker,
   SandboxesPanelView,
+  sandboxHasNoProviders,
 } from "./OpenShellProfiles.js";
 export type { SettingsSection } from "../location.js";
 

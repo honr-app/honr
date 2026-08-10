@@ -18,7 +18,7 @@ import {
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellPoliciesPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayMtlsReady, sandboxSpecReady } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellPoliciesPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayReady, gatewayMtlsReady, sandboxSpecReady, sandboxHasNoProviders } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import {
   chromeLocationsEqual,
@@ -1625,6 +1625,12 @@ assert(sandboxesHtml.includes("data-testid=\"sandbox-delete-default\""), "Defaul
 assert(sandboxesHtml.includes("data-testid=\"sandbox-policy-summary\""), "Selected profile shows policy summary");
 assert(sandboxesHtml.includes("data-testid=\"sandbox-policy-name\""), "Selected profile shows policy name");
 assert(sandboxesHtml.includes(">Minimal<") || sandboxesHtml.includes("Minimal"), "Policy name resolved from catalog");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-no-providers-warn\""),
+  "Selected profile with no providers shows warning");
+assert(sandboxesHtml.includes("data-testid=\"sandbox-no-providers-badge\""),
+  "Rail badges specs that attach no providers");
+assert.strictEqual(sandboxHasNoProviders({ provider_names: [] }), true, "sandboxHasNoProviders empty");
+assert.strictEqual(sandboxHasNoProviders({ provider_names: ["vertex"] }), false, "sandboxHasNoProviders with attach");
 assert(!sandboxesHtml.includes("data-testid=\"sandbox-destroy\""),
   "Sandbox specs panel must not offer live OpenShell sandbox destroy");
 assert(!/destroy sandbox|delete environment/i.test(sandboxesHtml),
@@ -1672,9 +1678,32 @@ assert(createFormHtml.includes("value=\"minimal\"") || createFormHtml.includes("
   "Form lists catalog policies");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-providers\""), "Form includes per-profile providers");
 assert(createFormHtml.includes("data-testid=\"sandbox-provider-vertex\""), "Form lists available providers");
+assert(!createFormHtml.includes("data-testid=\"sandbox-no-providers-warn\""),
+  "Create form with providers selected must not warn");
 assert(!/policy path|path to.*policy|host path/i.test(createFormHtml),
   "Settings must not ask for a host filesystem policy path");
 assert(createFormHtml.includes("data-testid=\"sandbox-save\""), "Form should include save");
+
+const emptyProvidersFormHtml = renderToString(
+  React.createElement(SandboxesPanelView, {
+    ...sandboxPanelBase,
+    cockpitId: "cockpit",
+    editingId: "",
+    draft: {
+      id: "",
+      name: "Bare",
+      image: "img:bare",
+      policy_id: "minimal",
+      cpu: "",
+      memory: "",
+      engine: "cursor",
+      provider_names: [],
+      mcp_server_ids: [],
+    },
+  }),
+);
+assert(emptyProvidersFormHtml.includes("data-testid=\"sandbox-no-providers-warn\""),
+  "Create form with no providers selected shows warning");
 
 const editFormHtml = renderToString(
   React.createElement(SandboxesPanelView, {
@@ -1747,6 +1776,9 @@ assert(pickerHtml.includes("Default · global default"), "Global default profile
 assert(pickerHtml.includes("Heavy"), "Named profiles list by display name");
 assert(!pickerHtml.includes("Default (default)"), "Must not show 'Default (default)' duplication");
 assert(!pickerHtml.includes("Heavy (heavy)"), "Must not show raw id in every option");
+assert(pickerHtml.includes("data-testid=\"project-sandbox-no-providers-warn\""),
+  "Project picker warns when effective sandbox has no providers");
+assert(pickerHtml.includes("no providers"), "Options mark specs with no providers");
 
 // Board view still mounts Board (regression: chrome must not replace it).
 const emptyBoardHtml = renderToString(
@@ -1795,46 +1827,84 @@ assert(!emptyBoardHtml.includes("data-testid=\"openshell-readiness-agents\""), "
 
 // OpenShell readiness strip — presentational ready / not-ready fixtures
 assert.strictEqual(
-  gatewayMtlsReady({
+  gatewayReady({
     healthy: true,
     summary: "Connected",
     not_configured: false,
+    auth_mode: "mtls",
     mtls: { ca: true, client_cert: true, client_key: true, complete: true },
   }),
   true,
-  "gatewayMtlsReady when healthy + complete mTLS",
+  "gatewayReady when healthy + complete mTLS",
 );
 assert.strictEqual(
-  gatewayMtlsReady({
+  gatewayReady({
+    healthy: true,
+    summary: "Healthy (gateway 0.0.101)",
+    not_configured: false,
+    auth_mode: "oidc",
+    mtls: { ca: false, client_cert: false, client_key: false, complete: false },
+    oidc_status: { logged_in: true },
+  }),
+  true,
+  "gatewayReady when healthy + OIDC logged in (no mTLS)",
+);
+assert.strictEqual(
+  gatewayReady({
+    healthy: true,
+    summary: "Healthy (gateway 0.0.101)",
+    not_configured: false,
+    auth_mode: "oidc",
+    mtls: { ca: false, client_cert: false, client_key: false, complete: false },
+    oidc_status: { logged_in: false },
+  }),
+  false,
+  "gatewayReady fails closed when OIDC not logged in",
+);
+assert.strictEqual(
+  gatewayReady({
     healthy: true,
     summary: "Connected",
     not_configured: false,
+    auth_mode: "mtls",
     mtls: { ca: true, client_cert: false, client_key: false, complete: false },
   }),
   false,
-  "gatewayMtlsReady fails closed on incomplete mTLS",
+  "gatewayReady fails closed on incomplete mTLS",
 );
 assert.strictEqual(
-  gatewayMtlsReady({
+  gatewayReady({
     healthy: false,
     summary: "unreachable",
     not_configured: false,
+    auth_mode: "mtls",
     mtls: { ca: true, client_cert: true, client_key: true, complete: true },
   }),
   false,
-  "gatewayMtlsReady fails closed when unhealthy",
+  "gatewayReady fails closed when unhealthy",
 );
 assert.strictEqual(
-  gatewayMtlsReady({
+  gatewayReady({
     healthy: false,
     summary: "not configured",
     not_configured: true,
     mtls: { ca: false, client_cert: false, client_key: false, complete: false },
   }),
   false,
-  "gatewayMtlsReady fails closed when not_configured",
+  "gatewayReady fails closed when not_configured",
 );
-assert.strictEqual(gatewayMtlsReady(null), false, "gatewayMtlsReady fails closed on null");
+assert.strictEqual(gatewayReady(null), false, "gatewayReady fails closed on null");
+assert.strictEqual(
+  gatewayMtlsReady({
+    healthy: true,
+    summary: "Connected",
+    not_configured: false,
+    auth_mode: "mtls",
+    mtls: { ca: true, client_cert: true, client_key: true, complete: true },
+  }),
+  true,
+  "gatewayMtlsReady alias still works",
+);
 assert.strictEqual(
   sandboxSpecReady({
     profiles: [{ id: "default", name: "Default", image: "honr-sandbox:latest", policy_id: "minimal" }],

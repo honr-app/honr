@@ -76,11 +76,15 @@ ARG RUST_VERSION=1.97.1
 # vanish. $CARGO_HOME / $CARGO_TARGET_DIR / $NPM_CONFIG_CACHE live under /opt
 # too, so a card's own `cargo build` / `npm ci` populate them there instead of
 # under /sandbox — the same reasoning, not a pre-warmed cache (there is none).
+# HOME=/sandbox matches the sandbox user's passwd home. OpenShell's supervisor
+# often starts as root (HOME=/root); agents that inherit that miss
+# /sandbox/.cursor/mcp.json. honr also passes HOME explicitly in agent_env.
 ENV RUSTUP_HOME=/opt/rust \
     CARGO_HOME=/opt/cargo \
     CARGO_TARGET_DIR=/opt/cargo-target \
     NPM_CONFIG_CACHE=/opt/npm-cache \
-    PATH=/opt/cargo/bin:$PATH
+    HOME=/sandbox \
+    PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # `chmod` right here, in the same layer that creates these files — a later,
 # separate `RUN chmod -R` would force a full copy-up of the whole toolchain
@@ -133,10 +137,12 @@ RUN for b in cargo rustc rustup clippy-driver cargo-clippy cargo-fmt rustfmt; do
 
 FROM shared AS cursor
 
-# Bake Cursor Agent CLI. Install lands under $HOME/.local; move under /opt so
-# the sandbox user's /sandbox HOME overlay does not hide it, and put a stable
-# /usr/local/bin/agent on the default PATH (exec env does not inherit image ENV).
-RUN curl -fsSL https://cursor.com/install | bash \
+# Bake Cursor Agent CLI. Installers honor $HOME; shared sets HOME=/sandbox for
+# runtime, so force HOME=/root for this root-user build step. Then move under
+# /opt so the sandbox user's /sandbox HOME overlay does not hide it, and put a
+# stable /usr/local/bin/agent on the default PATH (exec env does not inherit
+# image ENV).
+RUN HOME=/root curl -fsSL https://cursor.com/install | HOME=/root bash \
  && mkdir -p /opt/cursor-agent \
  && cp -a /root/.local/share/cursor-agent/. /opt/cursor-agent/ \
  && AGENT_BIN="$(find /opt/cursor-agent/versions -type f -name cursor-agent | sort | tail -1)" \
@@ -151,10 +157,10 @@ WORKDIR /sandbox
 
 FROM shared AS agy
 
-# Bake Google Antigravity CLI (agy).
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash \
- && (mv /root/.local/bin/agy /usr/local/bin/agy 2>/dev/null || cp ~/.local/bin/agy /usr/local/bin/agy 2>/dev/null || true) \
- && chmod 0755 /usr/local/bin/agy 2>/dev/null || true
+# Bake Google Antigravity CLI (agy). HOME=/root — see cursor stage.
+RUN HOME=/root curl -fsSL https://antigravity.google/cli/install.sh | HOME=/root bash \
+ && cp /root/.local/bin/agy /usr/local/bin/agy \
+ && chmod 0755 /usr/local/bin/agy
 
 USER sandbox
 WORKDIR /sandbox
@@ -163,8 +169,8 @@ FROM shared AS claude
 
 # Bake Claude Code CLI. The old community base shipped this for free; our own
 # minimal base does not, so every engine (including this one) installs only
-# what it needs, same as the other three leaf stages.
-RUN curl -fsSL https://claude.ai/install.sh | bash \
+# what it needs, same as the other three leaf stages. HOME=/root — see cursor.
+RUN HOME=/root curl -fsSL https://claude.ai/install.sh | HOME=/root bash \
  && cp /root/.local/bin/claude /usr/local/bin/claude \
  && chmod 755 /usr/local/bin/claude
 
@@ -175,7 +181,8 @@ FROM shared AS opencode
 
 # Bake OpenCode CLI. Installer writes $HOME/.opencode/bin; relocate under /opt
 # and expose /usr/local/bin/opencode on the default PATH (same ENV caveat).
-RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+# HOME=/root — see cursor stage.
+RUN HOME=/root curl -fsSL https://opencode.ai/install | HOME=/root bash -s -- --no-modify-path \
  && mkdir -p /opt/opencode \
  && cp -a /root/.opencode/. /opt/opencode/ \
  && test -x /opt/opencode/bin/opencode \
