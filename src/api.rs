@@ -273,6 +273,9 @@ pub struct CreateItem {
     /// Required for Projects — `owner/name` Initial plan clones for planning.
     #[serde(default)]
     clone_repo: Option<String>,
+    /// Optional sibling Task ids this new Task waits on (Task create only).
+    #[serde(default)]
+    blocked_by: Vec<ItemId>,
     /// Accepted on Task create; clone targets are named in intent/DoD.
     #[serde(default)]
     repo: Option<crate::schema::RepoConfig>,
@@ -287,29 +290,39 @@ async fn create_item(
 ) -> ApiResult<WorkItem> {
     let _ = req.product_repo;
     let _ = req.repo; // Task clone targets live in intent/DoD
-    let item = if req.parent.is_none() {
-        let clone = req
-            .clone_repo
-            .as_deref()
-            .ok_or_else(|| ApiError("clone_repo is required for Projects (`owner/name`)".into()))?;
-        b.create_project(req.title, req.intent, clone, req.above_line, None)
+    let item = match req.parent {
+        None => {
+            if !req.blocked_by.is_empty() {
+                return Err(ApiError(
+                    "blocked_by applies to Tasks under a Project, not Project create".into(),
+                ));
+            }
+            let clone = req.clone_repo.as_deref().ok_or_else(|| {
+                ApiError("clone_repo is required for Projects (`owner/name`)".into())
+            })?;
+            let item = b
+                .create_project(req.title, req.intent, clone, req.above_line, None)
+                .map_err(ApiError)?;
+            // A project dropped in plain language starts shaping immediately.
+            b.transition(item.id, State::Shaping, "human", None)
+                .unwrap_or(item)
+        }
+        Some(parent) => {
+            let dod = req.definition_of_done.ok_or_else(|| {
+                ApiError("definition_of_done is required so the Task can enter Backlog".into())
+            })?;
+            b.create_task(
+                parent,
+                req.title,
+                req.intent,
+                dod,
+                req.blocked_by,
+                req.capability,
+                req.above_line,
+            )
             .map_err(ApiError)?
-    } else {
-        b.create(
-            req.parent,
-            req.title,
-            req.intent,
-            req.definition_of_done,
-            crate::model::Origin::Human,
-            req.above_line,
-            req.capability,
-        )
-        .map_err(ApiError)?
+        }
     };
-    // A project dropped in plain language starts shaping immediately.
-    let item = b
-        .transition(item.id, State::Shaping, "human", None)
-        .unwrap_or(item);
 
     Ok(Json(item))
 }
@@ -2193,6 +2206,7 @@ mod tests {
                 capability: None,
                 above_line: true,
                 clone_repo: Some("acme/widgets".into()),
+                blocked_by: vec![],
                 repo: Some(crate::schema::RepoConfig {
                     upstream: "should/ignore".into(),
                     fork: String::new(),
@@ -2223,6 +2237,7 @@ mod tests {
                 capability: None,
                 above_line: true,
                 clone_repo: None,
+                blocked_by: vec![],
                 repo: None,
                 product_repo: None,
             }),
@@ -2367,7 +2382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_task_api_allows_missing_repo() {
+    async fn create_task_api_lands_in_backlog_and_stamps_project_clone() {
         let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
             crate::schema::Schema::default(),
             std::env::temp_dir().join(format!(
@@ -2380,15 +2395,7 @@ mod tests {
             )),
         ));
         let project = b
-            .create(
-                None,
-                "P",
-                "why",
-                None,
-                crate::model::Origin::Human,
-                true,
-                None,
-            )
+            .create_project("P", "why", "acme/widgets", true, None)
             .expect("project");
 
         let Ok(Json(created)) = create_item(
@@ -2396,21 +2403,55 @@ mod tests {
             Json(CreateItem {
                 parent: Some(project.id),
                 title: "Prose clone target".into(),
-                intent: "Clone acme/widgets and ship".into(),
-                definition_of_done: Some("done in acme/widgets".into()),
+                intent: "Clone repository: other/repo. Ship it.".into(),
+                definition_of_done: Some("done".into()),
                 capability: None,
                 above_line: false,
                 clone_repo: None,
+                blocked_by: vec![],
                 repo: None,
                 product_repo: None,
             }),
         )
         .await
         else {
-            panic!("Task create without repo must succeed");
+            panic!("Task create without repo field must succeed");
         };
+        assert_eq!(created.state, State::Backlog);
         assert!(created.repo.is_none());
+        assert!(
+            created.intent.contains("Clone repository: other/repo"),
+            "explicit Task clone must win: {}",
+            created.intent
+        );
         assert!(b.resolve_card_repo(created.id).unwrap().is_none());
+
+        // Omit clone line — stamp Project default into intent.
+        let Ok(Json(stamped)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: Some(project.id),
+                title: "Inherit project clone".into(),
+                intent: "Ship the feature".into(),
+                definition_of_done: Some("done".into()),
+                capability: None,
+                above_line: false,
+                clone_repo: None,
+                blocked_by: vec![],
+                repo: None,
+                product_repo: None,
+            }),
+        )
+        .await
+        else {
+            panic!("Task create should stamp Project clone");
+        };
+        assert_eq!(stamped.state, State::Backlog);
+        assert!(
+            stamped.intent.contains("Clone repository: acme/widgets"),
+            "expected Project default stamped: {}",
+            stamped.intent
+        );
 
         // Extra repo body on create is accepted and unused.
         let Ok(Json(ignored)) = create_item(
@@ -2418,11 +2459,12 @@ mod tests {
             Json(CreateItem {
                 parent: Some(project.id),
                 title: "Ignored repo body".into(),
-                intent: "ok".into(),
+                intent: "Clone repository: acme/widgets. ok".into(),
                 definition_of_done: Some("done".into()),
                 capability: None,
                 above_line: false,
                 clone_repo: None,
+                blocked_by: vec![],
                 repo: Some(crate::schema::RepoConfig {
                     upstream: "acme/widgets".into(),
                     fork: String::new(),
@@ -2436,6 +2478,114 @@ mod tests {
             panic!("Task create with repo body must still succeed");
         };
         assert!(ignored.repo.is_none());
+        assert_eq!(ignored.state, State::Backlog);
+    }
+
+    #[tokio::test]
+    async fn create_task_api_refuses_nest_under_task_and_applies_blockers() {
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-create-task-nest-{}-{}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+        let project = b
+            .create_project("P", "why", "honr-app/honr", true, None)
+            .expect("project");
+        let Ok(Json(blocker)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: Some(project.id),
+                title: "Blocker".into(),
+                intent: "first".into(),
+                definition_of_done: Some("done".into()),
+                capability: None,
+                above_line: false,
+                clone_repo: None,
+                blocked_by: vec![],
+                repo: None,
+                product_repo: None,
+            }),
+        )
+        .await
+        else {
+            panic!("blocker create");
+        };
+
+        let Ok(Json(blocked)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: Some(project.id),
+                title: "Blocked".into(),
+                intent: "second".into(),
+                definition_of_done: Some("done".into()),
+                capability: None,
+                above_line: false,
+                clone_repo: None,
+                blocked_by: vec![blocker.id],
+                repo: None,
+                product_repo: None,
+            }),
+        )
+        .await
+        else {
+            panic!("blocked create");
+        };
+        assert_eq!(blocked.state, State::Backlog);
+        assert_eq!(blocked.blocked_by, vec![blocker.id]);
+
+        let Err(ApiError(nest)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: Some(blocker.id),
+                title: "Nested".into(),
+                intent: "no".into(),
+                definition_of_done: Some("done".into()),
+                capability: None,
+                above_line: false,
+                clone_repo: None,
+                blocked_by: vec![],
+                repo: None,
+                product_repo: None,
+            }),
+        )
+        .await
+        else {
+            panic!("nest under Task must fail");
+        };
+        assert!(
+            nest.contains("flat under a Project") || nest.contains("parent must be a Project"),
+            "expected nest refusal, got {nest}"
+        );
+
+        let Err(ApiError(missing_dod)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: Some(project.id),
+                title: "No DoD".into(),
+                intent: "oops".into(),
+                definition_of_done: None,
+                capability: None,
+                above_line: false,
+                clone_repo: None,
+                blocked_by: vec![],
+                repo: None,
+                product_repo: None,
+            }),
+        )
+        .await
+        else {
+            panic!("Task without DoD must fail");
+        };
+        assert!(
+            missing_dod.contains("definition_of_done"),
+            "expected DoD error, got {missing_dod}"
+        );
     }
 
     /// Where a card ran and what it produced have to survive the trip to the
