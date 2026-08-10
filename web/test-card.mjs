@@ -18,6 +18,12 @@ import {
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { CreateProjectForm } from "./dist-test/components/CreateProjectForm.js";
+import {
+  CreateTaskForm,
+  cloneRepoFromProse,
+  proseHasCloneRepo,
+  stampCloneIntoIntent,
+} from "./dist-test/components/CreateTaskForm.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellPoliciesPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayReady, gatewayMtlsReady, sandboxSpecReady, sandboxHasNoProviders } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
@@ -317,6 +323,19 @@ assert(boardHtml.includes("Create Project"),
   "Populated board Create Project affordance copy");
 assert(!boardHtml.includes('data-testid="create-project-form"'),
   "Populated board keeps Create Project form collapsed until opened");
+// Create Task on Project swimlane (not Welcome) — collapsible trigger when lane is open.
+assert(boardHtml.includes('data-testid="create-task"'),
+  "Populated board Project lane exposes Create Task root");
+assert(boardHtml.includes('data-testid="create-task-open"'),
+  "Populated board shows Create Task open control");
+assert(boardHtml.includes("Create Task"),
+  "Populated board Create Task affordance copy");
+assert(!boardHtml.includes('data-testid="create-task-form"'),
+  "Populated board keeps Create Task form collapsed until opened");
+assert(boardHtml.includes('data-testid="create-task-open"') &&
+  boardHtml.indexOf('data-testid="create-task"') >
+    boardHtml.indexOf('data-testid="create-project"'),
+  "Create Task lives under Project lanes, separate from Create Project");
 
 // Test 8: Detail Head renders Archive and Delete actions
 
@@ -1821,6 +1840,10 @@ assert(emptyBoardHtml.includes('data-testid="create-project-clone-repo"'),
   "Empty board Create Project form has clone_repo field");
 assert(emptyBoardHtml.includes("owner/name"),
   "Empty board Create Project labels clone_repo as owner/name");
+assert(!emptyBoardHtml.includes('data-testid="create-task"'),
+  "Empty Welcome board must not expose Create Task");
+assert(!emptyBoardHtml.includes('data-testid="create-task-form"'),
+  "Empty Welcome board must not show Create Task form");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide\""), "Board empty embeds OperatorGuide");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-quickstart\""), "Board empty shows Quickstart section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-mcp\""), "Board empty shows MCP section");
@@ -1886,6 +1909,90 @@ assert(
   assert(
     cloneInputTag.includes('placeholder="owner/name"'),
     "Create Project clone_repo placeholder is owner/name",
+  );
+}
+
+// Create Task form — stamp/require clone; optional blockers; not on Welcome.
+assert.strictEqual(
+  cloneRepoFromProse(
+    "Clone repository: honr-app/honr into /sandbox/repo for planning.",
+  ),
+  "honr-app/honr",
+  "cloneRepoFromProse reads stamped Project line",
+);
+assert.strictEqual(cloneRepoFromProse("no stamp"), null, "cloneRepoFromProse misses bare prose");
+assert.strictEqual(
+  proseHasCloneRepo("Clone repository: acme/widgets. Ship it.", "done"),
+  true,
+  "proseHasCloneRepo sees intent stamp",
+);
+assert.strictEqual(
+  proseHasCloneRepo("why", "Clone repository: acme/widgets."),
+  true,
+  "proseHasCloneRepo sees DoD stamp",
+);
+assert.strictEqual(
+  stampCloneIntoIntent("Ship it.", "honr-app/honr"),
+  "Clone repository: honr-app/honr. Ship it.",
+  "stampCloneIntoIntent prefixes clone line",
+);
+
+const createTaskFormHtml = renderToString(
+  React.createElement(CreateTaskForm, {
+    parentId: 100,
+    projectIntent:
+      "Clone repository: honr-app/honr into /sandbox/repo for planning.",
+    siblings: [
+      { id: 9, title: "Sibling A" },
+      { id: 10, title: "Sibling B" },
+    ],
+    collapsible: false,
+    onCreated: () => {},
+  }),
+);
+assert(createTaskFormHtml.includes('data-testid="create-task-form"'),
+  "Create Task form root testid");
+assert(createTaskFormHtml.includes('data-testid="create-task-title"'),
+  "Create Task form title field");
+assert(createTaskFormHtml.includes('data-testid="create-task-intent"'),
+  "Create Task form intent field");
+assert(createTaskFormHtml.includes('data-testid="create-task-dod"'),
+  "Create Task form definition of done field");
+assert(createTaskFormHtml.includes('data-testid="create-task-clone-repo"'),
+  "Create Task form clone_repo field");
+assert(createTaskFormHtml.includes('data-testid="create-task-submit"'),
+  "Create Task form submit control");
+assert(createTaskFormHtml.includes('data-testid="create-task-blockers"'),
+  "Create Task form exposes optional blockers when siblings exist");
+assert(createTaskFormHtml.includes('data-testid="create-task-blocker-add"'),
+  "Create Task form can add a sibling blocker");
+assert(createTaskFormHtml.includes("honr-app/honr"),
+  "Create Task form surfaces Project default clone");
+assert(
+  /clone_repo[\s\S]*owner\/name/.test(createTaskFormHtml),
+  "Create Task form labels clone_repo as owner/name",
+);
+
+const createTaskNoDefaultHtml = renderToString(
+  React.createElement(CreateTaskForm, {
+    parentId: 100,
+    projectIntent: "A Project with no clone stamp",
+    collapsible: false,
+    onCreated: () => {},
+  }),
+);
+{
+  const cloneIdx = createTaskNoDefaultHtml.indexOf(
+    'data-testid="create-task-clone-repo"',
+  );
+  assert(cloneIdx >= 0, "clone_repo input present without Project default");
+  const tagStart = createTaskNoDefaultHtml.lastIndexOf("<input", cloneIdx);
+  const tagEnd = createTaskNoDefaultHtml.indexOf(">", cloneIdx);
+  const cloneInputTag = createTaskNoDefaultHtml.slice(tagStart, tagEnd + 1);
+  assert(
+    /\srequired(?:[\s>=]|=\"\")/.test(cloneInputTag) ||
+      cloneInputTag.includes("required"),
+    "Create Task requires clone_repo when Project has no default",
   );
 }
 
@@ -2082,6 +2189,21 @@ assert(boardSrc.includes("<CreateProjectForm initiallyOpen"),
   "Empty Welcome board opens Create Project form");
 assert(boardSrc.includes("<CreateProjectForm collapsible"),
   "Populated board exposes collapsible Create Project");
+assert(boardSrc.includes("CreateTaskForm"),
+  "Board mounts Create Task form on Project lanes");
+assert(boardSrc.includes("lane-create-task"),
+  "Create Task sits in Project swimlane body");
+{
+  const emptyIdx = boardSrc.indexOf('data-testid="board-empty"');
+  const emptyBlock = boardSrc.slice(
+    Math.max(0, emptyIdx - 200),
+    emptyIdx + 400,
+  );
+  assert(
+    !emptyBlock.includes("CreateTaskForm"),
+    "Create Task must not live in the empty Welcome path",
+  );
+}
 
 const createProjectFormSrc = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "src/components/CreateProjectForm.tsx"),
@@ -2100,6 +2222,19 @@ assert(
   "Create Project form keeps clone_repo required (source)",
 );
 
+const createTaskFormSrc = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "src/components/CreateTaskForm.tsx"),
+  "utf8",
+);
+assert(createTaskFormSrc.includes("api.createTask"),
+  "Create Task form uses api.createTask");
+assert(createTaskFormSrc.includes("definition_of_done"),
+  "Create Task form sends definition_of_done");
+assert(createTaskFormSrc.includes("blocked_by"),
+  "Create Task form supports optional blocked_by");
+assert(createTaskFormSrc.includes("stampCloneIntoIntent"),
+  "Create Task stamps Project default clone into intent when omitted");
+
 const apiSrc = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "src/api.ts"),
   "utf8",
@@ -2110,6 +2245,21 @@ assert(apiSrc.includes("createProject:"),
   "api.ts has typed createProject helper");
 assert(apiSrc.includes("clone_repo:"),
   "api.createProject requires clone_repo");
+assert(apiSrc.includes("createTask:"),
+  "api.ts has typed createTask helper");
+assert(apiSrc.includes("definition_of_done: body.definition_of_done"),
+  "api.createTask posts definition_of_done");
+assert(apiSrc.includes("parent: body.parent"),
+  "api.createTask posts parent Project id");
+
+const detailSrc = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "src/components/Detail.tsx"),
+  "utf8",
+);
+assert(detailSrc.includes("CreateTaskForm"),
+  "Detail drawer mounts Create Task on Projects");
+assert(detailSrc.includes('title="Create Task"') || detailSrc.includes("Create Task"),
+  "Detail exposes Create Task section on Projects");
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
