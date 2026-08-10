@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { Card } from "./Card.js";
+import { CreateProjectForm } from "./CreateProjectForm.js";
 import { DependencyGraph } from "./DependencyGraph.js";
 import { OperatorGuide } from "./OperatorGuide.js";
 import { OpenShellReadinessStrip } from "./OpenShellReadiness.js";
@@ -118,6 +119,11 @@ export function Board(props: BoardProps) {
     });
   }, [sortedGoals, filterState, props.items]);
 
+  const afterCreate = (item: WorkItem) => {
+    props.onChanged?.();
+    props.onOpen(item.id);
+  };
+
   if (!activeGoals.length && !(showArchived && archivedGoals.length)) {
     return (
       <div className="board-page">
@@ -141,6 +147,7 @@ export function Board(props: BoardProps) {
               </button>
             </p>
           )}
+          <CreateProjectForm initiallyOpen onCreated={afterCreate} />
           <OpenShellReadinessStrip />
           <OperatorGuide />
         </div>
@@ -154,6 +161,9 @@ export function Board(props: BoardProps) {
 
   return (
     <div className="board-page">
+      <div className="board-create-row">
+        <CreateProjectForm collapsible onCreated={afterCreate} />
+      </div>
       <div className="board-filter">
         <input
           type="text"
