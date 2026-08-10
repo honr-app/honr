@@ -1,0 +1,38 @@
+# OpenShell provider type for in-cluster kube/OpenShift API access.
+# Honr seals KUBE_TOKEN; the sandbox proxy rewrites Bearer on MITM
+# (protocol: rest) to kubernetes.default.svc. The sandbox image must trust the
+# cluster's kube-apiserver-service-network-signer CA or MITM upstream fails.
+id: microshift-api
+display_name: MicroShift / OCP API
+description: ServiceAccount token as KUBE_TOKEN (Bearer rewrite to kubernetes.default.svc)
+category: agent
+credentials:
+  - name: kube_token
+    description: ServiceAccount bearer token for the cluster API
+    env_vars:
+      - KUBE_TOKEN
+    required: true
+    auth_style: bearer
+    header_name: authorization
+    query_param: ""
+discovery:
+  credentials:
+    - kube_token
+endpoints:
+  - host: kubernetes.default.svc
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: kubernetes.default.svc.cluster.local
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /opt/openshift/oc
+  - /opt/openshift/kubectl
+  - /usr/local/bin/oc
+  - /usr/local/bin/kubectl
+  - /usr/bin/curl
+inference_capable: false

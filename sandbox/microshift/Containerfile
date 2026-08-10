@@ -1,0 +1,55 @@
+# Microshift/OCP operator sandbox: cursor base + oc/kubectl.
+#
+# OpenShell MITM (credential rewrite) verifies upstream TLS with webpki-roots
+# plus the image system CA store. The kube API presents a cluster-private CA
+# (kube-apiserver-service-network-signer), so that CA must be in the image
+# trust store — otherwise CONNECT succeeds and the proxy resets (NET:FAIL).
+#
+#   podman build -f sandbox/microshift/Containerfile -t quay.io/honr-app/sandbox-microshift:latest .
+
+FROM quay.io/honr-app/sandbox-cursor:latest
+
+USER root
+
+ARG OCP_CLIENT_VERSION=stable-4.18
+
+# Cluster API trust (service-network signer). Refresh when the cluster CA rotates.
+COPY sandbox/microshift/kube-apiserver-service-network-signer.crt \
+     /etc/pki/ca-trust/source/anchors/kube-apiserver-service-network-signer.crt
+
+RUN update-ca-trust extract \
+ && mkdir -p /etc/ssl/certs \
+ && ln -sfn /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+      /etc/ssl/certs/ca-certificates.crt
+
+# Real clients under /opt; thin PATH wrappers pass server + sealed KUBE_TOKEN
+# (OpenShell rewrites Bearer on protocol:rest to kubernetes.default.svc).
+RUN mkdir -p /opt/openshift \
+ && curl -fsSL \
+      "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OCP_CLIENT_VERSION}/openshift-client-linux.tar.gz" \
+      | tar -xz -C /opt/openshift oc kubectl \
+ && chmod 755 /opt/openshift/oc /opt/openshift/kubectl \
+ && printf '%s\n' \
+'#!/bin/sh' \
+'server="${KUBE_SERVER:-https://kubernetes.default.svc}"' \
+'if [ -z "${KUBE_TOKEN:-}" ]; then' \
+'  echo "honr-oc: KUBE_TOKEN unset — attach the microshift-api provider" >&2' \
+'  exit 1' \
+'fi' \
+'exec /opt/openshift/oc --server="$server" --token="$KUBE_TOKEN" --insecure-skip-tls-verify=true "$@"' \
+      > /usr/local/bin/oc \
+ && printf '%s\n' \
+'#!/bin/sh' \
+'server="${KUBE_SERVER:-https://kubernetes.default.svc}"' \
+'if [ -z "${KUBE_TOKEN:-}" ]; then' \
+'  echo "honr-kubectl: KUBE_TOKEN unset — attach the microshift-api provider" >&2' \
+'  exit 1' \
+'fi' \
+'exec /opt/openshift/kubectl --server="$server" --token="$KUBE_TOKEN" --insecure-skip-tls-verify=true "$@"' \
+      > /usr/local/bin/kubectl \
+ && chmod 755 /usr/local/bin/oc /usr/local/bin/kubectl \
+ && /opt/openshift/oc version --client \
+ && /opt/openshift/kubectl version --client
+
+USER sandbox
+WORKDIR /sandbox
