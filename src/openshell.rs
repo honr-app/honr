@@ -1430,14 +1430,19 @@ impl OpenShell {
             parent = shell_single_quote(parent),
             base = shell_single_quote(base)
         );
-        let out = self.exec(name, &script, self.default_timeout).await?;
-        if !out.ok() {
+        // Raw bytes — never route tar through Output.stdout (UTF-8 lossy).
+        // USTAR headers contain NULs; from_utf8_lossy replaces them and the
+        // archive checksum fails ("archive header checksum mismatch").
+        let (code, stdout, stderr) = self
+            .exec_capture(name, &script, Vec::new(), self.default_timeout)
+            .await?;
+        if code != 0 {
             return Err(Error::Failed {
                 op: "sandbox download".into(),
-                message: out.stderr.trim().to_string(),
+                message: String::from_utf8_lossy(&stderr).trim().to_string(),
             });
         }
-        extract_download_tar(out.stdout.as_bytes(), dest, base)?;
+        extract_download_tar(&stdout, dest, base)?;
         Ok(())
     }
 
@@ -1489,6 +1494,25 @@ impl OpenShell {
         stdin: Vec<u8>,
         timeout: Duration,
     ) -> Result<Output> {
+        let (code, stdout, stderr) = self.exec_capture(name, script, stdin, timeout).await?;
+        Ok(Output {
+            code,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
+    }
+
+    /// Like [`Self::exec`], but keep stdout/stderr as raw bytes.
+    ///
+    /// Required for `download` (USTAR over the wire). Text paths may keep using
+    /// [`Output`] — lossy UTF-8 is fine for logs and shell probes.
+    async fn exec_capture(
+        &self,
+        name: &str,
+        script: &str,
+        stdin: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(i32, Vec<u8>, Vec<u8>)> {
         #[cfg(test)]
         if let Some(mock) = &self.mock {
             let _ = &stdin;
@@ -1505,7 +1529,8 @@ impl OpenShell {
                 "-lc".into(),
                 script.into(),
             ];
-            return Ok(mock(&args));
+            let out = mock(&args);
+            return Ok((out.code, out.stdout.into_bytes(), out.stderr.into_bytes()));
         }
 
         let remote = timeout.as_secs().saturating_sub(5).max(1);
@@ -1542,11 +1567,7 @@ impl OpenShell {
                 })?;
                 apply_exec_event(ev, &mut stdout, &mut stderr, &mut code);
             }
-            Ok(Output {
-                code,
-                stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
-            })
+            Ok((code, stdout, stderr))
         })
         .await
     }
@@ -2458,6 +2479,73 @@ mod tests {
         let st = os.gateway_status().await;
         assert!(st.healthy, "status={st:?}");
         os.list().await.expect("sandbox list");
+    }
+}
+
+#[cfg(test)]
+mod download_tar_tests {
+    use super::*;
+
+    fn sample_ustar(contents: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut ar = tar::Builder::new(&mut buf);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("plan.json").unwrap();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            ar.append(&header, contents).unwrap();
+            ar.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn extract_download_tar_round_trips_ustar_bytes() {
+        let payload = b"{\"summary\":\"ok\",\"tasks\":[]}\n";
+        let tar = sample_ustar(payload);
+        let dir = std::env::temp_dir().join(format!(
+            "honr-download-tar-ok-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("out.json");
+        extract_download_tar(&tar, dest.to_str().unwrap(), "plan.json").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Guards the download path: GNU `tar cf` writes binary uid/mtime (high
+    /// bit set). `String::from_utf8_lossy` replaces those bytes and the archive
+    /// checksum fails — the bug that sent Initial plan cards back to Backlog.
+    #[test]
+    fn utf8_lossy_corrupts_gnu_tar_binary_header_fields() {
+        let mut tar = sample_ustar(b"{\"x\":1}");
+        // Mimic GNU tar binary header fields (see ustar mode with high bit).
+        assert!(tar.len() > 120);
+        tar[108] = 0x80;
+        tar[109] = 0x9e;
+        let lossy = String::from_utf8_lossy(&tar).into_owned().into_bytes();
+        assert_ne!(tar, lossy, "lossy UTF-8 must change the byte stream");
+        let dir = std::env::temp_dir().join(format!(
+            "honr-download-tar-bad-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("out.json");
+        let err = extract_download_tar(&lossy, dest.to_str().unwrap(), "plan.json")
+            .expect_err("corrupted ustar must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("checksum")
+                || msg.contains("Io")
+                || msg.to_lowercase().contains("tar"),
+            "expected checksum/io failure, got: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
