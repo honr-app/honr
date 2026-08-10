@@ -1391,6 +1391,81 @@ impl Board {
         Ok(self.get(item.id).unwrap_or(item))
     }
 
+    /// Create a flat Task under an existing Project, ready for dispatch (Backlog).
+    ///
+    /// Parent must be a Project (nesting under a Task is refused). Origin is
+    /// Human. Transitions Draft → Shaping → Backlog like `materialize_proposal`.
+    /// When intent/DoD omit an explicit `Clone repository:` line, stamps the
+    /// Project default from Project intent — never invents an owner/name.
+    /// Optional `blocked_by` ItemIds are applied via `set_blocked_by`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_task(
+        &self,
+        parent: ItemId,
+        title: impl Into<String>,
+        intent: impl Into<String>,
+        definition_of_done: impl Into<String>,
+        blocked_by: Vec<ItemId>,
+        capability: Option<String>,
+        above_line: bool,
+    ) -> Result<WorkItem, String> {
+        let project = self
+            .get(parent)
+            .ok_or_else(|| format!("no parent #{parent}"))?;
+        if !project.is_project() {
+            return Err(
+                "tasks are flat under a Project; cannot nest under another task".into(),
+            );
+        }
+
+        let dod_raw = definition_of_done.into();
+        let dod = dod_raw.trim();
+        if dod.is_empty() {
+            return Err(
+                "definition_of_done is required so the Task can enter Backlog".into(),
+            );
+        }
+        let definition_of_done = dod.to_string();
+
+        let intent_raw = intent.into();
+        let has_clone = crate::schema::clone_repo_from_prose(&intent_raw).is_some()
+            || crate::schema::clone_repo_from_prose(&definition_of_done).is_some();
+        let intent = if has_clone {
+            intent_raw
+        } else if let Some(clone) = crate::schema::clone_repo_from_prose(&project.intent) {
+            let stamp = format!("Clone repository: {clone}.");
+            let trimmed = intent_raw.trim();
+            if trimmed.is_empty() {
+                stamp
+            } else {
+                format!("{stamp} {trimmed}")
+            }
+        } else {
+            // No Project default — leave prose alone; Remotes escalate when unnamed.
+            intent_raw
+        };
+
+        let item = self.create(
+            Some(parent),
+            title,
+            intent,
+            Some(definition_of_done),
+            Origin::Human,
+            above_line,
+            capability,
+        )?;
+        self.transition(item.id, State::Shaping, "human", Some("create task".into()))
+            .map_err(|e| e.to_string())?;
+        let item = self
+            .transition(item.id, State::Backlog, "human", Some("create task".into()))
+            .map_err(|e| e.to_string())?;
+
+        if !blocked_by.is_empty() {
+            self.set_blocked_by(item.id, blocked_by);
+        }
+        Ok(self.get(item.id).unwrap_or(item))
+    }
+
     /// Seed the Project's claimable Initial plan Task (idempotent).
     ///
     /// Clone target comes from Project intent prose (`Clone repository: …`).
@@ -7710,6 +7785,122 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.contains("flat under a Project"), "got error: {err}");
+    }
+
+    #[test]
+    fn create_task_lands_in_backlog_stamps_clone_and_applies_blockers() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-create-task-{}-{}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        );
+        let project = b
+            .create_project("Proj", "Ship it", "honr-app/honr", true, None)
+            .expect("project");
+
+        let blocker = b
+            .create_task(
+                project.id,
+                "First",
+                "Clone repository: other/repo. Do first.",
+                "first done",
+                vec![],
+                None,
+                false,
+            )
+            .expect("blocker");
+        assert_eq!(blocker.state, State::Backlog);
+        assert!(matches!(blocker.origin, Origin::Human));
+        assert!(
+            blocker.intent.contains("Clone repository: other/repo"),
+            "explicit clone must not be overwritten: {}",
+            blocker.intent
+        );
+
+        let blocked = b
+            .create_task(
+                project.id,
+                "Second",
+                "Do second after first",
+                "second done",
+                vec![blocker.id],
+                None,
+                false,
+            )
+            .expect("blocked");
+        assert_eq!(blocked.state, State::Backlog);
+        assert_eq!(blocked.blocked_by, vec![blocker.id]);
+        assert!(
+            blocked.intent.contains("Clone repository: honr-app/honr"),
+            "Project default must stamp when omitted: {}",
+            blocked.intent
+        );
+
+        let nest_err = b
+            .create_task(
+                blocker.id,
+                "Nested",
+                "no",
+                "done",
+                vec![],
+                None,
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            nest_err.contains("flat under a Project"),
+            "got error: {nest_err}"
+        );
+
+        let dod_err = b
+            .create_task(project.id, "No DoD", "intent", "  ", vec![], None, false)
+            .unwrap_err();
+        assert!(
+            dod_err.contains("definition_of_done"),
+            "got error: {dod_err}"
+        );
+    }
+
+    #[test]
+    fn create_task_without_project_clone_leaves_prose_unstamped() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-create-task-no-clone-{}-{}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        );
+        // Bare create — no Clone repository line on the Project.
+        let project = b
+            .create(None, "No Repo Proj", "why", None, Origin::Human, true, None)
+            .expect("project");
+        let task = b
+            .create_task(
+                project.id,
+                "Ad hoc",
+                "Ship without naming a repo",
+                "done",
+                vec![],
+                None,
+                false,
+            )
+            .expect("task");
+        assert_eq!(task.state, State::Backlog);
+        assert!(
+            crate::schema::clone_repo_from_prose(&task.intent).is_none(),
+            "must not invent a clone target: {}",
+            task.intent
+        );
     }
 
     #[test]
