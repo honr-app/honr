@@ -148,7 +148,7 @@ export function Board(props: BoardProps) {
               </button>
             </p>
           )}
-          <CreateProjectForm initiallyOpen onCreated={afterCreate} />
+          <CreateProjectForm collapsible onCreated={afterCreate} />
           <OpenShellReadinessStrip />
           <OperatorGuide />
         </div>

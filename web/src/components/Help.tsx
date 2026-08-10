@@ -1,22 +1,25 @@
+import { OpenShellReadinessStrip } from "./OpenShellReadiness.js";
 import { OperatorGuide } from "./OperatorGuide.js";
 
 /**
- * Help surface — same OperatorGuide content as empty-state onboarding.
- * Hero chrome stays here; Quickstart + MCP (and OpenShell setup) live in
- * OperatorGuide.
+ * Help surface — Welcome hero + OpenShell readiness + OperatorGuide
+ * (Create Project stays on the Board).
  */
 export function Help() {
   return (
     <div className="help-page" data-testid="help-page">
       <header className="board-hero">
-        <h1>Operator help</h1>
+        <h1>Welcome to honr</h1>
         <p className="board-lede">
-          First Project loop, then connect MCP if you want to drive the board
-          from a client. Name the clone target in each Task&apos;s intent/DoD.
+          Create a Project, approve its plan, then dispatch work. Setup steps
+          are below.
         </p>
       </header>
 
-      <OperatorGuide />
+      <div className="board-empty" data-testid="help-welcome">
+        <OpenShellReadinessStrip />
+        <OperatorGuide />
+      </div>
     </div>
   );
 }

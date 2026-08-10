@@ -799,6 +799,13 @@ assert.equal(cockpitChatGate(runningSession).canSend, true);
 
 const helpHtml = renderToString(React.createElement(Help));
 assert(helpHtml.includes("data-testid=\"help-page\""), "Help view should render");
+assert(helpHtml.includes("Welcome to honr"), "Help uses Welcome hero");
+assert(helpHtml.includes('data-testid="help-welcome"'), "Help wraps welcome stack");
+assert(!helpHtml.includes('data-testid="create-project"'), "Help must not expose Create Project");
+assert(!helpHtml.includes('data-testid="create-project-form"'), "Help must not show Create Project form");
+assert(helpHtml.includes("data-testid=\"openshell-readiness\""), "Help shows OpenShell readiness strip");
+assert(helpHtml.includes("data-testid=\"openshell-readiness-gateway\""), "Help readiness: gateway row");
+assert(helpHtml.includes("data-testid=\"openshell-readiness-sandbox\""), "Help readiness: sandbox row");
 assert(helpHtml.includes("data-testid=\"operator-guide\""), "Help embeds OperatorGuide");
 assert(helpHtml.includes("data-testid=\"operator-guide-quickstart\""), "Help shows OperatorGuide Quickstart");
 assert(helpHtml.includes("data-testid=\"operator-guide-mcp\""), "Help shows OperatorGuide MCP section");
@@ -817,6 +824,14 @@ assert(!helpHtml.includes("127.0.0.1:8080"), "Help must not hardcode loopback:80
 assert(helpHtml.includes("Streamable HTTP"), "Help should name Streamable HTTP transport");
 assert(helpHtml.includes("Quickstart"), "Help includes Quickstart");
 assert(helpHtml.includes("Connect MCP"), "Help includes Connect MCP");
+{
+  const readyIdx = helpHtml.indexOf('data-testid="openshell-readiness"');
+  const guideIdx = helpHtml.indexOf('data-testid="operator-guide"');
+  assert(
+    readyIdx >= 0 && guideIdx > readyIdx,
+    "Help orders OpenShell readiness before OperatorGuide",
+  );
+}
 // Help surface order: Quickstart pillar before MCP pillar.
 {
   const helpQuickstartIdx = helpHtml.indexOf("data-testid=\"operator-guide-quickstart\"");
@@ -1846,12 +1861,12 @@ assert(emptyBoardHtml.includes("Create a Project, approve its plan"),
   "Welcome lede stays consistent with on-board create");
 assert(emptyBoardHtml.includes('data-testid="create-project"'),
   "Empty board exposes Create Project root");
-assert(emptyBoardHtml.includes('data-testid="create-project-form"'),
-  "Empty board opens Create Project form");
-assert(emptyBoardHtml.includes('data-testid="create-project-clone-repo"'),
-  "Empty board Create Project form has clone_repo field");
-assert(emptyBoardHtml.includes("owner/name"),
-  "Empty board Create Project labels clone_repo as owner/name");
+assert(emptyBoardHtml.includes('data-testid="create-project-open"'),
+  "Empty board shows Create Project open control (form collapsed)");
+assert(!emptyBoardHtml.includes('data-testid="create-project-form"'),
+  "Empty board keeps Create Project form collapsed until opened");
+assert(emptyBoardHtml.includes("Create Project"),
+  "Empty board Create Project affordance copy");
 assert(!emptyBoardHtml.includes('data-testid="create-task"'),
   "Empty Welcome board must not expose Create Task");
 assert(!emptyBoardHtml.includes('data-testid="create-task-form"'),
@@ -2197,10 +2212,10 @@ assert(boardSrc.includes("api.unarchive"),
   "Board Unarchive should call api.unarchive");
 assert(boardSrc.includes("CreateProjectForm"),
   "Board mounts Create Project form");
-assert(boardSrc.includes("<CreateProjectForm initiallyOpen"),
-  "Empty Welcome board opens Create Project form");
 assert(boardSrc.includes("<CreateProjectForm collapsible"),
-  "Populated board exposes collapsible Create Project");
+  "Create Project is collapsible (closed until opened)");
+assert(!boardSrc.includes("<CreateProjectForm initiallyOpen"),
+  "Welcome board does not force Create Project open");
 assert(boardSrc.includes("CreateTaskForm"),
   "Board mounts Create Task form on Project lanes");
 assert(boardSrc.includes("lane-create-task"),

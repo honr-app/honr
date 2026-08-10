@@ -203,7 +203,9 @@ export function CreateTaskForm({
             />
           </label>
           <label>
-            clone_repo (<code>owner/name</code>)
+            <span>
+              clone_repo (<code>owner/name</code>)
+            </span>
             <input
               className="search-input"
               value={cloneRepo}

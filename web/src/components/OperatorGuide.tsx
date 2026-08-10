@@ -35,8 +35,8 @@ export function OperatorGuide() {
           data-testid="operator-guide-quickstart-steps"
         >
           <li>
-            Create a Project with required <code>clone_repo</code> (
-            <code>owner/name</code>) — on the board or via{" "}
+            Create a Project with required <code>clone_repo</code> as{" "}
+            <code>owner/name</code> — on the board or via{" "}
             <code>create_project</code>. That creates an{" "}
             <strong>Initial plan</strong> task for that repo.
           </li>

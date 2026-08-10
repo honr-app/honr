@@ -72,8 +72,8 @@ export function CreateProjectForm({
         >
           <h3>Create Project</h3>
           <p className="dim create-project-lede">
-            New Projects need a <code>clone_repo</code> (
-            <code>owner/name</code>) — the Initial plan clones that repo.
+            New Projects need a <code>clone_repo</code> as{" "}
+            <code>owner/name</code> — the Initial plan clones that repo.
           </p>
           {error && (
             <div className="err" data-testid="create-project-error">
@@ -104,7 +104,10 @@ export function CreateProjectForm({
             />
           </label>
           <label>
-            clone_repo (<code>owner/name</code>)
+            {/* Span keeps caption one flex item — bare text+code stacks in column labels. */}
+            <span>
+              clone_repo (<code>owner/name</code>)
+            </span>
             <input
               className="search-input"
               value={cloneRepo}
