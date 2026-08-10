@@ -36,6 +36,7 @@ of them is the same.
 |---|---|
 | **Dispatch** / **Start** | Marks a Backlog card as wanting to run. The supervisor picks it up on the next tick. |
 | **Auto mode** | Per-Project. Queues every claimable Backlog leaf automatically. Does not approve, answer Needs You, or unpark. |
+| **Create Task** / `create_task` | Add a flat Backlog Task under an existing Project (board UI or MCP) without re-running Initial plan. Parent must be a Project. Each Task names its clone target in intent/DoD. Not the same as Approve. |
 | **Approve** | On a proposal, creates the sibling Tasks. On a Review card, surfaces the PR. Does not merge. A GitHub PR `APPROVED` review does not Approve in honr. |
 | **Request changes** | Sends a Review card back with a note that reaches the next run's briefing. Does not restart it. Submitted GitHub `CHANGES_REQUESTED` / `COMMENT` reviews take the same Board path (pointer steer → Backlog); see [Workflow](workflow.md#pr-review-feedback). |
 | **Steer** | A soft note stored for the next claim. Does not interrupt a running turn. |

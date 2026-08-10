@@ -51,6 +51,11 @@ agent would fill in.
 Move it around. Nothing will claim it, nothing will spend money, and you cannot
 break anything that a restart does not fix.
 
+Once the Project has cards, **Create Task** on the swimlane or Detail drawer
+(or MCP `create_task`) adds another Backlog card under that Project without
+re-running Initial plan. Name the clone target in intent/DoD. See
+[Workflow](workflow.md#adding-tasks-to-an-existing-project).
+
 ## 4. Connect a chat client (optional)
 
 You can drive the board from Cursor or Claude Code over MCP instead of the UI.

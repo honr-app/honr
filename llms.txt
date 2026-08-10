@@ -20,8 +20,9 @@ the API the same way a human pastes into the UI.
   silence as failure.
 - honr does not read the host keychain or OpenShell files on disk. You (or the
   human) supply PEMs and secrets over the API; the board seals them.
-- `/mcp` is for operators (Projects, triage, dispatch, park, steer, approve).
-  Worker verbs (`claim`, `heartbeat`, `report`, …) are supervisor-only.
+- `/mcp` is for operators (Projects, create_task, triage, dispatch, park,
+  steer, approve). Worker verbs (`claim`, `heartbeat`, `report`, …) are
+  supervisor-only.
 - Dispatch spends real money and opens PRs. Confirm with the human before the
   first Project loop.
 
@@ -166,6 +167,12 @@ Only after Connectivity, Providers, and a default sandbox spec are ready.
 4. Human (or operator with approval): Approve — creates sibling Tasks. Does not merge.
 5. Dispatch one Task; it opens a PR and lands in Review.
 6. Human merges on GitHub; card moves to Done.
+
+After a Project exists, add more Backlog Tasks without re-running Initial plan:
+board **Create Task**, or MCP `create_task` (parent = Project id). Each Task
+must name its clone target (`owner/name`) in intent/DoD (Project default is
+stamped when prose omits it). Approve still only materializes proposals and
+never merges.
 
 Steer / park / answer escalation / request changes as needed. Prefer park over
 halt when a run is wedged (park keeps sandbox + session).

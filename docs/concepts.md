@@ -29,6 +29,11 @@ and proposes the breakdown; you edit and Approve; the proposal becomes real
 cards. Same path when a card turns out too big — the agent proposes siblings
 and you approve those.
 
+Operators can also add Backlog Tasks directly under an existing Project — board
+**Create Task** or MCP `create_task` — without re-running Initial plan. Each
+Task must name its clone target (`owner/name`) in intent/DoD. Approve still
+only materializes proposals and never merges.
+
 ## Operator and worker
 
 Three roles, different reach:

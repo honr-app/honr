@@ -804,6 +804,8 @@ assert(helpHtml.includes("data-testid=\"operator-guide-quickstart\""), "Help sho
 assert(helpHtml.includes("data-testid=\"operator-guide-mcp\""), "Help shows OperatorGuide MCP section");
 assert(helpHtml.includes("data-testid=\"operator-guide-openshell\""), "Help shows OperatorGuide OpenShell section");
 assert(helpHtml.includes("create_project"), "Help should document create_project");
+assert(helpHtml.includes("create_task"), "Help should document create_task");
+assert(helpHtml.includes("Create Task"), "Help should name board Create Task");
 assert(helpHtml.includes("clone_repo"), "Help should document clone_repo");
 assert(helpHtml.includes("owner/name"), "Help labels clone_repo as owner/name");
 assert(helpHtml.includes("on the board"), "Help mentions on-board Create Project");
@@ -846,6 +848,16 @@ assert(guideHtml.includes("on the board"), "OperatorGuide mentions on-board Crea
 assert(guideHtml.includes("plan.json"), "OperatorGuide documents plan.json");
 assert(guideHtml.includes("Approve"), "OperatorGuide documents Approve");
 assert(guideHtml.includes("idle"), "OperatorGuide notes agents stay idle until dispatch");
+assert(
+  guideHtml.includes('data-testid="operator-guide-create-task-note"'),
+  "OperatorGuide documents ad-hoc Create Task on existing Projects",
+);
+assert(guideHtml.includes("create_task"), "OperatorGuide documents MCP create_task");
+assert(guideHtml.includes("Create Task"), "OperatorGuide names board Create Task");
+assert(
+  guideHtml.includes("never merges") || guideHtml.includes("never merge"),
+  "OperatorGuide keeps Approve ≠ merge for create-Task path",
+);
 assert(guideHtml.includes("claude mcp add"), "OperatorGuide has Claude mcp add example");
 assert(guideHtml.includes("mcp.json"), "OperatorGuide has Cursor mcp.json example");
 assert(guideHtml.includes("OpenShell + sandbox"), "OperatorGuide OpenShell section title");

@@ -58,6 +58,13 @@ export function OperatorGuide() {
           Agents stay idle until you dispatch. Name the repo to clone in each
           Task&apos;s intent/DoD.
         </p>
+        <p className="dim" data-testid="operator-guide-create-task-note">
+          After a Project exists, add Backlog Tasks with board{" "}
+          <strong>Create Task</strong> or MCP <code>create_task</code> — no need
+          to re-run Initial plan. Each Task must name its clone target in
+          intent/DoD. <strong>Approve</strong> still only materializes proposals
+          and never merges.
+        </p>
       </section>
 
       <section
@@ -67,8 +74,9 @@ export function OperatorGuide() {
       >
         <h2 id="operator-guide-mcp-title">Connect MCP</h2>
         <p className="dim">
-          Drive the board from an MCP client: create Projects, triage, dispatch,
-          park, steer, and approve. Start honr before adding the server.
+          Drive the board from an MCP client: create Projects, create Tasks
+          under a Project (<code>create_task</code>), triage, dispatch, park,
+          steer, and approve. Start honr before adding the server.
         </p>
         <ol className="operator-guide-steps" data-testid="operator-guide-mcp-steps">
           <li>
