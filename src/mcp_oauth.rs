@@ -952,7 +952,9 @@ async fn authorize_post(
             url.push_str("&state=");
             url.push_str(&urlencoding_encode(state));
         }
-        return Redirect::temporary(&url).into_response();
+        // 303 after POST so the browser GETs the loopback callback (Cursor
+        // only accepts GET; 307 would replay POST → Method Not Allowed).
+        return Redirect::to(&url).into_response();
     }
 
     let code = random_token();
@@ -975,7 +977,7 @@ async fn authorize_post(
         url.push_str("&state=");
         url.push_str(&urlencoding_encode(state));
     }
-    Redirect::temporary(&url).into_response()
+    Redirect::to(&url).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1479,7 +1481,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(authz.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(authz.status(), StatusCode::SEE_OTHER);
         let loc = authz
             .headers()
             .get(header::LOCATION)
