@@ -122,6 +122,25 @@ export const api = {
       intent: body.intent,
       clone_repo: body.clone_repo,
     }),
+  /**
+   * Create a Task under a Project. Server requires `definition_of_done`,
+   * refuses non-Project parents, stamps Project clone into intent when prose
+   * omits it, applies optional `blocked_by`, and lands the card in Backlog.
+   */
+  createTask: (body: {
+    parent: number;
+    title: string;
+    intent: string;
+    definition_of_done: string;
+    blocked_by?: number[];
+  }): Promise<WorkItem> =>
+    post("/items", {
+      parent: body.parent,
+      title: body.title,
+      intent: body.intent,
+      definition_of_done: body.definition_of_done,
+      blocked_by: body.blocked_by ?? [],
+    }),
   // The human verbs. Each costs the system something different.
   steer: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/steer`, { text }),

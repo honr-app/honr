@@ -267,6 +267,10 @@ function AuthedApp({
                     navigateChrome({ view: "board", cardId: null })
                   }
                   onChanged={b.refresh}
+                  onOpen={(id) =>
+                    navigateChrome({ view: "board", cardId: id })
+                  }
+                  items={b.items}
                   defaultEngine={b.defaultEngine}
                   defaultModel={b.defaultModel}
                 />

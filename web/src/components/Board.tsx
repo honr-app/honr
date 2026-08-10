@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { Card } from "./Card.js";
 import { CreateProjectForm } from "./CreateProjectForm.js";
+import { CreateTaskForm } from "./CreateTaskForm.js";
 import { DependencyGraph } from "./DependencyGraph.js";
 import { OperatorGuide } from "./OperatorGuide.js";
 import { OpenShellReadinessStrip } from "./OpenShellReadiness.js";
@@ -415,6 +416,15 @@ function Swimlane({
     return true;
   });
 
+  const siblingOptions = [...p.items.values()]
+    .filter(
+      (i) =>
+        i.parent === goal.id &&
+        i.level !== "Project" &&
+        i.state !== "retired",
+    )
+    .map((i) => ({ id: i.id, title: i.title }));
+
   useEffect(() => {
     if (filterState !== "all" && mine.length > 0 && !open) onOpenChange(true);
   }, [filterState, mine.length, open, onOpenChange]);
@@ -676,31 +686,52 @@ function Swimlane({
                   ))}
               </div>
             )
-          ) : viewMode === "graph" ? (
-            <DependencyGraph items={mine} onOpen={p.onOpen} />
           ) : (
-            <div
-              className={`columns cols-${BOARD_COLUMNS.length}`}
-              style={{ ["--board-cols" as string]: String(BOARD_COLUMNS.length) }}
-            >
-              {BOARD_COLUMNS.map((col) => {
-                const cards = mine
-                  .filter((i) => COLUMN_OF[normState(i.state)] === col.key)
-                  .sort(sortFor(col.key));
-                const summary = goal.columns.find((c) => c.column === col.key)?.summary;
-                return (
-                  <ColumnEl
-                    key={col.key}
-                    label={col.label}
-                    question={col.question}
-                    colKey={col.key}
-                    cards={cards}
-                    summary={summary?.text ?? ""}
-                    {...p}
-                  />
-                );
-              })}
-            </div>
+            <>
+              <div className="lane-create-task">
+                <CreateTaskForm
+                  parentId={goal.id}
+                  projectIntent={
+                    p.items.get(goal.id)?.intent ?? goal.intent
+                  }
+                  siblings={siblingOptions}
+                  onCreated={(item) => {
+                    p.onChanged?.();
+                    p.onOpen(item.id);
+                  }}
+                />
+              </div>
+              {viewMode === "graph" ? (
+                <DependencyGraph items={mine} onOpen={p.onOpen} />
+              ) : (
+                <div
+                  className={`columns cols-${BOARD_COLUMNS.length}`}
+                  style={{
+                    ["--board-cols" as string]: String(BOARD_COLUMNS.length),
+                  }}
+                >
+                  {BOARD_COLUMNS.map((col) => {
+                    const cards = mine
+                      .filter((i) => COLUMN_OF[normState(i.state)] === col.key)
+                      .sort(sortFor(col.key));
+                    const summary = goal.columns.find(
+                      (c) => c.column === col.key,
+                    )?.summary;
+                    return (
+                      <ColumnEl
+                        key={col.key}
+                        label={col.label}
+                        question={col.question}
+                        colKey={col.key}
+                        cards={cards}
+                        summary={summary?.text ?? ""}
+                        {...p}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

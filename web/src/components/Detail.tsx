@@ -3,6 +3,7 @@ import { api, since } from "../api.js";
 import type { BoardEvent, PlanTaskSpec, SandboxProfile, WorkItem } from "../types.js";
 import { cardPrUrl } from "../types.js";
 import { subscribeBoardEvents } from "../useBoard.js";
+import { CreateTaskForm } from "./CreateTaskForm.js";
 import { ProjectSandboxPicker } from "./Settings.js";
 
 interface Detail extends WorkItem {
@@ -517,6 +518,8 @@ export function DetailDrawer({
   defaultModel,
   onClose,
   onChanged,
+  onOpen,
+  items,
 }: {
   id: number;
   now: number;
@@ -524,6 +527,10 @@ export function DetailDrawer({
   defaultModel?: string;
   onClose: () => void;
   onChanged: () => void;
+  /** Open another card after create (e.g. new Task). */
+  onOpen?: (id: number) => void;
+  /** Board items — sibling Tasks for Create Task blockers. */
+  items?: Map<number, WorkItem>;
 }) {
   const [d, setD] = useState<Detail | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1202,6 +1209,27 @@ export function DetailDrawer({
               </div>
             </div>
           </Section>
+
+          {d.state !== "retired" && (
+            <Section title="Create Task">
+              <CreateTaskForm
+                parentId={d.id}
+                projectIntent={editIntent || d.intent}
+                siblings={[...(items?.values() ?? [])]
+                  .filter(
+                    (i) =>
+                      i.parent === d.id &&
+                      i.level !== "Project" &&
+                      i.state !== "retired",
+                  )
+                  .map((i) => ({ id: i.id, title: i.title }))}
+                onCreated={(item) => {
+                  onChanged();
+                  onOpen?.(item.id);
+                }}
+              />
+            </Section>
+          )}
 
           <Section title="Project prompt">
             <p className="dim" style={{ marginBottom: 8 }}>

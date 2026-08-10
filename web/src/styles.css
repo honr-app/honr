@@ -1261,6 +1261,43 @@ a.button-link:hover {
   margin-top: 4px;
 }
 
+.create-task {
+  width: 100%;
+  max-width: 520px;
+}
+.lane-create-task {
+  margin-bottom: 12px;
+}
+.create-task-form {
+  margin-top: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.create-task-lede {
+  margin: 0;
+  line-height: 1.45;
+}
+.create-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.create-task-blockers-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
+  margin-bottom: 4px;
+}
+.create-task-blocker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 .openshell-readiness {
   max-width: 640px;
   padding: 14px 16px;
