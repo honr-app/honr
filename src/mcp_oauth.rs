@@ -180,16 +180,12 @@ fn random_token() -> String {
 /// Public origin for OAuth redirect_uri / metadata issuer.
 ///
 /// Prefer the origin the browser actually used (Vite/Tailscale/proxy), not the
-/// backend bind address. Never invents `127.0.0.1:8080` — callers that need a
-/// URL must send Host / Origin / X-Forwarded-* (or set `HONR_PUBLIC_URL`).
+/// backend bind address and not a process-wide `HONR_PUBLIC_URL` override.
+/// MCP client OAuth (Atlassian, etc.) must bounce back to the tab that started
+/// login — env public URL is only a fallback when the request has no Host /
+/// Origin / X-Forwarded-* (or when those are empty).
+/// Never invents `127.0.0.1:8080`.
 pub fn public_origin(headers: &HeaderMap) -> String {
-    if let Some(base) = std::env::var("HONR_PUBLIC_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return base;
-    }
     let proto = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -222,15 +218,19 @@ pub fn public_origin(headers: &HeaderMap) -> String {
             }
         }
     }
-    let Some(host) = headers
+    if let Some(host) = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    else {
-        return String::new();
-    };
-    format!("{proto}://{host}")
+    {
+        return format!("{proto}://{host}");
+    }
+    std::env::var("HONR_PUBLIC_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
 }
 
 fn canonical_resource(origin: &str) -> String {
@@ -1255,8 +1255,39 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "localhost:9090".parse().unwrap());
         assert_eq!(public_origin(&headers), "http://localhost:9090");
+    }
 
-        assert!(public_origin(&HeaderMap::new()).is_empty());
+    /// Guards MCP client OAuth (Atlassian, etc.): a process-wide public URL
+    /// must not steal redirect_uri away from the tab that started login.
+    #[test]
+    fn public_origin_prefers_browser_over_honr_public_url_env() {
+        let prev = std::env::var("HONR_PUBLIC_URL").ok();
+        // SAFETY: test-only; serial enough for this crate's unit tests.
+        unsafe {
+            std::env::set_var("HONR_PUBLIC_URL", "https://honr.example.ts.net");
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "https://tot.example:5173".parse().unwrap());
+        headers.insert(header::HOST, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(public_origin(&headers), "https://tot.example:5173");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-host", "tot.example:5173".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert_eq!(public_origin(&headers), "https://tot.example:5173");
+
+        assert_eq!(
+            public_origin(&HeaderMap::new()),
+            "https://honr.example.ts.net"
+        );
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("HONR_PUBLIC_URL", v),
+                None => std::env::remove_var("HONR_PUBLIC_URL"),
+            }
+        }
     }
 
     #[test]
