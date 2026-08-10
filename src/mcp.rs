@@ -1178,6 +1178,90 @@ impl ServerHandler for Operator {
     }
 }
 
+/// Hosts rmcp's DNS-rebinding guard will accept on `/mcp`.
+///
+/// Loopback + docker defaults, plus the authority from `HONR_PUBLIC_URL` /
+/// `~/.config/honr/public_url` (Tailscale Serve / reverse proxy) and any
+/// comma-separated `HONR_MCP_ALLOWED_HOSTS`.
+fn mcp_allowed_hosts() -> Vec<String> {
+    let mut hosts = vec![
+        "localhost".into(),
+        "127.0.0.1".into(),
+        "::1".into(),
+        "host.docker.internal".into(),
+        "host.docker.internal:8080".into(),
+    ];
+    if let Some(auth) = configured_public_url().as_deref().and_then(authority_from_public_url) {
+        // Entry without port matches any port; with port matches exactly.
+        if let Some((host, _)) = split_host_port(&auth) {
+            if !hosts.iter().any(|h| h == host) {
+                hosts.push(host.to_string());
+            }
+        }
+        if !hosts.iter().any(|h| h == &auth) {
+            hosts.push(auth);
+        }
+    }
+    if let Ok(extra) = std::env::var("HONR_MCP_ALLOWED_HOSTS") {
+        for part in extra.split(',') {
+            let h = part.trim();
+            if h.is_empty() || hosts.iter().any(|e| e == h) {
+                continue;
+            }
+            hosts.push(h.to_string());
+        }
+    }
+    hosts
+}
+
+fn configured_public_url() -> Option<String> {
+    if let Some(base) = std::env::var("HONR_PUBLIC_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(base);
+    }
+    let path = dirs_public_url_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let base = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))?
+        .trim_end_matches('/')
+        .to_string();
+    (!base.is_empty()).then_some(base)
+}
+
+fn dirs_public_url_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    Some(std::path::PathBuf::from(home).join(".config/honr/public_url"))
+}
+
+fn authority_from_public_url(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return None;
+    }
+    let uri: axum::http::Uri = url.parse().ok()?;
+    uri.authority().map(|a| a.as_str().to_string())
+}
+
+fn split_host_port(authority: &str) -> Option<(&str, Option<&str>)> {
+    if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        let host = &authority[..=end];
+        let port = authority.get(end + 1..).and_then(|rest| rest.strip_prefix(':'));
+        return Some((host, port.filter(|p| !p.is_empty())));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+            Some((host, Some(port)))
+        }
+        _ => Some((authority, None)),
+    }
+}
+
 /// Mounted on the same axum router, same port, same state as the human face.
 ///
 /// `/mcp` is the **operator seat** (operator tools only). Stateless on purpose:
@@ -1188,16 +1272,11 @@ pub fn service(board: SharedBoard) -> StreamableHttpService<Operator, NeverSessi
     // rmcp defaults to localhost/127.0.0.1/::1 only (DNS-rebinding guard).
     // Cockpit's shipped honr MCP is stdio now (no HTTP hop at all); this
     // allowlist only matters for other HTTP MCP clients reaching /mcp
-    // directly (host Cursor, worker sandboxes on host.docker.internal).
+    // directly (host Cursor, worker sandboxes on host.docker.internal,
+    // remote Cursor via Tailscale Serve — set HONR_PUBLIC_URL).
     let mcp_http = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
-        .with_allowed_hosts([
-            "localhost",
-            "127.0.0.1",
-            "::1",
-            "host.docker.internal",
-            "host.docker.internal:8080",
-        ]);
+        .with_allowed_hosts(mcp_allowed_hosts());
     StreamableHttpService::new(
         move || Ok(Operator::new(board.clone())),
         Arc::new(NeverSessionManager::default()),
@@ -1339,6 +1418,25 @@ mod tests {
     use crate::model::{Column, Origin};
     use crate::schema::Schema;
     use crate::store::Board;
+
+    #[test]
+    fn authority_from_public_url_strips_scheme_and_path() {
+        assert_eq!(
+            authority_from_public_url("https://tot.example.ts.net:8080/mcp"),
+            Some("tot.example.ts.net:8080".into())
+        );
+        assert_eq!(
+            authority_from_public_url("http://localhost:5173/"),
+            Some("localhost:5173".into())
+        );
+    }
+
+    #[test]
+    fn split_host_port_handles_ipv6_and_bare_host() {
+        assert_eq!(split_host_port("tot.example:8080"), Some(("tot.example", Some("8080"))));
+        assert_eq!(split_host_port("tot.example"), Some(("tot.example", None)));
+        assert_eq!(split_host_port("[::1]:8080"), Some(("[::1]", Some("8080"))));
+    }
 
     fn test_board() -> (SharedBoard, ItemId) {
         let path = std::env::temp_dir().join(format!(
