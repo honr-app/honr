@@ -82,6 +82,12 @@ live on the board and are edited in **Settings → OpenShell → Sandbox specs**
 (REST: `/api/sandbox-profiles`). Upsert requires a known `policy_id`; you edit
 allow-list YAML under Policies, not on the spec.
 
+Four specs come seeded — `sandbox-cursor`, `sandbox-agy`, `sandbox-claude`,
+`sandbox-opencode` — one per split `quay.io/honr-app/sandbox-<engine>` image
+([Sandbox](sandbox.md#image-and-offline-gates)), each already wired to a
+matching minimal Cockpit policy with honr MCP attached. Editing a seeded row
+sticks; the seed only inserts what's missing.
+
 ### Which spec a card gets
 
 Resolution order is documented in [Sandbox](sandbox.md). Create-form defaults
@@ -91,8 +97,11 @@ needs.
 ### Cockpit
 
 Cockpit uses the global default sandbox spec unless you set an explicit Cockpit
-profile under Sandbox specs. That spec's `policy_id` is what the sandbox gets at
-create.
+profile under Sandbox specs. A fresh board seeds all four specs but picks none
+of them as default — that choice is an onboarding step (Welcome flags it red
+until you set one). Pick a seeded spec (or one you made) and click **Set
+default**, or **Use for Cockpit** to give Cockpit its own engine. That spec's
+`policy_id` is what the sandbox gets at create.
 
 ## OpenShell / Forge / GitHub App provider
 

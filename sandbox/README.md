@@ -20,36 +20,50 @@ them at create time.
 
 ## Cockpit network policy (board Policies)
 
-The **cockpit** sandbox uses the same catalog: a Policy for egress (inference
-and GitHub App `GH_TOKEN`) and a Sandbox spec that selects that policy. Host
-honr MCP is stdio over a local Unix socket (`nc -U`, see
-`src/cockpit_mcp_tunnel.rs`) — no network hop, so no policy entry for it.
-Package registries typically stay on the worker Policy.
-
-`sandbox/cockpit-policy.yaml` is a checked-in starting point for a full cockpit
-policy;
-paste or adapt it under Settings → OpenShell → Policies when that matches the
-install, then attach it from the cockpit Sandbox spec.
+The **cockpit** sandbox uses the same catalog. `src/seed_policies.rs` seeds one
+minimal Cockpit policy per engine (`cockpit-cursor`, `cockpit-agy`,
+`cockpit-claude`, `cockpit-opencode`) — inference/API egress for that engine
+plus GitHub App `GH_TOKEN` and crates.io/npm registry egress (a card's own
+`cargo build`/`npm ci` fetch live; there is no baked-in dependency cache) —
+matched to a seeded Sandbox spec (`sandbox-cursor`, …) that already selects
+it. Host honr MCP is stdio over a local Unix socket (`socat`, see
+`src/cockpit_mcp_tunnel.rs`) — no network hop, so no policy entry for it. Edit
+the live seeded Policy under Settings → OpenShell → Policies if these
+defaults don't match your install — a re-seed on the next boot never
+overwrites an edited row.
 
 ## `Containerfile`
 
-The base image has no Rust toolchain and the `sandbox` user has no sudo, so an agent cannot build
-or test honr out of the box. This adds `cargo`/`clippy`, pre-warms the npm cache, and
-**pre-compiles** the Rust dependency tree into `/opt/cargo-target` (with the crates.io
-registry under `/opt/cargo`), so a card doesn't pay a rustup install, a cold fetch, or a
-cold compile every run — and so crates.io never needs to be reachable from an agent sandbox.
+Builds honr's own minimal base — Red Hat UBI9, not the OpenShell community
+image — plus a Rust toolchain. Multi-stage: a `shared` stage installs OS
+packages (`git`, `nodejs`/`npm`, `gh`, `gcc`/`make`, `iproute`, `nftables`,
+`socat`) and `cargo`/`clippy`, then one leaf stage per agent engine (`cursor`,
+`agy`, `claude`, `opencode`) installs only that engine's CLI on top, so each
+resulting image only carries the binary it will actually run.
+
+The toolchain is baked in; honr's own source and dependency cache are not — a
+card's own `cargo build`/`npm ci` populate `/opt/cargo`, `/opt/cargo-target`,
+and `/opt/npm-cache` at runtime by fetching crates.io/npm live. Full rationale
+(including why UBI9 over the community image) in
+[`docs/sandbox.md`](../docs/sandbox.md#image).
 
 Build from the **repo root**, not this directory:
 
 ```bash
-docker build -f sandbox/Containerfile -t honr-sandbox:latest .
+podman build -f sandbox/Containerfile --target cursor -t quay.io/honr-app/sandbox-cursor:latest .
+# make sandbox builds all four; make sandbox-push also pushes them.
 ```
 
-Rebuild when `Cargo.lock`, `src/`, or `migrations/` change materially. Matching
-`/opt` entries (`/opt/cargo`, `/opt/cargo-target`, `/opt/npm-cache`, …) belong in
-the worker **board Policy** (and the embedded seed in `src/seed_policies.rs`).
-When the catalog already exists, add `/opt/cargo-target` to `read_write` under
-Policies after an image layout change.
+Rebuild when you need a newer engine CLI, OS package, or Rust toolchain
+version. Matching `/opt` entries belong in the worker **board Policy** (and
+the embedded seed in `src/seed_policies.rs`): `/opt/cargo`,
+`/opt/cargo-target`, `/opt/npm-cache` need **read-write** (populated live, not
+pre-baked); `/opt/rust` (plus that engine's own `/opt/cursor-agent` or
+`/opt/opencode`) stays **read-only**. `/opt/cargo/bin/cargo` is rustup's proxy
+binary and re-execs the real `cargo` under `/opt/rust/toolchains/<version>/bin`
+at runtime — a process exec, not a symlink OpenShell's literal binary matching
+can follow, so the toolchain path needs its own policy entry too (verified
+live: omitting it gets a 403 on crates.io even with the proxy path allowed).
 
 Claude / OpenCode auth goes through OpenShell `inference.local` (see
 [`docs/sandbox.md`](../docs/sandbox.md)) — no in-sandbox metadata shim.

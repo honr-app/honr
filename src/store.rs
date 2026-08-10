@@ -626,14 +626,19 @@ impl Board {
                 Err(e) => tracing::warn!("ignoring unreadable {path:?}: {e}"),
             }
         }
-        // Sandbox specs are operator-owned (Settings → Sandbox specs). Do not
-        // invent default/cockpit entries on boot.
+        // Operator-created sandbox specs are left alone. The four
+        // sandbox-<engine> rows below are the exception: shipped, one per
+        // split image, so Cockpit works before an operator writes anything.
         if board.ensure_minimal_policy() {
             tracing::info!("seeded minimal OpenShell policy");
             board.flush();
         }
         if board.ensure_shipped_mcp_servers() {
             tracing::info!("seeded shipped MCP servers");
+            board.flush();
+        }
+        if board.ensure_shipped_sandbox_profiles() {
+            tracing::info!("seeded shipped per-engine sandbox profiles");
             board.flush();
         }
         if board.ensure_cockpit_honr_mcp_attach() {
@@ -711,14 +716,19 @@ impl Board {
             board.dirty.store(true, Ordering::Relaxed);
             board.flush();
         }
-        // Sandbox specs are operator-owned (Settings → Sandbox specs). Do not
-        // invent default/cockpit entries on boot.
+        // Operator-created sandbox specs are left alone. The four
+        // sandbox-<engine> rows below are the exception: shipped, one per
+        // split image, so Cockpit works before an operator writes anything.
         if board.ensure_minimal_policy() {
             tracing::info!("seeded minimal OpenShell policy");
             board.flush();
         }
         if board.ensure_shipped_mcp_servers() {
             tracing::info!("seeded shipped MCP servers");
+            board.flush();
+        }
+        if board.ensure_shipped_sandbox_profiles() {
+            tracing::info!("seeded shipped per-engine sandbox profiles");
             board.flush();
         }
         if board.ensure_cockpit_honr_mcp_attach() {
@@ -3189,6 +3199,93 @@ impl Board {
         true
     }
 
+    /// Seed the four per-engine Cockpit policy rows (`cockpit-cursor`,
+    /// `cockpit-agy`, `cockpit-claude`, `cockpit-opencode`) matching the
+    /// split `sandbox-<engine>` images in `sandbox/Containerfile`. Insert
+    /// only — an operator who has already edited one of these ids keeps
+    /// their edit; this never overwrites.
+    fn ensure_shipped_cockpit_policies(&self) -> bool {
+        use crate::seed_policies::*;
+        let rows: [(&str, &str, &str); 4] = [
+            (COCKPIT_CURSOR_POLICY_ID, COCKPIT_CURSOR_POLICY_NAME, COCKPIT_CURSOR_POLICY),
+            (COCKPIT_AGY_POLICY_ID, COCKPIT_AGY_POLICY_NAME, COCKPIT_AGY_POLICY),
+            (COCKPIT_CLAUDE_POLICY_ID, COCKPIT_CLAUDE_POLICY_NAME, COCKPIT_CLAUDE_POLICY),
+            (COCKPIT_OPENCODE_POLICY_ID, COCKPIT_OPENCODE_POLICY_NAME, COCKPIT_OPENCODE_POLICY),
+        ];
+        let mut s = self.state.write();
+        let mut changed = false;
+        for (id, name, yaml) in rows {
+            if s.openshell_policies.contains_key(id) {
+                continue;
+            }
+            s.openshell_policies.insert(
+                id.into(),
+                OpenShellPolicy {
+                    id: id.into(),
+                    name: name.into(),
+                    yaml: yaml.into(),
+                },
+            );
+            changed = true;
+        }
+        drop(s);
+        if changed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        changed
+    }
+
+    /// Seed one `SandboxProfile` per split `sandbox-<engine>` image (cursor,
+    /// agy, claude, opencode) so Cockpit and card workers have something to
+    /// pick from without an operator having to hand-write a profile + policy
+    /// first. Insert only, by stable id — an operator-edited row (even one
+    /// that started `shipped`) is left alone. Deliberately does **not** pick
+    /// one as the default: which engine an operator wants is a real decision
+    /// (see the Welcome "Sandbox spec" readiness check), not something honr
+    /// should guess on a fresh board.
+    pub fn ensure_shipped_sandbox_profiles(&self) -> bool {
+        self.ensure_shipped_mcp_servers();
+        self.ensure_shipped_cockpit_policies();
+        use crate::seed_policies::*;
+        let rows: [(&str, &str, &str, &str, &str); 4] = [
+            ("sandbox-cursor", "Sandbox (cursor)", "quay.io/honr-app/sandbox-cursor:latest", COCKPIT_CURSOR_POLICY_ID, "cursor"),
+            ("sandbox-agy", "Sandbox (agy)", "quay.io/honr-app/sandbox-agy:latest", COCKPIT_AGY_POLICY_ID, "agy"),
+            ("sandbox-claude", "Sandbox (claude)", "quay.io/honr-app/sandbox-claude:latest", COCKPIT_CLAUDE_POLICY_ID, "claude"),
+            ("sandbox-opencode", "Sandbox (opencode)", "quay.io/honr-app/sandbox-opencode:latest", COCKPIT_OPENCODE_POLICY_ID, "opencode"),
+        ];
+        let mut s = self.state.write();
+        let mut changed = false;
+        for (id, name, image, policy_id, engine) in rows {
+            if s.sandbox_profiles.contains_key(id) {
+                continue;
+            }
+            s.sandbox_profiles.insert(
+                id.into(),
+                SandboxProfile {
+                    id: id.into(),
+                    name: name.into(),
+                    image: image.into(),
+                    policy_id: policy_id.into(),
+                    policy_inline_legacy: None,
+                    cpu: None,
+                    memory: None,
+                    engine: Some(engine.into()),
+                    provider_names: Vec::new(),
+                    mcp_server_ids: vec![HONR_MCP_SERVER_ID.into()],
+                    shipped: true,
+                },
+            );
+            changed = true;
+        }
+        // No auto-default here: an operator picks one via Settings → Sandbox
+        // specs (surfaced as a Welcome readiness check until they do).
+        drop(s);
+        if changed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        changed
+    }
+
     pub fn list_mcp_servers(&self) -> Vec<McpServerDesired> {
         self.ensure_shipped_mcp_servers();
         self.state.read().mcp_servers.values().cloned().collect()
@@ -3483,6 +3580,9 @@ impl Board {
             engine,
             provider_names,
             mcp_server_ids,
+            // Operator-authored path — shipped rows only come from
+            // `ensure_shipped_sandbox_profiles`.
+            shipped: false,
         };
         let first = s.sandbox_profiles.is_empty();
         s.sandbox_profiles.insert(stored.id.clone(), stored.clone());
@@ -10377,6 +10477,7 @@ mod tests {
             engine: Some("cursor".into()),
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .expect("upsert profile")
     }
@@ -11335,6 +11436,7 @@ mod tests {
                 engine: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            shipped: false,
             })
             .expect("upsert heavy");
         b.set_default_sandbox_profile(&heavy.id)
@@ -11410,6 +11512,7 @@ mod tests {
             engine: Some("cursor".into()),
             provider_names: vec!["vertex".into(), "missing".into()],
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .unwrap();
         assert_eq!(
@@ -11437,6 +11540,7 @@ mod tests {
             engine: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .unwrap();
 
@@ -11484,6 +11588,7 @@ mod tests {
             engine: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .unwrap();
         b.set_default_sandbox_profile("ci").unwrap();
@@ -11496,7 +11601,9 @@ mod tests {
 
         let restored = Board::load_or_new(Schema::default(), path.clone());
         assert_eq!(restored.default_sandbox_profile_id().as_deref(), Some("ci"));
-        assert_eq!(restored.list_sandbox_profiles().len(), 2);
+        // 2 operator profiles (default, ci) + 4 shipped sandbox-<engine> rows
+        // seeded on boot (ensure_shipped_sandbox_profiles).
+        assert_eq!(restored.list_sandbox_profiles().len(), 6);
         let p = restored.get(project.id).expect("project");
         assert_eq!(p.sandbox_profile_id.as_deref(), Some("default"));
         assert_eq!(
@@ -11579,6 +11686,7 @@ mod tests {
             engine: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -11598,6 +11706,7 @@ mod tests {
             engine: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .unwrap();
         b.set_project_sandbox_profile(project.id, Some("alt".into()))
@@ -11636,6 +11745,7 @@ mod tests {
             engine: Some("agy".into()),
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -11692,6 +11802,7 @@ mod tests {
             engine: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .unwrap();
         b.set_default_sandbox_profile("default").unwrap();
@@ -11732,6 +11843,7 @@ mod tests {
                 engine: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            shipped: false,
             })
             .expect("create from name");
         assert_eq!(created.id, "heavy-ci");
@@ -11750,6 +11862,7 @@ mod tests {
                 engine: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            shipped: false,
             })
             .expect("create colliding slug");
         assert_eq!(again.id, "default-2");
@@ -11767,6 +11880,7 @@ mod tests {
                 engine: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            shipped: false,
             })
             .expect("create punctuation name");
         assert_eq!(punct.id, "profile");
@@ -11807,6 +11921,7 @@ mod tests {
                     engine: None,
                     provider_names: Vec::new(),
                     mcp_server_ids: Vec::new(),
+            shipped: false,
                 },
             );
         }
@@ -11862,6 +11977,7 @@ mod tests {
             engine: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .expect("profile");
 
@@ -11957,6 +12073,7 @@ network_policies:
             engine: Some("cursor".into()),
             provider_names: Vec::new(),
             mcp_server_ids: vec!["cnv".into()],
+            shipped: false,
         })
         .expect("profile");
         let resolved = b.resolve_cockpit_sandbox_create();
@@ -11986,6 +12103,7 @@ network_policies:
             engine: Some("cursor".into()),
             provider_names: Vec::new(),
             mcp_server_ids: vec!["honr".into(), "cnv".into()],
+            shipped: false,
         })
         .expect("profile");
         let worker2 = b.resolve_sandbox_create(
@@ -12018,6 +12136,7 @@ network_policies:
             engine: Some("cursor".into()),
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         })
         .expect("profile");
         b.set_cockpit_sandbox_profile("cockpit").unwrap();
@@ -12053,6 +12172,7 @@ network_policies:
             engine: Some("cursor".into()),
             provider_names: Vec::new(),
             mcp_server_ids: vec!["honr".into()],
+            shipped: false,
         })
         .expect("profile");
         b.set_cockpit_sandbox_profile("cockpit").unwrap();
@@ -12068,6 +12188,7 @@ network_policies:
                 engine: Some("cursor".into()),
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            shipped: false,
             })
             .expect("upsert without honr");
         assert_eq!(
@@ -12100,6 +12221,49 @@ network_policies:
         assert_eq!(b.get_openshell_policy(id).unwrap().yaml, edited);
         let defaults = crate::model::sandbox_profile_create_defaults();
         assert_eq!(defaults.policy_id, id);
+    }
+
+    #[test]
+    fn ensure_shipped_sandbox_profiles_seeds_once_without_overwrite() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-shipped-sandbox-profiles-{}",
+                std::process::id()
+            )),
+        );
+        assert!(b.ensure_shipped_sandbox_profiles());
+        assert!(!b.ensure_shipped_sandbox_profiles());
+
+        for (id, engine, policy_id) in [
+            ("sandbox-cursor", "cursor", crate::seed_policies::COCKPIT_CURSOR_POLICY_ID),
+            ("sandbox-agy", "agy", crate::seed_policies::COCKPIT_AGY_POLICY_ID),
+            ("sandbox-claude", "claude", crate::seed_policies::COCKPIT_CLAUDE_POLICY_ID),
+            ("sandbox-opencode", "opencode", crate::seed_policies::COCKPIT_OPENCODE_POLICY_ID),
+        ] {
+            let p = b.get_sandbox_profile(id).unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(p.engine.as_deref(), Some(engine));
+            assert_eq!(p.policy_id, policy_id);
+            assert!(p.image.contains(&format!("sandbox-{engine}")), "{p:?}");
+            assert!(
+                p.mcp_server_ids.iter().any(|m| m == "honr"),
+                "cockpit MCP must be attached: {p:?}"
+            );
+            assert!(p.shipped, "{p:?}");
+            assert!(b.get_openshell_policy(policy_id).is_some(), "policy {policy_id}");
+        }
+        // Seeding never picks a default — that's an explicit operator choice.
+        assert!(b.default_sandbox_profile_id().is_none());
+
+        // Operator edit survives a re-seed: still keyed by id, ensure only inserts.
+        let mut edited = b.get_sandbox_profile("sandbox-cursor").unwrap();
+        edited.name = "My Cursor Box".into();
+        b.upsert_sandbox_profile(edited).unwrap();
+        assert!(!b.ensure_shipped_sandbox_profiles());
+        assert_eq!(
+            b.get_sandbox_profile("sandbox-cursor").unwrap().name,
+            "My Cursor Box"
+        );
     }
 
     #[test]

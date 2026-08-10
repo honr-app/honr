@@ -1549,6 +1549,7 @@ async fn upsert_sandbox_profile(
             engine: req.engine,
             provider_names: req.provider_names,
             mcp_server_ids: req.mcp_server_ids,
+            shipped: false,
         })
         .map_err(ApiError)?,
     ))

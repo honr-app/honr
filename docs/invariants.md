@@ -76,7 +76,9 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Both must be clean, and both run `--offline` inside a sandbox.
+Both must be clean. A card's sandbox has no pre-baked honr build cache —
+`cargo`/`npm` reach crates.io/npm live (see [Sandbox](sandbox.md#image)) — so
+`--offline` no longer applies there; `--locked` still does.
 
 Stage specific paths. `git add -A` has committed unintended local state here
 before.

@@ -57,7 +57,9 @@ shell quoting, config validation. Prefer a test that names the
 failure it prevents over one that names the function it calls.
 
 Before you finish: `cargo test` and `cargo clippy --all-targets -- -D warnings`
-must both be clean. Both run `--offline` inside a sandbox.
+must both be clean. A card's sandbox has no pre-baked honr build cache —
+`cargo`/`npm` reach crates.io/npm live — so `--offline` no longer applies
+there; `--locked` still does.
 
 Stage specific paths. `git add -A` has committed unintended local state here
 before.

@@ -6,7 +6,7 @@
 #   make dev-ui   Vite hot-reload on :5173 (proxies API to :8080)
 #   make test     cargo + web unit tests
 
-.PHONY: all build api release ui install-ui run dev dev-ui docs docs-serve test test-api test-ui clippy sandbox clean help
+.PHONY: all build api release ui install-ui run dev dev-ui docs docs-serve test test-api test-ui clippy sandbox sandbox-push clean help
 
 all: build
 
@@ -21,7 +21,8 @@ help:
 	@echo "  make dev-ui         Vite dev server (:5173 → :8080)"
 	@echo "  make docs           mdbook build → target/mdbook"
 	@echo "  make docs-serve     mdbook serve (http://localhost:3000)"
-	@echo "  make sandbox        Rebuild honr-sandbox:latest via podman (CONTAINER_ENGINE=docker to override)"
+	@echo "  make sandbox        Rebuild all sandbox-<engine> images via podman (CONTAINER_ENGINE=docker to override)"
+	@echo "  make sandbox-push   Build and push all sandbox-<engine> images to REGISTRY"
 	@echo "  make test           cargo nextest/test + web tests"
 	@echo "  make clippy         cargo clippy -D warnings"
 	@echo "  make clean          cargo clean + remove web/dist"
@@ -94,14 +95,30 @@ docs-serve:
 	}
 	mdbook serve
 
-# Rebuild when Cargo.lock / src / web/package-lock.json change. New sandboxes
-# pick this up via --from; existing ones keep the create-time image.
+# Rebuild when you need a newer engine CLI, OS package, or Rust toolchain
+# version — not when honr's own source changes, since no honr code or
+# dependency cache is baked in (cards fetch crates.io/npm live). New sandboxes
+# pick this up via --from; existing ones keep the create-time image. One
+# image per agent engine (sandbox/Containerfile is multi-stage) — each
+# sandbox-<engine> tag only carries that engine's CLI on top of the shared
+# UBI9 base + rust toolchain.
 # Default engine is podman (OpenShell's usual host driver). Override with
 # CONTAINER_ENGINE=docker when needed.
 CONTAINER_ENGINE ?= podman
+REGISTRY ?= quay.io/honr-app
+ENGINES := cursor agy claude opencode
 
 sandbox:
-	$(CONTAINER_ENGINE) build -f sandbox/Containerfile -t honr-sandbox:latest .
+	@for e in $(ENGINES); do \
+		echo "==> building $(REGISTRY)/sandbox-$$e:latest"; \
+		$(CONTAINER_ENGINE) build -f sandbox/Containerfile --target $$e -t $(REGISTRY)/sandbox-$$e:latest . || exit 1; \
+	done
+
+sandbox-push: sandbox
+	@for e in $(ENGINES); do \
+		echo "==> pushing $(REGISTRY)/sandbox-$$e:latest"; \
+		$(CONTAINER_ENGINE) push $(REGISTRY)/sandbox-$$e:latest || exit 1; \
+	done
 
 clean:
 	cargo clean
