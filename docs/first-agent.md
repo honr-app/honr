@@ -126,27 +126,35 @@ resources, engine, and providers live on the spec; YAML lives on the Policy.
 [Configuration](configuration.md#policies) covers the split; a running sandbox
 keeps the policy it was created with.
 
-Build or pull whatever your sandbox spec's image field names. For honr's own
-Rust toolchain image:
+A fresh board already has four seeded specs — `sandbox-cursor`,
+`sandbox-agy`, `sandbox-claude`, `sandbox-opencode` — each pointed at
+`quay.io/honr-app/sandbox-<engine>:latest` and a matching minimal Cockpit
+policy. None of them is the default yet — pick one (Welcome flags this until
+you do). Build and push those images yourself (or point the seeded specs at
+wherever you host them):
 
 ```bash
-make sandbox
-# or: podman build -f sandbox/Containerfile -t honr-sandbox:latest .
+make sandbox        # builds all four quay.io/honr-app/sandbox-<engine>:latest
+make sandbox-push   # builds, then pushes all four
 # Docker: CONTAINER_ENGINE=docker make sandbox
+# Different registry: REGISTRY=ghcr.io/you make sandbox
 ```
 
-From the **repo root**, not `sandbox/` — `Cargo.lock` and
-`web/package-lock.json` have to be in build context. The image pre-warms cargo
-and npm caches so crates.io never has to be reachable from a sandbox.
+From the **repo root**, not `sandbox/` — the Containerfile is multi-stage and
+`podman build -f sandbox/Containerfile` resolves relative to wherever you run
+it. Each image bakes a Rust toolchain but no honr source or dependency cache;
+a card's own `cargo build`/`npm ci` fetch crates.io/npm live, so the seeded
+Cockpit policies allow that egress (`src/seed_policies.rs`).
 
-Then confirm the board's **default** sandbox spec in
-**Settings → OpenShell → Sandbox specs** (Welcome/Help deep-links here), and
-that it references the Policy you intend. Specs live on the board;
-[Configuration](configuration.md#sandbox-specs) and [Sandbox](sandbox.md) cover
-resolution.
+Then set the board's **default** sandbox spec in
+**Settings → OpenShell → Sandbox specs** (Welcome/Help deep-links here) —
+either one of the four seeded rows or one you made. Nothing is default until
+you choose; the Welcome "Sandbox spec" readiness check stays red until then.
+Specs live on the board; [Configuration](configuration.md#sandbox-specs) and
+[Sandbox](sandbox.md) cover resolution.
 
-**Check:** `podman image ls | grep honr-sandbox`, and the default spec's image
-matches what you built.
+**Check:** `podman image ls | grep sandbox-`, and Welcome's "Sandbox spec"
+readiness check turns green.
 
 ## 5. Agent runtime (optional tune)
 

@@ -6003,6 +6003,7 @@ mod tests {
                 engine: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+                shipped: false,
             })
             .unwrap();
         board
@@ -6017,6 +6018,7 @@ mod tests {
                 engine: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+                shipped: false,
             })
             .unwrap();
         board.set_default_sandbox_profile("default").unwrap();

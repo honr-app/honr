@@ -1,77 +1,103 @@
-# honr agent sandbox = the OpenShell base image + a Rust toolchain + a warm
-# dependency cache.
+# honr agent sandbox = a minimal Red Hat UBI9 base + a Rust toolchain, split
+# into one build target per agent engine. No honr source or dependency cache
+# is baked in — cards fetch crates.io/npm live and build against their own
+# checkout, same as any other repo honr might dispatch work against.
 #
-# Why this exists: the base image ships node, git, gh and claude but no cargo,
-# so an agent cannot build or test honr. Installing rustup per card would cost
-# minutes of wall-clock and real Vertex spend on every run, and would require
-# opening three more egress destinations permanently. Baking it means
-# crates.io never has to be reachable from an agent sandbox at all.
+# Why our own base instead of the OpenShell community image: that image bakes
+# in every supported agent CLI (Claude, OpenCode via a bug-bloated npm package
+# with 4 redundant platform binaries, Copilot, Codex) plus a Python/uv/
+# cloudpickle "skills" venv honr never touches, regardless of which
+# engine-specific target you build — about 1.2GB of dead weight per image on
+# top of another ~950MB of Ubuntu convenience tooling (vim, nano, traceroute,
+# ping, openssh-sftp-server) this project doesn't use. OpenShell's own
+# documented minimum for a custom sandbox image is just iproute2 (required,
+# network namespace management) and nftables (optional, bypass detection) —
+# see examples/bring-your-own-container/Dockerfile in the OpenShell source.
+# Everything below that line is ours to choose. Bare `ubi9/ubi` plus exactly
+# what honr needs measures ~760MB versus the old base's 3.42GB.
 #
-# Build from the REPO ROOT, so Cargo.lock and web/package-lock.json are in context:
-#   docker build -f sandbox/Containerfile -t honr-sandbox:latest .
+# Why one image per engine: each sandbox only carries the CLI it will
+# actually run — no agy/opencode binaries sitting unused (and unaudited) in
+# a Cursor sandbox. `shared` holds everything engine-independent so all four
+# targets reuse the same cached layers; only the CLI install happens per
+# leaf stage, so a broken/changed installer script never invalidates the
+# shared layers below it.
+#
+# Why the toolchain is baked in but the dependency cache is not: reinstalling
+# rustup (and its components) fresh on every card would cost real wall-clock
+# and inference spend for zero benefit — nobody ever wants a different
+# toolchain build per run. A honr source snapshot and its compiled dependency
+# tree are the opposite: they go stale the moment a PR merges, so baking them
+# into a multi-GB image just means rebuilding and re-pushing that image on
+# every merge to keep pace. Cards build against crates.io/npm directly instead
+# — see the network policy note at the bottom.
+#
+# `make sandbox` builds all four `quay.io/honr-app/sandbox-<engine>:latest`;
+# `make sandbox-push` also pushes them. Or directly:
+#   podman build -f sandbox/Containerfile --target cursor -t quay.io/honr-app/sandbox-cursor:latest .
 #
 # Then pair it with the worker board-profile policy companion entries — see the
-# note at the bottom (and src/seed_policies.rs for the empty-catalog seed).
+# note at the bottom (and src/seed_policies.rs for the per-engine cockpit seed).
 
-FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
+FROM registry.access.redhat.com/ubi9/ubi:latest AS shared
 
 USER root
 
-# Cockpit MCP reaches the agent's stdio MCP client through `socat` on a
-# local Unix socket (cockpit_mcp_tunnel::AGENT_SOCK_PATH). Not `nc`: the
-# base image's OpenBSD-netcat build accepts a UDS connection fine but never
-# forwards bytes written to its stdin *after* accept out to the socket —
-# exactly the relay->client direction serve_server's responses need. Layer
-# lives after the warm caches below so re-running this apt-get does not
-# invalidate the expensive rustup/cargo/npm layers.
+# Matches the old community base's user setup — OpenShell's default policy
+# resolves `process.run_as_user`/`run_as_group` by name ("sandbox"), and each
+# leaf stage below switches to that user before the agent runs.
+RUN groupadd -r supervisor \
+ && useradd -r -g supervisor -s /usr/sbin/nologin supervisor \
+ && groupadd -r sandbox \
+ && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox
+
+# OS-level tools. `iproute` (network namespace management) and `nftables`
+# (bypass detection) are OpenShell's own documented minimum for a custom
+# sandbox image. `git`/`nodejs`/`npm`/`gh` are honr's own build and agent
+# requirements — `curl`/`ca-certificates` ship on `ubi9/ubi` by default.
+# `gcc`/`gcc-c++`/`make` exist so a card's own `cargo build` can compile: the
+# `ring` crate (via rustls/tonic's `tls-ring` feature) and sqlx's `sqlite`
+# feature both compile C/assembly. `procps-ng` and `socat` are agent runtime
+# conveniences (`ps`, and the Cockpit MCP UDS relay — see below).
+RUN dnf module enable nodejs:22 -y \
+ && dnf install -y --setopt=install_weak_deps=False \
+      git nodejs npm gcc gcc-c++ make \
+      iproute nftables socat procps-ng dnf-plugins-core \
+ && dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo \
+ && dnf install -y --setopt=install_weak_deps=False gh \
+ && dnf clean all
 
 # Match the host toolchain. Cargo.toml declares rust-version = "1.88", so this
 # only needs to be >= that; pinning keeps sandbox builds reproducible.
 ARG RUST_VERSION=1.97.1
 
 # Toolchain lives outside $HOME because /sandbox is the agent's writable
-# workdir and gets overlaid at runtime — anything installed there would vanish.
-# CARGO_TARGET_DIR is shared across agent checkouts under /sandbox/repo so
-# precompiled debug deps from the warm step are reused (GHA rust-cache analog).
+# workdir and gets overlaid at runtime — anything installed there would
+# vanish. $CARGO_HOME / $CARGO_TARGET_DIR / $NPM_CONFIG_CACHE live under /opt
+# too, so a card's own `cargo build` / `npm ci` populate them there instead of
+# under /sandbox — the same reasoning, not a pre-warmed cache (there is none).
 ENV RUSTUP_HOME=/opt/rust \
     CARGO_HOME=/opt/cargo \
     CARGO_TARGET_DIR=/opt/cargo-target \
     NPM_CONFIG_CACHE=/opt/npm-cache \
     PATH=/opt/cargo/bin:$PATH
 
+# `chmod` right here, in the same layer that creates these files — a later,
+# separate `RUN chmod -R` would force a full copy-up of the whole toolchain
+# into a new layer (permission bits differ, so overlayfs treats every file as
+# changed), roughly doubling the image size for a metadata-only fix.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --no-modify-path --profile minimal \
            --default-toolchain "${RUST_VERSION}" \
            --component clippy \
- && cargo --version && clippy-driver --version
+ && cargo --version && clippy-driver --version \
+ && chmod -R a+rX /opt/rust
 
-# Bake Google Antigravity CLI (agy) into the image alongside claude
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash \
- && (mv /root/.local/bin/agy /usr/local/bin/agy 2>/dev/null || cp ~/.local/bin/agy /usr/local/bin/agy 2>/dev/null || true) \
- && chmod 0755 /usr/local/bin/agy 2>/dev/null || true
-
-# Bake Cursor Agent CLI. Install lands under $HOME/.local; move under /opt so
-# the sandbox user's /sandbox HOME overlay does not hide it, and put a stable
-# /usr/local/bin/agent on the default PATH (exec env does not inherit image ENV).
-RUN curl -fsSL https://cursor.com/install | bash \
- && mkdir -p /opt/cursor-agent \
- && cp -a /root/.local/share/cursor-agent/. /opt/cursor-agent/ \
- && AGENT_BIN="$(find /opt/cursor-agent/versions -type f -name cursor-agent | sort | tail -1)" \
- && test -n "$AGENT_BIN" \
- && ln -sfn "$AGENT_BIN" /usr/local/bin/agent \
- && ln -sfn "$AGENT_BIN" /usr/local/bin/cursor-agent \
- && chmod -R a+rX /opt/cursor-agent \
- && /usr/local/bin/agent --version
-
-# Bake OpenCode CLI. Installer writes $HOME/.opencode/bin; relocate under /opt
-# and expose /usr/local/bin/opencode on the default PATH (same ENV caveat).
-RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
- && mkdir -p /opt/opencode \
- && cp -a /root/.opencode/. /opt/opencode/ \
- && test -x /opt/opencode/bin/opencode \
- && ln -sfn /opt/opencode/bin/opencode /usr/local/bin/opencode \
- && chmod -R a+rX /opt/opencode \
- && /usr/local/bin/opencode --version
+# $CARGO_HOME / $CARGO_TARGET_DIR / $NPM_CONFIG_CACHE start empty — a card's
+# own `cargo build` / `npm ci` populate them at runtime as the unprivileged
+# `sandbox` user, so they need to be writable from the start.
+RUN mkdir -p /opt/cargo /opt/cargo-target /opt/npm-cache \
+ && chmod -R a+rwX /opt/cargo /opt/cargo-target /opt/npm-cache
 
 # ---- rustup shims & environment --------------------------------------------
 
@@ -95,52 +121,87 @@ RUN for b in cargo rustc rustup clippy-driver cargo-clippy cargo-fmt rustfmt; do
  && printf 'export RUSTUP_HOME=/opt/rust\nexport CARGO_HOME=/opt/cargo\nexport CARGO_TARGET_DIR=/opt/cargo-target\nexport NPM_CONFIG_CACHE=/opt/npm-cache\nexport PATH=/opt/cargo/bin:$PATH\n' \
       > /etc/profile.d/rust.sh && chmod 0644 /etc/profile.d/rust.sh
 
-# ---- warm dependency caches ------------------------------------------------
-# Registry + precompiled debug target (GHA rust-cache analog). Without this
-# every card cold-fetches crates.io and recompiles the world (or hangs when
-# policy denies egress). Agents then `cargo build/test --offline --locked`
-# against CARGO_TARGET_DIR=/opt/cargo-target. Rebuild when Cargo.lock / src /
-# web/package-lock.json change materially.
-WORKDIR /tmp/honr-warm
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY migrations ./migrations
-# include_str!("../sandbox/openshell/antigravity.yaml") from src/
-COPY sandbox/openshell ./sandbox/openshell
-RUN cargo build --locked \
- && cargo test --no-run --locked \
- && rm -rf /tmp/honr-warm
+# Cockpit MCP reaches the agent's stdio MCP client through `socat` (installed
+# above) on a local Unix socket (cockpit_mcp_tunnel::AGENT_SOCK_PATH). Not
+# `nc`: OpenBSD-netcat builds accept a UDS connection fine but never forward
+# bytes written to their stdin *after* accept out to the socket — exactly the
+# relay->client direction serve_server's responses need.
 
-WORKDIR /tmp/honr-warm-web
-COPY web/package.json web/package-lock.json ./
-RUN npm ci --ignore-scripts \
- && rm -rf /tmp/honr-warm-web
+# ---- per-engine leaf stages -------------------------------------------------
+# Each installs only its own CLI, after the shared layers above — a
+# broken/changed installer script invalidates just that one target's image.
 
-# Cargo and npm both write to their caches during a build, so these must stay
-# group-writable for the unprivileged `sandbox` user. Re-chmod after the warm
-# steps above — build/ci create root-owned cache entries.
-RUN mkdir -p /opt/cargo /opt/cargo-target /opt/npm-cache \
- && chmod -R a+rX /opt/rust \
- && chmod -R a+rwX /opt/cargo /opt/cargo-target /opt/npm-cache
+FROM shared AS cursor
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends socat \
- && rm -rf /var/lib/apt/lists/*
+# Bake Cursor Agent CLI. Install lands under $HOME/.local; move under /opt so
+# the sandbox user's /sandbox HOME overlay does not hide it, and put a stable
+# /usr/local/bin/agent on the default PATH (exec env does not inherit image ENV).
+RUN curl -fsSL https://cursor.com/install | bash \
+ && mkdir -p /opt/cursor-agent \
+ && cp -a /root/.local/share/cursor-agent/. /opt/cursor-agent/ \
+ && AGENT_BIN="$(find /opt/cursor-agent/versions -type f -name cursor-agent | sort | tail -1)" \
+ && test -n "$AGENT_BIN" \
+ && ln -sfn "$AGENT_BIN" /usr/local/bin/agent \
+ && ln -sfn "$AGENT_BIN" /usr/local/bin/cursor-agent \
+ && chmod -R a+rX /opt/cursor-agent \
+ && /usr/local/bin/agent --version
+
+USER sandbox
+WORKDIR /sandbox
+
+FROM shared AS agy
+
+# Bake Google Antigravity CLI (agy).
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash \
+ && (mv /root/.local/bin/agy /usr/local/bin/agy 2>/dev/null || cp ~/.local/bin/agy /usr/local/bin/agy 2>/dev/null || true) \
+ && chmod 0755 /usr/local/bin/agy 2>/dev/null || true
+
+USER sandbox
+WORKDIR /sandbox
+
+FROM shared AS claude
+
+# Bake Claude Code CLI. The old community base shipped this for free; our own
+# minimal base does not, so every engine (including this one) installs only
+# what it needs, same as the other three leaf stages.
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+ && cp /root/.local/bin/claude /usr/local/bin/claude \
+ && chmod 755 /usr/local/bin/claude
+
+USER sandbox
+WORKDIR /sandbox
+
+FROM shared AS opencode
+
+# Bake OpenCode CLI. Installer writes $HOME/.opencode/bin; relocate under /opt
+# and expose /usr/local/bin/opencode on the default PATH (same ENV caveat).
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+ && mkdir -p /opt/opencode \
+ && cp -a /root/.opencode/. /opt/opencode/ \
+ && test -x /opt/opencode/bin/opencode \
+ && ln -sfn /opt/opencode/bin/opencode /usr/local/bin/opencode \
+ && chmod -R a+rX /opt/opencode \
+ && /usr/local/bin/opencode --version
 
 USER sandbox
 WORKDIR /sandbox
 
 # ---- board profile policy companion changes -------------------------------
 # OpenShell matches binary paths LITERALLY and does not follow the toolchain's
-# own symlinks, so the worker sandbox profile (Settings → default) needs, at minimum:
+# own symlinks, so each per-engine sandbox profile's policy needs, at minimum:
 #
-#   filesystem_policy.read_write:  add /opt/cargo, /opt/cargo-target, /opt/npm-cache
-#   filesystem_policy.read_only:   add /opt/rust
+#   filesystem_policy.read_write:  /opt/cargo, /opt/cargo-target, /opt/npm-cache
+#                                   (populated live — a card's own build, not
+#                                   a pre-baked cache, so these must be
+#                                   writable, not read-only)
+#   filesystem_policy.read_only:   /opt/rust (+ that engine's own /opt/<engine> path)
 #
-# and, only if you accept live dependency fetches rather than rebuilding this
-# image, a network policy allowing index.crates.io / static.crates.io /
-# registry.npmjs.org for /opt/cargo/bin/cargo and /usr/bin/npm. Leaving those
-# closed is the stronger default: a cache miss then fails loudly at build time
-# instead of silently widening what an agent can reach.
-# Live board profiles do not auto-pick up seed edits — paste /opt/cargo-target
-# into Settings → OpenShell → Profiles → default if the catalog already exists.
+# and a network policy allowing index.crates.io / static.crates.io /
+# registry.npmjs.org / github.com (the git dependency in Cargo.toml) for
+# /opt/cargo/bin/cargo, /usr/bin/npm, and /usr/bin/node. There is no warm
+# cache to fall back on, so denying this egress means every card's first
+# `cargo build`/`npm ci` simply fails.
+# src/seed_policies.rs seeds one minimal cockpit policy per engine
+# (cockpit-cursor, cockpit-agy, cockpit-claude, cockpit-opencode) matching
+# each split image's contents; edit the live Policy under Settings →
+# OpenShell → Policies if the catalog already exists.

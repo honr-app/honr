@@ -56,7 +56,7 @@ pasting anything into honr.
 |---|---|
 | Container engine the gateway can reach | `docker info` (or equivalent) succeeds |
 | OpenShell gateway up | `openshell status` → Connected + Authenticated |
-| Sandbox image named by your spec | e.g. `honr-sandbox:latest` built (`make sandbox` from repo root) |
+| Sandbox image named by your spec | e.g. `quay.io/honr-app/sandbox-cursor:latest` built (`make sandbox` from repo root) — four seeded specs already point at one image per engine, see below |
 
 `DOCKER_HOST` belongs to the gateway process, not to honr.
 
@@ -116,6 +116,18 @@ Check: `GET /api/openshell/providers` → expected names, `gateway_reachable: tr
 Policies are named OpenShell YAML allow-lists. Specs reference a policy by id
 (image / resources / engine / providers + `policy_id`).
 
+`GET /api/sandbox-profiles` already has four seeded rows on any board:
+`sandbox-cursor`, `sandbox-agy`, `sandbox-claude`, `sandbox-opencode`, each
+pointed at its own `quay.io/honr-app/sandbox-<engine>:latest` image and a
+matching minimal Cockpit policy (`cockpit-cursor`, …) with honr MCP already
+attached. None of them is the default — seeding never picks one, because
+which engine to run is the operator's call, not honr's guess. Set one with
+`POST /api/sandbox-profiles/{id}/default` (or the UI's **Set default**), and
+point Cockpit at a different one with `POST /api/sandbox-profiles/{id}/cockpit`
+(or **Use for Cockpit**) instead of building a spec from scratch — only create
+a new one when none of the four fit (a different image, provider set, or
+resource limits):
+
 - `POST /api/openshell/policies` with `id` (optional), `name`, `yaml`
 - `GET /api/openshell/policies` → catalog; `create_default_policy_id` is the
   seeded minimal row
@@ -126,9 +138,9 @@ Policies are named OpenShell YAML allow-lists. Specs reference a policy by id
 
 Create-form default policy is minimal (`network_policies: {}`). Add egress the
 work needs under Policies (Cursor hosts, GitHub, and for cockpit: host honr MCP
-with `protocol: mcp`). This repo’s checked-in starting point for a full cockpit
-policy is `sandbox/cockpit-policy.yaml` — use it only when that matches the
-human’s intent; do not silently assume every install wants it.
+with `protocol: mcp`) — or start from one of the four seeded Cockpit policies
+above and adapt it; do not silently assume every install wants the same
+allow-list.
 
 Attach only providers that exist. Missing attach names get pruned.
 

@@ -1175,6 +1175,7 @@ mod tests {
                 engine: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+                shipped: false,
             },
         );
         state.default_sandbox_profile_id = Some("default".into());

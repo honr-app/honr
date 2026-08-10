@@ -65,34 +65,60 @@ under `/sandbox/.honr`). Agents finish via `plan.json` / `report.json` /
 `escalate.json` / `split.json`. The board is the only tracker — sandboxes do
 not carry a separate issue-store CLI or database.
 
-## Image and offline gates
+## Image
 
-The community base image has no Rust toolchain and the `sandbox` user has no
-sudo. For honr itself, [`sandbox/Containerfile`](https://github.com/honr-app/honr/blob/main/sandbox/Containerfile) bakes
-`cargo` / `clippy`, Cursor Agent (`agent`), OpenCode (`opencode`), and pre-compiles
-the Rust dependency tree (plus npm `ci`) so crates.io never needs to be reachable
-from an agent sandbox. The warm step runs `cargo build --locked` and
-`cargo test --no-run --locked` into `CARGO_TARGET_DIR=/opt/cargo-target`; agents
-inherit that path and reuse the debug artifacts.
+[`sandbox/Containerfile`](https://github.com/honr-app/honr/blob/main/sandbox/Containerfile) builds honr's own base — a
+minimal Red Hat UBI9 image, not the OpenShell community image — plus a Rust
+toolchain, split into one build target per agent engine. A `shared` stage
+installs OS packages (`git`, `nodejs`/`npm`, `gh`, `gcc`/`make`, `iproute`,
+`nftables`, `socat`) and bakes `cargo`/`clippy`, then one leaf stage per agent
+engine (`cursor`, `agy`, `claude`, `opencode`) installs only that engine's CLI
+on top — a sandbox only ever carries the one binary it will actually run.
+
+The toolchain is baked in, but honr's own source and dependency tree are not.
+A card's own `cargo build`/`npm ci` populate `$CARGO_HOME` (`/opt/cargo`),
+`$CARGO_TARGET_DIR` (`/opt/cargo-target`), and `$NPM_CONFIG_CACHE`
+(`/opt/npm-cache`) at runtime by fetching crates.io/npm live — there is no
+pre-baked cache to go stale every time `Cargo.lock` or `src/` changes. This
+means the matching Policy has to allow that egress; see
+[Default vs Cockpit](#default-vs-cockpit) for the seeded per-engine policies.
+
+Why UBI9 instead of the OpenShell community image: that image bakes in every
+supported agent CLI, a Python/uv/cloudpickle skills venv, and Ubuntu
+convenience tooling honr never touches, regardless of which engine-specific
+target you build. OpenShell's own documented minimum for a custom sandbox
+image is just `iproute2` (required) and `nftables` (optional) — see
+`examples/bring-your-own-container/Dockerfile` in the OpenShell source.
+Building from `ubi9/ubi` plus exactly what honr needs cuts each image from
+~15GB (the community-base version) to under 2GB.
 
 ```bash
-# from the repo root; Cargo.lock, src/, migrations/, and web/package-lock.json in context
-make sandbox
-# or: podman build -f sandbox/Containerfile -t honr-sandbox:latest .
+# from the repo root
+make sandbox        # builds all four quay.io/honr-app/sandbox-<engine>:latest
+make sandbox-push   # builds, then pushes all four
+# or: podman build -f sandbox/Containerfile --target cursor -t quay.io/honr-app/sandbox-cursor:latest .
 # Docker: CONTAINER_ENGINE=docker make sandbox
+# Different registry: REGISTRY=ghcr.io/you make sandbox
 ```
 
-The image flag is `--from`, not `--image`. Rebuild when `Cargo.lock`, `src/`, or
-`migrations/` change materially, or when you need a newer Cursor/OpenCode CLI. Matching `/opt`
-entries (`/opt/cargo`, `/opt/cargo-target`, `/opt/npm-cache`, `/opt/opencode`, …)
-belong in the **board Policies** catalog (Settings → OpenShell → Policies). Specs
-only reference a policy by id. Create-form defaults select the seeded minimal
-policy (`src/seed_policies.rs`); add your `/opt` allow-list (including
-`/opt/cargo-target` on `read_write`) under Policies when you need the honr image
-layout.
+The image flag is `--from`, not `--image`. Rebuild when you need a newer
+engine CLI, OS package, or Rust toolchain version — not when honr's own source
+changes, since none of it is baked in. Matching `/opt` entries belong in the
+**board Policies** catalog (Settings → OpenShell → Policies):
+`/opt/cargo`, `/opt/cargo-target`, `/opt/npm-cache` need **read-write** (a
+card's build populates them, not the image), while `/opt/rust` (+ that
+engine's own `/opt/cursor-agent` or `/opt/opencode`) stays **read-only**.
+`src/seed_policies.rs` seeds one minimal Cockpit policy per engine matching
+each split image's contents, including the crates.io/npm/GitHub egress a
+build needs — see [Default vs Cockpit](#default-vs-cockpit).
 
-Pass `--offline` in gate commands so a cache miss fails loudly instead of
-hanging on a denied fetch.
+**Binary identity gotcha, verified live:** `/opt/cargo/bin/cargo` is rustup's
+proxy binary — it re-execs the real `cargo` under
+`/opt/rust/toolchains/<version>/bin/cargo` at runtime. That's a process exec,
+not a filesystem symlink, so OpenShell's literal binary-path matching needs
+its own entry for the toolchain path (a glob, since the version is baked into
+the directory name) or a card's first `cargo build` gets a 403 on crates.io
+even with the proxy path allowed.
 
 ## Operator-relevant gotchas
 
@@ -133,16 +159,20 @@ helper paths (e.g. `/usr/lib/git-core/git-remote-http`).
 
 ## Default vs Cockpit
 
-There is no separate seeded Cockpit profile. Create a Policy under
-**Settings → OpenShell → Policies**, then a sandbox spec under
-**Settings → OpenShell → Sandbox specs** that selects that policy (create-form
-defaults pick the seeded minimal policy). The first profile becomes the global
-default; Cockpit uses that default until you create another profile and click
-**Use for Cockpit**.
+Four sandbox specs come seeded — `sandbox-cursor`, `sandbox-agy`,
+`sandbox-claude`, `sandbox-opencode` — one per split image, each pointed at a
+matching minimal Cockpit policy (`cockpit-cursor`, …) with honr MCP already
+attached. Seeding never sets a default — which engine to run is your call, and
+a fresh board's Welcome page flags "Sandbox spec" as not ready until you make
+it. Pick one under **Settings → OpenShell → Sandbox specs** and click **Set
+default**; Cockpit inherits that default until you pick a different seeded row
+(or a profile you made) and click **Use for Cockpit**. These rows are inserts,
+not overwrites — editing one sticks; a re-seed on the next boot leaves your
+edit alone.
 
-Attach on create starts empty — add providers under **Providers**, then check
-them on the spec. Add honr MCP / package-registry / toolchain egress under
-**Policies** when you need it.
+Attach on create starts empty for a profile you make yourself — add providers
+under **Providers**, then check them on the spec. Add honr MCP /
+package-registry / toolchain egress under **Policies** when you need it.
 
 Cockpit MCP does **not** use `host.docker.internal` and does not cross the
 network at all. When the seat is Ready, honr keeps a board-owned

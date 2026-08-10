@@ -1037,6 +1037,10 @@ pub struct SandboxProfile {
     /// (profile ensure + resolve + inject) even when omitted here.
     #[serde(default)]
     pub mcp_server_ids: Vec<String>,
+    /// Seeded from the repo (one per split `sandbox-<engine>` image);
+    /// operators may edit. See `store::ensure_shipped_sandbox_profiles`.
+    #[serde(default)]
+    pub shipped: bool,
 }
 
 /// Create-form / last-resort knobs when the catalog has no matching profile.
@@ -1690,6 +1694,7 @@ mod tests {
             engine: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            shipped: false,
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("policy_id"));
