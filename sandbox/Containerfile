@@ -142,6 +142,10 @@ FROM shared AS cursor
 # /opt so the sandbox user's /sandbox HOME overlay does not hide it, and put a
 # stable /usr/local/bin/agent on the default PATH (exec env does not inherit
 # image ENV).
+# Install under HOME=/root, then move to /opt. Do NOT run `agent --version`
+# (or anything that writes config) with the image ENV HOME=/sandbox while still
+# root — that leaves /sandbox/.cursor root-owned and the sandbox user hits
+# EACCES creating projects/ at runtime.
 RUN HOME=/root curl -fsSL https://cursor.com/install | HOME=/root bash \
  && mkdir -p /opt/cursor-agent \
  && cp -a /root/.local/share/cursor-agent/. /opt/cursor-agent/ \
@@ -150,7 +154,10 @@ RUN HOME=/root curl -fsSL https://cursor.com/install | HOME=/root bash \
  && ln -sfn "$AGENT_BIN" /usr/local/bin/agent \
  && ln -sfn "$AGENT_BIN" /usr/local/bin/cursor-agent \
  && chmod -R a+rX /opt/cursor-agent \
- && /usr/local/bin/agent --version
+ && HOME=/tmp /usr/local/bin/agent --version \
+ && rm -rf /sandbox/.cursor /sandbox/.cache \
+ && mkdir -p /sandbox \
+ && chown -R sandbox:sandbox /sandbox
 
 USER sandbox
 WORKDIR /sandbox
