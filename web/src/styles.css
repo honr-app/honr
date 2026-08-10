@@ -1230,6 +1230,36 @@ a.button-link:hover {
 .board-empty-archived {
   margin: 0;
 }
+.board-create-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+}
+.create-project {
+  width: 100%;
+  max-width: 520px;
+}
+.board-empty .create-project {
+  max-width: 640px;
+}
+.create-project-form {
+  margin-top: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.create-project-lede {
+  margin: 0;
+  line-height: 1.45;
+}
+.create-project-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
 
 .openshell-readiness {
   max-width: 640px;

@@ -108,6 +108,20 @@ export const api = {
   detail: (id: number) => fetch(`/api/items/${id}`, fetchOpts).then(jsonOrThrow),
   logs: (id: number): Promise<{ agent: string[]; openshell: string[] }> =>
     fetch(`/api/items/${id}/logs`, fetchOpts).then(jsonOrThrow),
+  /**
+   * Create a Project (no parent). Server requires `clone_repo` as `owner/name`
+   * and seeds Initial plan — same path as MCP `create_project` / POST /api/items.
+   */
+  createProject: (body: {
+    title: string;
+    intent: string;
+    clone_repo: string;
+  }): Promise<WorkItem> =>
+    post("/items", {
+      title: body.title,
+      intent: body.intent,
+      clone_repo: body.clone_repo,
+    }),
   // The human verbs. Each costs the system something different.
   steer: (id: number, text: string): Promise<WorkItem> =>
     post(`/items/${id}/steer`, { text }),
