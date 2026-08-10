@@ -17,6 +17,7 @@ import {
   cockpitChatGate,
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
+import { CreateProjectForm } from "./dist-test/components/CreateProjectForm.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellPoliciesPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayReady, gatewayMtlsReady, sandboxSpecReady, sandboxHasNoProviders } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
@@ -307,6 +308,15 @@ assert(
   "Board Needs you should humanize clone failures",
 );
 assert(boardHtml.includes("Investigate the environment"), "Board should offer answer options");
+// Create Project entry on non-empty board (collapsible trigger; form closed).
+assert(boardHtml.includes('data-testid="create-project"'),
+  "Populated board exposes Create Project root");
+assert(boardHtml.includes('data-testid="create-project-open"'),
+  "Populated board shows Create Project open control");
+assert(boardHtml.includes("Create Project"),
+  "Populated board Create Project affordance copy");
+assert(!boardHtml.includes('data-testid="create-project-form"'),
+  "Populated board keeps Create Project form collapsed until opened");
 
 // Test 8: Detail Head renders Archive and Delete actions
 
@@ -776,6 +786,8 @@ assert(helpHtml.includes("data-testid=\"operator-guide-mcp\""), "Help shows Oper
 assert(helpHtml.includes("data-testid=\"operator-guide-openshell\""), "Help shows OperatorGuide OpenShell section");
 assert(helpHtml.includes("create_project"), "Help should document create_project");
 assert(helpHtml.includes("clone_repo"), "Help should document clone_repo");
+assert(helpHtml.includes("owner/name"), "Help labels clone_repo as owner/name");
+assert(helpHtml.includes("on the board"), "Help mentions on-board Create Project");
 assert(helpHtml.includes("plan.json"), "Help should document plan.json");
 assert(helpHtml.includes("Approve"), "Help should document Approve");
 assert(helpHtml.includes("dispatch"), "Help should document dispatch");
@@ -810,6 +822,8 @@ assert(!guideHtml.includes("127.0.0.1:8080"), "OperatorGuide must not hardcode l
 assert(guideHtml.includes("Streamable HTTP"), "OperatorGuide names Streamable HTTP transport");
 assert(guideHtml.includes("create_project"), "OperatorGuide documents create_project");
 assert(guideHtml.includes("clone_repo"), "OperatorGuide documents clone_repo");
+assert(guideHtml.includes("owner/name"), "OperatorGuide labels clone_repo as owner/name");
+assert(guideHtml.includes("on the board"), "OperatorGuide mentions on-board Create Project");
 assert(guideHtml.includes("plan.json"), "OperatorGuide documents plan.json");
 assert(guideHtml.includes("Approve"), "OperatorGuide documents Approve");
 assert(guideHtml.includes("idle"), "OperatorGuide notes agents stay idle until dispatch");
@@ -1797,11 +1811,23 @@ assert(emptyBoardHtml.includes("board-page") || emptyBoardHtml.includes("Welcome
   "Board view should still render Board");
 assert(emptyBoardHtml.includes("Welcome to honr"), "Board empty keeps Welcome hero");
 assert(emptyBoardHtml.includes("data-testid=\"board-empty\""), "Board empty shell testid");
+assert(emptyBoardHtml.includes("Create a Project, approve its plan"),
+  "Welcome lede stays consistent with on-board create");
+assert(emptyBoardHtml.includes('data-testid="create-project"'),
+  "Empty board exposes Create Project root");
+assert(emptyBoardHtml.includes('data-testid="create-project-form"'),
+  "Empty board opens Create Project form");
+assert(emptyBoardHtml.includes('data-testid="create-project-clone-repo"'),
+  "Empty board Create Project form has clone_repo field");
+assert(emptyBoardHtml.includes("owner/name"),
+  "Empty board Create Project labels clone_repo as owner/name");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide\""), "Board empty embeds OperatorGuide");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-quickstart\""), "Board empty shows Quickstart section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-mcp\""), "Board empty shows MCP section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-openshell\""), "Board empty shows OpenShell section");
 assert(emptyBoardHtml.includes("clone_repo"), "Board empty documents clone_repo");
+assert(emptyBoardHtml.includes("on the board"),
+  "Board empty OperatorGuide stays consistent with on-board create");
 assert(emptyBoardHtml.includes("plan.json"), "Board empty documents plan.json");
 assert(emptyBoardHtml.includes("Approve"), "Board empty documents Approve");
 assert(emptyBoardHtml.includes("/mcp"), "Board empty shows MCP URL");
@@ -1822,6 +1848,44 @@ assert(!emptyBoardHtml.includes("data-testid=\"openshell-readiness-agents\""), "
   assert(
     boardQuickstartIdx >= 0 && boardMcpIdx > boardQuickstartIdx,
     "Board empty orders Quickstart before MCP",
+  );
+}
+
+// Create Project form — required clone_repo (owner/name); presentational field contract.
+const createProjectFormHtml = renderToString(
+  React.createElement(CreateProjectForm, {
+    initiallyOpen: true,
+    onCreated: () => {},
+  }),
+);
+assert(createProjectFormHtml.includes('data-testid="create-project-form"'),
+  "Create Project form root testid");
+assert(createProjectFormHtml.includes('data-testid="create-project-title"'),
+  "Create Project form title field");
+assert(createProjectFormHtml.includes('data-testid="create-project-intent"'),
+  "Create Project form intent field");
+assert(createProjectFormHtml.includes('data-testid="create-project-clone-repo"'),
+  "Create Project form clone_repo field");
+assert(createProjectFormHtml.includes('data-testid="create-project-submit"'),
+  "Create Project form submit control");
+assert(
+  /clone_repo[\s\S]*owner\/name/.test(createProjectFormHtml),
+  "Create Project form labels clone_repo as owner/name",
+);
+{
+  const cloneIdx = createProjectFormHtml.indexOf('data-testid="create-project-clone-repo"');
+  assert(cloneIdx >= 0, "clone_repo input testid present");
+  // required may be on the same tag before or after the testid attribute.
+  const tagStart = createProjectFormHtml.lastIndexOf("<input", cloneIdx);
+  const tagEnd = createProjectFormHtml.indexOf(">", cloneIdx);
+  const cloneInputTag = createProjectFormHtml.slice(tagStart, tagEnd + 1);
+  assert(
+    /\srequired(?:[\s>=]|=\"\")/.test(cloneInputTag) || cloneInputTag.includes("required"),
+    "Create Project form requires clone_repo (fails if required drops)",
+  );
+  assert(
+    cloneInputTag.includes('placeholder="owner/name"'),
+    "Create Project clone_repo placeholder is owner/name",
   );
 }
 
@@ -2012,12 +2076,40 @@ assert(boardSrc.includes('data-testid="lane-unarchive"'),
   "Archived Project lane should expose Unarchive control");
 assert(boardSrc.includes("api.unarchive"),
   "Board Unarchive should call api.unarchive");
+assert(boardSrc.includes("CreateProjectForm"),
+  "Board mounts Create Project form");
+assert(boardSrc.includes("<CreateProjectForm initiallyOpen"),
+  "Empty Welcome board opens Create Project form");
+assert(boardSrc.includes("<CreateProjectForm collapsible"),
+  "Populated board exposes collapsible Create Project");
+
+const createProjectFormSrc = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "src/components/CreateProjectForm.tsx"),
+  "utf8",
+);
+assert(createProjectFormSrc.includes('data-testid="create-project-clone-repo"'),
+  "Create Project form exposes clone_repo testid");
+assert(createProjectFormSrc.includes("clone_repo (<code>owner/name</code>)"),
+  "Create Project form labels clone_repo as owner/name");
+assert(createProjectFormSrc.includes("api.createProject"),
+  "Create Project form uses api.createProject");
+assert(
+  /create-project-clone-repo[\s\S]*?required|required[\s\S]*?create-project-clone-repo/.test(
+    createProjectFormSrc.replace(/\n/g, " "),
+  ),
+  "Create Project form keeps clone_repo required (source)",
+);
+
 const apiSrc = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "src/api.ts"),
   "utf8",
 );
 assert(apiSrc.includes("/items/${id}/unarchive"),
   "api.unarchive should POST /items/{id}/unarchive");
+assert(apiSrc.includes("createProject:"),
+  "api.ts has typed createProject helper");
+assert(apiSrc.includes("clone_repo:"),
+  "api.createProject requires clone_repo");
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
