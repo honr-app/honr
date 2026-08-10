@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, AuthRequiredError } from "./api.js";
 import { Board } from "./components/Board";
-import { CockpitDrop, CockpitToggle } from "./components/Cockpit";
+import {
+  CockpitDrop,
+  CockpitToggle,
+  cockpitBarChip,
+  useCockpitSession,
+} from "./components/Cockpit";
 import { DetailDrawer } from "./components/Detail";
 import { Help } from "./components/Help";
 import { Login } from "./components/Login";
@@ -107,6 +112,8 @@ function AuthedApp({
   const view = chrome.view;
   const open = chrome.cardId;
   const [cockpitOpen, setCockpitOpen] = useState(false);
+  const cockpit = useCockpitSession();
+  const cockpitChip = cockpitBarChip(cockpit.session);
   const [themePref, setThemePref] = useState<ThemePreference>(() =>
     readThemePreference(),
   );
@@ -200,6 +207,7 @@ function AuthedApp({
           <CockpitToggle
             open={cockpitOpen}
             onToggle={() => setCockpitOpen((was) => !was)}
+            chip={cockpitChip}
           />
         </div>
         <div className="stats">
@@ -215,7 +223,12 @@ function AuthedApp({
         </div>
       </header>
 
-      <CockpitDrop open={cockpitOpen} />
+      <CockpitDrop
+        open={cockpitOpen}
+        session={cockpit.session}
+        onSession={cockpit.setSession}
+        pollError={cockpit.error}
+      />
 
       {staleFor !== null && (
         <div className="err banner">

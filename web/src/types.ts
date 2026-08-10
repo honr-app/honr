@@ -498,6 +498,16 @@ export interface Snapshot {
 /** Wire value for Board cockpit-session status (`snake_case` from Rust). */
 export type CockpitSessionStatus = "running" | "parked";
 
+/** Supervisor-owned OpenShell sandbox lifecycle (`snake_case` from Rust). */
+export type CockpitSandboxPhase =
+  | "idle"
+  | "starting"
+  | "waiting_for_delete"
+  | "provisioning"
+  | "ready"
+  | "stopping"
+  | "error";
+
 /**
  * Board cockpit-session singleton — Cockpit is a thin face over this record.
  * Do not invent a parallel lifecycle in React.
@@ -506,6 +516,11 @@ export interface CockpitSession {
   environment?: string | null;
   conversation_id?: string | null;
   status: CockpitSessionStatus;
+  /** OpenShell create/delete/ready phase for UI feedback. */
+  sandbox_phase?: CockpitSandboxPhase;
+  phase_detail?: string | null;
+  /** ISO timestamp when `sandbox_phase` last changed. */
+  phase_since?: string;
   created_at: string;
   updated_at: string;
 }

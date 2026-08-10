@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { api } from "./api.js";
 import type { BoardEvent, GoalView, Snapshot, StoryLine, WorkItem } from "./types.js";
+import { honrWsUrl } from "./wsUrl.js";
 
 export type BoardEventListener = (ev: BoardEvent) => void;
 
@@ -236,9 +237,8 @@ export function useBoard() {
     };
 
     const attachWebSocket = () => {
-      // Same-origin (incl. Vite proxy) so the session cookie reaches auth middleware.
-      const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/ws`;
-      const ws = new WebSocket(wsUrl);
+      // Prefer API host in Vite dev — see `honrWsUrl` (Tailscale→Vite WSS stalls).
+      const ws = new WebSocket(honrWsUrl("/api/ws"));
       wsRef.current = ws;
       socket = ws;
 

@@ -51,6 +51,8 @@ export default defineConfig({
       // comment so Vite does not buffer until the first 15s keep-alive.
       "/api/events": toHonr({ timeout: 0, proxyTimeout: 0 }),
       "/api/ws": toHonr({ ws: true }),
+      // Kept for non-WS clients; the SPA dials :8080 for WSS when on :5173
+      // (see web/src/wsUrl.ts) because Tailscale Serve → Vite often stalls upgrades.
       "/api/cockpit-attach": toHonr({ ws: true, timeout: 0, proxyTimeout: 0 }),
       // ws:true so any future /api/* WebSocket is proxied even without a
       // dedicated rule (Vite skips upgrade when the matching rule lacks ws).

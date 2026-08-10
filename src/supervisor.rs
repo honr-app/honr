@@ -17,7 +17,9 @@
 //!   detached and writes to a log, so watching is a thing a *different* honr
 //!   process can pick up after a restart. See `reconcile`.
 
-use crate::model::{CockpitSession, CockpitSessionStatus, ItemId, State, WorkItem};
+use crate::model::{
+    CockpitSandboxPhase, CockpitSession, CockpitSessionStatus, ItemId, State, WorkItem,
+};
 use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_COCKPIT, LABEL_ITEM};
 use crate::schema::{AgentConfig, ExecutionConfig};
 use crate::store::{ClaimGrant, SharedBoard};
@@ -3166,14 +3168,22 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<(String, anyhow:
                 board
                     .update_cockpit_session(Some(new_name.clone()), None)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let _ = board.set_cockpit_sandbox_phase(
+                    CockpitSandboxPhase::Provisioning,
+                    Some("Reconnecting to existing sandbox".into()),
+                );
                 (new_name, true)
             } else {
-                // Fresh create: clear conversation now, but do **not** publish
-                // `environment` until Ready — Cockpit attach keys off that field
-                // and will hammer exec with "sandbox is not ready" otherwise.
+                // Fresh create: clear stale env + conversation now, but do **not**
+                // publish `environment` until Ready — Cockpit attach keys off that
+                // field and will hammer exec with "sandbox is not ready" otherwise.
                 board
-                    .update_cockpit_session(None, Some(String::new()))
+                    .update_cockpit_session(Some(String::new()), Some(String::new()))
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let _ = board.set_cockpit_sandbox_phase(
+                    CockpitSandboxPhase::Starting,
+                    Some("Preparing cockpit sandbox".into()),
+                );
                 (new_name, false)
             }
         }
@@ -3195,12 +3205,20 @@ async fn wait_cockpit_name_free(
 ) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     let mut kicked = false;
+    let mut announced = false;
     loop {
         ensure_cockpit_running(board)?;
         let inflight = cockpit_delete_inflight().lock().contains(name);
         let live = is_sandbox_live(os, name).await;
         if !inflight && !live {
             return Ok(());
+        }
+        if !announced {
+            announced = true;
+            let _ = board.set_cockpit_sandbox_phase(
+                CockpitSandboxPhase::WaitingForDelete,
+                Some("Waiting for previous sandbox to finish deleting".into()),
+            );
         }
         if tokio::time::Instant::now() >= deadline {
             anyhow::bail!("cockpit sandbox {name} still present after stop");
@@ -3227,7 +3245,15 @@ async fn run_cockpit_inside(
 
     if !is_reused {
         with_cockpit_cancel(board, wait_cockpit_name_free(board, os, name)).await?;
+        let _ = board.set_cockpit_sandbox_phase(
+            CockpitSandboxPhase::Provisioning,
+            Some("Creating cockpit sandbox".into()),
+        );
         with_cockpit_cancel(board, async { os.create(spec).await.map_err(Into::into) }).await?;
+        let _ = board.set_cockpit_sandbox_phase(
+            CockpitSandboxPhase::Provisioning,
+            Some("Waiting for sandbox to become Ready".into()),
+        );
         with_cockpit_cancel(board, wait_until_sandbox_ready(os, name)).await?;
         let _ = with_cockpit_cancel(
             board,
@@ -3241,12 +3267,20 @@ async fn run_cockpit_inside(
         tracing::info!("cockpit: environment {name} published (sandbox Ready)");
     } else {
         // Reused boxes can still be mid-relay settle after a quick Stop/Start.
+        let _ = board.set_cockpit_sandbox_phase(
+            CockpitSandboxPhase::Provisioning,
+            Some("Reusing cockpit sandbox".into()),
+        );
         with_cockpit_cancel(board, wait_until_sandbox_ready(os, name)).await?;
     }
 
     // Start the cockpit MCP relay (nc -lU over exec_interactive) before
     // minting/injecting mcp.json so the agent's stdio config has somewhere
     // to connect.
+    let _ = board.set_cockpit_sandbox_phase(
+        CockpitSandboxPhase::Provisioning,
+        Some("Starting MCP relay".into()),
+    );
     with_cockpit_cancel(board, async {
         crate::cockpit_mcp_tunnel::ensure_cockpit_mcp_tunnel(os, board, name)
             .await
@@ -3275,6 +3309,7 @@ async fn run_cockpit_inside(
     // Cockpit attach owns the interactive agent. Do not start a competing
     // headless seat — stop any leftover detached process from older builds.
     stop_agent(os, name).await;
+    let _ = board.set_cockpit_sandbox_phase(CockpitSandboxPhase::Ready, None);
     tracing::info!("cockpit: sandbox {name} ready for Cockpit attach");
 
     // Hold while Board says Running so the outer loop does not re-materialize
@@ -3484,8 +3519,18 @@ async fn cockpit_seat_loop(board: SharedBoard, _cfg: ExecutionConfig) {
                         }
                         Err(e) if is_infrastructure(&e.to_string()) => {
                             tracing::warn!("cockpit: infrastructure failure: {e}");
+                            let _ = board2.set_cockpit_sandbox_phase(
+                                CockpitSandboxPhase::Error,
+                                Some(format!("Infrastructure: {e}")),
+                            );
                         }
-                        Err(e) => tracing::error!("cockpit failed: {e}"),
+                        Err(e) => {
+                            tracing::error!("cockpit failed: {e}");
+                            let _ = board2.set_cockpit_sandbox_phase(
+                                CockpitSandboxPhase::Error,
+                                Some(e.to_string()),
+                            );
+                        }
                     }
                     // Release before finalize: gateway delete must not block Stop→Start.
                     flag.store(false, Ordering::Relaxed);
@@ -3503,10 +3548,18 @@ async fn cockpit_seat_loop(board: SharedBoard, _cfg: ExecutionConfig) {
                 }
                 Err(e) if is_infrastructure(&e.to_string()) => {
                     tracing::warn!("cockpit: infrastructure failure: {e}");
+                    let _ = board2.set_cockpit_sandbox_phase(
+                        CockpitSandboxPhase::Error,
+                        Some(format!("Infrastructure: {e}")),
+                    );
                     flag.store(false, Ordering::Relaxed);
                 }
                 Err(e) => {
                     tracing::error!("cockpit failed: {e}");
+                    let _ = board2.set_cockpit_sandbox_phase(
+                        CockpitSandboxPhase::Error,
+                        Some(e.to_string()),
+                    );
                     flag.store(false, Ordering::Relaxed);
                 }
             }

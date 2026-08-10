@@ -1,11 +1,98 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { api } from "../api.js";
-import { xtermThemeFromDocument } from "../theme.js";
-import type { CockpitSession } from "../types.js";
+import {
+  openCockpitAttach,
+  type CockpitAttachHandle,
+} from "../cockpitAttachClient.js";
+import type { CockpitSandboxPhase, CockpitSession } from "../types.js";
 
-const POLL_MS = 4000;
+const POLL_IDLE_MS = 4000;
+const POLL_ACTIVE_MS = 1000;
 
-/** Why attach is locked — mirrors Board session readiness only. */
+/** Phases where the seat is mid create/delete — poll faster for UI feedback. */
+export function cockpitPollIntervalMs(
+  session: CockpitSession | null,
+): number {
+  const phase = session?.sandbox_phase;
+  if (
+    phase === "starting" ||
+    phase === "waiting_for_delete" ||
+    phase === "provisioning" ||
+    phase === "stopping" ||
+    phase === "error"
+  ) {
+    return POLL_ACTIVE_MS;
+  }
+  return POLL_IDLE_MS;
+}
+
+/** Short label for panel / titlebar (no environment dump). */
+export function cockpitPhaseLabel(
+  session: CockpitSession | null,
+): string | null {
+  if (session == null) return null;
+  const phase = session.sandbox_phase ?? "idle";
+  const detail = session.phase_detail?.trim();
+  switch (phase) {
+    case "starting":
+      return detail || "Starting cockpit sandbox…";
+    case "waiting_for_delete":
+      return detail || "Reclaiming previous sandbox…";
+    case "provisioning":
+      return detail || "Provisioning sandbox…";
+    case "ready":
+      return "Ready";
+    case "stopping":
+      return detail || "Stopping cockpit…";
+    case "error":
+      return detail ? `Error: ${detail}` : "Sandbox error";
+    case "idle":
+    default:
+      return session.status === "parked" ? "Parked" : null;
+  }
+}
+
+/** Compact bar chip word (closed drop still shows lifecycle). */
+export function cockpitBarChip(
+  session: CockpitSession | null,
+): { text: string; busy: boolean } | null {
+  if (session == null) return null;
+  const phase = session.sandbox_phase ?? "idle";
+  switch (phase) {
+    case "starting":
+      return { text: "starting", busy: true };
+    case "waiting_for_delete":
+      return { text: "reclaiming", busy: true };
+    case "provisioning":
+      return { text: "provisioning", busy: true };
+    case "stopping":
+      return { text: "stopping", busy: true };
+    case "error":
+      return { text: "error", busy: false };
+    case "ready":
+      return session.status === "parked"
+        ? { text: "parked", busy: false }
+        : { text: "ready", busy: false };
+    default:
+      return session.status === "parked"
+        ? { text: "parked", busy: false }
+        : null;
+  }
+}
+
+/** Elapsed whole seconds since `phase_since` (or 0). */
+export function cockpitPhaseElapsedSecs(
+  session: CockpitSession | null,
+  nowMs: number = Date.now(),
+): number {
+  const since = session?.phase_since;
+  if (!since) return 0;
+  const t = Date.parse(since);
+  if (Number.isNaN(t)) return 0;
+  return Math.max(0, Math.floor((nowMs - t) / 1000));
+}
+
+/** Why attach is locked — Board session + sandbox phase. */
 export function cockpitAttachGate(
   session: CockpitSession | null,
 ): { canAttach: boolean; reason: string | null } {
@@ -16,6 +103,30 @@ export function cockpitAttachGate(
     return {
       canAttach: false,
       reason: "Cockpit session is parked. Stop it, then Start again.",
+    };
+  }
+  const phase = session.sandbox_phase;
+  if (phase === "error") {
+    const detail = session.phase_detail?.trim();
+    return {
+      canAttach: false,
+      reason: detail
+        ? `Cockpit sandbox failed: ${detail}`
+        : "Cockpit sandbox failed. Stop and Start again.",
+    };
+  }
+  if (phase === "waiting_for_delete") {
+    return {
+      canAttach: false,
+      reason:
+        session.phase_detail?.trim() ||
+        "Waiting for the previous sandbox to finish deleting…",
+    };
+  }
+  if (phase === "starting" || phase === "provisioning" || phase === "stopping") {
+    return {
+      canAttach: false,
+      reason: cockpitPhaseLabel(session) ?? "Waiting for the cockpit sandbox…",
     };
   }
   const environment = session.environment?.trim();
@@ -37,11 +148,6 @@ export function cockpitChatGate(session: CockpitSession | null): {
   return { canSend: g.canAttach, reason: g.reason };
 }
 
-function cockpitAttachWsUrl(): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/api/cockpit-attach`;
-}
-
 /** Exponential backoff for attach reconnect after honr/proxy drops the socket. */
 export function cockpitAttachRetryDelayMs(attempt: number): number {
   const n = Math.max(0, Math.min(attempt, 5));
@@ -49,23 +155,34 @@ export function cockpitAttachRetryDelayMs(attempt: number): number {
 }
 
 /**
- * Start / Stop only — exported so tests render without fetch.
- * Session metadata stays on the Board; Cockpit does not dump it.
+ * Start / Stop + lifecycle phase strip. Session metadata stays on the Board;
+ * we show phase (not env/conversation dumps).
  */
 export function CockpitSessionView({
   session,
   busy,
   error,
+  nowMs,
   onStart,
   onStop,
 }: {
   session: CockpitSession | null;
   busy?: boolean;
   error?: string | null;
+  nowMs?: number;
   onStart: () => void;
   onStop: () => void;
 }) {
   const absent = session == null;
+  const phaseLabel = cockpitPhaseLabel(session);
+  const elapsed = cockpitPhaseElapsedSecs(session, nowMs ?? Date.now());
+  const showElapsed =
+    session != null &&
+    (session.sandbox_phase === "starting" ||
+      session.sandbox_phase === "waiting_for_delete" ||
+      session.sandbox_phase === "provisioning" ||
+      session.sandbox_phase === "stopping") &&
+    elapsed > 0;
 
   return (
     <div className="cockpit-session" data-testid="cockpit-session">
@@ -94,6 +211,17 @@ export function CockpitSessionView({
           Stop
         </button>
       </div>
+      {phaseLabel && (
+        <p
+          className={`cockpit-session-phase${
+            session?.sandbox_phase === "error" ? " err" : " dim"
+          }`}
+          data-testid="cockpit-session-phase"
+        >
+          {phaseLabel}
+          {showElapsed ? ` ${elapsed}s` : null}
+        </p>
+      )}
     </div>
   );
 }
@@ -107,6 +235,8 @@ export function CockpitAttachView({
   disabledReason,
   environment,
   sessionStatus,
+  sandboxPhase,
+  phaseLabel,
   reconnectKey = 0,
   /** When the drop re-opens, refit xterm (attach stays mounted while collapsed). */
   panelOpen = true,
@@ -115,6 +245,8 @@ export function CockpitAttachView({
   disabledReason?: string | null;
   environment?: string | null;
   sessionStatus?: CockpitSession["status"] | null;
+  sandboxPhase?: CockpitSandboxPhase | null;
+  phaseLabel?: string | null;
   /** Bump to force a fresh WebSocket (e.g. after Stop/Start). */
   reconnectKey?: number;
   panelOpen?: boolean;
@@ -130,13 +262,22 @@ export function CockpitAttachView({
   const titleStatus =
     sessionStatus === "parked"
       ? "parked"
-      : sessionStatus === "running"
-        ? connected
-          ? "attached"
-          : attachError
-            ? "reconnecting…"
-            : "connecting…"
-        : "offline";
+      : !canAttach
+        ? phaseLabel?.replace(/\…$/, "") ||
+          (sandboxPhase === "waiting_for_delete"
+            ? "reclaiming…"
+            : sandboxPhase === "provisioning" || sandboxPhase === "starting"
+              ? "provisioning…"
+              : sandboxPhase === "error"
+                ? "error"
+                : "waiting…")
+        : sessionStatus === "running"
+          ? connected
+            ? "attached"
+            : attachError
+              ? "reconnecting…"
+              : "connecting…"
+          : "offline";
 
   // Parent Start/Stop (or env change) should not inherit a prior backoff streak.
   useEffect(() => {
@@ -151,9 +292,8 @@ export function CockpitAttachView({
       return;
     }
 
-    // Dynamic import keeps SSR / node tests free of xterm's CJS surface.
     let disposed = false;
-    let cleanup: (() => void) | undefined;
+    let handle: CockpitAttachHandle | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectScheduled = false;
     setAttachError(null);
@@ -182,219 +322,58 @@ export function CockpitAttachView({
     // React StrictMode (Vite dev) mount→unmount→remounts effects. Opening the
     // attach WebSocket in the phantom first mount still hits the server, which
     // pkills the agent on the real remount — death spiral of exit 143. Defer
-    // past that cleanup so only the surviving mount connects. Production
-    // (embedded UI without StrictMode) does not double-invoke, which is why
-    // attach looked "Vite-only broken".
+    // past that cleanup so only the surviving mount connects.
     let startTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       startTimer = null;
-      if (disposed) return;
-      void (async () => {
-      const [{ Terminal }, { FitAddon }] = await Promise.all([
-        import("@xterm/xterm"),
-        import("@xterm/addon-fit"),
-      ]);
       if (disposed || !hostRef.current) return;
-
       const host = hostRef.current;
-      host.replaceChildren();
-
-      const term = new Terminal({
-        cursorBlink: true,
-        fontSize: 13,
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-        theme: xtermThemeFromDocument(),
-        allowProposedApi: true,
-      });
-      const fit = new FitAddon();
-      term.loadAddon(fit);
-      term.open(host);
-      fit.fit();
-      if (disposed) {
-        term.dispose();
-        return;
-      }
-
-      let ws: WebSocket | null = null;
-      try {
-        ws = new WebSocket(cockpitAttachWsUrl());
-        ws.binaryType = "arraybuffer";
-      } catch (e) {
-        scheduleReconnect(e instanceof Error ? e.message : String(e));
-        term.dispose();
-        return;
-      }
-
-      // After `ready`, agent stdout can lag a few seconds — animate in-terminal
-      // so "attached" doesn't look like a dead TTY. Cleared on first PTY bytes.
-      let awaitingAgent = false;
-      let spinnerTimer: ReturnType<typeof setInterval> | null = null;
-      let spinnerTick = 0;
-      const stopAgentSpinner = (clearLine: boolean) => {
-        if (spinnerTimer != null) {
-          clearInterval(spinnerTimer);
-          spinnerTimer = null;
-        }
-        if (awaitingAgent && clearLine) {
-          term.write("\r\x1b[2K");
-        }
-        awaitingAgent = false;
-      };
-      const startAgentSpinner = () => {
-        stopAgentSpinner(false);
-        awaitingAgent = true;
-        spinnerTick = 0;
-        const paint = () => {
-          if (!awaitingAgent || disposed) return;
-          const dots = ".".repeat((spinnerTick % 3) + 1);
-          term.write(`\r\x1b[2K\x1b[90mstarting agent${dots}\x1b[0m`);
-          spinnerTick += 1;
-        };
-        paint();
-        spinnerTimer = setInterval(paint, 400);
-      };
-
-      const sendResize = () => {
-        fit.fit();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "resize",
-              cols: term.cols,
-              rows: term.rows,
-            }),
-          );
-        }
-      };
-
-      // Apply after paint so --term-* have resolved under the new data-theme.
-      // clearTextureAtlas + a one-row resize nudge refreshes Cursor's TUI chrome
-      // (palette/truecolor cells) the way a hard reload would.
-      let themeSyncRaf = 0;
-      const syncTheme = () => {
-        cancelAnimationFrame(themeSyncRaf);
-        themeSyncRaf = requestAnimationFrame(() => {
-          themeSyncRaf = requestAnimationFrame(() => {
-            if (disposed) return;
-            term.options.theme = { ...xtermThemeFromDocument() };
-            term.clearTextureAtlas();
-            term.refresh(0, Math.max(0, term.rows - 1));
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              const cols = term.cols;
-              const rows = Math.max(1, term.rows);
-              ws.send(
-                JSON.stringify({ type: "resize", cols, rows: rows + 1 }),
-              );
-              ws.send(JSON.stringify({ type: "resize", cols, rows }));
-            }
-          });
-        });
-      };
-      const themeObs = new MutationObserver(syncTheme);
-      themeObs.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ["data-theme"],
-      });
-
-      ws.onopen = () => {
-        if (disposed) return;
-        // WS open ≠ agent ready — create-chat + exec_interactive still run.
-        sendResize();
-      };
-      ws.onmessage = (ev) => {
-        if (disposed) return;
-        if (typeof ev.data === "string") {
-          try {
-            const msg = JSON.parse(ev.data) as {
-              type?: string;
-              message?: string;
-              code?: number;
-            };
-            if (msg.type === "ready") {
-              retryAttemptRef.current = 0;
-              setAttachError(null);
-              setConnected(true);
-              sendResize();
-              startAgentSpinner();
-            } else if (msg.type === "error" && msg.message) {
-              stopAgentSpinner(true);
-              setAttachError(msg.message);
-              term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);
-            } else if (msg.type === "exit") {
-              stopAgentSpinner(true);
-              term.writeln(
-                `\r\n\x1b[90m[shell exited${msg.code != null ? ` ${msg.code}` : ""}]\x1b[0m`,
-              );
-              setConnected(false);
-              // Socket close follows; onclose schedules reconnect once.
-            }
-          } catch {
-            /* ignore non-JSON control */
-          }
+      void openCockpitAttach(host, {
+        isDisposed: () => disposed,
+        onOpen: () => {
+          retryAttemptRef.current = 0;
+          setConnected(true);
+          setAttachError(null);
+        },
+        onClose: (hint) => {
+          setConnected(false);
+          scheduleReconnect(hint);
+        },
+        onError: (message) => {
+          setAttachError(message);
+        },
+      }).then((h) => {
+        if (disposed) {
+          h?.dispose();
           return;
         }
-        stopAgentSpinner(true);
-        const bytes =
-          ev.data instanceof ArrayBuffer
-            ? new Uint8Array(ev.data)
-            : new Uint8Array(ev.data as ArrayBuffer);
-        term.write(bytes);
-      };
-      // onerror is usually followed by onclose; reconnect there so we do not
-      // stick a permanent "attach WebSocket error" after a honr restart.
-      ws.onerror = () => {};
-      ws.onclose = () => {
-        stopAgentSpinner(true);
-        if (disposed) return;
-        setConnected(false);
-        scheduleReconnect("attach WebSocket closed");
-      };
-
-      const dataSub = term.onData((data) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(new TextEncoder().encode(data));
+        if (!h) {
+          scheduleReconnect("attach failed to start");
+          return;
         }
+        handle = h;
       });
-
-      const onWinResize = () => sendResize();
-      window.addEventListener("resize", onWinResize);
-      const ro =
-        typeof ResizeObserver !== "undefined"
-          ? new ResizeObserver(() => sendResize())
-          : null;
-      ro?.observe(host);
-
-      cleanup = () => {
-        stopAgentSpinner(false);
-        cancelAnimationFrame(themeSyncRaf);
-        themeObs.disconnect();
-        window.removeEventListener("resize", onWinResize);
-        ro?.disconnect();
-        dataSub.dispose();
-        // Prevent onclose from scheduling another retry while we tear down.
-        if (ws) {
-          ws.onclose = null;
-          ws.onerror = null;
-          ws.close();
-        }
-        term.dispose();
-        setConnected(false);
-      };
-      })();
     }, 0);
 
     return () => {
       disposed = true;
-      if (startTimer != null) clearTimeout(startTimer);
-      if (retryTimer != null) clearTimeout(retryTimer);
-      cleanup?.();
+      if (startTimer) clearTimeout(startTimer);
+      if (retryTimer) clearTimeout(retryTimer);
+      handle?.dispose();
     };
-  }, [canAttach, environment, reconnectKey, attachGen]);
+  }, [canAttach, attachGen, reconnectKey, environment]);
 
-  // Collapse only hides the drop — keep the WebSocket. Refit when shown again.
+  // Refit when the drop opens (was display:none / zero height while collapsed).
   useEffect(() => {
-    if (!panelOpen || !canAttach) return;
-    window.dispatchEvent(new Event("resize"));
-  }, [panelOpen, canAttach]);
+    if (!panelOpen || !canAttach || !hostRef.current) return;
+    const host = hostRef.current;
+    requestAnimationFrame(() => {
+      host.dispatchEvent(new Event("resize"));
+      // FitAddon listens via ResizeObserver; nudge by toggling a tiny style.
+      const prev = host.style.width;
+      host.style.width = "99.9%";
+      host.style.width = prev;
+    });
+  }, [panelOpen, canAttach, attachGen]);
 
   return (
     <section
@@ -472,22 +451,40 @@ function CockpitChevrons() {
 export function CockpitToggle({
   open,
   onToggle,
+  chip,
 }: {
   open: boolean;
   onToggle: () => void;
+  /** Compact lifecycle word when session is active / transitional. */
+  chip?: { text: string; busy: boolean } | null;
 }) {
+  const label = chip
+    ? open
+      ? `Collapse Cockpit (${chip.text})`
+      : `Open Cockpit (${chip.text})`
+    : open
+      ? "Collapse Cockpit"
+      : "Open Cockpit";
   return (
     <button
       type="button"
-      className={`cockpit-bar-btn${open ? " open" : ""}`}
+      className={`cockpit-bar-btn${open ? " open" : ""}${chip?.busy ? " busy" : ""}`}
       aria-expanded={open}
       aria-controls="cockpit-drop"
-      aria-label={open ? "Collapse Cockpit" : "Open Cockpit"}
-      title={open ? "Collapse Cockpit" : "Open Cockpit"}
+      aria-label={label}
+      title={label}
       data-testid="cockpit-toggle"
       onClick={onToggle}
     >
       <CockpitChevrons />
+      {chip && (
+        <span className="cockpit-bar-chip" data-testid="cockpit-bar-chip">
+          {chip.busy && (
+            <span className="cockpit-bar-chip-dot" aria-hidden="true" />
+          )}
+          {chip.text}
+        </span>
+      )}
     </button>
   );
 }
@@ -497,7 +494,18 @@ export function CockpitToggle({
  * not tear down the attach WebSocket / interactive agent. `shown` lags one
  * frame behind `open` so open/close both slide via CSS.
  */
-export function CockpitDrop({ open }: { open: boolean }) {
+export function CockpitDrop({
+  open,
+  session,
+  onSession,
+  pollError,
+}: {
+  open: boolean;
+  /** Lifted session so the bar chip can share one poll. */
+  session?: CockpitSession | null;
+  onSession?: (s: CockpitSession | null) => void;
+  pollError?: string | null;
+}) {
   const [kept, setKept] = useState(false);
   const [shown, setShown] = useState(false);
 
@@ -522,22 +530,102 @@ export function CockpitDrop({ open }: { open: boolean }) {
       inert={!open || undefined}
     >
       <div className="cockpit-drop-inner">
-        <Cockpit panelOpen={open} />
+        <Cockpit
+          panelOpen={open}
+          session={session}
+          onSession={onSession}
+          pollError={pollError}
+        />
       </div>
     </section>
   );
 }
 
 /**
+ * Shared cockpit session poll — bar chip + panel use the same Board record.
+ * Pass `enabled: false` when a parent already owns the poll (avoid doubles).
+ */
+export function useCockpitSession(opts?: { enabled?: boolean }): {
+  session: CockpitSession | null;
+  setSession: (s: CockpitSession | null) => void;
+  error: string | null;
+  refresh: () => Promise<void>;
+} {
+  const enabled = opts?.enabled !== false;
+  const [session, setSession] = useState<CockpitSession | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const sessionRef = useRef<CockpitSession | null>(null);
+  sessionRef.current = session;
+
+  const refresh = useCallback(async () => {
+    try {
+      const out = await api.getCockpitSession();
+      setSession(out.session ?? null);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = (ms: number) => {
+      timer = setTimeout(() => {
+        void tick();
+      }, ms);
+    };
+
+    const tick = async () => {
+      if (!alive) return;
+      try {
+        const out = await api.getCockpitSession();
+        if (!alive) return;
+        setSession(out.session ?? null);
+        setError(null);
+        schedule(cockpitPollIntervalMs(out.session ?? null));
+      } catch (e) {
+        if (!alive) return;
+        setError(e instanceof Error ? e.message : String(e));
+        schedule(POLL_IDLE_MS);
+      }
+    };
+
+    void tick();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [enabled]);
+
+  return { session, setSession, error, refresh };
+}
+
+/**
  * Cockpit — Start/Stop the Board cockpit session; terminal attaches when ready.
  * MCP inject stays silent in the background.
+ *
+ * When `session` + `onSession` are passed (App bar chip), polling is owned by
+ * the parent. Standalone `<Cockpit />` (tests) polls itself.
  */
-export function Cockpit({ panelOpen = true }: { panelOpen?: boolean } = {}) {
-  const [session, setSession] = useState<CockpitSession | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [reconnectKey, setReconnectKey] = useState(0);
-  const provisionedEnv = useRef<string | null>(null);
+export function Cockpit({
+  panelOpen = true,
+  session: sessionProp,
+  onSession,
+  pollError,
+}: {
+  panelOpen?: boolean;
+  session?: CockpitSession | null;
+  onSession?: (s: CockpitSession | null) => void;
+  /** Error from a parent-owned poll (App). */
+  pollError?: string | null;
+} = {}) {
+  const controlled = sessionProp !== undefined && onSession !== undefined;
+  const local = useCockpitSession({ enabled: !controlled });
+  const session = controlled ? sessionProp! : local.session;
+  const setSession = controlled ? onSession! : local.setSession;
 
   const refresh = useCallback(async () => {
     try {
@@ -550,26 +638,36 @@ export function Cockpit({ panelOpen = true }: { panelOpen?: boolean } = {}) {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [setSession]);
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [reconnectKey, setReconnectKey] = useState(0);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const provisionedEnv = useRef<string | null>(null);
+
+  useEffect(() => {
+    const fromPoll = controlled ? pollError : local.error;
+    if (fromPoll) setError(fromPoll);
+  }, [controlled, pollError, local.error]);
+
+  // Elapsed clock while transitional.
+  useEffect(() => {
+    const phase = session?.sandbox_phase;
+    const active =
+      phase === "starting" ||
+      phase === "waiting_for_delete" ||
+      phase === "provisioning" ||
+      phase === "stopping";
+    if (!active) return;
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [session?.sandbox_phase]);
 
   const provisionMcp = useCallback(async () => {
     const out = await api.provisionCockpitMcp();
     provisionedEnv.current = out.environment;
   }, []);
-
-  useEffect(() => {
-    let alive = true;
-    const tick = () => {
-      if (!alive) return;
-      void refresh();
-    };
-    tick();
-    const poll = setInterval(tick, POLL_MS);
-    return () => {
-      alive = false;
-      clearInterval(poll);
-    };
-  }, [refresh]);
 
   // When the supervisor fills environment, inject MCP once for this env.
   useEffect(() => {
@@ -604,6 +702,7 @@ export function Cockpit({ panelOpen = true }: { panelOpen?: boolean } = {}) {
   );
 
   const gate = cockpitAttachGate(session);
+  const phaseLabel = cockpitPhaseLabel(session);
 
   return (
     <div className="cockpit-pane" data-testid="cockpit-pane">
@@ -611,6 +710,7 @@ export function Cockpit({ panelOpen = true }: { panelOpen?: boolean } = {}) {
         session={session}
         busy={busy}
         error={error}
+        nowMs={nowMs}
         onStart={() =>
           void runAction(() => api.startCockpitSession(), { reconnect: true })
         }
@@ -627,6 +727,8 @@ export function Cockpit({ panelOpen = true }: { panelOpen?: boolean } = {}) {
         disabledReason={gate.reason}
         environment={session?.environment}
         sessionStatus={session?.status ?? null}
+        sandboxPhase={session?.sandbox_phase ?? null}
+        phaseLabel={phaseLabel}
         reconnectKey={reconnectKey}
         panelOpen={panelOpen}
       />

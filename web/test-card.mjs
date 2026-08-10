@@ -14,7 +14,10 @@ import {
   CockpitToggle,
   cockpitAttachGate,
   cockpitAttachRetryDelayMs,
+  cockpitBarChip,
   cockpitChatGate,
+  cockpitPhaseLabel,
+  cockpitPollIntervalMs,
 } from "./dist-test/components/Cockpit.js";
 import { Help } from "./dist-test/components/Help.js";
 import { CreateProjectForm } from "./dist-test/components/CreateProjectForm.js";
@@ -27,6 +30,7 @@ import {
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
 import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellPoliciesPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayReady, gatewayMtlsReady, sandboxSpecReady, sandboxHasNoProviders } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
+import { honrWsHost, honrWsUrl } from "./dist-test/wsUrl.js";
 import {
   chromeLocationsEqual,
   formatChromePath,
@@ -702,6 +706,7 @@ const absentHtml = renderToString(
   }),
 );
 assert(!absentHtml.includes("data-testid=\"cockpit-session-status\""), "No status dump when absent");
+assert(!absentHtml.includes("data-testid=\"cockpit-session-phase\""), "No phase strip when absent");
 assert(!isDisabled(absentHtml, "cockpit-session-start"), "Start enabled when no session");
 assert(isDisabled(absentHtml, "cockpit-session-stop"), "Stop disabled when no session");
 
@@ -709,6 +714,8 @@ const runningSession = {
   environment: "honr-cockpit",
   conversation_id: "conv-cockpit-1",
   status: "running",
+  sandbox_phase: "ready",
+  phase_since: new Date().toISOString(),
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 };
@@ -721,10 +728,30 @@ const runningHtml = renderToString(
 );
 assert(!runningHtml.includes("honr-cockpit"), "Session strip does not dump environment");
 assert(!runningHtml.includes("conv-cockpit-1"), "Session strip does not dump conversation_id");
+assert(runningHtml.includes("data-testid=\"cockpit-session-phase\""), "Phase strip when ready");
+assert(runningHtml.includes("Ready"), "Ready phase label");
 assert(isDisabled(runningHtml, "cockpit-session-start"), "Start disabled when Running");
 assert(!isDisabled(runningHtml, "cockpit-session-stop"), "Stop enabled when Running");
 assert(!runningHtml.includes("data-testid=\"cockpit-open-cursor\""), "No Open in Cursor button");
 assert(!runningHtml.includes("openshell sandbox connect"), "No host TTY hint in Cockpit");
+
+const reclaimSession = {
+  ...runningSession,
+  environment: null,
+  sandbox_phase: "waiting_for_delete",
+  phase_detail: "Waiting for previous sandbox to finish deleting",
+  phase_since: new Date(Date.now() - 38_000).toISOString(),
+};
+const reclaimHtml = renderToString(
+  React.createElement(CockpitSessionView, {
+    session: reclaimSession,
+    nowMs: Date.now(),
+    onStart: noop,
+    onStop: noop,
+  }),
+);
+assert(reclaimHtml.includes("Waiting for previous sandbox"), "Reclaim detail in phase strip");
+assert(reclaimHtml.includes("38s") || reclaimHtml.includes("37s") || reclaimHtml.includes("39s"), "Elapsed seconds on reclaim");
 
 const parkedSession = {
   ...runningSession,
@@ -794,6 +821,61 @@ assert.equal(
   cockpitAttachGate({ ...runningSession, environment: null }).canAttach,
   false,
 );
+assert.equal(cockpitAttachGate(reclaimSession).canAttach, false);
+assert.match(
+  cockpitAttachGate(reclaimSession).reason,
+  /previous sandbox to finish deleting/,
+);
+assert.match(
+  cockpitAttachGate({
+    ...runningSession,
+    environment: null,
+    sandbox_phase: "provisioning",
+    phase_detail: "Creating cockpit sandbox",
+  }).reason,
+  /Creating cockpit sandbox/,
+);
+assert.equal(cockpitPhaseLabel(reclaimSession), "Waiting for previous sandbox to finish deleting");
+assert.equal(cockpitPollIntervalMs(reclaimSession), 1000);
+assert.equal(cockpitPollIntervalMs(runningSession), 4000);
+assert.equal(cockpitPollIntervalMs(null), 4000);
+assert.deepEqual(cockpitBarChip(reclaimSession), { text: "reclaiming", busy: true });
+assert.deepEqual(cockpitBarChip(runningSession), { text: "ready", busy: false });
+assert.equal(cockpitBarChip(null), null);
+const chipHtml = renderToString(
+  React.createElement(CockpitToggle, {
+    open: false,
+    onToggle: noop,
+    chip: { text: "reclaiming", busy: true },
+  }),
+);
+assert(chipHtml.includes("data-testid=\"cockpit-bar-chip\""), "Bar chip renders");
+assert(chipHtml.includes("reclaiming"), "Bar chip text");
+
+// Vite :5173 → dial API :8080 (cookie is host-scoped; WSS through Vite+Tailscale stalls).
+assert.equal(
+  honrWsHost({ hostname: "tot.tail43beb.ts.net", port: "5173", host: "tot.tail43beb.ts.net:5173" }),
+  "tot.tail43beb.ts.net:8080",
+);
+assert.equal(
+  honrWsUrl("/api/cockpit-attach", {
+    protocol: "https:",
+    hostname: "tot.tail43beb.ts.net",
+    port: "5173",
+    host: "tot.tail43beb.ts.net:5173",
+  }),
+  "wss://tot.tail43beb.ts.net:8080/api/cockpit-attach",
+);
+assert.equal(
+  honrWsUrl("/api/ws", {
+    protocol: "https:",
+    hostname: "honr.tail43beb.ts.net",
+    port: "",
+    host: "honr.tail43beb.ts.net",
+  }),
+  "wss://honr.tail43beb.ts.net/api/ws",
+);
+
 // Legacy alias
 assert.equal(cockpitChatGate(runningSession).canSend, true);
 

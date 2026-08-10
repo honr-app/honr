@@ -1406,6 +1406,42 @@ a.button-link:hover {
 .cockpit-bar-btn.open .cockpit-bar-icon {
   transform: rotate(180deg);
 }
+.cockpit-bar-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: inherit;
+  opacity: 0.9;
+}
+.cockpit-bar-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: cockpit-pulse 1s ease-in-out infinite;
+}
+.cockpit-bar-btn.busy {
+  color: var(--accent);
+}
+@keyframes cockpit-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.cockpit-session-phase {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+}
 
 /* Grid 0fr→1fr slides height both ways; tree stays mounted while collapsed. */
 .cockpit-drop {

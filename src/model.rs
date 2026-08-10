@@ -745,6 +745,30 @@ pub enum CockpitSessionStatus {
     Parked,
 }
 
+/// Supervisor-owned cockpit sandbox lifecycle for UI feedback.
+///
+/// Distinct from [`CockpitSessionStatus`] (Running/Parked hold): this tracks
+/// OpenShell create/delete/ready so the UI can explain Stop→Start reclaim delays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CockpitSandboxPhase {
+    /// No session / unknown (legacy rows).
+    #[default]
+    Idle,
+    /// Session created; seat loop has not begun create yet.
+    Starting,
+    /// Waiting for a prior sandbox delete (or name collision) to finish.
+    WaitingForDelete,
+    /// Creating / waiting until OpenShell reports Ready.
+    Provisioning,
+    /// Environment published; attach/MCP may proceed.
+    Ready,
+    /// Stop requested; sandbox reap in flight (session may clear soon after).
+    Stopping,
+    /// Seat/provision failure; see `phase_detail`.
+    Error,
+}
+
 /// Durable cockpit-session singleton on the Board. Chat and TTY are faces over this
 /// record — they must not grow a second lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -757,6 +781,15 @@ pub struct CockpitSession {
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub status: CockpitSessionStatus,
+    /// OpenShell sandbox lifecycle (supervisor writes; UI reads).
+    #[serde(default)]
+    pub sandbox_phase: CockpitSandboxPhase,
+    /// Short human line for the current phase (e.g. reclaim wait).
+    #[serde(default)]
+    pub phase_detail: Option<String>,
+    /// When `sandbox_phase` last changed (elapsed UI).
+    #[serde(default = "Utc::now")]
+    pub phase_since: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -764,13 +797,38 @@ pub struct CockpitSession {
 impl CockpitSession {
     pub fn new(environment: Option<String>, conversation_id: Option<String>) -> Self {
         let now = Utc::now();
+        let env = normalize_cockpit_field(environment);
+        // Env already known → treat as ready (rare on create); else starting.
+        let (sandbox_phase, phase_detail) = if env.is_some() {
+            (CockpitSandboxPhase::Ready, None)
+        } else {
+            (CockpitSandboxPhase::Starting, None)
+        };
         Self {
-            environment: normalize_cockpit_field(environment),
+            environment: env,
             conversation_id: normalize_cockpit_field(conversation_id),
             status: CockpitSessionStatus::Running,
+            sandbox_phase,
+            phase_detail,
+            phase_since: now,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Apply a sandbox phase change; bumps `phase_since` only when the phase differs.
+    pub fn set_sandbox_phase(
+        &mut self,
+        phase: CockpitSandboxPhase,
+        detail: Option<String>,
+    ) {
+        let detail = normalize_cockpit_field(detail);
+        if self.sandbox_phase != phase {
+            self.sandbox_phase = phase;
+            self.phase_since = Utc::now();
+        }
+        self.phase_detail = detail;
+        self.updated_at = Utc::now();
     }
 }
 

@@ -3804,6 +3804,7 @@ impl Board {
 
     /// Patch sandbox environment and/or conversation id. `None` leaves a field
     /// unchanged; `Some(s)` sets it (blank clears). Hold status is unchanged.
+    /// Sandbox phase is supervisor-owned via [`Self::set_cockpit_sandbox_phase`].
     pub fn update_cockpit_session(
         &self,
         environment: Option<String>,
@@ -3823,6 +3824,22 @@ impl Board {
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         Ok(out)
+    }
+
+    /// Supervisor-owned sandbox lifecycle for Cockpit UI. No-op if no session.
+    /// Returns the updated session when a session was present.
+    pub fn set_cockpit_sandbox_phase(
+        &self,
+        phase: CockpitSandboxPhase,
+        detail: Option<String>,
+    ) -> Option<CockpitSession> {
+        let mut s = self.state.write();
+        let session = s.cockpit_session.as_mut()?;
+        session.set_sandbox_phase(phase, detail);
+        let out = session.clone();
+        drop(s);
+        self.dirty.store(true, Ordering::Relaxed);
+        Some(out)
     }
 
     /// Park-like hold: keep sandbox + conversation; mark `Parked`.
@@ -3858,11 +3875,15 @@ impl Board {
     }
 
     /// Stop and clear the durable cockpit session. Idempotent when already absent.
+    ///
+    /// Marks `stopping` briefly so a concurrent poll can see it, then clears.
     pub fn stop_cockpit_session(&self) -> Result<(), String> {
         let mut s = self.state.write();
-        if s.cockpit_session.take().is_none() {
+        let Some(session) = s.cockpit_session.as_mut() else {
             return Ok(());
-        }
+        };
+        session.set_sandbox_phase(CockpitSandboxPhase::Stopping, None);
+        s.cockpit_session = None;
         drop(s);
         self.dirty.store(true, Ordering::Relaxed);
         Ok(())
@@ -6644,6 +6665,28 @@ mod tests {
         assert_eq!(created.environment.as_deref(), Some("honr-cockpit"));
         assert!(created.conversation_id.is_none());
         assert_eq!(created.status, CockpitSessionStatus::Running);
+        assert_eq!(created.sandbox_phase, CockpitSandboxPhase::Ready);
+
+        b.stop_cockpit_session().expect("clear for starting-phase create");
+        let starting = b.create_cockpit_session(None, None).expect("start bare");
+        assert_eq!(starting.sandbox_phase, CockpitSandboxPhase::Starting);
+        let phased = b
+            .set_cockpit_sandbox_phase(
+                CockpitSandboxPhase::WaitingForDelete,
+                Some("Waiting for previous sandbox to finish deleting".into()),
+            )
+            .expect("phase");
+        assert_eq!(phased.sandbox_phase, CockpitSandboxPhase::WaitingForDelete);
+        assert!(phased
+            .phase_detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("previous sandbox"));
+        b.stop_cockpit_session().expect("clear again");
+        let created = b
+            .create_cockpit_session(Some("honr-cockpit".into()), None)
+            .expect("create with env");
+        assert_eq!(created.sandbox_phase, CockpitSandboxPhase::Ready);
 
         let err = b
             .create_cockpit_session(None, None)
