@@ -42,8 +42,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    // Tailscale Serve (https://tot.example.ts.net:5173 → Vite).
-    allowedHosts: ["tot.example.ts.net"],
+    // Any host (Tailscale Serve / reverse proxy → Vite). Avoid baking a
+    // personal MagicDNS name into the repo.
+    allowedHosts: true,
     proxy: {
       // SSE must be declared before the general `/api` rule. Zero timeouts keep
       // the long-lived stream open; the backend also flushes an immediate

@@ -8,7 +8,7 @@ Ingress hostname resolves:
 
   1. Open the Board URL and create the admin account.
   2. Settings → OpenShell — point the gateway at your in-cluster OpenShell
-     (e.g. https://microshift-openshell.example.ts.net) and complete OIDC.
+     (your Tailscale / Ingress URL) and complete OIDC.
      OpenShell login uses redirect_uri
        {{ .Values.ingress.publicUrl }}/oauth/openshell/callback
      which must be listed on Keycloak client openshell-cli (realm openshell).

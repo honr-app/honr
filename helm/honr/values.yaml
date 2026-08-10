@@ -9,17 +9,21 @@ image:
 # Postgres is a single RWO volume.
 replicaCount: 1
 
-# Tailscale Ingress hostname (tls.hosts entry). The operator appends
-# .<tailnet>.ts.net → e.g. microshift-honr.example.ts.net
+# Tailscale Ingress — set per deploy (do not commit personal *.ts.net names).
+# hostname is the short MagicDNS label; the operator appends .<tailnet>.ts.net.
+# publicUrl is HONR_PUBLIC_URL (MCP Host allow-list + OpenShell OIDC
+# redirect_uri = {publicUrl}/oauth/openshell/callback). Must match the
+# resolved Tailscale URL. When you change it, also add that callback (and the
+# origin) to Keycloak realm `openshell` client `openshell-cli` redirectUris /
+# webOrigins — Keycloak rejects anything not on that allow-list.
+#
+#   helm upgrade --install honr ./helm/honr -n honr \
+#     --set ingress.hostname=my-honr \
+#     --set ingress.publicUrl=https://my-honr.<tailnet>.ts.net
 ingress:
   enabled: true
-  hostname: microshift-honr
-  # Full public URL for HONR_PUBLIC_URL (MCP Host allow-list + OpenShell OIDC
-  # redirect_uri = {publicUrl}/oauth/openshell/callback). Must match the
-  # Tailscale hostname. When you change this, also add that callback (and the
-  # origin) to Keycloak realm `openshell` client `openshell-cli` redirectUris /
-  # webOrigins — Keycloak rejects anything not on that allow-list.
-  publicUrl: https://microshift-honr.example.ts.net
+  hostname: ""
+  publicUrl: ""
 
 service:
   port: 8080

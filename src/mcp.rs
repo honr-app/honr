@@ -1474,8 +1474,8 @@ mod tests {
     #[test]
     fn authority_from_public_url_strips_scheme_and_path() {
         assert_eq!(
-            authority_from_public_url("https://tot.example.ts.net:8080/mcp"),
-            Some("tot.example.ts.net:8080".into())
+            authority_from_public_url("https://board.example.ts.net:8080/mcp"),
+            Some("board.example.ts.net:8080".into())
         );
         assert_eq!(
             authority_from_public_url("http://localhost:5173/"),

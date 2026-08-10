@@ -2450,10 +2450,10 @@ mod tests {
     #[ignore = "needs HTTPS OIDC gateway + HONR_TEST_OIDC_TOKEN_JSON"]
     async fn real_gateway_oidc_health_and_list() {
         let endpoint = std::env::var("HONR_OPENSHELL_ENDPOINT")
-            .unwrap_or_else(|_| "https://microshift-openshell.example.ts.net".into());
-        let issuer = std::env::var("HONR_TEST_OIDC_ISSUER").unwrap_or_else(|_| {
-            "https://microshift-keycloak.example.ts.net/realms/openshell".into()
-        });
+            .expect("set HONR_OPENSHELL_ENDPOINT to the gateway base URL");
+        let issuer = std::env::var("HONR_TEST_OIDC_ISSUER").expect(
+            "set HONR_TEST_OIDC_ISSUER (e.g. https://<keycloak>/realms/openshell)",
+        );
         let client_id =
             std::env::var("HONR_TEST_OIDC_CLIENT_ID").unwrap_or_else(|_| "openshell-cli".into());
         let audience =
