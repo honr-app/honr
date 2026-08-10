@@ -23,6 +23,28 @@ Read the whole plan before approving. One good card can still be the wrong plan.
 too big uses the same path in reverse: the agent writes `split.json`, the card
 goes to Review with a proposal, and Approve creates the siblings.
 
+## Adding Tasks to an existing Project
+
+After a Project exists, you can add more Backlog Tasks without re-running
+Initial plan:
+
+| Surface | How |
+|---|---|
+| **Board UI** | **Create Task** on the Project swimlane (when the lane is open) or in the Project Detail drawer. Title, intent, definition of done; optional blockers from sibling Tasks. Not on the empty-board Welcome path. |
+| **MCP** | Operator tool `create_task` — parent Project id, title, intent, `definition_of_done`, optional `blocked_by`. Same Board path as `POST /api/items` with `parent`. |
+
+The new card lands in **Backlog**, ready for **Start** / `dispatch` (or Project
+auto mode). Parent must be a Project — nesting under a Task is refused.
+
+Each Task must name its clone target (`owner/name`) in intent and/or definition
+of done. When the caller omits an explicit `Clone repository:` line, honr stamps
+the Project default from Project intent when one is present; otherwise Remotes
+escalate rather than guessing.
+
+**Approve** still only materializes proposals (Initial plan or `split.json`) and
+never merges. Creating a Task ad-hoc is not Approve — it is a separate human
+create path.
+
 ## Which repo an agent clones
 
 Agents clone the repository named in the card's **intent**, **definition of
