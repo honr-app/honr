@@ -127,6 +127,29 @@ pub struct CreateProjectArg {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateTaskArg {
+    /// Parent Project id (`#167` is `167`). Must be a Project — nesting under
+    /// a Task is refused.
+    pub parent: ItemId,
+    /// Short and distinct — you cannot chunk what you cannot name.
+    pub title: String,
+    /// One sentence of task intent. Name the clone repo here and/or in
+    /// `definition_of_done` (`Clone repository: owner/name`); when omitted,
+    /// the Project's `clone_repo` (from Project intent) is stamped.
+    pub intent: String,
+    /// Must be mechanically checkable. May carry the clone target line.
+    pub definition_of_done: String,
+    /// Sibling Task ids this card is blocked by.
+    #[serde(default)]
+    pub blocked_by: Vec<ItemId>,
+    /// Optional capability tag for list_ready filtering.
+    #[serde(default)]
+    pub capability: Option<String>,
+    #[serde(default = "default_above_line")]
+    pub above_line: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct InitPlanArg {
     /// Project id (`#167` is `167`). Container must already exist.
     pub project: ItemId,
@@ -659,6 +682,35 @@ impl Operator {
         self.ack(
             item.id,
             "Project created in shaping with auto-seeded Initial plan — dispatch that Task to plan",
+        )
+    }
+
+    #[tool(
+        name = "create_task",
+        description = "Create a flat Task under an existing Project, landing in Backlog \
+                       (dispatchable). Parent must be a Project id — nesting under a Task \
+                       is refused. Each Task must name its clone repository (`owner/name`) \
+                       in intent and/or definition_of_done; when omitted, the Project's \
+                       clone_repo (from Project intent) is stamped as the default. Optional \
+                       blocked_by ItemIds and capability. Same Board path as POST /api/items \
+                       with parent."
+    )]
+    fn create_task(&self, Parameters(a): Parameters<CreateTaskArg>) -> Out<Ack> {
+        let item = self
+            .board
+            .create_task(
+                a.parent,
+                a.title,
+                a.intent,
+                a.definition_of_done,
+                a.blocked_by,
+                a.capability,
+                a.above_line,
+            )
+            .map_err(bad)?;
+        self.ack(
+            item.id,
+            "Task created in Backlog under Project — dispatch when ready",
         )
     }
 
@@ -1928,6 +1980,87 @@ mod tests {
     }
 
     #[test]
+    fn create_task_mcp_lands_in_backlog_and_refuses_nest() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-mcp-create-task-{}.json",
+            std::process::id()
+        ));
+        let board = Arc::new(Board::new(Schema::default(), path));
+        let operator = Operator::new(board.clone());
+
+        let project = board
+            .create_project("Proj", "Ship it", "honr-app/honr", true, None)
+            .expect("project");
+
+        let ack = operator
+            .create_task(Parameters(CreateTaskArg {
+                parent: project.id,
+                title: "Ad hoc".into(),
+                intent: "Do the thing".into(),
+                definition_of_done: "thing done".into(),
+                blocked_by: vec![],
+                capability: None,
+                above_line: false,
+            }))
+            .expect("create_task");
+        assert!(ack.0.ok);
+        assert_eq!(ack.0.state, format!("{:?}", State::Backlog));
+        assert!(
+            ack.0.note.contains("Backlog"),
+            "ack should mirror create_project style: {}",
+            ack.0.note
+        );
+
+        let task = board.get(ack.0.item).expect("created task");
+        assert_eq!(task.state, State::Backlog);
+        assert_eq!(task.parent, Some(project.id));
+        assert!(
+            task.intent.contains("honr-app/honr"),
+            "Project clone_repo should stamp when intent omits clone: {}",
+            task.intent
+        );
+
+        let nest = operator.create_task(Parameters(CreateTaskArg {
+            parent: task.id,
+            title: "Nested".into(),
+            intent: "should fail".into(),
+            definition_of_done: "no".into(),
+            blocked_by: vec![],
+            capability: None,
+            above_line: false,
+        }));
+        let nest_err = match nest {
+            Ok(_) => panic!("nesting under a Task must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            nest_err.message.contains("flat under a Project")
+                || nest_err.message.contains("nest"),
+            "nest refusal must be clear: {}",
+            nest_err.message
+        );
+
+        let missing = operator.create_task(Parameters(CreateTaskArg {
+            parent: 9_999_999,
+            title: "Orphan".into(),
+            intent: "no parent".into(),
+            definition_of_done: "no".into(),
+            blocked_by: vec![],
+            capability: None,
+            above_line: false,
+        }));
+        let missing_err = match missing {
+            Ok(_) => panic!("missing parent must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            missing_err.message.contains("no parent"),
+            "missing parent must be clear: {}",
+            missing_err.message
+        );
+    }
+
+    #[test]
     fn operator_seat_lists_operator_tools_and_hides_worker_verbs() {
         let (board, _) = test_board();
         let operator = Operator::new(board);
@@ -1944,6 +2077,8 @@ mod tests {
             "board_snapshot",
             "search_items",
             "item_detail",
+            "create_project",
+            "create_task",
             "dispatch",
             "park",
             "steer",
