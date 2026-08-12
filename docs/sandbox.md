@@ -65,6 +65,50 @@ under `/sandbox/.honr`). Agents finish via `plan.json` / `report.json` /
 `escalate.json` / `split.json`. The board is the only tracker — sandboxes do
 not carry a separate issue-store CLI or database.
 
+## Spec env and prompt
+
+Sandbox specs (Settings → OpenShell → Sandbox specs) may carry optional
+**`env`** (string map) and **`prompt`** (seat notes). Edit them on create/edit
+in the UI; they round-trip on the profile API. Details and resolution live under
+[Configuration](configuration.md#sandbox-specs).
+
+### Create-time env overlay
+
+At sandbox create (card path and Cockpit), honr builds the OpenShell create env
+as:
+
+1. **`agent_env(engine)`** — toolchain / seat defaults the supervisor always
+   passes (`PATH`, `HOME`, cargo/npm homes, engine inference URLs, …)
+2. **Profile `env` overlay** — keys from the resolved sandbox spec
+
+On a key clash, **the profile wins**. Spec `env` is **non-secret**: API URLs,
+tool paths, and similar wiring belong here; secrets stay on **Providers**
+(attach them on the same spec). The Settings editor states that distinction
+next to the env key/value fields.
+
+### Briefing injection
+
+When a card is claimed, the grant carries `sandbox_prompt` from the resolved
+sandbox profile. Cold card `briefing()` inserts a generic section after
+**Project prompt** when that value is non-empty:
+
+```
+Sandbox prompt (seat notes):
+…
+```
+
+`cockpit_briefing()` appends the cockpit sandbox profile's prompt the same way.
+`resume_briefing()` does **not** re-dump the sandbox prompt — conversation
+memory already has it from the cold start.
+
+### Operator practice
+
+Put seat wiring on the live board's sandbox specs — for example an API base URL
+in `env` and short usage notes in `prompt`. Do **not** hardcode product-specific
+CLIs or cluster tooling (MicroShift / `oc`, kubeconfig writers, PATH wrappers,
+post-Ready setup scripts) into the binary or supervisor; those stay out of
+scope of honr itself.
+
 ## Model selection
 
 Which model an agent run uses depends on the engine.
@@ -246,4 +290,5 @@ Attach names that are not in the Providers catalog are pruned on board load.
 - [Your first agent](first-agent.md) — Welcome/Help OpenShell onboarding, then the first run
 - [Troubleshooting](troubleshooting.md) — the gotchas above, as symptoms
 - [Configuration](configuration.md#policies) — Policies catalog vs Sandbox specs
-- [Configuration](configuration.md#sandbox-specs) — spec resolution and engines
+- [Configuration](configuration.md#sandbox-specs) — spec resolution, engines, env / prompt
+- [Spec env and prompt](#spec-env-and-prompt) — create-time overlay and briefing injection
