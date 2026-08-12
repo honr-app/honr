@@ -402,6 +402,8 @@ pub struct ClaimGrant {
     pub lease_expires_at: DateTime<Utc>,
     pub run_deadline_at: DateTime<Utc>,
     pub engine: Option<String>,
+    /// Resolved model for agent CLI argv (card → spec → engine default).
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -4067,6 +4069,40 @@ impl Board {
         }
     }
 
+    /// Model for agent CLI argv: card.model → sandbox spec model → engine default.
+    pub fn resolve_model_for_card(&self, item_id: ItemId) -> Option<String> {
+        let engine = self.resolve_engine_for_card(item_id);
+        let card_model = self
+            .get(item_id)
+            .and_then(|i| i.model.clone())
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        if card_model.is_some() {
+            return card_model;
+        }
+        let spec_model = self.resolve_sandbox_create(item_id).model;
+        if let Some(m) = spec_model {
+            let t = m.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        crate::engine::default_model_for_engine(&engine).map(|s| s.to_string())
+    }
+
+    /// Model for Cockpit attach/chat: sandbox spec model → engine default (no card).
+    pub fn resolve_cockpit_model(&self) -> Option<String> {
+        let engine = self.resolve_cockpit_engine();
+        let spec_model = self.resolve_cockpit_sandbox_create().model;
+        if let Some(m) = spec_model {
+            let t = m.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        crate::engine::default_model_for_engine(&engine).map(|s| s.to_string())
+    }
+
     // ------------------------------------------------------- the agent verbs
 
     /// A card still leased to this agent — survives a restart mid-flight. The
@@ -4343,6 +4379,7 @@ impl Board {
 
         let ctx = self.claim_plan_context(id, &item);
         let engine = Some(self.resolve_engine_for_card(id));
+        let model = self.resolve_model_for_card(id);
 
         Ok(ClaimGrant {
             item_id: id,
@@ -4358,6 +4395,7 @@ impl Board {
             lease_expires_at: deadline,
             run_deadline_at: deadline,
             engine,
+            model,
         })
     }
 
@@ -12071,6 +12109,160 @@ mod tests {
             )
             .unwrap();
         assert_eq!(b.resolve_engine_for_card(task.id), "claude");
+    }
+
+    #[test]
+    fn resolve_model_for_card_card_over_spec_over_default() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-model-resolve-{}",
+                std::process::id()
+            )),
+        );
+        ensure_seed_policy(&b);
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "img:1".into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("agy".into()),
+            model: Some("spec-model".into()),
+            provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            shipped: false,
+        })
+        .unwrap();
+        b.set_default_sandbox_profile("default").unwrap();
+        let project = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = b
+            .create(
+                Some(project.id),
+                "T",
+                "do",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            b.resolve_model_for_card(task.id).as_deref(),
+            Some("spec-model")
+        );
+
+        b.transition(task.id, State::Shaping, "test", None).unwrap();
+        b.transition(task.id, State::Backlog, "test", None).unwrap();
+        let grant = b.claim(task.id, "agent-1", Some("claim-model".into()), 60).unwrap();
+        assert_eq!(grant.model.as_deref(), Some("claim-model"));
+        assert_eq!(
+            b.resolve_model_for_card(task.id).as_deref(),
+            Some("claim-model")
+        );
+    }
+
+    #[test]
+    fn resolve_model_for_card_agy_defaults_without_spec_or_card() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-model-default-{}",
+                std::process::id()
+            )),
+        );
+        ensure_seed_policy(&b);
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            image: "img:1".into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("agy".into()),
+            model: None,
+            provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            shipped: false,
+        })
+        .unwrap();
+        b.set_default_sandbox_profile("default").unwrap();
+        let project = b
+            .create(None, "P", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = b
+            .create(
+                Some(project.id),
+                "T",
+                "do",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            b.resolve_model_for_card(task.id).as_deref(),
+            Some(crate::antigravity::DEFAULT_SEAT_MODEL)
+        );
+    }
+
+    #[test]
+    fn resolve_cockpit_model_spec_then_default() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-cockpit-model-{}",
+                std::process::id()
+            )),
+        );
+        ensure_seed_policy(&b);
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "cockpit".into(),
+            name: "Cockpit".into(),
+            image: "img:1".into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("agy".into()),
+            model: Some("cockpit-spec".into()),
+            provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            shipped: false,
+        })
+        .unwrap();
+        b.set_cockpit_sandbox_profile("cockpit").unwrap();
+        assert_eq!(
+            b.resolve_cockpit_model().as_deref(),
+            Some("cockpit-spec")
+        );
+
+        b.upsert_sandbox_profile(SandboxProfile {
+            id: "cockpit2".into(),
+            name: "Cockpit2".into(),
+            image: "img:2".into(),
+            policy_id: SEED_POLICY_ID.into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("agy".into()),
+            model: None,
+            provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            shipped: false,
+        })
+        .unwrap();
+        b.set_cockpit_sandbox_profile("cockpit2").unwrap();
+        assert_eq!(
+            b.resolve_cockpit_model().as_deref(),
+            Some(crate::antigravity::DEFAULT_SEAT_MODEL)
+        );
     }
 
     #[test]

@@ -1067,6 +1067,7 @@ async fn run_inside(
         &briefing_text,
         engine,
         conversation_id.as_deref().filter(|_| resume),
+        grant.model.as_deref(),
     )?;
     let start = with_board_cancel(board, id, async {
         os.exec(name, &script, short).await.map_err(Into::into)
@@ -1850,6 +1851,7 @@ fn start_script(
     briefing: &str,
     engine: &str,
     conversation_id: Option<&str>,
+    model: Option<&str>,
 ) -> Result<String, crate::engine::UnknownEngine> {
     let secs = cfg.agent_timeout_secs;
     // Engine argv (including Cursor --force/--trust/--sandbox disabled) lives
@@ -1859,6 +1861,7 @@ fn start_script(
         engine,
         crate::engine::PromptEnv::Briefing,
         conversation_id,
+        model,
     )?;
     let conv_export = conversation_id
         .map(|c| format!("export HONR_CONVERSATION={}\n", shell_quote(c)))
@@ -4240,7 +4243,7 @@ mod tests {
     /// and left deleting the sandbox as the only honest option.
     #[test]
     fn the_agent_outlives_the_exec_that_starts_it() {
-        let s = start_script(&repo_cfg(), "do the thing", "claude", None).unwrap();
+        let s = start_script(&repo_cfg(), "do the thing", "claude", None, None).unwrap();
         assert!(s.contains("setsid nohup"), "must be detached: {s}");
         assert!(
             s.trim_end().contains("&\n") || s.contains("2>&1 &"),
@@ -4269,7 +4272,7 @@ mod tests {
     fn the_agent_carries_its_own_deadline() {
         let mut cfg = repo_cfg();
         cfg.agent_timeout_secs = 900;
-        let s = start_script(&cfg, "b", "claude", None).unwrap();
+        let s = start_script(&cfg, "b", "claude", None, None).unwrap();
         assert!(s.contains("timeout --foreground 900 claude"), "{s}");
     }
 
@@ -4279,7 +4282,7 @@ mod tests {
     /// apostrophe in it — which is most of them.
     #[test]
     fn the_briefing_crosses_the_inner_shell_intact() {
-        let s = start_script(&repo_cfg(), "it's a card; rm -rf /", "claude", None).unwrap();
+        let s = start_script(&repo_cfg(), "it's a card; rm -rf /", "claude", None, None).unwrap();
         assert!(
             s.contains(r"it'\''s a card; rm -rf /"),
             "must be escaped once: {s}"
@@ -4297,6 +4300,7 @@ mod tests {
             "continue",
             "agy",
             Some("8f9c6cee-964a-44ce-8698-c92a4ea473ef"),
+            None,
         )
         .unwrap();
         assert!(s.contains("--conversation \"$HONR_CONVERSATION\""), "{s}");
@@ -4304,9 +4308,16 @@ mod tests {
             s.contains("HONR_CONVERSATION='8f9c6cee-964a-44ce-8698-c92a4ea473ef'"),
             "{s}"
         );
-        let fresh = start_script(&repo_cfg(), "start", "agy", None).unwrap();
+        let fresh = start_script(&repo_cfg(), "start", "agy", None, None).unwrap();
         assert!(!fresh.contains("--conversation"), "{fresh}");
         assert!(!fresh.contains("HONR_CONVERSATION="), "{fresh}");
+    }
+
+    #[test]
+    fn start_script_agy_uses_resolved_model() {
+        let s = start_script(&repo_cfg(), "brief", "agy", None, Some("custom-seat")).unwrap();
+        assert!(s.contains("--model 'custom-seat'"), "{s}");
+        assert!(!s.contains(crate::antigravity::DEFAULT_SEAT_MODEL), "{s}");
     }
 
     #[test]
@@ -4342,7 +4353,7 @@ mod tests {
 
     #[test]
     fn cursor_engine_uses_agent_cli_flags() {
-        let s = start_script(&repo_cfg(), "do the thing", "cursor", None).unwrap();
+        let s = start_script(&repo_cfg(), "do the thing", "cursor", None, None).unwrap();
         assert!(s.contains("timeout --foreground"), "{s}");
         assert!(
             s.contains("agent -p --force --trust --approve-mcps --sandbox disabled"),
@@ -4355,6 +4366,7 @@ mod tests {
             "continue",
             "cursor",
             Some("c6b62c6f-7ead-4fd6-9922-e952131177ff"),
+            None,
         )
         .unwrap();
         assert!(
@@ -4369,7 +4381,7 @@ mod tests {
 
     #[test]
     fn start_script_rejects_unknown_engine() {
-        let err = start_script(&repo_cfg(), "x", "nope", None).unwrap_err();
+        let err = start_script(&repo_cfg(), "x", "nope", None, None).unwrap_err();
         assert!(
             err.to_string().contains("unknown agent engine"),
             "{err}"
@@ -4380,7 +4392,7 @@ mod tests {
 
     #[test]
     fn opencode_engine_uses_run_json_auto_and_session() {
-        let s = start_script(&repo_cfg(), "do the thing", "opencode", None).unwrap();
+        let s = start_script(&repo_cfg(), "do the thing", "opencode", None, None).unwrap();
         assert!(s.contains("timeout --foreground"), "{s}");
         assert!(
             s.contains("opencode run --format json --auto \"$HONR_BRIEFING\""),
@@ -4392,6 +4404,7 @@ mod tests {
             "continue",
             "opencode",
             Some("ses_494719016ffe85dkDMj0FPRbHK"),
+            None,
         )
         .unwrap();
         assert!(
@@ -4523,7 +4536,7 @@ mod tests {
             !path.contains("/sandbox/.venv"),
             "agent_env PATH must not reference removed Ubuntu venv: {path}"
         );
-        let script = start_script(&repo_cfg(), "briefing", "claude", None).unwrap();
+        let script = start_script(&repo_cfg(), "briefing", "claude", None, None).unwrap();
         assert!(
             !script.contains("BEADS_DIR"),
             "start script must not export BEADS_DIR: {script}"
@@ -4552,7 +4565,7 @@ mod tests {
                 .all(|(k, _)| k != "ANTHROPIC_BASE_URL"),
             "cursor must not force Anthropic base URL"
         );
-        let script = start_script(&repo_cfg(), "briefing", "opencode", None).unwrap();
+        let script = start_script(&repo_cfg(), "briefing", "opencode", None, None).unwrap();
         assert!(
             script.contains("ANTHROPIC_BASE_URL=https://inference.local/v1"),
             "{script}"
@@ -5119,6 +5132,7 @@ mod tests {
             lease_expires_at: deadline,
             run_deadline_at: deadline,
             engine: None,
+            model: None,
         }
     }
 

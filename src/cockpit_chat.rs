@@ -97,13 +97,18 @@ fn turn_script(
     prompt: &str,
     conversation_id: Option<&str>,
     agy_cloud_exports: &str,
+    model: Option<&str>,
 ) -> Result<String, crate::engine::UnknownEngine> {
     let secs = 3600u64;
     // Resume only when the registry says this engine supports it — same gate as
     // the supervisor (claude never gets `--conversation` / `--resume`).
     let resume_id = conversation_id.filter(|_| crate::engine::supports_resume(engine));
-    let cmd =
-        crate::engine::command_line(engine, crate::engine::PromptEnv::Prompt, resume_id)?;
+    let cmd = crate::engine::command_line(
+        engine,
+        crate::engine::PromptEnv::Prompt,
+        resume_id,
+        model,
+    )?;
     let conv_export = resume_id
         .map(|c| format!("export HONR_CONVERSATION={}\n", shell_quote(c)))
         .unwrap_or_default();
@@ -247,7 +252,14 @@ async fn run_turn(
     } else {
         String::new()
     };
-    let script = turn_script(engine, prompt, conversation_id, &agy_exports)
+    let model = board.resolve_cockpit_model();
+    let script = turn_script(
+        engine,
+        prompt,
+        conversation_id,
+        &agy_exports,
+        model.as_deref(),
+    )
         .map_err(|e| e.to_string())?;
     let board_lines = board.clone();
     let tx_lines = tx.clone();
@@ -309,7 +321,7 @@ mod tests {
 
     #[test]
     fn turn_script_resumes_cursor_conversation() {
-        let s = turn_script("cursor", "triage Needs You", Some("conv-abc"), "").unwrap();
+        let s = turn_script("cursor", "triage Needs You", Some("conv-abc"), "", None).unwrap();
         assert!(s.contains("--resume \"$HONR_CONVERSATION\""), "{s}");
         assert!(s.contains("HONR_CONVERSATION='conv-abc'"), "{s}");
         assert!(s.contains("HONR_PROMPT='triage Needs You'"), "{s}");
@@ -324,12 +336,13 @@ mod tests {
             "hello",
             Some("cid-1"),
             "export GOOGLE_CLOUD_PROJECT='p'\n",
+            None,
         )
         .unwrap();
         assert!(s.contains("GOOGLE_CLOUD_PROJECT='p'"), "{s}");
         assert!(s.contains("PATH=/sandbox/.local/bin:$PATH"), "{s}");
         assert!(
-            s.contains(&format!("--model {}", crate::antigravity::DEFAULT_SEAT_MODEL)),
+            s.contains(&format!("--model '{}'", crate::antigravity::DEFAULT_SEAT_MODEL)),
             "{s}"
         );
         assert!(s.contains("--conversation \"$HONR_CONVERSATION\""), "{s}");
@@ -341,7 +354,7 @@ mod tests {
 
     #[test]
     fn turn_script_without_conversation_starts_fresh_in_seat() {
-        let s = turn_script("cursor", "first prompt", None, "").unwrap();
+        let s = turn_script("cursor", "first prompt", None, "", None).unwrap();
         assert!(!s.contains("--resume"), "{s}");
         assert!(!s.contains("HONR_CONVERSATION="), "{s}");
         assert!(s.contains("HONR_PROMPT='first prompt'"), "{s}");
@@ -349,26 +362,26 @@ mod tests {
 
     #[test]
     fn turn_script_shell_quotes_prompt_apostrophes() {
-        let s = turn_script("cursor", "it's a test", None, "").unwrap();
+        let s = turn_script("cursor", "it's a test", None, "", None).unwrap();
         assert!(s.contains(r"it'\''s a test"), "{s}");
     }
 
     #[test]
     fn turn_script_rejects_unknown_engine() {
-        let err = turn_script("nope", "hi", None, "").unwrap_err();
+        let err = turn_script("nope", "hi", None, "", None).unwrap_err();
         assert!(err.to_string().contains("unknown agent engine"), "{err}");
     }
 
     #[test]
     fn turn_script_opencode_fresh_and_resume() {
-        let fresh = turn_script("opencode", "hi", None, "").unwrap();
+        let fresh = turn_script("opencode", "hi", None, "", None).unwrap();
         assert!(
             fresh.contains("opencode run --format json --auto \"$HONR_PROMPT\""),
             "{fresh}"
         );
         assert!(!fresh.contains("--session"), "{fresh}");
 
-        let resume = turn_script("opencode", "again", Some("ses_1"), "").unwrap();
+        let resume = turn_script("opencode", "again", Some("ses_1"), "", None).unwrap();
         assert!(
             resume.contains("--session \"$HONR_CONVERSATION\""),
             "{resume}"
@@ -378,7 +391,7 @@ mod tests {
 
     #[test]
     fn turn_script_claude_ignores_conversation_id() {
-        let s = turn_script("claude", "hello", Some("cid"), "").unwrap();
+        let s = turn_script("claude", "hello", Some("cid"), "", None).unwrap();
         assert!(!s.contains("--conversation"), "{s}");
         assert!(!s.contains("--resume"), "{s}");
         assert!(!s.contains("HONR_CONVERSATION="), "{s}");
