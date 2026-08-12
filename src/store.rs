@@ -5586,12 +5586,12 @@ facts are pasted, then unpark";
 
     /// Notify that the default branch advanced (push or merge into main).
     ///
-    /// Claimed/Running cards get a steer note to fetch/rebase onto upstream base,
-    /// then park+unpark so the resume briefing carries it — the supervisor does
-    /// not touch the live worktree. Review catch-up is not queued here: callers
-    /// observe GitHub `mergeable` (MERGEABLE = no-op; CONFLICTING → Backlog;
-    /// UNKNOWN → [`Self::dispatch_rebase`] retry). Review is not parked onto the
-    /// Running steer path.
+    /// **Live (Claimed/Running) cards** on the matching upstream get a steer note
+    /// and park+unpark unconditionally — not gated on GitHub `mergeable` / PR
+    /// conflict status (many live runs have no PR yet). **Review** catch-up is
+    /// separate: callers observe GitHub `mergeable` after this returns
+    /// (MERGEABLE = no-op; CONFLICTING → Backlog; UNKNOWN → retry). Review is
+    /// not parked onto the Running steer path.
     pub fn notify_main_advanced(
         &self,
         advanced_repo: &str,
@@ -5644,11 +5644,13 @@ facts are pasted, then unpark";
         )
     }
 
-    /// Steer every Claimed/Running card, then park+unpark so the resume briefing
-    /// carries the rebase instruction. Steer alone does not inject mid-turn.
-    /// Already-parked cards are left alone (no second park/unpark). Sandbox
-    /// environment and conversation_id are preserved through the bounce.
-    /// Each card gets a note using **its** resolved upstream/base.
+    /// Steer matching Claimed/Running cards, then park+unpark so the resume
+    /// briefing carries the rebase instruction. Runs for every live card whose
+    /// upstream matches `advanced_repo` — **not** only when a PR is CONFLICTING
+    /// (that gate applies to Review catch-up, not live runs). Steer alone does
+    /// not inject mid-turn. Already-parked cards are left alone (no second
+    /// park/unpark). Sandbox environment and conversation_id are preserved through
+    /// the bounce. Each card gets a note using **its** resolved upstream/base.
     fn steer_live_cards_on_main_advanced(
         &self,
         advanced_repo: &str,
