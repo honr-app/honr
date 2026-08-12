@@ -1778,7 +1778,17 @@ impl OpenShell {
                         let ev = match ev {
                             Ok(e) => e,
                             Err(e) => {
-                                tracing::warn!("exec interactive stream error: {e}");
+                                let msg = e.to_string();
+                                // Cockpit Stop / sandbox delete tears the relay down
+                                // while attach or MCP still has an interactive stream
+                                // open — expected, not a fault to page on.
+                                if is_expected_interactive_disconnect(&msg) {
+                                    tracing::debug!(
+                                        "exec interactive stream closed on teardown: {msg}"
+                                    );
+                                } else {
+                                    tracing::warn!("exec interactive stream error: {msg}");
+                                }
                                 break;
                             }
                         };
@@ -2197,9 +2207,34 @@ fn mock_create_args(spec: &SandboxSpec) -> Vec<String> {
     args
 }
 
+/// Interactive exec ended because the sandbox/relay went away mid-stream.
+///
+/// Happens on every cockpit Stop (and card halt) while attach or the MCP
+/// stdio relay still holds `ExecSandboxInteractive`. Not a fault — the delete
+/// won the race with the stream.
+pub(crate) fn is_expected_interactive_disconnect(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("exec relay closed")
+        || e.contains("the service is currently unavailable")
+        || e.contains("sandbox not found")
+        || e.contains("entity was not found")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_interactive_disconnect_matches_teardown_relay() {
+        assert!(is_expected_interactive_disconnect(
+            "status: Some(Status { code: Unavailable, message: \"exec relay closed before the command reported an exit status\", .. })"
+        ));
+        assert!(is_expected_interactive_disconnect(
+            "code: 'The service is currently unavailable', message: \"exec relay closed\""
+        ));
+        assert!(is_expected_interactive_disconnect("sandbox not found"));
+        assert!(!is_expected_interactive_disconnect("permission denied writing tty"));
+    }
 
     fn spec() -> SandboxSpec {
         SandboxSpec {

@@ -167,11 +167,14 @@ async fn relay_sessions(os: OpenShell, board: SharedBoard, sandbox: String, stop
         let exec = match os.exec_interactive_raw(&sandbox, relay_command()).await {
             Ok(e) => e,
             Err(e) => {
-                if sandbox_gone(&e.to_string()) {
+                let msg = e.to_string();
+                if sandbox_gone(&msg)
+                    || crate::openshell::is_expected_interactive_disconnect(&msg)
+                {
                     tracing::info!(%sandbox, "cockpit: MCP relay stop — sandbox gone");
                     break;
                 }
-                tracing::warn!(%sandbox, "cockpit: spawn MCP relay (socat): {e}");
+                tracing::warn!(%sandbox, "cockpit: spawn MCP relay (socat): {msg}");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -192,7 +195,20 @@ async fn relay_sessions(os: OpenShell, board: SharedBoard, sandbox: String, stop
                     let _ = running.waiting().await;
                 }
                 Err(e) => {
-                    tracing::warn!("cockpit: MCP serve_server over exec pipe ended: {e}");
+                    let msg = e.to_string();
+                    // Stop/delete closes the exec pipe under serve_server —
+                    // same class as openshell::is_expected_interactive_disconnect.
+                    if crate::openshell::is_expected_interactive_disconnect(&msg)
+                        || msg.to_ascii_lowercase().contains("connection closed")
+                    {
+                        tracing::debug!(
+                            "cockpit: MCP serve_server ended on teardown: {msg}"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "cockpit: MCP serve_server over exec pipe ended: {msg}"
+                        );
+                    }
                 }
             }
         });
