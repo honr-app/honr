@@ -3443,8 +3443,20 @@ pub(crate) fn cockpit_briefing() -> String {
     );
     b.push_str(
         "When creating a Project, `create_project` requires `clone_repo` (`owner/name`) — \
-         the repository Initial plan clones for planning. Do not dispatch Initial plan \
-         until that clone target is set.\n",
+         the repository Initial plan clones for planning. Optional `project_prompt` overrides \
+         the compiled default standing instructions workers inherit on every claim. Do not \
+         dispatch Initial plan until that clone target is set.\n\n",
+    );
+    b.push_str(
+        "Configuration stacks in layers: process boot and board Settings (Policies, sandbox \
+         specs, agent runtime, Forge) are host/operator setup; Project fields (`clone_repo`, \
+         optional sandbox override) seed the Initial plan; `project_prompt` carries standing \
+         agent policy — escalation, clone-target protocol, plan/split/report paths, and where \
+         to name Project-wide quality gates; per-card intent/DoD names clone targets and \
+         card-specific gates. Boot, Settings, and Project fields do not belong in \
+         `project_prompt`. Name test/lint commands in `project_prompt` when they apply to every \
+         card; honr does not assume cargo or any toolchain unless `project_prompt` or a \
+         card's DoD names it.\n",
     );
     b
 }
@@ -4795,6 +4807,18 @@ mod tests {
         assert!(
             cold.contains("clone_repo") && cold.contains("owner/name"),
             "briefing must require create_project clone_repo: {cold}"
+        );
+        assert!(
+            cold.contains("project_prompt"),
+            "briefing must explain project_prompt: {cold}"
+        );
+        assert!(
+            cold.contains("Configuration stacks in layers"),
+            "briefing must name configuration layers: {cold}"
+        );
+        assert!(
+            cold.contains("do not assume cargo") || cold.contains("does not assume cargo"),
+            "briefing must not invent cargo gates: {cold}"
         );
         assert!(
             cold.contains("mcp.json"),

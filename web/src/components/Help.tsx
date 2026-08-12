@@ -11,8 +11,9 @@ export function Help() {
       <header className="board-hero">
         <h1>Welcome to honr</h1>
         <p className="board-lede">
-          Create a Project, approve its plan, then dispatch work. Setup steps
-          are below.
+          Create a Project, set standing instructions if needed, approve its
+          plan, then dispatch work. Configuration layers and setup steps are
+          below.
         </p>
       </header>
 
