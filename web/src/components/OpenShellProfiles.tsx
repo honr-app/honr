@@ -20,6 +20,10 @@ type ProfileDraft = {
   /** Explicit attach list (always sent on save). */
   provider_names: string[];
   mcp_server_ids: string[];
+  /** Non-secret env overlaid at sandbox create (profile wins on key clash). */
+  env: Record<string, string>;
+  /** Seat notes injected into cold/Cockpit briefing when non-empty. */
+  prompt: string;
 };
 
 const emptyDraft = (defaults?: SandboxProfileCreateDefaults | null): ProfileDraft => ({
@@ -33,6 +37,8 @@ const emptyDraft = (defaults?: SandboxProfileCreateDefaults | null): ProfileDraf
   model: "",
   provider_names: [],
   mcp_server_ids: [],
+  env: {},
+  prompt: "",
 });
 
 function draftFrom(p: SandboxProfile): ProfileDraft {
@@ -47,7 +53,13 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
     model: p.model?.trim() ?? "",
     provider_names: [...(p.provider_names ?? [])],
     mcp_server_ids: [...(p.mcp_server_ids ?? [])],
+    env: { ...(p.env ?? {}) },
+    prompt: p.prompt?.trim() ?? "",
   };
+}
+
+function envEntries(env: Record<string, string>): [string, string][] {
+  return Object.entries(env).sort(([a], [b]) => a.localeCompare(b));
 }
 
 function policyLabel(
@@ -470,6 +482,112 @@ export function SandboxesPanelView({
                   )}
                 </div>
 
+                <div
+                  className="openshell-profile-providers"
+                  data-testid="sandbox-field-env"
+                >
+                  <div className="openshell-profile-providers-head">
+                    <span className="openshell-profile-providers-title">
+                      Environment variables
+                    </span>
+                    <span
+                      className="dim sandbox-field-hint"
+                      data-testid="sandbox-env-non-secret-hint"
+                    >
+                      Non-secret values overlaid at sandbox create (profile wins
+                      on key clash). Put secrets on Providers — not here.
+                    </span>
+                  </div>
+                  {envEntries(draft.env).length === 0 ? (
+                    <p className="dim" data-testid="sandbox-env-empty">
+                      No env vars — add keys like API URLs or tool paths.
+                    </p>
+                  ) : (
+                    <ul className="openshell-profile-provider-ul sandbox-env-ul">
+                      {envEntries(draft.env).map(([key, value]) => (
+                        <li key={key} className="sandbox-env-row">
+                          <label className="sandbox-env-key">
+                            <span className="dim">Key</span>
+                            <input
+                              className="search-input"
+                              value={key}
+                              disabled
+                              readOnly
+                              data-testid={`sandbox-env-key-${key}`}
+                            />
+                          </label>
+                          <label className="sandbox-env-value">
+                            <span className="dim">Value</span>
+                            <input
+                              className="search-input"
+                              value={value}
+                              disabled={busy}
+                              onChange={(e) =>
+                                onDraftChange({
+                                  ...draft,
+                                  env: { ...draft.env, [key]: e.target.value },
+                                })
+                              }
+                              data-testid={`sandbox-env-value-${key}`}
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            className="sandbox-env-remove"
+                            disabled={busy}
+                            onClick={() => {
+                              const next = { ...draft.env };
+                              delete next[key];
+                              onDraftChange({ ...draft, env: next });
+                            }}
+                            data-testid={`sandbox-env-remove-${key}`}
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="btns" style={{ marginTop: 0 }}>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      data-testid="sandbox-env-add"
+                      onClick={() => {
+                        const key = window.prompt("Environment variable name");
+                        if (!key?.trim()) return;
+                        const trimmed = key.trim();
+                        if (trimmed in draft.env) return;
+                        onDraftChange({
+                          ...draft,
+                          env: { ...draft.env, [trimmed]: "" },
+                        });
+                      }}
+                    >
+                      Add variable
+                    </button>
+                  </div>
+                </div>
+
+                <label data-testid="sandbox-field-prompt">
+                  Sandbox prompt (seat notes)
+                  <textarea
+                    className="search-input"
+                    rows={5}
+                    value={draft.prompt}
+                    disabled={busy}
+                    placeholder="optional — injected into cold and Cockpit briefing"
+                    onChange={(e) =>
+                      onDraftChange({ ...draft, prompt: e.target.value })
+                    }
+                    data-testid="sandbox-field-prompt-input"
+                  />
+                  <span className="dim sandbox-field-hint">
+                    Operator notes for agents using this spec. Shown once at
+                    briefing start — not re-dumped on resume.
+                  </span>
+                </label>
+
                 <div className="sandbox-profile-form-row">
                   <label>
                     CPU
@@ -559,6 +677,28 @@ export function SandboxesPanelView({
                       : (selected.provider_names ?? []).join(", ")}
                   </strong>
                 </div>
+                {envEntries(selected.env ?? {}).length > 0 && (
+                  <div
+                    className="openshell-profile-attach-summary"
+                    data-testid="sandbox-env-summary"
+                  >
+                    <span className="dim">Env</span>
+                    <strong>
+                      {envEntries(selected.env ?? {})
+                        .map(([k, v]) => `${k}=${v}`)
+                        .join(", ")}
+                    </strong>
+                  </div>
+                )}
+                {selected.prompt?.trim() && (
+                  <div
+                    className="openshell-profile-attach-summary sandbox-prompt-summary"
+                    data-testid="sandbox-prompt-summary"
+                  >
+                    <span className="dim">Sandbox prompt</span>
+                    <span>{selected.prompt.trim()}</span>
+                  </div>
+                )}
                 {sandboxHasNoProviders(selected) && (
                   <p
                     className="info"
@@ -750,6 +890,8 @@ export function SandboxesPanel() {
           model: draft.model.trim() || null,
           provider_names: draft.provider_names,
           mcp_server_ids,
+          env: draft.env,
+          prompt: draft.prompt.trim() || null,
         };
         run(api.upsertSandboxProfile(body)).then(() => {
           setEditingId(null);

@@ -784,6 +784,23 @@ textarea.sandbox-policy-textarea {
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+.sandbox-env-ul { list-style: none; padding: 0; margin: 0; }
+.sandbox-env-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(160px, 2fr) auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+.sandbox-env-row label { margin: 0; }
+.sandbox-env-row .dim { font-size: 11px; display: block; margin-bottom: 2px; }
+.sandbox-env-remove { align-self: end; margin-bottom: 2px; }
+.sandbox-prompt-summary span:last-child {
+  display: block;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  font-size: 13px;
+}
 .project-sandbox-picker { margin-top: 4px; }
 
 .workspace-form {

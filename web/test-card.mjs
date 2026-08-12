@@ -1791,6 +1791,8 @@ const fixtureProfiles = [
     memory: "16Gi",
     engine: "agy",
     model: "gemini-3.6-flash-high",
+    env: { TOOL_PATH: "/opt/tools" },
+    prompt: "Prefer agy for this seat.",
   },
 ];
 
@@ -1832,6 +1834,8 @@ const sandboxPanelBase = {
     model: "",
     provider_names: [],
     mcp_server_ids: [],
+    env: {},
+    prompt: "",
   },
   onSelect: () => {},
   onDraftChange: () => {},
@@ -1888,6 +1892,10 @@ assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-set-cockpit-heavy\""),
   "Non-Cockpit offers Use for Cockpit");
 assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-delete-heavy\""), "Deletable profile offers Delete");
 assert(sandboxesHeavyHtml.includes("gemini-3.6-flash-high"), "Selected profile with model shows it in readonly meta");
+assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-env-summary\""), "Readonly view shows env summary");
+assert(sandboxesHeavyHtml.includes("TOOL_PATH=/opt/tools"), "Readonly env summary lists key=value");
+assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-prompt-summary\""), "Readonly view shows prompt summary");
+assert(sandboxesHeavyHtml.includes("Prefer agy for this seat."), "Readonly prompt shows seat notes");
 
 const createFormHtml = renderToString(
   React.createElement(SandboxesPanelView, {
@@ -1905,6 +1913,8 @@ const createFormHtml = renderToString(
       model: "claude-sonnet-4",
       provider_names: ["vertex"],
       mcp_server_ids: [],
+      env: { API_URL: "https://api.example.test" },
+      prompt: "Use the staging API.",
     },
   }),
 );
@@ -1922,6 +1932,17 @@ assert(createFormHtml.includes("value=\"minimal\"") || createFormHtml.includes("
   "Form lists catalog policies");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-providers\""), "Form includes per-profile providers");
 assert(createFormHtml.includes("data-testid=\"sandbox-provider-vertex\""), "Form lists available providers");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-env\""), "Form includes env editor");
+assert(createFormHtml.includes("data-testid=\"sandbox-env-non-secret-hint\""),
+  "Form shows non-secret env hint");
+assert(createFormHtml.includes("secrets on Providers"), "Env hint mentions Providers for secrets");
+assert(createFormHtml.includes("data-testid=\"sandbox-env-key-API_URL\""), "Form shows env key");
+assert(createFormHtml.includes("data-testid=\"sandbox-env-value-API_URL\""), "Form shows env value");
+assert(createFormHtml.includes("https://api.example.test"), "Form shows env draft value");
+assert(createFormHtml.includes("data-testid=\"sandbox-env-add\""), "Form offers add env variable");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-prompt\""), "Form includes prompt field");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-prompt-input\""), "Form includes prompt textarea");
+assert(createFormHtml.includes("Use the staging API."), "Form shows prompt draft value");
 assert(!createFormHtml.includes("data-testid=\"sandbox-no-providers-warn\""),
   "Create form with providers selected must not warn");
 assert(!/policy path|path to.*policy|host path/i.test(createFormHtml),
@@ -1944,6 +1965,8 @@ const emptyProvidersFormHtml = renderToString(
       model: "",
       provider_names: [],
       mcp_server_ids: [],
+      env: {},
+      prompt: "",
     },
   }),
 );
@@ -1966,6 +1989,8 @@ const editFormHtml = renderToString(
       model: "gpt-5",
       provider_names: ["vertex"],
       mcp_server_ids: ["honr"],
+      env: {},
+      prompt: "",
     },
   }),
 );
@@ -1997,6 +2022,8 @@ const nonCockpitMcpHtml = renderToString(
       model: "",
       provider_names: [],
       mcp_server_ids: [],
+      env: {},
+      prompt: "",
     },
   }),
 );
