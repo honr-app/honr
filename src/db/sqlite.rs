@@ -1173,6 +1173,7 @@ mod tests {
                 cpu: Some("2".into()),
                 memory: None,
                 engine: None,
+                model: Some("gpt-5".into()),
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
                 shipped: false,
@@ -1200,6 +1201,10 @@ mod tests {
         assert_eq!(
             again.sandbox_profiles.get("default").unwrap().policy_id,
             "minimal"
+        );
+        assert_eq!(
+            again.sandbox_profiles.get("default").unwrap().model.as_deref(),
+            Some("gpt-5")
         );
         assert!(
             again

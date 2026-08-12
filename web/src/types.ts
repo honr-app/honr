@@ -105,6 +105,8 @@ export interface SandboxProfile {
   memory?: string | null;
   /** Agent CLI (`cursor` / `agy` / `claude` / `opencode`). Unset → Agent runtime default. */
   engine?: string | null;
+  /** Model passed to the agent CLI when set. Unset → card.model → engine default. */
+  model?: string | null;
   /** Providers to attach on sandbox create (`[]` = none). */
   provider_names?: string[];
   /** MCP server catalog ids to attach (`[]` = none; cockpit always attaches shipped honr). */
