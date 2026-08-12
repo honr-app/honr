@@ -117,16 +117,38 @@ recreate the sandbox after a change.
 ## Sandbox specs
 
 A sandbox spec is the recipe for a sandbox: image, CPU, memory, engine,
-attached providers, and a **reference to a named Policy** (`policy_id`). Specs
-live on the board and are edited in **Settings → OpenShell → Sandbox specs**
-(REST: `/api/sandbox-profiles`). Upsert requires a known `policy_id`; you edit
-allow-list YAML under Policies, not on the spec.
+optional **model**, attached providers, and a **reference to a named Policy**
+(`policy_id`). Specs live on the board and are edited in **Settings → OpenShell
+→ Sandbox specs** (REST: `/api/sandbox-profiles`). Upsert requires a known
+`policy_id`; you edit allow-list YAML under Policies, not on the spec.
 
 Four specs come seeded — `sandbox-cursor`, `sandbox-agy`, `sandbox-claude`,
 `sandbox-opencode` — one per split `quay.io/honr-app/sandbox-<engine>` image
 ([Sandbox](sandbox.md#image-and-offline-gates)), each already wired to a
 matching minimal Cockpit policy with honr MCP attached. Editing a seeded row
 sticks; the seed only inserts what's missing.
+
+### Model
+
+An optional **model** on the spec names the model honr passes to agent CLIs
+that accept a `--model` flag on launch (today: `agy`). Leave it unset to inherit
+the engine default — for `agy`, `gemini-3.6-flash-high`
+(`DEFAULT_SEAT_MODEL`).
+
+Resolution at claim/run:
+
+1. **`card.model`** on the Task (if set) — per-card override on claim
+2. **Sandbox spec `model`** — the winning profile for that card
+3. **Engine default** — compiled fallback when both are unset (`agy` only today)
+
+The board and card UI show the resolved value (`resolved_model`). Cockpit uses
+the same spec → default chain (no card).
+
+**`claude` and `opencode` do not read spec model.** Those engines reach models
+through OpenShell's `inference.local` router; which model they get is whatever
+you configured on the gateway with `openshell inference set` (see
+[Sandbox](sandbox.md#how-credentials-reach-the-agent)). honr does not automate
+that route — set it once per gateway as today.
 
 ### Which spec a card gets
 
