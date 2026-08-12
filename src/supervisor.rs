@@ -2782,8 +2782,9 @@ fn resume_briefing(grant: &ClaimGrant, repo: &crate::schema::RepoConfig) -> Stri
     b
 }
 
-/// Project prompt + Plan are the primary inputs; a fresh `claude -p` has none
-/// of them unless we put them here.
+/// Plan + Project prompt are the primary inputs; a fresh `claude -p` has none
+/// of them unless we put them here. Plan (breakdown) precedes project_prompt
+/// (standing agent policy) so card context comes before standing rules.
 fn briefing(
     grant: &ClaimGrant,
     branch: BranchState,
@@ -2795,13 +2796,6 @@ fn briefing(
 
     if let Some(pt) = &grant.project_title {
         b.push_str(&format!("Project: {pt}\n"));
-    }
-    if let Some(prompt) = &grant.project_prompt {
-        if !prompt.trim().is_empty() {
-            b.push_str("\nProject prompt (standing instructions):\n");
-            b.push_str(prompt.trim());
-            b.push('\n');
-        }
     }
 
     if grant.plan_summary.is_some() || !grant.plan_tasks.is_empty() {
@@ -2827,6 +2821,14 @@ fn briefing(
             ));
         }
         b.push('\n');
+    }
+
+    if let Some(prompt) = &grant.project_prompt {
+        if !prompt.trim().is_empty() {
+            b.push_str("Project prompt (standing agent policy):\n");
+            b.push_str(prompt.trim());
+            b.push('\n');
+        }
     }
 
     b.push_str(&format!("Your card: {}\n", grant.title));
@@ -2950,9 +2952,9 @@ names an exact product repo; otherwise escalate (see Remotes) — do not guess.\
 `gates`.\n",
         );
         b.push_str(
-            "\nRun the project's own checks before you finish — see the Project prompt and \
-definition of done for which gates apply. Do not assume cargo or any other toolchain unless \
-those instructions name it.\n",
+            "\nRun the project's own checks before you finish — Project-level quality gates \
+live in the Project prompt above; card-specific gates live in this card's definition of done. \
+Do not assume cargo or any other toolchain unless those instructions name it.\n",
         );
         b.push_str(&format!(
             "\nWhen the work is done, publish it yourself:\n\
@@ -4025,6 +4027,36 @@ mod tests {
         assert!(
             b.contains("/sandbox/.honr/report.json"),
             "verdict path invariant: {b}"
+        );
+    }
+
+    #[test]
+    fn briefing_presents_plan_before_project_prompt() {
+        let b = briefing(
+            &grant(),
+            BranchState::Fresh,
+            "honr/card-7",
+            &cross_fork_repo(),
+        );
+        let plan_pos = b.find("Project Plan").expect("must have Plan section");
+        let prompt_pos = b
+            .find("Project prompt (standing agent policy)")
+            .expect("must have project_prompt heading");
+        assert!(
+            plan_pos < prompt_pos,
+            "Plan must precede project_prompt: plan={plan_pos} prompt={prompt_pos}"
+        );
+        assert!(
+            !b.contains("standing instructions"),
+            "must use standing agent policy heading: {b}"
+        );
+        assert!(
+            b.contains("Project-level quality gates live in the Project prompt"),
+            "must point at project_prompt for gates: {b}"
+        );
+        assert!(
+            b.contains("card-specific gates live in this card's definition of done"),
+            "must point at DoD for card gates: {b}"
         );
     }
 
