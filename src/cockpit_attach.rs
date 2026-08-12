@@ -405,7 +405,8 @@ where
     // Cursor fresh chats get the briefing as the initial prompt; other engines
     // open their TUI without a forced first message.
     let briefing = if fresh && engine == "cursor" {
-        Some(cockpit_briefing())
+        let resolved = board.resolve_cockpit_sandbox_create();
+        Some(cockpit_briefing(resolved.prompt.as_deref()))
     } else {
         None
     };
