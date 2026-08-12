@@ -391,6 +391,8 @@ pub struct ClaimGrant {
     pub project_title: Option<String>,
     /// Project standing instructions (`project_prompt`).
     pub project_prompt: Option<String>,
+    /// Resolved sandbox profile prompt at claim (seat notes for this run).
+    pub sandbox_prompt: Option<String>,
     /// Plan summary from the Project artifact.
     pub plan_summary: Option<String>,
     /// Plan tasks (deps included); `current` marks this card's row when known.
@@ -4394,6 +4396,7 @@ impl Board {
         let ctx = self.claim_plan_context(id, &item);
         let engine = Some(self.resolve_engine_for_card(id));
         let model = self.resolve_model_for_card(id);
+        let sandbox_prompt = self.resolve_sandbox_create(id).prompt;
 
         Ok(ClaimGrant {
             item_id: id,
@@ -4402,6 +4405,7 @@ impl Board {
             definition_of_done: item.definition_of_done.clone(),
             project_title: ctx.project_title,
             project_prompt: ctx.project_prompt,
+            sandbox_prompt,
             plan_summary: ctx.plan_summary,
             plan_tasks: ctx.plan_tasks,
             plan_task_key: ctx.plan_task_key,

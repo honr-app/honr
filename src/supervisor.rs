@@ -2844,6 +2844,8 @@ fn briefing(
         }
     }
 
+    push_sandbox_prompt_section(&mut b, grant.sandbox_prompt.as_deref());
+
     b.push_str(&format!("Your card: {}\n", grant.title));
     if let Some(key) = &grant.plan_task_key {
         b.push_str(&format!("Plan key: {key}\n"));
@@ -3417,8 +3419,16 @@ async fn finalize_cockpit(
     }
 }
 
+fn push_sandbox_prompt_section(b: &mut String, prompt: Option<&str>) {
+    if let Some(p) = prompt.filter(|s| !s.trim().is_empty()) {
+        b.push_str("Sandbox prompt (seat notes):\n");
+        b.push_str(p.trim());
+        b.push('\n');
+    }
+}
+
 /// Briefing for a fresh Cockpit interactive `agent` (and tests).
-pub(crate) fn cockpit_briefing() -> String {
+pub(crate) fn cockpit_briefing(sandbox_prompt: Option<&str>) -> String {
     let mut b = String::new();
     b.push_str(
         "You are the privileged control-plane cockpit for honr — the human's liaison \
@@ -3458,6 +3468,7 @@ pub(crate) fn cockpit_briefing() -> String {
          card; honr does not assume cargo or any toolchain unless `project_prompt` or a \
          card's DoD names it.\n",
     );
+    push_sandbox_prompt_section(&mut b, sandbox_prompt);
     b
 }
 
@@ -4517,6 +4528,125 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claim_populates_sandbox_prompt_from_resolved_profile() {
+        use crate::model::{Origin, SandboxProfile};
+
+        let board = Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-claim-sbx-prompt-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+        board
+            .upsert_openshell_policy(crate::model::OpenShellPolicy {
+                id: "default-pol".into(),
+                name: "Default policy".into(),
+                yaml: crate::seed_policies::MINIMAL_SANDBOX_POLICY.into(),
+            })
+            .unwrap();
+        board
+            .upsert_sandbox_profile(SandboxProfile {
+                id: "default".into(),
+                name: "Default".into(),
+                image: "default-image:1".into(),
+                policy_id: "default-pol".into(),
+                policy_inline_legacy: None,
+                cpu: Some("2".into()),
+                memory: Some("4Gi".into()),
+                engine: None,
+                model: None,
+                provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
+                env: Default::default(),
+                prompt: Some("Profile seat notes.".into()),
+                shipped: false,
+            })
+            .unwrap();
+        board.set_default_sandbox_profile("default").unwrap();
+
+        let project = board
+            .create(None, "Sbx Proj", "why", None, Origin::Human, true, None)
+            .unwrap();
+        let task = board
+            .create(
+                Some(project.id),
+                "task",
+                "do it",
+                Some("done".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        board
+            .set_task_repo(task.id, Some(cross_fork_repo()))
+            .unwrap();
+        let _ = board.transition(task.id, State::Shaping, "t", None);
+        let _ = board.transition(task.id, State::Backlog, "t", None);
+        let grant = board.claim(task.id, "agent", None, 60).unwrap();
+        assert_eq!(
+            grant.sandbox_prompt.as_deref(),
+            Some("Profile seat notes.")
+        );
+    }
+
+    #[test]
+    fn sandbox_prompt_section_in_cold_briefing_after_project_prompt() {
+        let mut g = grant();
+        g.sandbox_prompt = Some("Use oc with API_URL.".into());
+        let b = briefing(&g, BranchState::Fresh, "honr/card-7", &cross_fork_repo());
+        assert!(b.contains("Sandbox prompt (seat notes):"), "{b}");
+        assert!(b.contains("Use oc with API_URL."), "{b}");
+        let proj_pos = b
+            .find("Project prompt (standing agent policy):")
+            .expect("project prompt");
+        let sbx_pos = b.find("Sandbox prompt (seat notes):").expect("sandbox prompt");
+        let card_pos = b.find("Your card:").expect("your card");
+        assert!(
+            proj_pos < sbx_pos,
+            "sandbox prompt must follow project prompt: {b}"
+        );
+        assert!(
+            sbx_pos < card_pos,
+            "sandbox prompt must precede card header: {b}"
+        );
+    }
+
+    #[test]
+    fn resume_briefing_omits_sandbox_prompt() {
+        let mut g = grant();
+        g.sandbox_prompt = Some("Use oc with API_URL.".into());
+        let b = resume_briefing(&g, &cross_fork_repo());
+        assert!(
+            !b.contains("Sandbox prompt (seat notes):"),
+            "resume must not re-dump sandbox prompt: {b}"
+        );
+        assert!(
+            !b.contains("Use oc with API_URL."),
+            "resume must not repeat seat notes: {b}"
+        );
+    }
+
+    #[test]
+    fn cockpit_briefing_includes_sandbox_prompt_section() {
+        let cold = cockpit_briefing(Some("Cockpit seat notes for oc."));
+        assert!(cold.contains("Sandbox prompt (seat notes):"), "{cold}");
+        assert!(cold.contains("Cockpit seat notes for oc."), "{cold}");
+        assert!(
+            !cockpit_briefing(None).contains("Sandbox prompt (seat notes):"),
+            "empty prompt must omit section"
+        );
+        assert!(
+            !cockpit_briefing(Some("  ")).contains("Sandbox prompt (seat notes):"),
+            "blank prompt must omit section"
+        );
+    }
+
     /// Sandbox image/policy/runtime must not reintroduce beads (t3 regression).
     #[test]
     fn sandbox_assets_have_no_beads_surface() {
@@ -4814,7 +4944,7 @@ mod tests {
 
     #[test]
     fn cockpit_briefing_is_operator_seat_not_worker() {
-        let cold = cockpit_briefing();
+        let cold = cockpit_briefing(None);
         assert!(cold.contains("cockpit"), "{cold}");
         assert!(cold.contains("operator"), "{cold}");
         assert!(cold.contains("board_snapshot"), "{cold}");
@@ -5181,6 +5311,7 @@ mod tests {
             run_deadline_at: deadline,
             engine: None,
             model: None,
+            sandbox_prompt: None,
         }
     }
 
