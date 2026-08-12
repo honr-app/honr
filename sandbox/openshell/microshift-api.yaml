@@ -1,10 +1,16 @@
-# OpenShell provider type for in-cluster kube/OpenShift API access.
+# OpenShell provider type for CRC / MicroShift / OCP API access from a
+# Podman (or in-cluster) sandbox.
+#
 # Honr seals KUBE_TOKEN; the sandbox proxy rewrites Bearer on MITM
-# (protocol: rest) to kubernetes.default.svc. The sandbox image must trust the
-# cluster's kube-apiserver-service-network-signer CA or MITM upstream fails.
+# (protocol: rest). From a host-side Podman sandbox, oc talks to CRC via
+# host.containers.internal:8443 — OpenShell always blocks control-plane port
+# 6443, so the host runs crc-api-proxy (TLS terminator with a cert for
+# host.containers.internal, forwarding to 127.0.0.1:6443). The sandbox image
+# must trust that proxy CA (honr-crc-api-proxy-ca.crt). In-cluster seats still
+# use kubernetes.default.svc:443.
 id: microshift-api
 display_name: MicroShift / OCP API
-description: ServiceAccount token as KUBE_TOKEN (Bearer rewrite to kubernetes.default.svc)
+description: ServiceAccount token as KUBE_TOKEN (Bearer rewrite to the cluster API)
 category: agent
 credentials:
   - name: kube_token
@@ -19,6 +25,24 @@ discovery:
   credentials:
     - kube_token
 endpoints:
+  # Host-side Podman → CRC/MicroShift via host proxy (not :6443; OpenShell
+  # hard-blocks that control-plane port even for host.containers.internal).
+  - host: host.containers.internal
+    port: 8443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: host.docker.internal
+    port: 8443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: api.crc.testing
+    port: 8443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  # In-cluster OpenShell seats.
   - host: kubernetes.default.svc
     port: 443
     protocol: rest

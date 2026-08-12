@@ -1,9 +1,13 @@
 # Microshift/OCP operator sandbox: cursor base + oc/kubectl.
 #
 # OpenShell MITM (credential rewrite) verifies upstream TLS with webpki-roots
-# plus the image system CA store. The kube API presents a cluster-private CA
-# (kube-apiserver-service-network-signer), so that CA must be in the image
-# trust store — otherwise CONNECT succeeds and the proxy resets (NET:FAIL).
+# plus the image system CA store. Host-side Podman seats reach CRC through a
+# local TLS proxy on host.containers.internal:8443 (OpenShell hard-blocks
+# control-plane port 6443). Trust that proxy CA here. Also ship CRC's
+# kube-apiserver-external-signer for any direct api.crc.testing paths.
+#
+# Host prerequisite: user systemd unit crc-api-proxy.service (see
+# ~/.config/honr/crc-api-proxy/).
 #
 #   podman build -f sandbox/microshift/Containerfile -t quay.io/honr-app/sandbox-microshift:latest .
 
@@ -13,7 +17,10 @@ USER root
 
 ARG OCP_CLIENT_VERSION=stable-4.18
 
-# Cluster API trust (service-network signer). Refresh when the cluster CA rotates.
+COPY sandbox/microshift/honr-crc-api-proxy-ca.crt \
+     /etc/pki/ca-trust/source/anchors/honr-crc-api-proxy-ca.crt
+COPY sandbox/microshift/kube-apiserver-external-signer.crt \
+     /etc/pki/ca-trust/source/anchors/kube-apiserver-external-signer.crt
 COPY sandbox/microshift/kube-apiserver-service-network-signer.crt \
      /etc/pki/ca-trust/source/anchors/kube-apiserver-service-network-signer.crt
 
@@ -23,15 +30,16 @@ RUN update-ca-trust extract \
       /etc/ssl/certs/ca-certificates.crt
 
 # Real clients under /opt; thin PATH wrappers pass server + sealed KUBE_TOKEN
-# (OpenShell rewrites Bearer on protocol:rest to kubernetes.default.svc).
+# (OpenShell rewrites Bearer on protocol:rest).
 RUN mkdir -p /opt/openshift \
  && curl -fsSL \
       "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OCP_CLIENT_VERSION}/openshift-client-linux.tar.gz" \
       | tar -xz -C /opt/openshift oc kubectl \
  && chmod 755 /opt/openshift/oc /opt/openshift/kubectl \
+# Default API: host TLS proxy → CRC. In-cluster: KUBE_SERVER=https://kubernetes.default.svc
  && printf '%s\n' \
 '#!/bin/sh' \
-'server="${KUBE_SERVER:-https://kubernetes.default.svc}"' \
+'server="${KUBE_SERVER:-https://host.containers.internal:8443}"' \
 'if [ -z "${KUBE_TOKEN:-}" ]; then' \
 '  echo "honr-oc: KUBE_TOKEN unset — attach the microshift-api provider" >&2' \
 '  exit 1' \
@@ -40,7 +48,7 @@ RUN mkdir -p /opt/openshift \
       > /usr/local/bin/oc \
  && printf '%s\n' \
 '#!/bin/sh' \
-'server="${KUBE_SERVER:-https://kubernetes.default.svc}"' \
+'server="${KUBE_SERVER:-https://host.containers.internal:8443}"' \
 'if [ -z "${KUBE_TOKEN:-}" ]; then' \
 '  echo "honr-kubectl: KUBE_TOKEN unset — attach the microshift-api provider" >&2' \
 '  exit 1' \
