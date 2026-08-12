@@ -97,7 +97,9 @@ endpoint and sealed PEMs — same split as [Configuration](configuration.md).
 **Sync** applies it to the gateway. Which providers attach on create is chosen
 per Sandbox spec.
 
-For inference, point OpenShell's local router at your model:
+For **`claude`** and **`opencode`** sandboxes, point OpenShell's local router at
+your model (this is separate from the optional **Model** field on Sandbox
+specs, which only applies to CLIs that accept `--model` — today `agy`):
 
 ```bash
 openshell provider create --name vertex --type google-vertex-ai --from-gcloud-adc \
@@ -105,9 +107,14 @@ openshell provider create --name vertex --type google-vertex-ai --from-gcloud-ad
 openshell inference set --provider vertex --model claude-sonnet-4-6@default
 ```
 
-Agents then reach models at `https://inference.local` and the gateway swaps in
-the real credential on the way out. Details, including the one environment
-variable that will silently break this: [Sandbox](sandbox.md).
+Those agents then reach models at `https://inference.local` and the gateway
+swaps in the real credential on the way out. Details, including the one
+environment variable that will silently break this:
+[Sandbox](sandbox.md#how-credentials-reach-the-agent).
+
+For **`agy`**, model selection is on the Sandbox spec (or per card at claim);
+honr passes the resolved value as `agy --model …`. See
+[Configuration](configuration.md#model) and [Sandbox](sandbox.md#model-selection).
 
 For GitHub, add or edit the shipped **`github-app`** provider under
 **Settings → OpenShell → Providers** (type profile under **Provider types**,
@@ -150,8 +157,11 @@ Then set the board's **default** sandbox spec in
 **Settings → OpenShell → Sandbox specs** (Welcome/Help deep-links here) —
 either one of the four seeded rows or one you made. Nothing is default until
 you choose; the Welcome "Sandbox spec" readiness check stays red until then.
-Specs live on the board; [Configuration](configuration.md#sandbox-specs) and
-[Sandbox](sandbox.md) cover resolution.
+Optionally set **Model** on the spec when using `agy` (or override per card at
+claim); `claude`/`opencode` model routing stays on the gateway via
+`openshell inference set` as above. Specs live on the board;
+[Configuration](configuration.md#sandbox-specs) and [Sandbox](sandbox.md) cover
+resolution.
 
 **Check:** `podman image ls | grep sandbox-`, and Welcome's "Sandbox spec"
 readiness check turns green.

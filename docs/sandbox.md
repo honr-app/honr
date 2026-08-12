@@ -65,6 +65,25 @@ under `/sandbox/.honr`). Agents finish via `plan.json` / `report.json` /
 `escalate.json` / `split.json`. The board is the only tracker — sandboxes do
 not carry a separate issue-store CLI or database.
 
+## Model selection
+
+Which model an agent run uses depends on the engine.
+
+| Engine | How model is chosen | Operator configures |
+|---|---|---|
+| `agy` | `card.model` → sandbox spec **model** → `DEFAULT_SEAT_MODEL` (`gemini-3.6-flash-high`) | Optional **Model** on **Settings → OpenShell → Sandbox specs**; per-card `model` on claim overrides the spec |
+| `claude`, `opencode` | OpenShell `inference.local` — gateway route from `openshell inference set` | Gateway CLI once per install (see [How credentials reach the agent](#how-credentials-reach-the-agent)); **not** the sandbox spec model field |
+| `cursor` | Cursor Agent default for the attached API key | Provider credentials on the spec |
+
+For engines whose CLI accepts `--model` on launch, honr injects the resolved
+value into the supervisor start script and Cockpit attach/chat argv. Today that
+is `agy` only. Put `--model` **before** `-p` when invoking agy manually — `-p`
+takes the next argv as the prompt.
+
+Seeded sandbox specs load with **model** unset; `agy` cards then get
+`DEFAULT_SEAT_MODEL` unless you set a spec default or override a card at claim
+time. The card badge and Detail pane show the resolved model when known.
+
 ## Image
 
 [`sandbox/Containerfile`](https://github.com/honr-app/honr/blob/main/sandbox/Containerfile) builds honr's own base — a
@@ -212,9 +231,13 @@ sitting on the machine it runs on.
 | Seat token file | Placeholder only + far-future expiry; **no** seat-side `refresh_token` |
 | Seat `settings.json` | `enableTelemetry: false`, `gcp.project` / `gcp.location` from Board provider config `ANTIGRAVITY_GCP_PROJECT` / `ANTIGRAVITY_GCP_LOCATION` (Settings → Providers) |
 | Seat env (agy launch) | `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_QUOTA_PROJECT` set from the same Board project so they win over Vertex’s injected project — agy otherwise leaves `quotaProject` empty |
-| Seat default model | `gemini-3.6-flash-high` (`DEFAULT_SEAT_MODEL`) — requires the consumer Antigravity OAuth client from Settings → Log in with Google (the Business Cloud Code client returns Flash rows without `vertexModelId`) |
+| Seat default model | `gemini-3.6-flash-high` (`DEFAULT_SEAT_MODEL`) when the spec and card omit model — requires the consumer Antigravity OAuth client from Settings → Log in with Google (the Business Cloud Code client returns Flash rows without `vertexModelId`) |
 
-Provider type YAML must list `aiplatform.googleapis.com` (and `*-aiplatform.googleapis.com`) so `streamGenerateContent` / OpenAI-compat chat is allowed under `_provider_antigravity`, not only the cockpit `vertex_ai` policy group. Put `--model` **before** `-p` when invoking agy — `-p` takes the next argv as the prompt.
+Set a default on the `sandbox-agy` spec under **Settings → OpenShell → Sandbox
+specs** to avoid repeating the same model on every card. A Task's `model` field
+on claim still wins over the spec.
+
+Provider type YAML must list `aiplatform.googleapis.com` (and `*-aiplatform.googleapis.com`) so `streamGenerateContent` / OpenAI-compat chat is allowed under `_provider_antigravity`, not only the cockpit `vertex_ai` policy group.
 
 Attach names that are not in the Providers catalog are pruned on board load.
 
