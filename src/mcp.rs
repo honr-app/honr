@@ -658,8 +658,10 @@ impl Operator {
         description = "Create a Project container. Requires clone_repo (`owner/name`) — the \
                        repository Initial plan clones into for planning (and the default for \
                        proposed Tasks). Auto-seeds one Backlog Initial plan Task with that \
-                       clone target stamped in. Optional project_prompt overrides default \
-                       standing instructions. Dispatch the Initial plan when ready; the \
+                       clone target stamped in. Optional project_prompt overrides the compiled \
+                       default standing agent policy (escalation, clone-target protocol, \
+                       plan/split/report, Project-wide quality gates) — not boot config, \
+                       Settings, or clone_repo. Dispatch the Initial plan when ready; the \
                        planner writes plan.json (each proposed Task names its clone target \
                        in intent/DoD, usually the same clone_repo)."
     )]
@@ -1213,12 +1215,21 @@ impl ServerHandler for Operator {
                  park keeps the sandbox and agy session; halt deletes the sandbox; unpark queues resume. Prefer \
                  steer for a soft note that can wait (steer alone does not inject \
                  mid-turn). MainAdvanced does not park live runs; Review catch-up observes \
-                 GitHub mergeable and bounces only on CONFLICTING. Standing policy belongs in the Project \
-                 project_prompt (edit via update); task inputs are the Plan. Initial plan and \
-                 impl splits write a proposal on the card → Review; Approve creates sibling \
-                 Tasks. Read item_detail's proposal/Plan before approving; a card that passes \
-                 its gates can still be building the wrong thing, because coherence is not a \
-                 property of any single card."
+                 GitHub mergeable and bounces only on CONFLICTING.\n\n\
+                 Configuration layers: process boot and board Settings (Policies, sandbox \
+                 specs, agent runtime, Forge) are operator setup; Project fields (clone_repo, \
+                 optional sandbox override) seed the Initial plan; project_prompt is standing \
+                 agent policy workers inherit on every claim; per-card intent/DoD names clone \
+                 targets and card-specific gates. Boot, Settings, and Project fields do not \
+                 belong in project_prompt — put escalation rules, clone-target protocol, \
+                 plan/split/report paths, and Project-wide quality gates there (edit via \
+                 update on the Project). Name test/lint commands explicitly; honr does not \
+                 assume cargo or any toolchain unless project_prompt or a card's DoD names it. \
+                 Task inputs are the Plan. Initial plan and impl splits write a proposal on \
+                 the card → Review; Approve creates sibling Tasks. Read item_detail's \
+                 proposal/Plan before approving; a card that passes its gates can still be \
+                 building the wrong thing, because coherence is not a property of any single \
+                 card."
             }
             McpSeat::Host => {
                 "honr — host MCP seat: operator tools plus worker verbs \
@@ -2057,6 +2068,32 @@ mod tests {
             missing_err.message.contains("no parent"),
             "missing parent must be clear: {}",
             missing_err.message
+        );
+    }
+
+    #[test]
+    fn operator_seat_instructions_align_configuration_layers() {
+        let (board, _) = test_board();
+        let operator = Operator::new(board);
+        let instructions = operator
+            .get_info()
+            .instructions
+            .unwrap_or_default();
+        assert!(
+            instructions.contains("Configuration layers"),
+            "operator instructions must name configuration layers: {instructions}"
+        );
+        assert!(
+            instructions.contains("project_prompt"),
+            "operator instructions must explain project_prompt: {instructions}"
+        );
+        assert!(
+            instructions.contains("do not assume cargo") || instructions.contains("does not assume cargo"),
+            "operator instructions must not invent cargo gates: {instructions}"
+        );
+        assert!(
+            instructions.contains("Boot, Settings, and Project fields"),
+            "operator instructions must separate operator config from project_prompt: {instructions}"
         );
     }
 

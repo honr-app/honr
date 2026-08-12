@@ -70,6 +70,47 @@ export function OperatorGuide() {
 
       <section
         className="operator-guide-section"
+        aria-labelledby="operator-guide-config-title"
+        data-testid="operator-guide-config"
+      >
+        <h2 id="operator-guide-config-title">Configuration and standing instructions</h2>
+        <p className="dim">
+          honr stacks setup in layers. Lower layers are operator concerns; agents
+          read <code>project_prompt</code> and card prose at claim time.
+        </p>
+        <ol
+          className="operator-guide-steps"
+          data-testid="operator-guide-config-steps"
+        >
+          <li>
+            <strong>Process boot</strong> and <strong>board Settings</strong>{" "}
+            (Policies, sandbox specs, agent runtime, Forge) — host/operator
+            setup, not <code>project_prompt</code>.
+          </li>
+          <li>
+            <strong>Project fields</strong> — <code>clone_repo</code> and
+            optional sandbox override seed the Initial plan.
+          </li>
+          <li>
+            <strong>project_prompt</strong> — standing agent policy every worker
+            inherits: escalation, clone-target protocol, plan/split/report
+            paths, and Project-wide quality gates. Optional on create; editable
+            on the Project afterward.
+          </li>
+          <li>
+            <strong>Per-card intent / DoD</strong> — clone target and
+            card-specific gates for that Task.
+          </li>
+        </ol>
+        <p className="dim" data-testid="operator-guide-quality-gates-note">
+          Name test/lint commands in <code>project_prompt</code> when they apply
+          to every card. honr does not assume <code>cargo</code> or any toolchain
+          unless <code>project_prompt</code> or a card&apos;s DoD names it.
+        </p>
+      </section>
+
+      <section
+        className="operator-guide-section"
         aria-labelledby="operator-guide-mcp-title"
         data-testid="operator-guide-mcp"
       >

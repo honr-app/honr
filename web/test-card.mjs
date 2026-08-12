@@ -906,6 +906,10 @@ assert(!helpHtml.includes("127.0.0.1:8080"), "Help must not hardcode loopback:80
 assert(helpHtml.includes("Streamable HTTP"), "Help should name Streamable HTTP transport");
 assert(helpHtml.includes("Quickstart"), "Help includes Quickstart");
 assert(helpHtml.includes("Connect MCP"), "Help includes Connect MCP");
+assert(helpHtml.includes("Configuration layers"), "Help lede mentions configuration layers");
+assert(helpHtml.includes("standing instructions"), "Help lede mentions standing instructions");
+assert(helpHtml.includes("data-testid=\"operator-guide-config\""), "Help shows configuration section");
+assert(helpHtml.includes("project_prompt"), "Help documents project_prompt");
 {
   const readyIdx = helpHtml.indexOf('data-testid="openshell-readiness"');
   const guideIdx = helpHtml.indexOf('data-testid="operator-guide"');
@@ -914,13 +918,18 @@ assert(helpHtml.includes("Connect MCP"), "Help includes Connect MCP");
     "Help orders OpenShell readiness before OperatorGuide",
   );
 }
-// Help surface order: Quickstart pillar before MCP pillar.
+// Help surface order: Quickstart pillar before Configuration before MCP pillar.
 {
   const helpQuickstartIdx = helpHtml.indexOf("data-testid=\"operator-guide-quickstart\"");
+  const helpConfigIdx = helpHtml.indexOf("data-testid=\"operator-guide-config\"");
   const helpMcpIdx = helpHtml.indexOf("data-testid=\"operator-guide-mcp\"");
   assert(
-    helpQuickstartIdx >= 0 && helpMcpIdx > helpQuickstartIdx,
-    "Help orders Quickstart before MCP",
+    helpQuickstartIdx >= 0 && helpConfigIdx > helpQuickstartIdx,
+    "Help orders Quickstart before Configuration",
+  );
+  assert(
+    helpConfigIdx >= 0 && helpMcpIdx > helpConfigIdx,
+    "Help orders Configuration before MCP",
   );
 }
 
@@ -969,14 +978,26 @@ assert(guideHtml.includes("cursor-agent"), "OperatorGuide places github-app with
 assert(guideHtml.includes("Policies"), "OperatorGuide names Policies tab");
 assert(guideHtml.includes("Sandbox specs"), "OperatorGuide names Sandbox specs tab");
 assert(guideHtml.includes("mTLS"), "OperatorGuide mentions mTLS on Connectivity");
-// Order: Quickstart → MCP (with examples) → OpenShell/sandbox.
+assert(guideHtml.includes("data-testid=\"operator-guide-config\""), "OperatorGuide configuration section");
+assert(guideHtml.includes("project_prompt"), "OperatorGuide documents project_prompt");
+assert(
+  guideHtml.includes("does not assume") && guideHtml.includes("cargo"),
+  "OperatorGuide must not invent cargo gates",
+);
+assert(guideHtml.includes("quality gates"), "OperatorGuide documents quality gates");
+// Order: Quickstart → Configuration → MCP (with examples) → OpenShell/sandbox.
 const quickstartIdx = guideHtml.indexOf("data-testid=\"operator-guide-quickstart\"");
+const configIdx = guideHtml.indexOf("data-testid=\"operator-guide-config\"");
 const mcpIdx = guideHtml.indexOf("data-testid=\"operator-guide-mcp\"");
 const openshellIdx = guideHtml.indexOf("data-testid=\"operator-guide-openshell\"");
 const examplesIdx = guideHtml.indexOf("data-testid=\"operator-guide-client-examples\"");
 assert(
-  quickstartIdx >= 0 && mcpIdx > quickstartIdx,
-  "OperatorGuide leads with Quickstart before MCP",
+  quickstartIdx >= 0 && configIdx > quickstartIdx,
+  "OperatorGuide leads with Quickstart before Configuration",
+);
+assert(
+  configIdx >= 0 && mcpIdx > configIdx,
+  "OperatorGuide places Configuration before MCP",
 );
 assert(
   openshellIdx > mcpIdx,
@@ -1955,9 +1976,11 @@ assert(!emptyBoardHtml.includes('data-testid="create-task-form"'),
   "Empty Welcome board must not show Create Task form");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide\""), "Board empty embeds OperatorGuide");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-quickstart\""), "Board empty shows Quickstart section");
+assert(emptyBoardHtml.includes("data-testid=\"operator-guide-config\""), "Board empty shows Configuration section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-mcp\""), "Board empty shows MCP section");
 assert(emptyBoardHtml.includes("data-testid=\"operator-guide-openshell\""), "Board empty shows OpenShell section");
 assert(emptyBoardHtml.includes("clone_repo"), "Board empty documents clone_repo");
+assert(emptyBoardHtml.includes("project_prompt"), "Board empty documents project_prompt");
 assert(emptyBoardHtml.includes("on the board"),
   "Board empty OperatorGuide stays consistent with on-board create");
 assert(emptyBoardHtml.includes("plan.json"), "Board empty documents plan.json");
@@ -1965,7 +1988,7 @@ assert(emptyBoardHtml.includes("Approve"), "Board empty documents Approve");
 assert(emptyBoardHtml.includes("/mcp"), "Board empty shows MCP URL");
 assert(!emptyBoardHtml.includes("127.0.0.1:8080"), "Board empty must not hardcode loopback:8080");
 assert(emptyBoardHtml.includes("Streamable HTTP"), "Board empty names Streamable HTTP transport");
-assert(emptyBoardHtml.includes("Setup steps"), "Board Welcome lede points at setup below");
+assert(emptyBoardHtml.includes("Configuration layers"), "Board Welcome lede mentions configuration layers");
 assert(emptyBoardHtml.includes("OpenShell + sandbox"), "Board empty includes OpenShell setup section");
 assert(emptyBoardHtml.includes("/settings/openshell/connectivity"), "Board empty deep-links Connectivity");
 assert(emptyBoardHtml.includes("/settings/agent-runtime"), "Board empty deep-links Agent runtime");
@@ -1973,13 +1996,18 @@ assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness\""), "Board em
 assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness-gateway\""), "Board empty readiness: gateway row");
 assert(emptyBoardHtml.includes("data-testid=\"openshell-readiness-sandbox\""), "Board empty readiness: sandbox row");
 assert(!emptyBoardHtml.includes("data-testid=\"openshell-readiness-agents\""), "Board empty readiness: no agents-enabled row");
-// Board empty shares OperatorGuide order: Quickstart → MCP.
+// Board empty shares OperatorGuide order: Quickstart → Configuration → MCP.
 {
   const boardQuickstartIdx = emptyBoardHtml.indexOf("data-testid=\"operator-guide-quickstart\"");
+  const boardConfigIdx = emptyBoardHtml.indexOf("data-testid=\"operator-guide-config\"");
   const boardMcpIdx = emptyBoardHtml.indexOf("data-testid=\"operator-guide-mcp\"");
   assert(
-    boardQuickstartIdx >= 0 && boardMcpIdx > boardQuickstartIdx,
-    "Board empty orders Quickstart before MCP",
+    boardQuickstartIdx >= 0 && boardConfigIdx > boardQuickstartIdx,
+    "Board empty orders Quickstart before Configuration",
+  );
+  assert(
+    boardConfigIdx >= 0 && boardMcpIdx > boardConfigIdx,
+    "Board empty orders Configuration before MCP",
   );
 }
 
