@@ -24,6 +24,7 @@ export function CreateProjectForm({
   const [title, setTitle] = useState("");
   const [intent, setIntent] = useState("");
   const [cloneRepo, setCloneRepo] = useState("");
+  const [projectPrompt, setProjectPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,12 +39,19 @@ export function CreateProjectForm({
     }
     setBusy(true);
     setError(null);
+    const prompt = projectPrompt.trim();
     api
-      .createProject({ title: t, intent: why, clone_repo: clone })
+      .createProject({
+        title: t,
+        intent: why,
+        clone_repo: clone,
+        ...(prompt ? { project_prompt: prompt } : {}),
+      })
       .then((item) => {
         setTitle("");
         setIntent("");
         setCloneRepo("");
+        setProjectPrompt("");
         if (collapsible) setOpen(false);
         onCreated(item);
       })
@@ -118,6 +126,18 @@ export function CreateProjectForm({
               spellCheck={false}
               onChange={(e) => setCloneRepo(e.target.value)}
               data-testid="create-project-clone-repo"
+            />
+          </label>
+          <label>
+            Project prompt (optional)
+            <textarea
+              className="search-input"
+              value={projectPrompt}
+              disabled={busy}
+              rows={4}
+              placeholder="Standing instructions for agents on this Project…"
+              onChange={(e) => setProjectPrompt(e.target.value)}
+              data-testid="create-project-prompt"
             />
           </label>
           <div className="btns create-project-actions">

@@ -282,6 +282,9 @@ pub struct CreateItem {
     /// Accepted and unused — use `clone_repo` on Project create.
     #[serde(default)]
     product_repo: Option<serde_json::Value>,
+    /// Standing instructions for Projects — defaults on create if omitted.
+    #[serde(default)]
+    project_prompt: Option<String>,
 }
 
 async fn create_item(
@@ -301,7 +304,13 @@ async fn create_item(
                 ApiError("clone_repo is required for Projects (`owner/name`)".into())
             })?;
             let item = b
-                .create_project(req.title, req.intent, clone, req.above_line, None)
+                .create_project(
+                    req.title,
+                    req.intent,
+                    clone,
+                    req.above_line,
+                    req.project_prompt,
+                )
                 .map_err(ApiError)?;
             // A project dropped in plain language starts shaping immediately.
             b.transition(item.id, State::Shaping, "human", None)
@@ -2213,6 +2222,7 @@ mod tests {
                     base: "main".into(),
                 }),
                 product_repo: Some(serde_json::json!({"upstream": "also/ignore"})),
+                project_prompt: None,
             }),
         )
         .await
@@ -2225,6 +2235,37 @@ mod tests {
             created.intent.contains("Clone repository: acme/widgets"),
             "Project intent must stamp clone_repo: {}",
             created.intent
+        );
+
+        let Ok(Json(custom_prompt)) = create_item(
+            AxState(b.clone()),
+            Json(CreateItem {
+                parent: None,
+                title: "Custom prompt".into(),
+                intent: "why".into(),
+                definition_of_done: None,
+                capability: None,
+                above_line: true,
+                clone_repo: Some("acme/widgets".into()),
+                blocked_by: vec![],
+                repo: None,
+                product_repo: None,
+                project_prompt: Some("Always run make test.".into()),
+            }),
+        )
+        .await
+        else {
+            panic!("create project with project_prompt");
+        };
+        assert!(custom_prompt.is_project());
+        let prompt = custom_prompt.project_prompt.as_deref().unwrap_or("");
+        assert!(
+            prompt.contains("Always run make test."),
+            "REST create must seed custom project_prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains("Default clone repository: acme/widgets"),
+            "project_prompt must still stamp clone_repo: {prompt}"
         );
 
         let Err(ApiError(missing)) = create_item(
@@ -2240,6 +2281,7 @@ mod tests {
                 blocked_by: vec![],
                 repo: None,
                 product_repo: None,
+                project_prompt: None,
             }),
         )
         .await
@@ -2411,6 +2453,7 @@ mod tests {
                 blocked_by: vec![],
                 repo: None,
                 product_repo: None,
+                project_prompt: None,
             }),
         )
         .await
@@ -2440,6 +2483,7 @@ mod tests {
                 blocked_by: vec![],
                 repo: None,
                 product_repo: None,
+                project_prompt: None,
             }),
         )
         .await
@@ -2471,6 +2515,7 @@ mod tests {
                     base: "main".into(),
                 }),
                 product_repo: None,
+                project_prompt: None,
             }),
         )
         .await
@@ -2510,6 +2555,7 @@ mod tests {
                 blocked_by: vec![],
                 repo: None,
                 product_repo: None,
+                project_prompt: None,
             }),
         )
         .await
@@ -2530,6 +2576,7 @@ mod tests {
                 blocked_by: vec![blocker.id],
                 repo: None,
                 product_repo: None,
+                project_prompt: None,
             }),
         )
         .await
@@ -2552,6 +2599,7 @@ mod tests {
                 blocked_by: vec![],
                 repo: None,
                 product_repo: None,
+                project_prompt: None,
             }),
         )
         .await
@@ -2576,6 +2624,7 @@ mod tests {
                 blocked_by: vec![],
                 repo: None,
                 product_repo: None,
+                project_prompt: None,
             }),
         )
         .await

@@ -116,11 +116,15 @@ export const api = {
     title: string;
     intent: string;
     clone_repo: string;
+    project_prompt?: string;
   }): Promise<WorkItem> =>
     post("/items", {
       title: body.title,
       intent: body.intent,
       clone_repo: body.clone_repo,
+      ...(body.project_prompt !== undefined
+        ? { project_prompt: body.project_prompt }
+        : {}),
     }),
   /**
    * Create a Task under a Project. Server requires `definition_of_done`,
