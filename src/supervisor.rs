@@ -4343,6 +4343,18 @@ mod tests {
     }
 
     #[test]
+    fn start_script_cursor_uses_resolved_model() {
+        let s = start_script(&repo_cfg(), "brief", "cursor", None, Some("gpt-5")).unwrap();
+        assert!(s.contains("--model 'gpt-5'"), "{s}");
+    }
+
+    #[test]
+    fn start_script_cursor_omits_model_when_unset() {
+        let s = start_script(&repo_cfg(), "brief", "cursor", None, None).unwrap();
+        assert!(!s.contains("--model"), "{s}");
+    }
+
+    #[test]
     fn parse_conversation_id_from_stream_shapes() {
         assert_eq!(
             parse_conversation_id(

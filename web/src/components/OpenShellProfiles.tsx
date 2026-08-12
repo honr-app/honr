@@ -317,8 +317,10 @@ export function SandboxesPanelView({
                     data-testid="sandbox-field-model"
                   />
                   <span className="dim sandbox-field-hint">
-                    Passed to the agent CLI when set (`agy --model`, etc.). Unset
-                    cards inherit this; card.model overrides on claim.
+                    Passed to the agent CLI when set (`agy --model`, `agent
+                    --model`). Unset cards inherit this; card.model overrides on
+                    claim. Ignored for `claude` / `opencode` (gateway
+                    `inference.local` route).
                   </span>
                 </label>
 

@@ -353,6 +353,15 @@ mod tests {
     }
 
     #[test]
+    fn turn_script_cursor_injects_resolved_model() {
+        let s = turn_script("cursor", "hello", None, "", Some("gpt-5")).unwrap();
+        assert!(s.contains("--model 'gpt-5'"), "{s}");
+        let model_at = s.find("--model").expect("model");
+        let prompt_at = s.find("\"$HONR_PROMPT\"").expect("prompt");
+        assert!(model_at < prompt_at, "{s}");
+    }
+
+    #[test]
     fn turn_script_without_conversation_starts_fresh_in_seat() {
         let s = turn_script("cursor", "first prompt", None, "", None).unwrap();
         assert!(!s.contains("--resume"), "{s}");

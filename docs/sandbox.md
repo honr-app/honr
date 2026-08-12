@@ -72,13 +72,13 @@ Which model an agent run uses depends on the engine.
 | Engine | How model is chosen | Operator configures |
 |---|---|---|
 | `agy` | `card.model` → sandbox spec **model** → `DEFAULT_SEAT_MODEL` (`gemini-3.6-flash-high`) | Optional **Model** on **Settings → OpenShell → Sandbox specs**; per-card `model` on claim overrides the spec |
+| `cursor` | `card.model` → sandbox spec **model** → Cursor account default (no honr fallback) | Same optional **Model** field; omit it to use the account default for your API key |
 | `claude`, `opencode` | OpenShell `inference.local` — gateway route from `openshell inference set` | Gateway CLI once per install (see [How credentials reach the agent](#how-credentials-reach-the-agent)); **not** the sandbox spec model field |
-| `cursor` | Cursor Agent default for the attached API key | Provider credentials on the spec |
 
 For engines whose CLI accepts `--model` on launch, honr injects the resolved
 value into the supervisor start script and Cockpit attach/chat argv. Today that
-is `agy` only. Put `--model` **before** `-p` when invoking agy manually — `-p`
-takes the next argv as the prompt.
+is `agy` and `cursor` (`agent --model`). Put `--model` **before** `-p` when
+invoking agy manually — `-p` takes the next argv as the prompt.
 
 Seeded sandbox specs load with **model** unset; `agy` cards then get
 `DEFAULT_SEAT_MODEL` unless you set a spec default or override a card at claim
