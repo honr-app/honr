@@ -296,13 +296,20 @@ mod initial_plan_title_tests {
 
 /// Default standing instructions seeded on every new Project (`project_prompt`).
 ///
+/// Agent-facing standing policy only — not process boot or board Settings.
 /// Clone targets are named in each Task's intent/DoD. After report, card
-/// `pull_request` drives resume remotes. Keep quality gates here.
+/// `pull_request` drives resume remotes. Name quality gates here when needed.
 pub const DEFAULT_PROJECT_PROMPT: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
 Do not weaken machine.rs invariants, supervisor budget enforcement, or the board sandbox-profile policy; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
 Network / egress denials: escalate; do not invent workarounds. Humans decide policy changes.\n\
+Configuration layers: process boot (database URL, compile-time hierarchy); board Settings \
+(OpenShell policies/sandbox specs, agent runtime, forge/providers); Project fields (default clone \
+repo, sandbox override); project_prompt (this field — standing agent policy); per-card \
+intent/definition_of_done (clone targets, card-specific gates).\n\
+Boot, Settings, and Project fields are operator concerns — not project_prompt. Keep escalation \
+rules, clone-target naming, plan/split/report protocol, and quality-gate placeholders here.\n\
 Name the repository to clone in each Task's intent and/or definition of done \
 (`owner/name`, and push remote when it differs). Do not invent an owner/name from context; \
 if the card text is silent or ambiguous, escalate.\n\
@@ -320,6 +327,31 @@ mod default_project_prompt_tests {
     use super::DEFAULT_PROJECT_PROMPT;
 
     #[test]
+    fn configuration_layers_are_explicit() {
+        let p = DEFAULT_PROJECT_PROMPT;
+        assert!(
+            p.contains("process boot"),
+            "must name process boot: {p}"
+        );
+        assert!(
+            p.contains("board Settings"),
+            "must name board Settings: {p}"
+        );
+        assert!(
+            p.contains("project_prompt"),
+            "must name project_prompt: {p}"
+        );
+        assert!(
+            p.contains("intent") && p.contains("definition_of_done"),
+            "must name per-card prose: {p}"
+        );
+        assert!(
+            p.contains("Boot, Settings, and Project fields are operator concerns"),
+            "must separate operator config from project_prompt: {p}"
+        );
+    }
+
+    #[test]
     fn clone_targets_are_named_in_task_prose() {
         let p = DEFAULT_PROJECT_PROMPT;
         assert!(
@@ -327,12 +359,34 @@ mod default_project_prompt_tests {
             "must point at task text for clone targets: {p}"
         );
         assert!(
+            p.contains("Name the repository to clone"),
+            "must instruct naming the clone target: {p}"
+        );
+    }
+
+    #[test]
+    fn quality_gates_are_placeholders_not_defaults() {
+        let p = DEFAULT_PROJECT_PROMPT;
+        assert!(
+            p.contains("do not assume cargo"),
+            "must not mandate cargo in global default: {p}"
+        );
+        assert!(
+            p.contains("quality gates"),
+            "must explain where to name gates: {p}"
+        );
+    }
+
+    #[test]
+    fn plan_and_split_protocol_is_preserved() {
+        let p = DEFAULT_PROJECT_PROMPT;
+        assert!(
             p.contains("plan.json") && p.contains("Approve creates Tasks"),
             "Initial plan must use plan.json then Approve: {p}"
         );
         assert!(
-            p.contains("Name the repository to clone"),
-            "must instruct naming the clone target: {p}"
+            p.contains("split.json") && p.contains("Approve creates siblings"),
+            "split must use split.json then Approve: {p}"
         );
     }
 }
