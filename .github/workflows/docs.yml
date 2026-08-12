@@ -116,6 +116,11 @@ jobs:
           curl -sSL https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-gnu.tar.gz \
             | tar xz -C /usr/local/bin mdbook-mermaid
 
+      # Mermaid browser assets are not in git — drop mermaid.min.js / mermaid-init.js
+      # next to book.toml (same files `make docs` fetches locally).
+      - name: Fetch mermaid assets
+        run: mdbook-mermaid install .
+
       - name: Build book
         env:
           MDBOOK_OUTPUT__HTML__SITE_URL: /

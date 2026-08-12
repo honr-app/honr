@@ -23,3 +23,7 @@ sandbox/antigravity
 
 # Local board backups
 honr.json.pre-flat-backup
+
+# mdBook Mermaid browser assets — fetched by `mdbook-mermaid install` (make docs / CI).
+mermaid.min.js
+mermaid-init.js

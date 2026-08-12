@@ -6,7 +6,7 @@
 #   make dev-ui   Vite hot-reload on :5173 (proxies API to :8080)
 #   make test     cargo + web unit tests
 
-.PHONY: all build api release ui install-ui run dev dev-ui docs docs-serve test test-api test-ui clippy sandbox sandbox-push image image-push clean help
+.PHONY: all build api release ui install-ui run dev dev-ui docs docs-mermaid-assets docs-serve test test-api test-ui clippy sandbox sandbox-push image image-push clean help
 
 all: build
 
@@ -19,7 +19,7 @@ help:
 	@echo "  make run            Build both, then cargo run (debug)"
 	@echo "  make dev            watchexec → cargo run (API hot-reload on :8080)"
 	@echo "  make dev-ui         Vite dev server (:5173 → :8080)"
-	@echo "  make docs           mdbook build → target/mdbook"
+	@echo "  make docs           mdbook build → target/mdbook (fetches mermaid JS)"
 	@echo "  make docs-serve     mdbook serve (http://localhost:3000)"
 	@echo "  make sandbox        Rebuild all sandbox-<engine> images via podman (CONTAINER_ENGINE=docker to override)"
 	@echo "  make sandbox-push   Build and push all sandbox-<engine> images to REGISTRY"
@@ -83,11 +83,21 @@ test-ui: install-ui
 clippy:
 	cargo clippy --all-targets --offline -- -D warnings
 
+# Mermaid browser assets are not committed — mdbook-mermaid install drops
+# mermaid.min.js / mermaid-init.js next to book.toml (gitignored).
+docs-mermaid-assets:
+	@command -v mdbook-mermaid >/dev/null 2>&1 || { \
+		echo "mdbook-mermaid not found. Install: cargo install mdbook-mermaid"; \
+		exit 1; \
+	}
+	mdbook-mermaid install .
+
 docs:
 	@command -v mdbook >/dev/null 2>&1 || { \
 		echo "mdbook not found. Install: brew install mdbook   # or: cargo install mdbook"; \
 		exit 1; \
 	}
+	$(MAKE) docs-mermaid-assets
 	mdbook build
 
 docs-serve:
@@ -95,6 +105,7 @@ docs-serve:
 		echo "mdbook not found. Install: brew install mdbook   # or: cargo install mdbook"; \
 		exit 1; \
 	}
+	$(MAKE) docs-mermaid-assets
 	mdbook serve
 
 # Rebuild when you need a newer engine CLI, OS package, or Rust toolchain
