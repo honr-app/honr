@@ -81,8 +81,11 @@ appends its own path, while `opencode` wants
 ### An environment variable the agent needs is missing
 
 **The image's `ENV` does not reach `openshell sandbox exec`.** Baking
-`ENV PATH=…` into the Containerfile is not enough. Pass what the agent needs
-explicitly in `agent_env`, or install wrappers on the default PATH.
+`ENV PATH=…` into the Containerfile is not enough. Honr always passes
+`agent_env` at create; overlay non-secret seat vars on the sandbox spec's
+**`env`** (Settings → Sandbox specs — profile wins on key clash). Secrets
+belong on Providers, not spec env. See
+[Sandbox](sandbox.md#spec-env-and-prompt).
 
 ### An uploaded file landed in the wrong place
 

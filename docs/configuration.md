@@ -117,10 +117,11 @@ recreate the sandbox after a change.
 ## Sandbox specs
 
 A sandbox spec is the recipe for a sandbox: image, CPU, memory, engine,
-optional **model**, attached providers, and a **reference to a named Policy**
-(`policy_id`). Specs live on the board and are edited in **Settings → OpenShell
-→ Sandbox specs** (REST: `/api/sandbox-profiles`). Upsert requires a known
-`policy_id`; you edit allow-list YAML under Policies, not on the spec.
+optional **model**, optional **env** / **prompt**, attached providers, and a
+**reference to a named Policy** (`policy_id`). Specs live on the board and are
+edited in **Settings → OpenShell → Sandbox specs** (REST:
+`/api/sandbox-profiles`). Upsert requires a known `policy_id`; you edit
+allow-list YAML under Policies, not on the spec.
 
 Four specs come seeded — `sandbox-cursor`, `sandbox-agy`, `sandbox-claude`,
 `sandbox-opencode` — one per split `quay.io/honr-app/sandbox-<engine>` image
@@ -150,6 +151,29 @@ you configured on the gateway with `openshell inference set` (see
 [Sandbox](sandbox.md#how-credentials-reach-the-agent)). honr does not automate
 that route — set it once per gateway as today.
 
+### Environment (`env`)
+
+Optional string map on the spec. At sandbox create (card and Cockpit), honr
+builds env as `agent_env(engine)` then overlays the resolved profile's `env` —
+**profile wins on key clash**. Spec `env` is **non-secret by contract**: put
+API URLs, tool paths, and similar seat wiring here; put credentials on
+**Providers** (attached on the same spec). The Settings editor shows that hint
+next to the key/value fields. See [Sandbox](sandbox.md#spec-env-and-prompt).
+
+### Prompt (`prompt`)
+
+Optional seat notes on the spec. At claim, `ClaimGrant` carries
+`sandbox_prompt` from the resolved profile. Cold card briefing inserts a
+**Sandbox prompt (seat notes):** section after **Project prompt** when
+non-empty; Cockpit seed briefing includes the cockpit profile's prompt the same
+way. Resume briefing (conversation memory already has it) does **not** re-dump
+the sandbox prompt. See [Sandbox](sandbox.md#spec-env-and-prompt).
+
+**Operator practice:** put an API base URL in `env` and short usage notes in
+`prompt` (for example how to call a cluster API from the seat). Do **not**
+hardcode product-specific CLIs or cluster wiring into the binary or supervisor
+— keep that on the live board's sandbox specs.
+
 ### Which spec a card gets
 
 Resolution order is documented in [Sandbox](sandbox.md). Create-form defaults
@@ -163,7 +187,9 @@ profile under Sandbox specs. A fresh board seeds all four specs but picks none
 of them as default — that choice is an onboarding step (Welcome flags it red
 until you set one). Pick a seeded spec (or one you made) and click **Set
 default**, or **Use for Cockpit** to give Cockpit its own engine. That spec's
-`policy_id` is what the sandbox gets at create.
+`policy_id` is what the sandbox gets at create. The cockpit profile's `env` and
+`prompt` apply the same create-time overlay and seed-briefing rules as card
+specs.
 
 ## OpenShell / Forge / GitHub App provider
 

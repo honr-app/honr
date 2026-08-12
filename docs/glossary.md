@@ -68,10 +68,10 @@ and **steer** over both when the note can wait.
 |---|---|
 | **OpenShell** | The sandbox gateway honr talks to over gRPC. Owns containers, network policy, and provider credentials. |
 | **Policy** | A named OpenShell YAML allow-list (filesystem / network) on the board. Edited in Settings → OpenShell → Policies. Applied at sandbox create and fixed for that sandbox's life. |
-| **Sandbox spec** | The named recipe for a sandbox: image, CPU, memory, engine, attached providers, and a reference to a Policy by id. Managed in Settings → OpenShell → Sandbox specs. |
+| **Sandbox spec** | The named recipe for a sandbox: image, CPU, memory, engine, optional model / env / prompt, attached providers, and a reference to a Policy by id. Managed in Settings → OpenShell → Sandbox specs. Spec `env` is non-secret (overlaid after `agent_env` at create; profile wins on clash); secrets belong on Providers. |
 | **Engine** | Which agent CLI runs in the sandbox: `cursor`, `claude`, `opencode`, or `agy`. |
 | **Provider** | A credential OpenShell holds and injects on egress — inference, GitHub. Secrets never enter the sandbox. |
-| **Briefing** | What the supervisor assembles at claim time: `project_prompt` (standing instructions), Plan, then card intent/DoD/notes, remotes, and protocol paths. Points at `project_prompt` and DoD for quality gates — does not invent them. |
+| **Briefing** | What the supervisor assembles at claim time: Plan, `project_prompt`, optional sandbox-spec `prompt` as **Sandbox prompt (seat notes):** (cold / Cockpit only — omitted on resume), then card intent/DoD/notes, remotes, and protocol paths. Points at `project_prompt` and DoD for quality gates — does not invent them. |
 | **Lease** | The claim an agent holds on a card. Expires if output stops, so another run can take the card. |
 | **Compute driver** | Whatever provides the Docker-compatible API OpenShell needs: podman, Colima, Docker. Your choice, outside honr. |
 
