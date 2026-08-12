@@ -3345,6 +3345,7 @@ impl Board {
                     cpu: None,
                     memory: None,
                     engine: Some(engine.into()),
+                    model: None,
                     provider_names: Vec::new(),
                     mcp_server_ids: vec![HONR_MCP_SERVER_ID.into()],
                     shipped: true,
@@ -3601,6 +3602,10 @@ impl Board {
             .engine
             .map(|e| e.trim().to_string())
             .filter(|e| !e.is_empty());
+        let model = profile
+            .model
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
         let provider_names: Vec<String> = profile
             .provider_names
             .into_iter()
@@ -3653,6 +3658,7 @@ impl Board {
             cpu,
             memory,
             engine,
+            model,
             provider_names,
             mcp_server_ids,
             // Operator-authored path — shipped rows only come from
@@ -10709,6 +10715,7 @@ mod tests {
             cpu: Some("2".into()),
             memory: Some("4Gi".into()),
             engine: Some("cursor".into()),
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -11668,6 +11675,7 @@ mod tests {
                 cpu: Some("8".into()),
                 memory: Some("16Gi".into()),
                 engine: None,
+                model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
             shipped: false,
@@ -11744,6 +11752,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: Some("cursor".into()),
+            model: None,
             provider_names: vec!["vertex".into(), "missing".into()],
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -11772,6 +11781,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: None,
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -11820,6 +11830,7 @@ mod tests {
             cpu: Some("1".into()),
             memory: None,
             engine: None,
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -11918,6 +11929,7 @@ mod tests {
             cpu: Some("2".into()),
             memory: None,
             engine: None,
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -11938,6 +11950,7 @@ mod tests {
             cpu: None,
             memory: Some("8Gi".into()),
             engine: None,
+            model: Some("claude-opus-4".into()),
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -11950,6 +11963,7 @@ mod tests {
         assert_eq!(over.image, "alt-img");
         assert_eq!(over.policy, alt_policy);
         assert_eq!(over.memory.as_deref(), Some("8Gi"));
+        assert_eq!(over.model.as_deref(), Some("claude-opus-4"));
     }
 
     #[test]
@@ -11977,6 +11991,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: Some("agy".into()),
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12034,6 +12049,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: None,
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12075,6 +12091,7 @@ mod tests {
                 cpu: None,
                 memory: None,
                 engine: None,
+                model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12094,6 +12111,7 @@ mod tests {
                 cpu: None,
                 memory: None,
                 engine: None,
+                model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12112,6 +12130,7 @@ mod tests {
                 cpu: None,
                 memory: None,
                 engine: None,
+                model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12153,6 +12172,7 @@ mod tests {
                     cpu: None,
                     memory: None,
                     engine: None,
+                    model: None,
                     provider_names: Vec::new(),
                     mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12209,6 +12229,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: None,
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12305,6 +12326,7 @@ network_policies:
             cpu: None,
             memory: None,
             engine: Some("cursor".into()),
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: vec!["cnv".into()],
             shipped: false,
@@ -12335,6 +12357,7 @@ network_policies:
             cpu: None,
             memory: None,
             engine: Some("cursor".into()),
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: vec!["honr".into(), "cnv".into()],
             shipped: false,
@@ -12368,6 +12391,7 @@ network_policies:
             cpu: None,
             memory: None,
             engine: Some("cursor".into()),
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12404,6 +12428,7 @@ network_policies:
             cpu: None,
             memory: None,
             engine: Some("cursor".into()),
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: vec!["honr".into()],
             shipped: false,
@@ -12420,6 +12445,7 @@ network_policies:
                 cpu: None,
                 memory: None,
                 engine: Some("cursor".into()),
+                model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
             shipped: false,
@@ -12478,6 +12504,7 @@ network_policies:
             let p = b.get_sandbox_profile(id).unwrap_or_else(|| panic!("missing {id}"));
             assert_eq!(p.engine.as_deref(), Some(engine));
             assert_eq!(p.policy_id, policy_id);
+            assert!(p.model.is_none(), "seeded profiles must not set model: {p:?}");
             assert!(p.image.contains(&format!("sandbox-{engine}")), "{p:?}");
             assert!(
                 p.mcp_server_ids.iter().any(|m| m == "honr"),

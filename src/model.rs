@@ -1140,6 +1140,10 @@ pub struct SandboxProfile {
     /// When unset, claim/run falls back to Settings → Agent runtime engine.
     #[serde(default)]
     pub engine: Option<String>,
+    /// Model passed to the agent CLI when set (`agy --model`, etc.).
+    /// When unset, claim/run resolves card.model → engine default.
+    #[serde(default)]
+    pub model: Option<String>,
     /// OpenShell provider names to attach on sandbox create for this profile.
     /// Empty = attach none. Unknown names are dropped at create time.
     #[serde(default)]
@@ -1276,6 +1280,8 @@ pub struct ResolvedSandboxCreate {
     pub memory: Option<String>,
     /// Profile engine when set; compiled-default fallback carries `agents.engine`.
     pub engine: Option<String>,
+    /// Profile model when set; unset for compiled-default fallback.
+    pub model: Option<String>,
     /// Catalog profile that won, if any. `None` means compiled-default fallback.
     pub profile_id: Option<String>,
     /// Provider names to attach (from the winning profile + MCP servers; empty for fallback).
@@ -1294,6 +1300,12 @@ impl ResolvedSandboxCreate {
             memory: p.memory.clone(),
             engine: p
                 .engine
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            model: p
+                .model
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -1320,6 +1332,7 @@ impl ResolvedSandboxCreate {
             cpu: agents.cpu.clone(),
             memory: agents.memory.clone(),
             engine,
+            model: None,
             profile_id: None,
             providers: Vec::new(),
             mcp_server_ids: Vec::new(),
@@ -1794,6 +1807,33 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_profile_round_trips_model() {
+        let p = SandboxProfile {
+            id: "agy".into(),
+            name: "AGY".into(),
+            image: "img:1".into(),
+            policy_id: "minimal".into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: Some("agy".into()),
+            model: Some("claude-sonnet-4".into()),
+            provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            shipped: false,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("claude-sonnet-4"));
+        let back: SandboxProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model.as_deref(), Some("claude-sonnet-4"));
+        let legacy: SandboxProfile = serde_json::from_str(
+            r#"{"id":"x","name":"X","image":"i","policy_id":"p"}"#,
+        )
+        .unwrap();
+        assert!(legacy.model.is_none());
+    }
+
+    #[test]
     fn sandbox_profile_round_trips_policy_id() {
         let p = SandboxProfile {
             id: "default".into(),
@@ -1804,6 +1844,7 @@ mod tests {
             cpu: None,
             memory: None,
             engine: None,
+            model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
             shipped: false,

@@ -1550,6 +1550,8 @@ pub struct UpsertSandboxProfileReq {
     #[serde(default)]
     pub engine: Option<String>,
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub provider_names: Vec<String>,
     #[serde(default)]
     pub mcp_server_ids: Vec<String>,
@@ -1569,6 +1571,7 @@ async fn upsert_sandbox_profile(
             cpu: req.cpu,
             memory: req.memory,
             engine: req.engine,
+            model: req.model,
             provider_names: req.provider_names,
             mcp_server_ids: req.mcp_server_ids,
             shipped: false,

@@ -214,6 +214,7 @@ export const api = {
     cpu?: string | null;
     memory?: string | null;
     engine?: string | null;
+    model?: string | null;
     provider_names?: string[];
     mcp_server_ids?: string[];
   }): Promise<SandboxProfile> => post("/sandbox-profiles", profile),
