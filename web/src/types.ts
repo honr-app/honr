@@ -111,6 +111,10 @@ export interface SandboxProfile {
   provider_names?: string[];
   /** MCP server catalog ids to attach (`[]` = none; cockpit always attaches shipped honr). */
   mcp_server_ids?: string[];
+  /** Non-secret env overlaid at sandbox create (profile wins on key clash). */
+  env?: Record<string, string>;
+  /** Seat notes injected into cold/Cockpit briefing when non-empty. */
+  prompt?: string | null;
 }
 
 /** Prefill for Settings → Sandbox specs → Create. */

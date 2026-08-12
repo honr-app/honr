@@ -3350,6 +3350,8 @@ impl Board {
                     model: None,
                     provider_names: Vec::new(),
                     mcp_server_ids: vec![HONR_MCP_SERVER_ID.into()],
+                    env: BTreeMap::new(),
+                    prompt: None,
                     shipped: true,
                 },
             );
@@ -3620,6 +3622,16 @@ impl Board {
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty())
             .collect();
+        let env: BTreeMap<String, String> = profile
+            .env
+            .into_iter()
+            .map(|(k, v)| (k.trim().to_string(), v))
+            .filter(|(k, _)| !k.is_empty())
+            .collect();
+        let prompt = profile
+            .prompt
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
         let mut s = self.state.write();
         if !s.openshell_policies.contains_key(&policy_id) {
             return Err(format!("no policy `{policy_id}`"));
@@ -3663,6 +3675,8 @@ impl Board {
             model,
             provider_names,
             mcp_server_ids,
+            env,
+            prompt,
             // Operator-authored path — shipped rows only come from
             // `ensure_shipped_sandbox_profiles`.
             shipped: false,
@@ -11256,6 +11270,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .expect("upsert profile")
@@ -12222,6 +12238,8 @@ mod tests {
                 model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
             })
             .expect("upsert heavy");
@@ -12299,6 +12317,8 @@ mod tests {
             model: None,
             provider_names: vec!["vertex".into(), "missing".into()],
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12328,6 +12348,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12377,6 +12399,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12476,6 +12500,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12497,6 +12523,8 @@ mod tests {
             model: Some("claude-opus-4".into()),
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12538,6 +12566,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12596,6 +12626,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12639,6 +12671,8 @@ mod tests {
             model: Some("spec-model".into()),
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12694,6 +12728,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12740,6 +12776,8 @@ mod tests {
             model: Some("cockpit-spec".into()),
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12761,6 +12799,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .unwrap();
@@ -12792,6 +12832,8 @@ mod tests {
                 model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
             })
             .expect("create from name");
@@ -12812,6 +12854,8 @@ mod tests {
                 model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
             })
             .expect("create colliding slug");
@@ -12831,6 +12875,8 @@ mod tests {
                 model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
             })
             .expect("create punctuation name");
@@ -12873,6 +12919,8 @@ mod tests {
                     model: None,
                     provider_names: Vec::new(),
                     mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
                 },
             );
@@ -12930,6 +12978,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .expect("profile");
@@ -13027,6 +13077,8 @@ network_policies:
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: vec!["cnv".into()],
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .expect("profile");
@@ -13058,6 +13110,8 @@ network_policies:
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: vec!["honr".into(), "cnv".into()],
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .expect("profile");
@@ -13092,6 +13146,8 @@ network_policies:
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .expect("profile");
@@ -13129,6 +13185,8 @@ network_policies:
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: vec!["honr".into()],
+            env: Default::default(),
+            prompt: None,
             shipped: false,
         })
         .expect("profile");
@@ -13146,6 +13204,8 @@ network_policies:
                 model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
             shipped: false,
             })
             .expect("upsert without honr");

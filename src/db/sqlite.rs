@@ -1176,6 +1176,8 @@ mod tests {
                 model: Some("gpt-5".into()),
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+                env: Default::default(),
+                prompt: None,
                 shipped: false,
             },
         );
