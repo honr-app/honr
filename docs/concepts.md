@@ -34,6 +34,30 @@ Operators can also add Backlog Tasks directly under an existing Project — boar
 Task must name its clone target (`owner/name`) in intent/DoD. Approve still
 only materializes proposals and never merges.
 
+## Configuration layers
+
+Configuration is layered; lower layers are operator setup, upper layers are what
+workers read at claim time. Full detail: [Configuration](configuration.md).
+
+| Layer | Examples |
+|---|---|
+| **Process boot** | `HONR_DATABASE_URL`, compile-time Project + Task hierarchy |
+| **Board Settings** | OpenShell Policies, sandbox specs, agent runtime, Forge |
+| **Project fields** | `clone_repo`, optional `sandbox_profile_id` override |
+| **`project_prompt`** | Standing agent policy — escalation, clone-target protocol, plan/split/report paths, Project-wide quality gates |
+| **Per-card intent / DoD** | Clone target for this card, card-specific gates, operational proof |
+
+Boot, Settings, and Project fields are **operator concerns** — not
+`project_prompt`. Do not put database URLs, Policy YAML, or sandbox spec ids in
+standing instructions.
+
+`project_prompt` is seeded from `DEFAULT_PROJECT_PROMPT` in `src/model.rs` when
+you create a Project and is editable afterward. The supervisor includes it in
+every worker briefing ahead of the Plan and the card prose. **Quality gates**
+(test/lint commands before publish) belong in `project_prompt` when they apply
+Project-wide; name the toolchain explicitly. honr does not assume `cargo` or
+any other tool unless `project_prompt` or the card's definition of done says so.
+
 ## Operator and worker
 
 Three roles, different reach:
