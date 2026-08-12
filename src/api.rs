@@ -3084,6 +3084,15 @@ mod tests {
         let item = b.get(id).unwrap();
         assert_eq!(item.state, State::Backlog);
         assert!(item.awaiting_dispatch);
+        assert!(
+            item.notes.iter().any(|n| {
+                n.text.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                    && n.text.contains("Main advanced")
+                    && n.text.to_lowercase().contains("rebase")
+            }),
+            "steer note must describe main-advanced rebase: {:?}",
+            item.notes
+        );
     }
 
     #[tokio::test]
