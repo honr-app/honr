@@ -219,12 +219,14 @@ async fn item_detail(
     let default_engine = agents.engine.clone();
     // Display the resolved profile engine (not stale WorkItem.engine).
     item.engine = Some(b.resolve_engine_for_card(id));
+    item.resolved_model = b.resolve_model_for_card(id);
+    let default_model = item.resolved_model.clone().unwrap_or_default();
     Ok(Json(ItemDetail {
         ancestry: b.ancestry(id),
         children: b.children_of(id),
         item,
         default_engine,
-        default_model: String::new(),
+        default_model,
     }))
 }
 

@@ -146,7 +146,8 @@ const runningAgyHtml = renderToString(
 
 console.log("\nRunning Card HTML (defaultEngine=agy):\n", runningAgyHtml);
 assert(runningAgyHtml.includes("agy"), "Running card with engine null and defaultEngine agy should render agy badge");
-assert(!runningAgyHtml.includes("◍ claude-opus-5"), "Running card should not render model name as badge when engine resolves to agy");
+assert(runningAgyHtml.includes("data-testid=\"card-model-badge\""), "Running card should show resolved model badge when known");
+assert(runningAgyHtml.includes("claude-opus-5"), "Running card model badge should show card.model override");
 
 // Test 4: Running card with engine null and defaultEngine claude shows claude badge
 const runningClaudeHtml = renderToString(
@@ -162,6 +163,26 @@ const runningClaudeHtml = renderToString(
 
 console.log("\nRunning Card HTML (defaultEngine=claude):\n", runningClaudeHtml);
 assert(runningClaudeHtml.includes("claude"), "Running card with engine null and defaultEngine claude should render claude badge");
+
+// Test 4b: Running card shows spec-resolved model when card.model unset
+const runningSpecModelHtml = renderToString(
+  React.createElement(Card, {
+    item: {
+      ...runningItem,
+      id: 11,
+      model: null,
+      resolved_model: "gemini-3.6-flash-high",
+      engine: "agy",
+    },
+    column: "running",
+    now,
+    agentTimeout: 600,
+    defaultEngine: "agy",
+    onOpen: () => {},
+  }),
+);
+assert(runningSpecModelHtml.includes("data-testid=\"card-model-badge\""), "Card shows model badge from resolved_model");
+assert(runningSpecModelHtml.includes("gemini-3.6-flash-high"), "Card model badge shows spec-resolved model");
 
 // Test 5: isBlocked helper
 assert.strictEqual(isBlocked(blockedItem), true, "blockedItem should be blocked");
@@ -1685,6 +1706,7 @@ const fixtureProfiles = [
     cpu: "2",
     memory: "4Gi",
     engine: "cursor",
+    model: null,
   },
   {
     id: "heavy",
@@ -1694,6 +1716,7 @@ const fixtureProfiles = [
     cpu: "8",
     memory: "16Gi",
     engine: "agy",
+    model: "gemini-3.6-flash-high",
   },
 ];
 
@@ -1732,6 +1755,7 @@ const sandboxPanelBase = {
     cpu: "",
     memory: "",
     engine: "cursor",
+    model: "",
     provider_names: [],
     mcp_server_ids: [],
   },
@@ -1789,6 +1813,7 @@ assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-set-default-heavy\""),
 assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-set-cockpit-heavy\""),
   "Non-Cockpit offers Use for Cockpit");
 assert(sandboxesHeavyHtml.includes("data-testid=\"sandbox-delete-heavy\""), "Deletable profile offers Delete");
+assert(sandboxesHeavyHtml.includes("gemini-3.6-flash-high"), "Selected profile with model shows it in readonly meta");
 
 const createFormHtml = renderToString(
   React.createElement(SandboxesPanelView, {
@@ -1803,6 +1828,7 @@ const createFormHtml = renderToString(
       cpu: "",
       memory: "",
       engine: "cursor",
+      model: "claude-sonnet-4",
       provider_names: ["vertex"],
       mcp_server_ids: [],
     },
@@ -1814,6 +1840,8 @@ assert(!createFormHtml.includes("data-testid=\"sandbox-field-id\""),
   "Create form must not require an Id field (server slugs from name)");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-name\""), "Create form should include name");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-engine\""), "Form should include engine field");
+assert(createFormHtml.includes("data-testid=\"sandbox-field-model\""), "Form should include model field");
+assert(createFormHtml.includes("claude-sonnet-4"), "Form should show model draft value");
 assert(createFormHtml.includes("data-testid=\"sandbox-field-policy\""), "Form should include policy select");
 assert(createFormHtml.includes("<select"), "Policy control should be a select by id");
 assert(createFormHtml.includes("value=\"minimal\"") || createFormHtml.includes(">Minimal"),
@@ -1839,6 +1867,7 @@ const emptyProvidersFormHtml = renderToString(
       cpu: "",
       memory: "",
       engine: "cursor",
+      model: "",
       provider_names: [],
       mcp_server_ids: [],
     },
@@ -1860,6 +1889,7 @@ const editFormHtml = renderToString(
       cpu: "",
       memory: "",
       engine: "cursor",
+      model: "gpt-5",
       provider_names: ["vertex"],
       mcp_server_ids: ["honr"],
     },
@@ -1890,6 +1920,7 @@ const nonCockpitMcpHtml = renderToString(
       cpu: "",
       memory: "",
       engine: "cursor",
+      model: "",
       provider_names: [],
       mcp_server_ids: [],
     },

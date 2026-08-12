@@ -469,6 +469,7 @@ where
         },
         engine: None,
         model: None,
+        resolved_model: None,
         progress: 0.0,
         escalation,
         gates,

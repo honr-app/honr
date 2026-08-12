@@ -16,6 +16,7 @@ type ProfileDraft = {
   cpu: string;
   memory: string;
   engine: string;
+  model: string;
   /** Explicit attach list (always sent on save). */
   provider_names: string[];
   mcp_server_ids: string[];
@@ -29,6 +30,7 @@ const emptyDraft = (defaults?: SandboxProfileCreateDefaults | null): ProfileDraf
   cpu: defaults?.cpu ?? "",
   memory: defaults?.memory ?? "",
   engine: defaults?.engine?.trim() || "cursor",
+  model: "",
   provider_names: [],
   mcp_server_ids: [],
 });
@@ -42,6 +44,7 @@ function draftFrom(p: SandboxProfile): ProfileDraft {
     cpu: p.cpu ?? "",
     memory: p.memory ?? "",
     engine: p.engine?.trim() || "cursor",
+    model: p.model?.trim() ?? "",
     provider_names: [...(p.provider_names ?? [])],
     mcp_server_ids: [...(p.mcp_server_ids ?? [])],
   };
@@ -302,6 +305,24 @@ export function SandboxesPanelView({
                 </label>
 
                 <label>
+                  Model
+                  <input
+                    className="search-input"
+                    value={draft.model}
+                    disabled={busy}
+                    placeholder="optional — card.model overrides"
+                    onChange={(e) =>
+                      onDraftChange({ ...draft, model: e.target.value })
+                    }
+                    data-testid="sandbox-field-model"
+                  />
+                  <span className="dim sandbox-field-hint">
+                    Passed to the agent CLI when set (`agy --model`, etc.). Unset
+                    cards inherit this; card.model overrides on claim.
+                  </span>
+                </label>
+
+                <label>
                   Policy
                   <select
                     className="search-input"
@@ -500,6 +521,12 @@ export function SandboxesPanelView({
                 </div>
                 <div className="dim sandbox-profile-meta">
                   {selected.engine?.trim() || "engine: default"}
+                  {selected.model?.trim() && (
+                    <>
+                      <span className="sep">·</span>
+                      {selected.model.trim()}
+                    </>
+                  )}
                   <span className="sep">·</span>
                   {selected.image}
                   {(selected.cpu || selected.memory) && (
@@ -718,6 +745,7 @@ export function SandboxesPanel() {
           cpu: draft.cpu.trim() || null,
           memory: draft.memory.trim() || null,
           engine: draft.engine.trim() || null,
+          model: draft.model.trim() || null,
           provider_names: draft.provider_names,
           mcp_server_ids,
         };
