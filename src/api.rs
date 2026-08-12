@@ -1557,6 +1557,10 @@ pub struct UpsertSandboxProfileReq {
     pub provider_names: Vec<String>,
     #[serde(default)]
     pub mcp_server_ids: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 async fn upsert_sandbox_profile(
@@ -1576,6 +1580,8 @@ async fn upsert_sandbox_profile(
             model: req.model,
             provider_names: req.provider_names,
             mcp_server_ids: req.mcp_server_ids,
+            env: req.env,
+            prompt: req.prompt,
             shipped: false,
         })
         .map_err(ApiError)?,
@@ -3825,6 +3831,53 @@ mod tests {
             panic!("get heavy");
         };
         assert_eq!(got.image, "honr-sandbox:heavy2");
+
+        let Ok(Json(with_env)) = upsert_sandbox_profile(
+            AxState(b.clone()),
+            Json(UpsertSandboxProfileReq {
+                id: Some("env-notes".into()),
+                name: "Env notes".into(),
+                image: "honr-sandbox:env".into(),
+                policy_id: "api-test".into(),
+                cpu: None,
+                memory: None,
+                engine: None,
+                model: None,
+                provider_names: Vec::new(),
+                mcp_server_ids: Vec::new(),
+                env: std::collections::BTreeMap::from([(
+                    "API_URL".into(),
+                    "https://example.test".into(),
+                )]),
+                prompt: Some("Use the API URL from env.".into()),
+            }),
+        )
+        .await
+        else {
+            panic!("create env profile");
+        };
+        assert_eq!(
+            with_env.env.get("API_URL").map(String::as_str),
+            Some("https://example.test")
+        );
+        assert_eq!(
+            with_env.prompt.as_deref(),
+            Some("Use the API URL from env.")
+        );
+        let Json(list_out) = list_sandbox_profiles(AxState(b.clone())).await;
+        let listed_env = list_out
+            .profiles
+            .iter()
+            .find(|p| p.id == "env-notes")
+            .expect("env profile listed");
+        assert_eq!(
+            listed_env.env.get("API_URL").map(String::as_str),
+            Some("https://example.test")
+        );
+        assert_eq!(
+            listed_env.prompt.as_deref(),
+            Some("Use the API URL from env.")
+        );
 
         let project = b
             .create(None, "Sbx Proj", "why", None, Origin::Human, true, None)

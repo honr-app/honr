@@ -1153,6 +1153,12 @@ pub struct SandboxProfile {
     /// (profile ensure + resolve + inject) even when omitted here.
     #[serde(default)]
     pub mcp_server_ids: Vec<String>,
+    /// Non-secret env overlaid onto agent env at sandbox create (profile wins on clash).
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Seat notes injected into cold/Cockpit briefing when non-empty.
+    #[serde(default)]
+    pub prompt: Option<String>,
     /// Seeded from the repo (one per split `sandbox-<engine>` image);
     /// operators may edit. See `store::ensure_shipped_sandbox_profiles`.
     #[serde(default)]
@@ -1288,6 +1294,10 @@ pub struct ResolvedSandboxCreate {
     pub providers: Vec<String>,
     /// MCP server catalog ids attached for this create (audience-filtered).
     pub mcp_server_ids: Vec<String>,
+    /// Non-secret env from the winning profile (overlaid at create; profile wins on clash).
+    pub env: BTreeMap<String, String>,
+    /// Seat notes from the winning profile (briefing injection when non-empty).
+    pub prompt: Option<String>,
 }
 
 impl ResolvedSandboxCreate {
@@ -1313,6 +1323,13 @@ impl ResolvedSandboxCreate {
             profile_id: Some(p.id.clone()),
             providers: p.provider_names.clone(),
             mcp_server_ids: p.mcp_server_ids.clone(),
+            env: p.env.clone(),
+            prompt: p
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
         }
     }
 
@@ -1336,6 +1353,8 @@ impl ResolvedSandboxCreate {
             profile_id: None,
             providers: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: BTreeMap::new(),
+            prompt: None,
         }
     }
 }
@@ -1824,6 +1843,8 @@ mod tests {
             model: Some("claude-sonnet-4".into()),
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: BTreeMap::new(),
+            prompt: None,
             shipped: false,
         };
         let json = serde_json::to_string(&p).unwrap();
@@ -1851,6 +1872,8 @@ mod tests {
             model: None,
             provider_names: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: BTreeMap::new(),
+            prompt: None,
             shipped: false,
         };
         let json = serde_json::to_string(&p).unwrap();
@@ -1859,6 +1882,72 @@ mod tests {
         let back: SandboxProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.policy_id, "minimal");
         assert!(back.policy_inline_legacy.is_none());
+    }
+
+    #[test]
+    fn sandbox_profile_round_trips_env_and_prompt() {
+        let mut env = BTreeMap::new();
+        env.insert("API_URL".into(), "https://example.test".into());
+        let p = SandboxProfile {
+            id: "oc".into(),
+            name: "OpenShift".into(),
+            image: "img:1".into(),
+            policy_id: "minimal".into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: None,
+            model: None,
+            provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            env,
+            prompt: Some("Use oc against the cluster URL in API_URL.".into()),
+            shipped: false,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: SandboxProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.env.get("API_URL").map(String::as_str),
+            Some("https://example.test")
+        );
+        assert_eq!(
+            back.prompt.as_deref(),
+            Some("Use oc against the cluster URL in API_URL.")
+        );
+        let legacy: SandboxProfile = serde_json::from_str(
+            r#"{"id":"x","name":"X","image":"i","policy_id":"p"}"#,
+        )
+        .unwrap();
+        assert!(legacy.env.is_empty());
+        assert!(legacy.prompt.is_none());
+    }
+
+    #[test]
+    fn resolved_sandbox_create_from_profile_carries_env_and_prompt() {
+        let mut env = BTreeMap::new();
+        env.insert("KUBECONFIG".into(), "/tmp/kube".into());
+        let p = SandboxProfile {
+            id: "p1".into(),
+            name: "P1".into(),
+            image: "img:1".into(),
+            policy_id: "minimal".into(),
+            policy_inline_legacy: None,
+            cpu: None,
+            memory: None,
+            engine: None,
+            model: None,
+            provider_names: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            env,
+            prompt: Some("  seat notes  ".into()),
+            shipped: false,
+        };
+        let resolved = ResolvedSandboxCreate::from_profile(&p, "version: 1\n");
+        assert_eq!(
+            resolved.env.get("KUBECONFIG").map(String::as_str),
+            Some("/tmp/kube")
+        );
+        assert_eq!(resolved.prompt.as_deref(), Some("seat notes"));
     }
 
     #[test]

@@ -4783,6 +4783,8 @@ mod tests {
             profile_id: Some("cockpit".into()),
             providers: Vec::new(),
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
         };
         let spec = sandbox_spec_for_cockpit("honr-cockpit", &resolved, &[], "agy");
         assert_eq!(spec.name, "honr-cockpit");
@@ -6171,6 +6173,8 @@ mod tests {
                 model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+                env: Default::default(),
+                prompt: None,
                 shipped: false,
             })
             .unwrap();
@@ -6187,6 +6191,8 @@ mod tests {
                 model: None,
                 provider_names: Vec::new(),
                 mcp_server_ids: Vec::new(),
+                env: Default::default(),
+                prompt: None,
                 shipped: false,
             })
             .unwrap();
@@ -6367,6 +6373,8 @@ mod tests {
             profile_id: Some("default".into()),
             providers: vec!["vertex".into(), "missing".into()],
             mcp_server_ids: Vec::new(),
+            env: Default::default(),
+            prompt: None,
         };
         let attach = board.attach_providers_for_resolved(&resolved);
         let spec = sandbox_spec_for_card(1, "honr-card-1-a1", &resolved, &attach);

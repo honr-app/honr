@@ -217,6 +217,8 @@ export const api = {
     model?: string | null;
     provider_names?: string[];
     mcp_server_ids?: string[];
+    env?: Record<string, string>;
+    prompt?: string | null;
   }): Promise<SandboxProfile> => post("/sandbox-profiles", profile),
   deleteSandboxProfile: (id: string): Promise<{ ok: boolean }> =>
     del(`/sandbox-profiles/${encodeURIComponent(id)}`),
