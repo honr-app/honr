@@ -1212,8 +1212,8 @@ impl ServerHandler for Operator {
                  dispatch again (or wait for auto). Prefer park over halt when a run is wedged — \
                  park keeps the sandbox and agy session; halt deletes the sandbox; unpark queues resume. Prefer \
                  steer for a soft note that can wait (steer alone does not inject \
-                 mid-turn; MainAdvanced auto park+unparks live cards so a main-advance \
-                 rebase note takes effect on resume). Standing policy belongs in the Project \
+                 mid-turn). MainAdvanced does not park live runs; Review catch-up observes \
+                 GitHub mergeable and bounces only on CONFLICTING. Standing policy belongs in the Project \
                  project_prompt (edit via update); task inputs are the Plan. Initial plan and \
                  impl splits write a proposal on the card → Review; Approve creates sibling \
                  Tasks. Read item_detail's proposal/Plan before approving; a card that passes \

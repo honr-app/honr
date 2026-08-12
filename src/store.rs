@@ -5586,12 +5586,11 @@ facts are pasted, then unpark";
 
     /// Notify that the default branch advanced (push or merge into main).
     ///
-    /// Claimed/Running cards get a steer note to fetch/rebase onto upstream base,
-    /// then park+unpark so the resume briefing carries it — the supervisor does
-    /// not touch the live worktree. Review catch-up is not queued here: callers
-    /// observe GitHub `mergeable` (MERGEABLE = no-op; CONFLICTING → Backlog;
-    /// UNKNOWN → [`Self::dispatch_rebase`] retry). Review is not parked onto the
-    /// Running steer path.
+    /// Emits [`BoardEvent::MainAdvanced`]. Live Claimed/Running cards are **not**
+    /// steered or park/unparked here — main advance under an in-progress run is
+    /// normal. Callers run [`supervisor::process_main_advanced_review_catch_up`]
+    /// with the advancing `owner/name` to observe GitHub `mergeable` on scoped
+    /// Review PRs (MERGEABLE = no-op; CONFLICTING → Backlog; UNKNOWN → retry).
     pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
         tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
         self.record_and_send(BoardEvent::MainAdvanced {
@@ -5599,68 +5598,20 @@ facts are pasted, then unpark";
             ref_name: ref_name.to_string(),
             commit_sha: commit_sha.clone(),
         });
-        self.steer_live_cards_on_main_advanced(ref_name, commit_sha.as_deref());
     }
 
-    /// Binding note for live runs when main moves under them.
-    /// Uses the card's resolved base branch when available.
-    fn main_advanced_steer_note(ref_name: &str, commit_sha: Option<&str>, base: &str) -> String {
-        let where_main = match commit_sha {
-            Some(sha) if !sha.is_empty() => format!("{ref_name} @ {sha}"),
-            _ => ref_name.to_string(),
-        };
-        let base = if base.trim().is_empty() {
-            "main"
-        } else {
-            base.trim()
-        };
-        format!(
-            "Main advanced ({where_main}). First action: fetch upstream {base} and rebase \
-             this card's branch onto upstream/{base} (not origin/{base} alone — the fork's \
-             base freezes at create time), then continue the card."
-        )
-    }
-
-    /// Steer every Claimed/Running card, then park+unpark so the resume briefing
-    /// carries the rebase instruction. Steer alone does not inject mid-turn.
-    /// Already-parked cards are left alone (no second park/unpark). Sandbox
-    /// environment and conversation_id are preserved through the bounce.
-    /// Each card gets a note using **its** resolved upstream/base.
-    fn steer_live_cards_on_main_advanced(&self, ref_name: &str, commit_sha: Option<&str>) {
-        let live_ids: Vec<ItemId> = {
-            let s = self.state.read();
-            s.items
-                .values()
-                .filter(|i| matches!(i.state, State::Claimed | State::Running))
-                .map(|i| i.id)
-                .collect()
-        };
-        for id in live_ids {
-            let base = self
-                .resolve_card_repo(id)
-                .ok()
-                .flatten()
-                .map(|r| r.base)
-                .unwrap_or_else(|| "main".into());
-            let note = Self::main_advanced_steer_note(ref_name, commit_sha, &base);
-            if let Err(e) = self.steer(id, note.clone()) {
-                tracing::warn!("main-advanced steer failed for #{id}: {e}");
-            }
-            // Skip park/unpark for cards already parked — steer may have been a
-            // no-op on a weird state, and a second park would be wrong.
-            let already_parked = {
-                let s = self.state.read();
-                s.items.get(&id).is_some_and(|i| i.parked)
-            };
-            if already_parked {
-                continue;
-            }
-            if let Err(e) = self.park(id, Some("main advanced".into())) {
-                tracing::warn!("main-advanced park failed for #{id}: {e}");
-                continue;
-            }
-            if let Err(e) = self.unpark(id) {
-                tracing::warn!("main-advanced unpark failed for #{id}: {e}");
+    /// Whether a card's resolved upstream (or unbound default upstream) matches
+    /// the repository whose default branch advanced.
+    fn card_matches_main_advanced_repo(&self, card_id: ItemId, advanced_repo: &str) -> bool {
+        let advanced = advanced_repo.trim();
+        if advanced.is_empty() {
+            return false;
+        }
+        match self.resolve_card_repo(card_id).ok().flatten() {
+            Some(repo) => repo.upstream == advanced,
+            None => {
+                let default = self.schema.execution.agents.repo.upstream.trim();
+                !default.is_empty() && default == advanced
             }
         }
     }
@@ -5689,6 +5640,15 @@ facts are pasted, then unpark";
         }
         results.sort_by_key(|i| i.entered_state_at);
         results
+    }
+
+    /// Identify Review cards with open PRs on the advancing upstream for
+    /// tip-driven catch-up after [`Self::notify_main_advanced`].
+    pub fn identify_review_prs_for_main_advanced(&self, advanced_repo: &str) -> Vec<WorkItem> {
+        self.identify_all_behind_sibling_prs()
+            .into_iter()
+            .filter(|item| self.card_matches_main_advanced_repo(item.id, advanced_repo))
+            .collect()
     }
 
     /// Identify every Review card with an open PR for tip-driven catch-up.
@@ -9982,12 +9942,12 @@ mod tests {
         assert!(!after.awaiting_dispatch);
     }
 
-    /// MainAdvanced steers Running while leaving Review as a silent no-op until
-    /// mergeable observation (Review is not parked onto the Running path).
+    /// MainAdvanced leaves live Running cards uninterrupted; Review waits for
+    /// mergeable observation (Review is not parked onto a live steer path).
     #[test]
-    fn notify_main_advanced_steers_running_without_queuing_review_rebase() {
+    fn notify_main_advanced_leaves_running_uninterrupted() {
         let b = Board::new(
-            Schema::default(),
+            schema_with_upstream("honr-app/honr"),
             std::env::temp_dir().join(format!(
                 "honr-test-rebase-review-and-running-{}.json",
                 std::process::id()
@@ -10076,19 +10036,16 @@ mod tests {
                 .notes
                 .iter()
                 .any(|n| n.text.contains("Main advanced")),
-            "Review must not be steered/parked via the Running path: {:?}",
+            "Review must not be steered on notify alone: {:?}",
             review_after.notes
         );
 
         let running_after = b.get(running.id).unwrap();
-        assert_eq!(running_after.state, State::Backlog);
-        assert!(running_after.awaiting_dispatch);
+        assert_eq!(running_after.state, State::Running);
+        assert!(!running_after.awaiting_dispatch);
         assert!(
-            running_after
-                .notes
-                .iter()
-                .any(|n| n.text.contains("bothpaths") && n.text.contains("upstream/main")),
-            "Running still gets steer + park/unpark: {:?}",
+            running_after.notes.is_empty(),
+            "live runs must not be steered on main advance: {:?}",
             running_after.notes
         );
     }
@@ -10185,15 +10142,15 @@ mod tests {
     }
 
     #[test]
-    fn notify_main_advanced_steers_running_cards_with_fetch_rebase_note() {
+    fn notify_main_advanced_leaves_claimed_and_running_uninterrupted() {
         let b = Board::new(
-            Schema::default(),
-            std::env::temp_dir().join(format!("honr-test-main-steer-{}.json", std::process::id())),
+            schema_with_upstream("honr-app/honr"),
+            std::env::temp_dir().join(format!("honr-test-main-live-{}.json", std::process::id())),
         );
         let project = b
             .create(
                 None,
-                "Steer Main Proj",
+                "Live Main Proj",
                 "intent",
                 None,
                 Origin::Human,
@@ -10245,64 +10202,47 @@ mod tests {
             .unwrap();
         b.transition(claimed.id, State::Claimed, "agent", None)
             .unwrap();
+        b.set_environment(running.id, Some("honr-card-150-sandbox".into()));
+        b.set_conversation_id(running.id, Some("conv-main-adv".into()));
 
         b.notify_main_advanced("refs/heads/main", Some("abcdeadbeef".into()));
 
         let running_after = b.get(running.id).unwrap();
+        assert_eq!(running_after.state, State::Running);
+        assert!(!running_after.awaiting_dispatch);
+        assert!(!running_after.parked);
         assert_eq!(
-            running_after.state,
-            State::Backlog,
-            "park+unpark must bounce the card to Backlog for resume"
+            running_after.environment.as_deref(),
+            Some("honr-card-150-sandbox")
         );
-        assert!(
-            running_after.awaiting_dispatch,
-            "unpark must queue the supervisor"
+        assert_eq!(
+            running_after.conversation_id.as_deref(),
+            Some("conv-main-adv")
         );
-        assert!(!running_after.parked, "unpark clears the park hold");
-        assert!(
-            running_after.notes.iter().any(|n| {
-                n.text.contains("abcdeadbeef")
-                    && n.text.contains("fetch")
-                    && n.text.contains("upstream/main")
-                    && n.text.to_lowercase().contains("rebase")
-            }),
-            "Running card should have a fetch/rebase steer note with sha: {:?}",
-            running_after.notes
-        );
+        assert!(running_after.notes.is_empty());
 
         let claimed_after = b.get(claimed.id).unwrap();
-        assert_eq!(claimed_after.state, State::Backlog);
-        assert!(claimed_after.awaiting_dispatch);
-        assert!(
-            claimed_after
-                .notes
-                .iter()
-                .any(|n| n.text.contains("abcdeadbeef") && n.text.contains("upstream/main")),
-            "Claimed cards should also be steered: {:?}",
-            claimed_after.notes
-        );
+        assert_eq!(claimed_after.state, State::Claimed);
+        assert!(!claimed_after.awaiting_dispatch);
+        assert!(claimed_after.notes.is_empty());
 
         let backlog_after = b.get(backlog.id).unwrap();
-        assert!(
-            backlog_after.notes.is_empty(),
-            "Backlog cards must not get a main-advanced steer: {:?}",
-            backlog_after.notes
-        );
+        assert!(backlog_after.notes.is_empty());
     }
 
     #[test]
-    fn notify_main_advanced_parks_and_unparks_running_so_steer_takes_effect() {
+    fn notify_main_advanced_skips_cross_repo_live_cards() {
         let b = Board::new(
             Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-main-park-unpark-{}.json",
+                "honr-test-main-skip-cross-{}.json",
                 std::process::id()
             )),
         );
         let project = b
             .create(
                 None,
-                "Park Unpark Main Proj",
+                "Cross Repo Proj",
                 "intent",
                 None,
                 Origin::Human,
@@ -10310,10 +10250,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        let running = b
+        let other = b
             .create(
                 Some(project.id),
-                "Live Task",
+                "Other Repo Live",
                 "intent",
                 Some("dod".into()),
                 Origin::Human,
@@ -10321,47 +10261,91 @@ mod tests {
                 None,
             )
             .unwrap();
-        b.transition(running.id, State::Shaping, "test", None)
+        b.transition(other.id, State::Shaping, "test", None)
             .unwrap();
-        b.transition(running.id, State::Backlog, "test", None)
+        b.transition(other.id, State::Backlog, "test", None)
             .unwrap();
-        b.transition(running.id, State::Claimed, "agent", None)
+        b.transition(other.id, State::Claimed, "agent", None)
             .unwrap();
-        b.transition(running.id, State::Running, "agent", None)
+        b.transition(other.id, State::Running, "agent", None)
             .unwrap();
-        b.set_environment(running.id, Some("honr-card-150-sandbox".into()));
-        b.set_conversation_id(running.id, Some("conv-main-adv".into()));
+        b.set_pr_url(
+            other.id,
+            Some("https://github.com/other/widgets/pull/42".into()),
+        );
 
-        b.notify_main_advanced("refs/heads/main", Some("def456abc".into()));
+        b.notify_main_advanced("refs/heads/main", Some("crossskipsha".into()));
 
-        let after = b.get(running.id).unwrap();
-        assert_eq!(after.state, State::Backlog);
+        let after = b.get(other.id).unwrap();
+        assert_eq!(after.state, State::Running, "card must stay Running");
+        assert!(!after.awaiting_dispatch);
         assert!(
-            after.awaiting_dispatch,
-            "unpark must leave the card queued for the supervisor"
-        );
-        assert!(!after.parked);
-        assert_eq!(
-            after.environment.as_deref(),
-            Some("honr-card-150-sandbox"),
-            "sandbox environment must survive park+unpark"
-        );
-        assert_eq!(
-            after.conversation_id.as_deref(),
-            Some("conv-main-adv"),
-            "conversation_id must survive park+unpark"
-        );
-        assert!(
-            after.notes.iter().any(|n| {
-                n.text.contains("def456abc")
-                    && n.text.contains("upstream/main")
-                    && n.text.to_lowercase().contains("rebase")
-            }),
-            "notes must include the main-advanced steer: {:?}",
+            after.notes.is_empty(),
+            "no steer note for unrelated upstream: {:?}",
             after.notes
         );
-        // Board path only: no supervisor/openshell mid-run git rebase — the
-        // agent rebases on resume from the steer note.
+    }
+
+    #[test]
+    fn identify_review_prs_for_main_advanced_scopes_by_upstream_repo() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-review-scope-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Review Scope Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let honr_review = b
+            .create(
+                Some(project.id),
+                "Honr Review",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let other_review = b
+            .create(
+                Some(project.id),
+                "Other Review",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        for (id, url) in [
+            (honr_review.id, "https://github.com/honr-app/honr/pull/701"),
+            (other_review.id, "https://github.com/other/widgets/pull/702"),
+        ] {
+            b.transition(id, State::Shaping, "test", None).unwrap();
+            b.transition(id, State::Backlog, "test", None).unwrap();
+            b.transition(id, State::Claimed, "agent", None).unwrap();
+            b.transition(id, State::Review, "agent", None).unwrap();
+            b.set_pr_url(id, Some(url.into()));
+        }
+
+        let scoped = b.identify_review_prs_for_main_advanced("honr-app/honr");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, honr_review.id);
+
+        let other_scope = b.identify_review_prs_for_main_advanced("other/widgets");
+        assert_eq!(other_scope.len(), 1);
+        assert_eq!(other_scope[0].id, other_review.id);
     }
 
     #[test]
@@ -10895,6 +10879,12 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    fn schema_with_upstream(upstream: &str) -> Schema {
+        let mut schema = Schema::default();
+        schema.execution.agents.repo.upstream = upstream.into();
+        schema
     }
 
     #[test]

@@ -2119,8 +2119,19 @@ async fn github_webhook(
                 .and_then(|pr| pr.merge_commit_sha.clone())
         };
 
+        let advanced_repo = payload
+            .repository
+            .as_ref()
+            .and_then(|r| r.full_name.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
         b.notify_main_advanced(&ref_name, commit_sha.clone());
-        let _ = crate::supervisor::process_main_advanced_review_catch_up(&b).await;
+        let steered_item_ids = crate::supervisor::process_main_advanced_review_catch_up(
+            &b,
+            advanced_repo,
+        )
+        .await;
 
         Ok(Json(WebhookResponse {
             status: "ok".into(),
@@ -2128,7 +2139,7 @@ async fn github_webhook(
             ref_name: Some(ref_name),
             commit_sha,
             completed_item_ids,
-            steered_item_ids: Vec::new(),
+            steered_item_ids,
         }))
     } else {
         Ok(Json(WebhookResponse {
@@ -2995,6 +3006,122 @@ mod tests {
         let _ = b.transition(t.id, State::Review, "agent", None);
         b.set_pr_url(t.id, Some(pr_url.to_string()));
         t.id
+    }
+
+    fn running_card_with_pr(b: &SharedBoard, pr_url: &str) -> u64 {
+        use crate::model::{Origin, State};
+        let p = b
+            .create(
+                None,
+                "Webhook Running Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                "Live Impl",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "human", None);
+        let _ = b.transition(t.id, State::Backlog, "human", None);
+        let _ = b.transition(t.id, State::Claimed, "agent", None);
+        let _ = b.transition(t.id, State::Running, "agent", None);
+        b.set_pr_url(t.id, Some(pr_url.to_string()));
+        t.id
+    }
+
+    #[tokio::test]
+    async fn github_webhook_main_advanced_leaves_running_cards_uninterrupted() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-live-skip-{}.json",
+                std::process::id()
+            )),
+        ));
+        let pr_url = "https://github.com/honr-app/honr/pull/5501";
+        let id = running_card_with_pr(&b, pr_url);
+
+        let push_payload = serde_json::json!({
+            "ref": "refs/heads/main",
+            "after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "repository": {
+                "default_branch": "main",
+                "full_name": "honr-app/honr"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "push".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(push_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert!(resp.main_advanced);
+        assert!(resp.steered_item_ids.is_empty());
+        let item = b.get(id).unwrap();
+        assert_eq!(item.state, State::Running);
+        assert!(!item.awaiting_dispatch);
+        assert!(item.notes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn github_webhook_main_advanced_skips_cross_repo_running_cards() {
+        use crate::model::State;
+
+        let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-webhook-steer-skip-{}.json",
+                std::process::id()
+            )),
+        ));
+        let pr_url = "https://github.com/other/widgets/pull/5502";
+        let id = running_card_with_pr(&b, pr_url);
+
+        let push_payload = serde_json::json!({
+            "ref": "refs/heads/main",
+            "after": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "repository": {
+                "default_branch": "main",
+                "full_name": "honr-app/honr"
+            }
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "push".parse().unwrap());
+
+        let Json(resp) = github_webhook(
+            AxState(b.clone()),
+            headers,
+            Json(serde_json::from_value(push_payload).unwrap()),
+        )
+        .await
+        .expect("webhook response");
+
+        assert!(resp.main_advanced);
+        assert!(resp.steered_item_ids.is_empty());
+        let item = b.get(id).unwrap();
+        assert_eq!(item.state, State::Running);
+        assert!(!item.awaiting_dispatch);
+        assert!(item.notes.is_empty());
     }
 
     #[tokio::test]

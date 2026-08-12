@@ -2264,13 +2264,17 @@ pub async fn process_awaiting_mergeable_checks(
     .await
 }
 
-/// Tip-driven Review catch-up after `MainAdvanced`: observe every open Review PR.
+/// Tip-driven Review catch-up after `MainAdvanced`: observe scoped open Review PRs
+/// via GitHub `mergeable`. Returns card ids bounced to Backlog on CONFLICTING.
 pub async fn process_main_advanced_review_catch_up(
     board: &SharedBoard,
-) -> Vec<Result<crate::model::WorkItem, String>> {
+    advanced_repo: &str,
+) -> Vec<crate::model::ItemId> {
+    use crate::model::State;
+
     let agents = board.effective_agents();
-    let candidates = board.identify_all_behind_sibling_prs();
-    observe_review_catch_up_with(board, &agents, candidates, |board, pr_url| {
+    let candidates = board.identify_review_prs_for_main_advanced(advanced_repo);
+    let results = observe_review_catch_up_with(board, &agents, candidates, |board, pr_url| {
         let board = board.clone();
         let pr_url = pr_url.to_string();
         Box::pin(async move {
@@ -2279,7 +2283,13 @@ pub async fn process_main_advanced_review_catch_up(
                 .map_err(|e| e.to_string())
         })
     })
-    .await
+    .await;
+    results
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .filter(|item| item.state == State::Backlog)
+        .map(|item| item.id)
+        .collect()
 }
 
 /// Same-parent sibling Review catch-up after a merge→Done.
@@ -6400,12 +6410,13 @@ mod tests {
     async fn process_main_advanced_review_catch_up_with<F>(
         board: &SharedBoard,
         cfg: &AgentConfig,
+        advanced_repo: &str,
         fetch: F,
     ) -> Vec<Result<crate::model::WorkItem, String>>
     where
         F: for<'a> FnMut(&'a SharedBoard, &'a str) -> MergeableFetchFut<'a>,
     {
-        let candidates = board.identify_all_behind_sibling_prs();
+        let candidates = board.identify_review_prs_for_main_advanced(advanced_repo);
         observe_review_catch_up_with(board, cfg, candidates, fetch).await
     }
 
@@ -6486,12 +6497,14 @@ mod tests {
         );
     }
 
-    /// Tip catch-up observes mergeable first: MERGEABLE is a silent Review no-op
-    /// (no rebase_requested), while Running still gets steer + park/unpark.
+    /// Tip catch-up observes mergeable first: MERGEABLE is a silent Review no-op;
+    /// live Running cards are not steered or park/unparked on main advance.
     #[tokio::test]
-    async fn main_advanced_review_mergeable_is_noop_while_running_steered() {
+    async fn main_advanced_review_mergeable_is_noop_while_running_uninterrupted() {
+        let mut schema = crate::schema::Schema::default();
+        schema.execution.agents.repo.upstream = "honr-app/honr".into();
         let board = Arc::new(crate::store::Board::new(
-            crate::schema::Schema::default(),
+            schema,
             std::env::temp_dir().join(format!(
                 "honr-test-main-adv-mergeable-{}.json",
                 std::time::SystemTime::now()
@@ -6592,14 +6605,11 @@ mod tests {
         board.notify_main_advanced("refs/heads/main", Some("idle-race-sha".into()));
 
         let running_after = board.get(running.id).unwrap();
-        assert_eq!(running_after.state, State::Backlog);
-        assert!(running_after.awaiting_dispatch);
+        assert_eq!(running_after.state, State::Running);
+        assert!(!running_after.awaiting_dispatch);
         assert!(
-            running_after
-                .notes
-                .iter()
-                .any(|n| n.text.contains("idle-race-sha") && n.text.contains("upstream/main")),
-            "Running still gets steer + park/unpark: {:?}",
+            running_after.notes.is_empty(),
+            "live runs must not be steered on main advance: {:?}",
             running_after.notes
         );
 
@@ -6621,6 +6631,7 @@ mod tests {
         let results = process_main_advanced_review_catch_up_with(
             &board,
             &repo_cfg(),
+            "honr-app/honr",
             fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
                 mergeable: crate::github_app::PrMergeableState::Mergeable,
                 base_ref: Some("main".into()),
@@ -6705,6 +6716,7 @@ mod tests {
         let results = process_main_advanced_review_catch_up_with(
             &board,
             &repo_cfg(),
+            "honr-app/honr",
             fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
                 mergeable: crate::github_app::PrMergeableState::Conflicting,
                 base_ref: Some("main".into()),
@@ -6785,6 +6797,7 @@ mod tests {
         let _ = process_main_advanced_review_catch_up_with(
             &board,
             &repo_cfg(),
+            "honr-app/honr",
             fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
                 mergeable: crate::github_app::PrMergeableState::Unknown,
                 base_ref: Some("main".into()),
