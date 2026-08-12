@@ -180,11 +180,11 @@ Ingress is `POST /api/webhooks/github`. A push to the default branch emits
 the merged PR, it completes. Webhook and polling both go through the same Board
 completion helper.
 
-**2. Review catch-up (CONFLICTING-only).** Main advancing under a Review PR is a
-no-op unless GitHub reports a conflict. honr observes the host GitHub API
+**2. Review catch-up (scoped, CONFLICTING-only).** Main advancing under a Review PR
+is a no-op unless GitHub reports a conflict. honr observes the host GitHub API
 `mergeable` field with an App installation token — not a `git rebase` in a
-sandbox — for every open Review PR targeting the advanced base (tip advance and
-same-parent sibling merge share this path):
+sandbox — for open Review PRs on the **same upstream** that advanced (tip
+advance and same-parent sibling merge share this path):
 
 | `mergeable` | What happens |
 |---|---|
@@ -195,13 +195,13 @@ same-parent sibling merge share this path):
 Repeated overlapping conflict files escalate to **Needs You** (decomposition
 failure) when those file lists are present.
 
-**3. Live runs get steered.** Each Claimed or Running card gets a note to fetch
-and rebase onto upstream main. Because steer alone does not inject mid-turn,
-honr then parks and unparks so the agent acts on resume — sandbox and
-conversation id are preserved.
+**3. Live runs stay put.** Claimed and Running cards are **not** steered or
+park/unparked when main advances — another card merging is normal. Rebase work
+is detected in Review via the `mergeable` check above; webhook responses list
+`steered_item_ids` only for Review cards bounced to Backlog on CONFLICTING.
 
 Review cards stay in Review unless GitHub reports CONFLICTING (or a human
-bounces them). Steering Running does not replace Review catch-up: both fire on
+bounces them). Live steering does not replace Review catch-up: both fire on
 the same `MainAdvanced`.
 
 ### Local webhook forwarding

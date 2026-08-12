@@ -149,8 +149,9 @@ pub async fn tick(board: &SharedBoard) -> Result<(), String> {
                     continue;
                 }
                 let ref_name = format!("refs/heads/{branch}");
-                board.notify_main_advanced(repo, &ref_name, Some(sha.clone()));
-                let _ = crate::supervisor::process_main_advanced_review_catch_up(board).await;
+                board.notify_main_advanced(&ref_name, Some(sha.clone()));
+                let _ =
+                    crate::supervisor::process_main_advanced_review_catch_up(board, repo).await;
                 tracing::info!(%repo, %branch, %sha, "poll: default branch advanced");
             }
             Ok(None) => {}
