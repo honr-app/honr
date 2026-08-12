@@ -110,6 +110,7 @@ pub(crate) fn attach_agent_command(
     initial_prompt: Option<&str>,
     // Prepended shell exports (agy: antigravity GCP project over Vertex).
     extra_exports: &str,
+    model: Option<&str>,
 ) -> Vec<String> {
     let engine = engine.trim();
     let cid = conversation_id
@@ -145,11 +146,15 @@ pub(crate) fn attach_agent_command(
             crate::cockpit_mcp::COCKPIT_CLAUDE_MCP_CONFIG
         ),
         "agy" => {
-            // `--model` before `-p` — see [`crate::antigravity::DEFAULT_SEAT_MODEL`].
-            let mut cmd = format!(
-                "agy --dangerously-skip-permissions --model {}",
-                shell_quote(crate::antigravity::DEFAULT_SEAT_MODEL)
-            );
+            let mut cmd = String::from("agy --dangerously-skip-permissions");
+            if let Some(m) = model
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| crate::engine::default_model_for_engine("agy"))
+            {
+                cmd.push_str(" --model ");
+                cmd.push_str(&shell_quote(m));
+            }
             if let Some(id) = cid {
                 cmd.push_str(" --conversation ");
                 cmd.push_str(&shell_quote(id));
@@ -414,6 +419,7 @@ where
         conversation_id,
         briefing.as_deref(),
         &agy_exports,
+        board.resolve_cockpit_model().as_deref(),
     );
 
     // Initial size; client sends resize ASAP after ready.
@@ -545,7 +551,7 @@ mod tests {
 
     #[test]
     fn attach_agent_command_cold_start() {
-        let cmd = attach_agent_command("cursor", None, Some("be the cockpit"), "");
+        let cmd = attach_agent_command("cursor", None, Some("be the cockpit"), "", None);
         assert_eq!(cmd[0], "bash");
         assert_eq!(cmd[1], "-lc");
         let script = &cmd[2];
@@ -569,6 +575,7 @@ mod tests {
             Some("22096329-228f-47a1-a16f-cbde6da8fe5b"),
             None,
             "",
+            None,
         );
         let script = &cmd[2];
         assert!(
@@ -588,7 +595,7 @@ mod tests {
 
     #[test]
     fn attach_agent_command_fresh_chat_seeds_briefing() {
-        let cmd = attach_agent_command("cursor", Some("new-chat-id"), Some("hello seat"), "");
+        let cmd = attach_agent_command("cursor", Some("new-chat-id"), Some("hello seat"), "", None);
         let script = &cmd[2];
         assert!(script.contains("--resume 'new-chat-id'"), "{script}");
         assert!(script.contains("'hello seat'"), "{script}");
@@ -596,13 +603,13 @@ mod tests {
 
     #[test]
     fn attach_agent_command_ignores_blank_conversation() {
-        let cmd = attach_agent_command("cursor", Some("  "), None, "");
+        let cmd = attach_agent_command("cursor", Some("  "), None, "", None);
         assert!(!cmd[2].contains("--resume"), "{}", cmd[2]);
     }
 
     #[test]
     fn attach_agent_command_opencode_uses_inference_local() {
-        let cmd = attach_agent_command("opencode", None, None, "");
+        let cmd = attach_agent_command("opencode", None, None, "", None);
         let script = &cmd[2];
         assert!(script.contains("exec opencode"), "{script}");
         assert!(
@@ -619,6 +626,7 @@ mod tests {
             None,
             None,
             "export GOOGLE_CLOUD_PROJECT='shanemcd-rh'\n",
+            None,
         );
         let script = &cmd[2];
         assert!(script.contains("exec agy"), "{script}");
@@ -641,7 +649,7 @@ mod tests {
 
     #[test]
     fn attach_agent_command_claude_loads_injected_mcp() {
-        let cmd = attach_agent_command("claude", None, None, "");
+        let cmd = attach_agent_command("claude", None, None, "", None);
         let script = &cmd[2];
         assert!(
             script.contains("exec claude --bare --strict-mcp-config --mcp-config"),
@@ -669,6 +677,7 @@ mod tests {
             Some("22096329-228f-47a1-a16f-cbde6da8fe5b"),
             None,
             "",
+            None,
         );
         assert!(
             !cmd[2].contains("--session"),

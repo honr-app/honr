@@ -48,8 +48,10 @@ enum PromptStyle {
 #[derive(Debug, Clone, Copy)]
 pub struct Engine {
     pub id: &'static str,
-    /// Binary + fixed flags, excluding resume and prompt.
+    /// Binary + fixed flags, excluding resume, model, and prompt.
     prefix: &'static str,
+    /// Fixed flags after `--model` and before resume/prompt (agy print-timeout).
+    post_model: &'static str,
     /// Flags after the prompt (claude puts format/permission flags here).
     trailing: &'static str,
     prompt: PromptStyle,
@@ -81,6 +83,7 @@ pub const ENGINES: &[Engine] = &[
         // GetMcpTools returns "MCP server honr not found" while the socat
         // relay is healthy.
         prefix: "agent -p --force --trust --approve-mcps --sandbox disabled --output-format stream-json",
+        post_model: "",
         trailing: "",
         prompt: PromptStyle::Positional,
         resume: Some(ResumeFlag::Resume),
@@ -89,9 +92,10 @@ pub const ENGINES: &[Engine] = &[
     },
     Engine {
         id: "agy",
-        // `--model` before `-p` (FlagP appends `-p …` last). Keep in sync with
-        // [`crate::antigravity::DEFAULT_SEAT_MODEL`].
-        prefix: "agy --dangerously-skip-permissions --model gemini-3.6-flash-high --print-timeout 24h --output-format stream-json",
+        // `--model` is injected from resolved card/spec/default — before `-p`
+        // (FlagP appends `-p …` last). Default: [`crate::antigravity::DEFAULT_SEAT_MODEL`].
+        prefix: "agy --dangerously-skip-permissions",
+        post_model: "--print-timeout 24h --output-format stream-json",
         trailing: "",
         prompt: PromptStyle::FlagP,
         resume: Some(ResumeFlag::Conversation),
@@ -104,6 +108,7 @@ pub const ENGINES: &[Engine] = &[
         // OpenShell inference.local (see [`anthropic_inference_env`]); MCP is
         // the injected cockpit/seat file via `--mcp-config`.
         prefix: "claude --bare --strict-mcp-config --mcp-config /sandbox/.honr/mcp/claude_mcp.json",
+        post_model: "",
         trailing: "--output-format stream-json --verbose --permission-mode bypassPermissions",
         prompt: PromptStyle::FlagP,
         resume: None,
@@ -115,6 +120,7 @@ pub const ENGINES: &[Engine] = &[
         // Headless one-shot: JSONL events on stdout, auto-approve tool perms
         // (sandbox is already the containment boundary). Prompt is positional.
         prefix: "opencode run --format json --auto",
+        post_model: "",
         trailing: "",
         prompt: PromptStyle::Positional,
         resume: Some(ResumeFlag::Session),
@@ -225,35 +231,73 @@ pub fn anthropic_inference_exports(engine_id: &str) -> &'static str {
     }
 }
 
+/// Engine default when card and sandbox spec omit `model`.
+pub fn default_model_for_engine(engine_id: &str) -> Option<&'static str> {
+    match engine_id.trim() {
+        "agy" => Some(crate::antigravity::DEFAULT_SEAT_MODEL),
+        _ => None,
+    }
+}
+
+/// Whether this engine's CLI accepts a `--model` flag on launch argv.
+pub fn engine_accepts_cli_model(engine_id: &str) -> bool {
+    matches!(engine_id.trim(), "agy")
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+/// `--model …` segment when the engine accepts it and a model is resolved.
+fn model_argv(engine_id: &str, model: Option<&str>) -> Option<String> {
+    if !engine_accepts_cli_model(engine_id) {
+        return None;
+    }
+    let m = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| default_model_for_engine(engine_id))?;
+    Some(format!("--model {}", shell_single_quote(m)))
+}
+
 /// Build the inner agent command line (no `timeout` / `setsid` wrapper).
 ///
 /// `conversation_id` is only honored when the engine declares a [`ResumeFlag`];
 /// callers that pass `Some` for a non-resumable engine still get a fresh argv
 /// (resume gate belongs at the call site).
+///
+/// `model` is the resolved card → spec → engine-default chain from the board.
 pub fn command_line(
     engine_id: &str,
     prompt: PromptEnv,
     conversation_id: Option<&str>,
+    model: Option<&str>,
 ) -> Result<String, UnknownEngine> {
     let engine = lookup(engine_id)?;
     let resume = conversation_id.is_some().then_some(engine.resume).flatten();
 
-    let mut parts: Vec<&str> = Vec::new();
-    parts.push(engine.prefix);
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(engine.prefix.to_string());
+    if let Some(argv) = model_argv(engine.id, model) {
+        parts.push(argv);
+    }
+    if !engine.post_model.is_empty() {
+        parts.push(engine.post_model.to_string());
+    }
     if let Some(flag) = resume {
-        parts.push(flag.argv());
+        parts.push(flag.argv().to_string());
     }
     match engine.prompt {
         PromptStyle::FlagP => {
-            parts.push("-p");
-            parts.push(prompt.shell_ref());
+            parts.push("-p".to_string());
+            parts.push(prompt.shell_ref().to_string());
         }
         PromptStyle::Positional => {
-            parts.push(prompt.shell_ref());
+            parts.push(prompt.shell_ref().to_string());
         }
     }
     if !engine.trailing.is_empty() {
-        parts.push(engine.trailing);
+        parts.push(engine.trailing.to_string());
     }
     Ok(parts.join(" "))
 }
@@ -296,19 +340,19 @@ mod tests {
         assert!(msg.contains("agy"), "{msg}");
         assert!(msg.contains("claude"), "{msg}");
         assert!(msg.contains("opencode"), "{msg}");
-        assert!(command_line("nope", PromptEnv::Briefing, None).is_err());
+        assert!(command_line("nope", PromptEnv::Briefing, None, None).is_err());
         assert!(!supports_resume("nope"));
     }
 
     #[test]
     fn claude_argv_fresh_no_resume() {
-        let cmd = command_line("claude", PromptEnv::Briefing, None).unwrap();
+        let cmd = command_line("claude", PromptEnv::Briefing, None, None).unwrap();
         assert_eq!(
             cmd,
             "claude --bare --strict-mcp-config --mcp-config /sandbox/.honr/mcp/claude_mcp.json -p \"$HONR_BRIEFING\" --output-format stream-json --verbose --permission-mode bypassPermissions"
         );
         // Claude has no resume flag — conversation id must not change argv.
-        let ignored = command_line("claude", PromptEnv::Briefing, Some("cid")).unwrap();
+        let ignored = command_line("claude", PromptEnv::Briefing, Some("cid"), None).unwrap();
         assert_eq!(ignored, cmd);
         assert!(!supports_resume("claude"));
     }
@@ -331,11 +375,11 @@ mod tests {
 
     #[test]
     fn agy_argv_fresh_and_resume() {
-        let fresh = command_line("agy", PromptEnv::Briefing, None).unwrap();
+        let fresh = command_line("agy", PromptEnv::Briefing, None, None).unwrap();
         assert_eq!(
             fresh,
             format!(
-                "agy --dangerously-skip-permissions --model {} --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\"",
+                "agy --dangerously-skip-permissions --model '{}' --print-timeout 24h --output-format stream-json -p \"$HONR_BRIEFING\"",
                 crate::antigravity::DEFAULT_SEAT_MODEL
             )
         );
@@ -345,7 +389,10 @@ mod tests {
         assert!(model_at < p_at, "{fresh}");
         assert!(!fresh.contains("--conversation"));
 
-        let resume = command_line("agy", PromptEnv::Briefing, Some("cid")).unwrap();
+        let custom = command_line("agy", PromptEnv::Briefing, None, Some("gemini-pro")).unwrap();
+        assert!(custom.contains("--model 'gemini-pro'"), "{custom}");
+
+        let resume = command_line("agy", PromptEnv::Briefing, Some("cid"), None).unwrap();
         assert!(resume.contains("--conversation \"$HONR_CONVERSATION\""), "{resume}");
         assert!(resume.contains("-p \"$HONR_BRIEFING\""), "{resume}");
         assert!(supports_resume("agy"));
@@ -354,14 +401,14 @@ mod tests {
 
     #[test]
     fn cursor_argv_fresh_and_resume() {
-        let fresh = command_line("cursor", PromptEnv::Briefing, None).unwrap();
+        let fresh = command_line("cursor", PromptEnv::Briefing, None, None).unwrap();
         assert_eq!(
             fresh,
             "agent -p --force --trust --approve-mcps --sandbox disabled --output-format stream-json \"$HONR_BRIEFING\""
         );
         assert!(!fresh.contains("--resume"));
 
-        let resume = command_line("cursor", PromptEnv::Prompt, Some("sid")).unwrap();
+        let resume = command_line("cursor", PromptEnv::Prompt, Some("sid"), None).unwrap();
         assert!(
             resume.contains("--resume \"$HONR_CONVERSATION\""),
             "{resume}"
@@ -382,14 +429,14 @@ mod tests {
 
     #[test]
     fn opencode_argv_fresh_and_resume() {
-        let fresh = command_line("opencode", PromptEnv::Briefing, None).unwrap();
+        let fresh = command_line("opencode", PromptEnv::Briefing, None, None).unwrap();
         assert_eq!(
             fresh,
             "opencode run --format json --auto \"$HONR_BRIEFING\""
         );
         assert!(!fresh.contains("--session"));
 
-        let resume = command_line("opencode", PromptEnv::Prompt, Some("ses_abc")).unwrap();
+        let resume = command_line("opencode", PromptEnv::Prompt, Some("ses_abc"), None).unwrap();
         assert!(
             resume.contains("--session \"$HONR_CONVERSATION\""),
             "{resume}"
