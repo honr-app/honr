@@ -6490,8 +6490,10 @@ mod tests {
     /// (no rebase_requested), while Running still gets steer + park/unpark.
     #[tokio::test]
     async fn main_advanced_review_mergeable_is_noop_while_running_steered() {
+        let mut schema = crate::schema::Schema::default();
+        schema.execution.agents.repo.upstream = "honr-app/honr".into();
         let board = Arc::new(crate::store::Board::new(
-            crate::schema::Schema::default(),
+            schema,
             std::env::temp_dir().join(format!(
                 "honr-test-main-adv-mergeable-{}.json",
                 std::time::SystemTime::now()
@@ -6589,7 +6591,11 @@ mod tests {
             .transition(running.id, State::Running, "agent", None)
             .unwrap();
 
-        board.notify_main_advanced("refs/heads/main", Some("idle-race-sha".into()));
+        board.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("idle-race-sha".into()),
+        );
 
         let running_after = board.get(running.id).unwrap();
         assert_eq!(running_after.state, State::Backlog);
@@ -6699,7 +6705,11 @@ mod tests {
             }),
         );
 
-        board.notify_main_advanced("refs/heads/main", Some("conflict-sha".into()));
+        board.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("conflict-sha".into()),
+        );
         assert!(!board.get(review.id).unwrap().rebase_requested);
 
         let results = process_main_advanced_review_catch_up_with(
@@ -6781,7 +6791,11 @@ mod tests {
             }),
         );
 
-        board.notify_main_advanced("refs/heads/main", Some("unknown-sha".into()));
+        board.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("unknown-sha".into()),
+        );
         let _ = process_main_advanced_review_catch_up_with(
             &board,
             &repo_cfg(),

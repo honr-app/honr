@@ -5592,14 +5592,37 @@ facts are pasted, then unpark";
     /// observe GitHub `mergeable` (MERGEABLE = no-op; CONFLICTING → Backlog;
     /// UNKNOWN → [`Self::dispatch_rebase`] retry). Review is not parked onto the
     /// Running steer path.
-    pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
-        tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
+    pub fn notify_main_advanced(
+        &self,
+        advanced_repo: &str,
+        ref_name: &str,
+        commit_sha: Option<String>,
+    ) -> Vec<ItemId> {
+        tracing::info!(
+            "main advanced: repo={advanced_repo}, ref={ref_name}, commit={commit_sha:?}"
+        );
         self.record_and_send(BoardEvent::MainAdvanced {
             seq: self.next_seq(),
             ref_name: ref_name.to_string(),
             commit_sha: commit_sha.clone(),
         });
-        self.steer_live_cards_on_main_advanced(ref_name, commit_sha.as_deref());
+        self.steer_live_cards_on_main_advanced(advanced_repo, ref_name, commit_sha.as_deref())
+    }
+
+    /// Whether a live card should steer when `advanced_repo` (normalized owner/name)
+    /// advances its default branch.
+    fn live_card_matches_main_advanced_repo(&self, card_id: ItemId, advanced_repo: &str) -> bool {
+        let advanced = advanced_repo.trim();
+        if advanced.is_empty() {
+            return false;
+        }
+        match self.resolve_card_repo(card_id).ok().flatten() {
+            Some(repo) => repo.upstream == advanced,
+            None => {
+                let default = self.schema.execution.agents.repo.upstream.trim();
+                !default.is_empty() && default == advanced
+            }
+        }
     }
 
     /// Binding note for live runs when main moves under them.
@@ -5626,7 +5649,12 @@ facts are pasted, then unpark";
     /// Already-parked cards are left alone (no second park/unpark). Sandbox
     /// environment and conversation_id are preserved through the bounce.
     /// Each card gets a note using **its** resolved upstream/base.
-    fn steer_live_cards_on_main_advanced(&self, ref_name: &str, commit_sha: Option<&str>) {
+    fn steer_live_cards_on_main_advanced(
+        &self,
+        advanced_repo: &str,
+        ref_name: &str,
+        commit_sha: Option<&str>,
+    ) -> Vec<ItemId> {
         let live_ids: Vec<ItemId> = {
             let s = self.state.read();
             s.items
@@ -5635,7 +5663,11 @@ facts are pasted, then unpark";
                 .map(|i| i.id)
                 .collect()
         };
+        let mut steered = Vec::new();
         for id in live_ids {
+            if !self.live_card_matches_main_advanced_repo(id, advanced_repo) {
+                continue;
+            }
             let base = self
                 .resolve_card_repo(id)
                 .ok()
@@ -5645,7 +5677,9 @@ facts are pasted, then unpark";
             let note = Self::main_advanced_steer_note(ref_name, commit_sha, &base);
             if let Err(e) = self.steer(id, note.clone()) {
                 tracing::warn!("main-advanced steer failed for #{id}: {e}");
+                continue;
             }
+            steered.push(id);
             // Skip park/unpark for cards already parked — steer may have been a
             // no-op on a weird state, and a second park would be wrong.
             let already_parked = {
@@ -5663,6 +5697,7 @@ facts are pasted, then unpark";
                 tracing::warn!("main-advanced unpark failed for #{id}: {e}");
             }
         }
+        steered
     }
 
     /// Identify open sibling PRs in Review that are behind main for a given item's parent.
@@ -9900,7 +9935,7 @@ mod tests {
             Some("https://github.com/honr-app/honr/pull/202".into()),
         );
 
-        b.notify_main_advanced("refs/heads/main", Some("sha123".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("sha123".into()));
 
         let t2_updated = b.get(t2.id).unwrap();
         assert_eq!(t2_updated.state, State::Review);
@@ -9971,7 +10006,7 @@ mod tests {
             "tip-driven identify must include Review PRs without a Done sibling"
         );
 
-        b.notify_main_advanced("refs/heads/main", Some("tipdeadbeef".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("tipdeadbeef".into()));
 
         let after = b.get(review.id).unwrap();
         assert_eq!(after.state, State::Review);
@@ -9987,7 +10022,7 @@ mod tests {
     #[test]
     fn notify_main_advanced_steers_running_without_queuing_review_rebase() {
         let b = Board::new(
-            Schema::default(),
+            schema_with_upstream("honr-app/honr"),
             std::env::temp_dir().join(format!(
                 "honr-test-rebase-review-and-running-{}.json",
                 std::process::id()
@@ -10063,7 +10098,7 @@ mod tests {
         b.transition(running.id, State::Running, "agent", None)
             .unwrap();
 
-        b.notify_main_advanced("refs/heads/main", Some("bothpaths".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("bothpaths".into()));
 
         let review_after = b.get(review.id).unwrap();
         assert_eq!(review_after.state, State::Review);
@@ -10187,7 +10222,7 @@ mod tests {
     #[test]
     fn notify_main_advanced_steers_running_cards_with_fetch_rebase_note() {
         let b = Board::new(
-            Schema::default(),
+            schema_with_upstream("honr-app/honr"),
             std::env::temp_dir().join(format!("honr-test-main-steer-{}.json", std::process::id())),
         );
         let project = b
@@ -10246,7 +10281,7 @@ mod tests {
         b.transition(claimed.id, State::Claimed, "agent", None)
             .unwrap();
 
-        b.notify_main_advanced("refs/heads/main", Some("abcdeadbeef".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("abcdeadbeef".into()));
 
         let running_after = b.get(running.id).unwrap();
         assert_eq!(
@@ -10293,7 +10328,7 @@ mod tests {
     #[test]
     fn notify_main_advanced_parks_and_unparks_running_so_steer_takes_effect() {
         let b = Board::new(
-            Schema::default(),
+            schema_with_upstream("honr-app/honr"),
             std::env::temp_dir().join(format!(
                 "honr-test-main-park-unpark-{}.json",
                 std::process::id()
@@ -10332,7 +10367,7 @@ mod tests {
         b.set_environment(running.id, Some("honr-card-150-sandbox".into()));
         b.set_conversation_id(running.id, Some("conv-main-adv".into()));
 
-        b.notify_main_advanced("refs/heads/main", Some("def456abc".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("def456abc".into()));
 
         let after = b.get(running.id).unwrap();
         assert_eq!(after.state, State::Backlog);
@@ -10362,6 +10397,231 @@ mod tests {
         );
         // Board path only: no supervisor/openshell mid-run git rebase — the
         // agent rebases on resume from the steer note.
+    }
+
+    #[test]
+    fn notify_main_advanced_skips_cross_repo_live_cards() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-skip-cross-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Cross Repo Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let other = b
+            .create(
+                Some(project.id),
+                "Other Repo Live",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.transition(other.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(other.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(other.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(other.id, State::Running, "agent", None)
+            .unwrap();
+        b.set_pr_url(
+            other.id,
+            Some("https://github.com/other/widgets/pull/42".into()),
+        );
+
+        let steered = b.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("crossskipsha".into()),
+        );
+        assert!(steered.is_empty(), "cross-repo live card must not steer");
+
+        let after = b.get(other.id).unwrap();
+        assert_eq!(after.state, State::Running, "card must stay Running");
+        assert!(!after.awaiting_dispatch);
+        assert!(
+            after.notes.is_empty(),
+            "no steer note for unrelated upstream: {:?}",
+            after.notes
+        );
+    }
+
+    #[test]
+    fn notify_main_advanced_steers_bound_same_repo_live_cards() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-same-repo-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Same Repo Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let live = b
+            .create(
+                Some(project.id),
+                "Honr Live",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.transition(live.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(live.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(live.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(live.id, State::Running, "agent", None)
+            .unwrap();
+        b.set_pr_url(
+            live.id,
+            Some("https://github.com/honr-app/honr/pull/99".into()),
+        );
+
+        let steered = b.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("samereposha".into()),
+        );
+        assert_eq!(steered, vec![live.id]);
+
+        let after = b.get(live.id).unwrap();
+        assert_eq!(after.state, State::Backlog);
+        assert!(after.awaiting_dispatch);
+        assert!(
+            after
+                .notes
+                .iter()
+                .any(|n| n.text.contains("samereposha")),
+            "same-repo live card must get steer note: {:?}",
+            after.notes
+        );
+    }
+
+    #[test]
+    fn notify_main_advanced_unbound_steers_only_when_default_upstream_matches() {
+        let b = Board::new(
+            schema_with_upstream("honr-app/honr"),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-unbound-match-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Unbound Match Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let live = b
+            .create(
+                Some(project.id),
+                "Unbound Live",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.transition(live.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(live.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(live.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(live.id, State::Running, "agent", None)
+            .unwrap();
+
+        let steered = b.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("unboundmatch".into()),
+        );
+        assert_eq!(steered, vec![live.id]);
+
+        let mismatch = Board::new(
+            schema_with_upstream("acme/widgets"),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-unbound-skip-{}.json",
+                std::process::id()
+            )),
+        );
+        let p2 = mismatch
+            .create(
+                None,
+                "Unbound Skip Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let skip = mismatch
+            .create(
+                Some(p2.id),
+                "Unbound Other",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        mismatch
+            .transition(skip.id, State::Shaping, "test", None)
+            .unwrap();
+        mismatch
+            .transition(skip.id, State::Backlog, "test", None)
+            .unwrap();
+        mismatch
+            .transition(skip.id, State::Claimed, "agent", None)
+            .unwrap();
+        mismatch
+            .transition(skip.id, State::Running, "agent", None)
+            .unwrap();
+
+        let skipped = mismatch.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("unboundskip".into()),
+        );
+        assert!(skipped.is_empty());
+        let skip_after = mismatch.get(skip.id).unwrap();
+        assert_eq!(skip_after.state, State::Running);
+        assert!(skip_after.notes.is_empty());
     }
 
     #[test]
@@ -10895,6 +11155,12 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    fn schema_with_upstream(upstream: &str) -> Schema {
+        let mut schema = Schema::default();
+        schema.execution.agents.repo.upstream = upstream.into();
+        schema
     }
 
     #[test]
