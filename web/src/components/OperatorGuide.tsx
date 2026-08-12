@@ -55,15 +55,16 @@ export function OperatorGuide() {
           </li>
         </ol>
         <p className="dim" data-testid="operator-guide-idle-note">
-          Agents stay idle until you dispatch. Name the repo to clone in each
-          Task&apos;s intent/DoD.
+          Agents stay idle until you dispatch. Override the Project clone in a
+          Task&apos;s Why/DoD when the card needs a different repo.
         </p>
         <p className="dim" data-testid="operator-guide-create-task-note">
           After a Project exists, add Backlog Tasks with board{" "}
           <strong>Create Task</strong> or MCP <code>create_task</code> — no need
-          to re-run Initial plan. Each Task must name its clone target in
-          intent/DoD. <strong>Approve</strong> still only materializes proposals
-          and never merges.
+          to re-run Initial plan. <code>clone_repo</code> is a Project field;
+          Tasks inherit it unless Why/DoD name{" "}
+          <code>Clone repository: owner/name</code>. <strong>Approve</strong>{" "}
+          still only materializes proposals and never merges.
         </p>
       </section>
 

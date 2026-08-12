@@ -1266,7 +1266,14 @@ a.button-link:hover {
   max-width: 520px;
 }
 .lane-create-task {
-  margin-bottom: 12px;
+  margin: 8px 10px 4px;
+}
+.lane-create-task.collapsed {
+  margin: 0;
+  padding: 0;
+}
+.lane-create-task .create-task {
+  max-width: 560px;
 }
 .create-task-form {
   margin-top: 0;
@@ -2417,9 +2424,19 @@ ul.hist li { border-bottom: 1px dotted var(--line); padding-bottom: 3px; }
 /* ----------------------------------------------------------- view switcher */
 
 .lane-view-switcher {
-  margin-left: 12px;
+  margin-left: 0;
   display: flex;
   gap: 4px;
+}
+.lane-actions .create-task-trigger {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  font-weight: 600;
+  min-width: auto;
+}
+.lane-actions .create-task-trigger:hover:not(:disabled) {
+  color: var(--accent-hover);
+  border-color: var(--accent);
 }
 .view-btn {
   font-size: 11px;

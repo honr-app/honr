@@ -2021,7 +2021,7 @@ assert(
   );
 }
 
-// Create Task form — stamp/require clone; optional blockers; not on Welcome.
+// Create Task form — matches MCP create_task (no clone_repo field); optional blockers.
 assert.strictEqual(
   cloneRepoFromProse(
     "Clone repository: honr-app/honr into /sandbox/repo for planning.",
@@ -2067,8 +2067,10 @@ assert(createTaskFormHtml.includes('data-testid="create-task-intent"'),
   "Create Task form intent field");
 assert(createTaskFormHtml.includes('data-testid="create-task-dod"'),
   "Create Task form definition of done field");
-assert(createTaskFormHtml.includes('data-testid="create-task-clone-repo"'),
-  "Create Task form clone_repo field");
+assert(!createTaskFormHtml.includes('data-testid="create-task-clone-repo"'),
+  "Create Task form has no clone_repo field (Project/MCP contract)");
+assert(createTaskFormHtml.includes('data-testid="create-task-clone-hint"'),
+  "Create Task form surfaces clone hint in lede");
 assert(createTaskFormHtml.includes('data-testid="create-task-submit"'),
   "Create Task form submit control");
 assert(createTaskFormHtml.includes('data-testid="create-task-blockers"'),
@@ -2076,11 +2078,9 @@ assert(createTaskFormHtml.includes('data-testid="create-task-blockers"'),
 assert(createTaskFormHtml.includes('data-testid="create-task-blocker-add"'),
   "Create Task form can add a sibling blocker");
 assert(createTaskFormHtml.includes("honr-app/honr"),
-  "Create Task form surfaces Project default clone");
-assert(
-  /clone_repo[\s\S]*owner\/name/.test(createTaskFormHtml),
-  "Create Task form labels clone_repo as owner/name",
-);
+  "Create Task form surfaces Project default clone in hint");
+assert(createTaskFormHtml.includes("create_task"),
+  "Create Task form names MCP create_task");
 
 const createTaskNoDefaultHtml = renderToString(
   React.createElement(CreateTaskForm, {
@@ -2090,20 +2090,14 @@ const createTaskNoDefaultHtml = renderToString(
     onCreated: () => {},
   }),
 );
-{
-  const cloneIdx = createTaskNoDefaultHtml.indexOf(
-    'data-testid="create-task-clone-repo"',
-  );
-  assert(cloneIdx >= 0, "clone_repo input present without Project default");
-  const tagStart = createTaskNoDefaultHtml.lastIndexOf("<input", cloneIdx);
-  const tagEnd = createTaskNoDefaultHtml.indexOf(">", cloneIdx);
-  const cloneInputTag = createTaskNoDefaultHtml.slice(tagStart, tagEnd + 1);
-  assert(
-    /\srequired(?:[\s>=]|=\"\")/.test(cloneInputTag) ||
-      cloneInputTag.includes("required"),
-    "Create Task requires clone_repo when Project has no default",
-  );
-}
+assert(
+  !createTaskNoDefaultHtml.includes('data-testid="create-task-clone-repo"'),
+  "Create Task still has no clone_repo field without Project default",
+);
+assert(
+  createTaskNoDefaultHtml.includes("Clone repository: owner/name"),
+  "Create Task without Project default tells you to name clone in Why/DoD",
+);
 
 // OpenShell readiness strip — presentational ready / not-ready fixtures
 assert.strictEqual(

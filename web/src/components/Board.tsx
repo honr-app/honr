@@ -392,6 +392,7 @@ function Swimlane({
   const hot = !archived && laneRank(goal, p.items) < 3;
   const urgent = !archived && goal.needs_you > 0;
   const [viewMode, setViewMode] = useState<"columns" | "graph">("columns");
+  const [createOpen, setCreateOpen] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [confirmUnarchive, setConfirmUnarchive] = useState(false);
@@ -428,6 +429,10 @@ function Swimlane({
   useEffect(() => {
     if (filterState !== "all" && mine.length > 0 && !open) onOpenChange(true);
   }, [filterState, mine.length, open, onOpenChange]);
+
+  useEffect(() => {
+    if (!open) setCreateOpen(false);
+  }, [open]);
 
   const archiveProject = async (e: MouseEvent) => {
     e.stopPropagation();
@@ -553,6 +558,38 @@ function Swimlane({
         </div>
 
         <div className="lane-actions" onClick={(e) => e.stopPropagation()}>
+          {!archived && open && !createOpen && (
+            <button
+              type="button"
+              className="dispatch-toggle create-task-trigger"
+              onClick={() => setCreateOpen(true)}
+              title="Add a Backlog task under this Project"
+              data-testid="create-task-open"
+            >
+              Create Task
+            </button>
+          )}
+          {!archived && open && (
+            <div className="lane-view-switcher">
+              <button
+                type="button"
+                className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
+                onClick={() => setViewMode("columns")}
+                title="Kanban columns"
+              >
+                Columns
+              </button>
+              <button
+                type="button"
+                className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
+                onClick={() => setViewMode("graph")}
+                title="Dependency graph"
+                data-testid="toggle-graph-view"
+              >
+                Graph
+              </button>
+            </div>
+          )}
           {archived ? (
             !confirmUnarchive ? (
               <button
@@ -618,27 +655,6 @@ function Swimlane({
               </button>
             </span>
           )}
-          {!archived && open && (
-            <div className="lane-view-switcher">
-              <button
-                type="button"
-                className={`view-btn ${viewMode === "columns" ? "on" : ""}`}
-                onClick={() => setViewMode("columns")}
-                title="Kanban columns"
-              >
-                Columns
-              </button>
-              <button
-                type="button"
-                className={`view-btn ${viewMode === "graph" ? "on" : ""}`}
-                onClick={() => setViewMode("graph")}
-                title="Dependency graph"
-                data-testid="toggle-graph-view"
-              >
-                Graph
-              </button>
-            </div>
-          )}
         </div>
       </header>
 
@@ -688,13 +704,18 @@ function Swimlane({
             )
           ) : (
             <>
-              <div className="lane-create-task">
+              <div
+                className={`lane-create-task${createOpen ? "" : " collapsed"}`}
+              >
                 <CreateTaskForm
                   parentId={goal.id}
                   projectIntent={
                     p.items.get(goal.id)?.intent ?? goal.intent
                   }
                   siblings={siblingOptions}
+                  open={createOpen}
+                  onOpenChange={setCreateOpen}
+                  hideTrigger
                   onCreated={(item) => {
                     p.onChanged?.();
                     p.onOpen(item.id);

@@ -23,7 +23,7 @@ export function proseHasCloneRepo(intent: string, dod: string): boolean {
   );
 }
 
-/** Stamp Project default (or explicit field) into intent when prose omits a clone line. */
+/** Same stamp shape the board applies when Why/DoD omit a clone line. */
 export function stampCloneIntoIntent(
   intent: string,
   clone: string,
@@ -40,19 +40,29 @@ export interface SiblingTaskOption {
 
 export interface CreateTaskFormProps {
   parentId: number;
-  /** Project intent — used to prefill / stamp the default clone target. */
+  /** Project intent — used to surface the Project default clone in the lede. */
   projectIntent: string;
   /** Sibling Tasks under the same Project (optional blockers). */
   siblings?: SiblingTaskOption[];
   onCreated: (item: WorkItem) => void;
   /** Compact trigger; form expands in place. Default true. */
   collapsible?: boolean;
+  /**
+   * Controlled open state. When set with `onOpenChange`, the parent owns
+   * expand/collapse (e.g. Board puts the trigger in the lane header).
+   */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  /** Omit the closed-state trigger — parent renders `create-task-open` itself. */
+  hideTrigger?: boolean;
+  /** Classes for the built-in open trigger. Default `primary`. */
+  triggerClassName?: string;
 }
 
 /**
  * Create Task under an existing Project — title, intent, DoD, optional blockers.
- * Posts via `api.createTask` (POST /api/items with parent). Clone target is
- * required in intent/DoD prose; when omitted, stamps the Project default if known.
+ * Posts via `api.createTask` (same fields as MCP `create_task`). Clone target is
+ * named in Why/DoD when needed; otherwise the board stamps the Project default.
  */
 export function CreateTaskForm({
   parentId,
@@ -60,16 +70,25 @@ export function CreateTaskForm({
   siblings = [],
   onCreated,
   collapsible = true,
+  open: openProp,
+  onOpenChange,
+  hideTrigger = false,
+  triggerClassName = "primary",
 }: CreateTaskFormProps) {
   const projectDefault = useMemo(
     () => cloneRepoFromProse(projectIntent),
     [projectIntent],
   );
-  const [open, setOpen] = useState(!collapsible);
+  const controlled = openProp !== undefined;
+  const [internalOpen, setInternalOpen] = useState(!collapsible);
+  const open = controlled ? openProp : internalOpen;
+  const setOpen = (next: boolean) => {
+    if (!controlled) setInternalOpen(next);
+    onOpenChange?.(next);
+  };
   const [title, setTitle] = useState("");
   const [intent, setIntent] = useState("");
   const [dod, setDod] = useState("");
-  const [cloneRepo, setCloneRepo] = useState(projectDefault ?? "");
   const [blockedBy, setBlockedBy] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +97,6 @@ export function CreateTaskForm({
     setTitle("");
     setIntent("");
     setDod("");
-    setCloneRepo(projectDefault ?? "");
     setBlockedBy([]);
     setError(null);
   };
@@ -88,21 +106,10 @@ export function CreateTaskForm({
     const t = title.trim();
     const why = intent.trim();
     const done = dod.trim();
-    const clone = cloneRepo.trim() || projectDefault || "";
     if (!t || !why || !done) {
       setError("Title, intent, and definition of done are required.");
       return;
     }
-    if (!proseHasCloneRepo(why, done) && !clone) {
-      setError(
-        "clone_repo (owner/name) is required — name it in intent/DoD or the Project default.",
-      );
-      return;
-    }
-    const stampedIntent =
-      proseHasCloneRepo(why, done) || !clone
-        ? why
-        : stampCloneIntoIntent(why, clone);
 
     setBusy(true);
     setError(null);
@@ -110,13 +117,13 @@ export function CreateTaskForm({
       .createTask({
         parent: parentId,
         title: t,
-        intent: stampedIntent,
+        intent: why,
         definition_of_done: done,
         blocked_by: blockedBy.length ? blockedBy : undefined,
       })
       .then((item) => {
         reset();
-        if (collapsible) setOpen(false);
+        if (collapsible || controlled) setOpen(false);
         onCreated(item);
       })
       .catch((err) => setError(String(err?.message ?? err)))
@@ -124,17 +131,15 @@ export function CreateTaskForm({
   };
 
   const blockerChoices = siblings.filter((s) => !blockedBy.includes(s.id));
+  const canCollapse = collapsible || controlled;
 
   return (
     <div className="create-task" data-testid="create-task">
-      {collapsible && !open && (
+      {canCollapse && !open && !hideTrigger && (
         <button
           type="button"
-          className="primary"
-          onClick={() => {
-            setCloneRepo((prev) => prev || projectDefault || "");
-            setOpen(true);
-          }}
+          className={triggerClassName}
+          onClick={() => setOpen(true)}
           data-testid="create-task-open"
         >
           Create Task
@@ -148,17 +153,21 @@ export function CreateTaskForm({
           data-testid="create-task-form"
         >
           <h3>Create Task</h3>
-          <p className="dim create-task-lede">
-            Adds a Backlog card under this Project. Each Task must name its
-            clone target (<code>owner/name</code>) in intent or definition of
-            done
+          <p className="dim create-task-lede" data-testid="create-task-clone-hint">
+            Adds a Backlog card under this Project. Same fields as MCP{" "}
+            <code>create_task</code>
             {projectDefault ? (
               <>
                 {" "}
-                — default from Project: <code>{projectDefault}</code>
+                — Project default clone <code>{projectDefault}</code> is stamped
+                when Why/DoD omit it
               </>
             ) : (
-              <> when the Project has no default</>
+              <>
+                {" "}
+                — this Project has no default; name{" "}
+                <code>Clone repository: owner/name</code> in Why or DoD
+              </>
             )}
             .
           </p>
@@ -200,22 +209,6 @@ export function CreateTaskForm({
               rows={3}
               onChange={(e) => setDod(e.target.value)}
               data-testid="create-task-dod"
-            />
-          </label>
-          <label>
-            <span>
-              clone_repo (<code>owner/name</code>)
-            </span>
-            <input
-              className="search-input"
-              value={cloneRepo}
-              disabled={busy}
-              required={!projectDefault}
-              placeholder={projectDefault ?? "owner/name"}
-              autoComplete="off"
-              spellCheck={false}
-              onChange={(e) => setCloneRepo(e.target.value)}
-              data-testid="create-task-clone-repo"
             />
           </label>
           {siblings.length > 0 && (
@@ -293,17 +286,13 @@ export function CreateTaskForm({
               type="submit"
               className="primary"
               disabled={
-                busy ||
-                !title.trim() ||
-                !intent.trim() ||
-                !dod.trim() ||
-                (!projectDefault && !cloneRepo.trim())
+                busy || !title.trim() || !intent.trim() || !dod.trim()
               }
               data-testid="create-task-submit"
             >
               {busy ? "Creating…" : "Create Task"}
             </button>
-            {collapsible && (
+            {canCollapse && (
               <button
                 type="button"
                 disabled={busy}
