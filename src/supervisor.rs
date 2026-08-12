@@ -6498,7 +6498,7 @@ mod tests {
     }
 
     /// Tip catch-up observes mergeable first: MERGEABLE is a silent Review no-op;
-    /// live Running cards are not steered or park/unparked on main advance.
+    /// live Running cards on the advancing upstream still get steer + park/unpark.
     #[tokio::test]
     async fn main_advanced_review_mergeable_is_noop_while_running_uninterrupted() {
         let mut schema = crate::schema::Schema::default();
@@ -6602,14 +6602,21 @@ mod tests {
             .transition(running.id, State::Running, "agent", None)
             .unwrap();
 
-        board.notify_main_advanced("refs/heads/main", Some("idle-race-sha".into()));
+        board.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("idle-race-sha".into()),
+        );
 
         let running_after = board.get(running.id).unwrap();
-        assert_eq!(running_after.state, State::Running);
-        assert!(!running_after.awaiting_dispatch);
+        assert_eq!(running_after.state, State::Backlog);
+        assert!(running_after.awaiting_dispatch);
         assert!(
-            running_after.notes.is_empty(),
-            "live runs must not be steered on main advance: {:?}",
+            running_after
+                .notes
+                .iter()
+                .any(|n| n.text.contains("idle-race-sha") && n.text.contains("upstream/main")),
+            "Running still gets steer + park/unpark: {:?}",
             running_after.notes
         );
 
@@ -6710,7 +6717,11 @@ mod tests {
             }),
         );
 
-        board.notify_main_advanced("refs/heads/main", Some("conflict-sha".into()));
+        board.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("conflict-sha".into()),
+        );
         assert!(!board.get(review.id).unwrap().rebase_requested);
 
         let results = process_main_advanced_review_catch_up_with(
@@ -6793,7 +6804,11 @@ mod tests {
             }),
         );
 
-        board.notify_main_advanced("refs/heads/main", Some("unknown-sha".into()));
+        board.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("unknown-sha".into()),
+        );
         let _ = process_main_advanced_review_catch_up_with(
             &board,
             &repo_cfg(),

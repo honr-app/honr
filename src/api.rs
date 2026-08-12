@@ -2126,12 +2126,15 @@ async fn github_webhook(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("");
-        b.notify_main_advanced(&ref_name, commit_sha.clone());
-        let steered_item_ids = crate::supervisor::process_main_advanced_review_catch_up(
-            &b,
-            advanced_repo,
-        )
-        .await;
+        let mut steered_item_ids: Vec<u64> = b
+            .notify_main_advanced(advanced_repo, &ref_name, commit_sha.clone())
+            .into_iter()
+            .collect();
+        steered_item_ids.extend(
+            crate::supervisor::process_main_advanced_review_catch_up(&b, advanced_repo).await,
+        );
+        steered_item_ids.sort_unstable();
+        steered_item_ids.dedup();
 
         Ok(Json(WebhookResponse {
             status: "ok".into(),
@@ -3041,13 +3044,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_webhook_main_advanced_leaves_running_cards_uninterrupted() {
+    async fn github_webhook_main_advanced_lists_steered_same_repo_running_ids() {
         use crate::model::State;
 
         let b: SharedBoard = std::sync::Arc::new(crate::store::Board::new(
             crate::schema::Schema::default(),
             std::env::temp_dir().join(format!(
-                "honr-test-webhook-live-skip-{}.json",
+                "honr-test-webhook-steer-same-{}.json",
                 std::process::id()
             )),
         ));
@@ -3075,11 +3078,10 @@ mod tests {
         .expect("webhook response");
 
         assert!(resp.main_advanced);
-        assert!(resp.steered_item_ids.is_empty());
+        assert_eq!(resp.steered_item_ids, vec![id]);
         let item = b.get(id).unwrap();
-        assert_eq!(item.state, State::Running);
-        assert!(!item.awaiting_dispatch);
-        assert!(item.notes.is_empty());
+        assert_eq!(item.state, State::Backlog);
+        assert!(item.awaiting_dispatch);
     }
 
     #[tokio::test]

@@ -5586,18 +5586,31 @@ facts are pasted, then unpark";
 
     /// Notify that the default branch advanced (push or merge into main).
     ///
-    /// Emits [`BoardEvent::MainAdvanced`]. Live Claimed/Running cards are **not**
-    /// steered or park/unparked here — main advance under an in-progress run is
-    /// normal. Callers run [`supervisor::process_main_advanced_review_catch_up`]
-    /// with the advancing `owner/name` to observe GitHub `mergeable` on scoped
-    /// Review PRs (MERGEABLE = no-op; CONFLICTING → Backlog; UNKNOWN → retry).
-    pub fn notify_main_advanced(&self, ref_name: &str, commit_sha: Option<String>) {
-        tracing::info!("main advanced: ref={ref_name}, commit={commit_sha:?}");
+    /// Emits [`BoardEvent::MainAdvanced`]. Live Claimed/Running cards on the
+    /// advancing upstream (or unbound cards whose default upstream matches) get
+    /// a steer note and park+unpark so the resume briefing carries rebase
+    /// instructions. When a card is already `awaiting_dispatch` from a recent
+    /// main-advanced steer on the same repo, a second event coalesces: no
+    /// park/unpark; the steer note refreshes only when the commit sha changes.
+    ///
+    /// Returns steered card ids from the live path. Callers also run
+    /// [`supervisor::process_main_advanced_review_catch_up`] with the advancing
+    /// `owner/name` to observe GitHub `mergeable` on scoped Review PRs.
+    pub fn notify_main_advanced(
+        &self,
+        advanced_repo: &str,
+        ref_name: &str,
+        commit_sha: Option<String>,
+    ) -> Vec<ItemId> {
+        tracing::info!(
+            "main advanced: repo={advanced_repo}, ref={ref_name}, commit={commit_sha:?}"
+        );
         self.record_and_send(BoardEvent::MainAdvanced {
             seq: self.next_seq(),
             ref_name: ref_name.to_string(),
             commit_sha: commit_sha.clone(),
         });
+        self.steer_live_cards_on_main_advanced(advanced_repo, ref_name, commit_sha.as_deref())
     }
 
     /// Whether a card's resolved upstream (or unbound default upstream) matches
@@ -5614,6 +5627,158 @@ facts are pasted, then unpark";
                 !default.is_empty() && default == advanced
             }
         }
+    }
+
+    /// Binding note for live runs when main moves under them.
+    /// Uses the card's resolved base branch when available.
+    fn main_advanced_steer_note(ref_name: &str, commit_sha: Option<&str>, base: &str) -> String {
+        let where_main = match commit_sha {
+            Some(sha) if !sha.is_empty() => format!("{ref_name} @ {sha}"),
+            _ => ref_name.to_string(),
+        };
+        let base = if base.trim().is_empty() {
+            "main"
+        } else {
+            base.trim()
+        };
+        format!(
+            "Main advanced ({where_main}). First action: fetch upstream {base} and rebase \
+             this card's branch onto upstream/{base} (not origin/{base} alone — the fork's \
+             base freezes at create time), then continue the card."
+        )
+    }
+
+    fn is_main_advanced_steer_note(text: &str) -> bool {
+        text.starts_with("Main advanced (")
+    }
+
+    fn has_main_advanced_steer_note(notes: &[Note]) -> bool {
+        notes
+            .iter()
+            .any(|n| Self::is_main_advanced_steer_note(&n.text))
+    }
+
+    fn last_main_advanced_steer_commit_sha(notes: &[Note]) -> Option<String> {
+        notes
+            .iter()
+            .rev()
+            .filter(|n| Self::is_main_advanced_steer_note(&n.text))
+            .find_map(|n| Self::parse_main_advanced_steer_commit_sha(&n.text))
+            .map(str::to_string)
+    }
+
+    fn parse_main_advanced_steer_commit_sha(text: &str) -> Option<&str> {
+        let rest = text.strip_prefix("Main advanced (")?;
+        let end = rest.find(')')?;
+        let inside = &rest[..end];
+        let (_, sha) = inside.split_once(" @ ")?;
+        let sha = sha.trim();
+        if sha.is_empty() {
+            None
+        } else {
+            Some(sha)
+        }
+    }
+
+    fn main_advanced_sha_unchanged(new_sha: Option<&str>, prev_sha: Option<&str>) -> bool {
+        fn norm(s: Option<&str>) -> Option<String> {
+            s.map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        }
+        norm(new_sha) == norm(prev_sha)
+    }
+
+    /// Steer scoped Claimed/Running cards, then park+unpark so the resume briefing
+    /// carries the rebase instruction. Steer alone does not inject mid-turn.
+    /// Already-parked cards are left alone (no second park/unpark). Sandbox
+    /// `environment` and `conversation_id` are preserved through the bounce.
+    ///
+    /// Cards already `awaiting_dispatch` from a prior main-advanced steer on the
+    /// same upstream coalesce: skip park/unpark; refresh the steer note only when
+    /// the commit sha changes.
+    fn steer_live_cards_on_main_advanced(
+        &self,
+        advanced_repo: &str,
+        ref_name: &str,
+        commit_sha: Option<&str>,
+    ) -> Vec<ItemId> {
+        let candidate_ids: Vec<ItemId> = {
+            let s = self.state.read();
+            s.items
+                .values()
+                .filter(|i| {
+                    matches!(i.state, State::Claimed | State::Running)
+                        || (i.state == State::Backlog
+                            && i.awaiting_dispatch
+                            && !i.parked
+                            && Self::has_main_advanced_steer_note(&i.notes))
+                })
+                .map(|i| i.id)
+                .collect()
+        };
+        let mut steered = Vec::new();
+        for id in candidate_ids {
+            if !self.card_matches_main_advanced_repo(id, advanced_repo) {
+                continue;
+            }
+            let base = self
+                .resolve_card_repo(id)
+                .ok()
+                .flatten()
+                .map(|r| r.base)
+                .unwrap_or_else(|| "main".into());
+            let note = Self::main_advanced_steer_note(ref_name, commit_sha, &base);
+
+            let (state, awaiting, parked, prev_sha, has_steer_note) = {
+                let s = self.state.read();
+                let it = s.items.get(&id).expect("candidate card");
+                (
+                    it.state,
+                    it.awaiting_dispatch,
+                    it.parked,
+                    Self::last_main_advanced_steer_commit_sha(&it.notes),
+                    Self::has_main_advanced_steer_note(&it.notes),
+                )
+            };
+
+            let coalesced =
+                state == State::Backlog && awaiting && !parked && has_steer_note;
+            if coalesced {
+                if Self::main_advanced_sha_unchanged(commit_sha, prev_sha.as_deref()) {
+                    continue;
+                }
+                if let Err(e) = self.steer(id, note) {
+                    tracing::warn!("main-advanced steer refresh failed for #{id}: {e}");
+                    continue;
+                }
+                steered.push(id);
+                continue;
+            }
+
+            if let Err(e) = self.steer(id, note.clone()) {
+                tracing::warn!("main-advanced steer failed for #{id}: {e}");
+                continue;
+            }
+            steered.push(id);
+            // Skip park/unpark for cards already parked — steer may have been a
+            // no-op on a weird state, and a second park would be wrong.
+            let already_parked = {
+                let s = self.state.read();
+                s.items.get(&id).is_some_and(|i| i.parked)
+            };
+            if already_parked {
+                continue;
+            }
+            if let Err(e) = self.park(id, Some("main advanced".into())) {
+                tracing::warn!("main-advanced park failed for #{id}: {e}");
+                continue;
+            }
+            if let Err(e) = self.unpark(id) {
+                tracing::warn!("main-advanced unpark failed for #{id}: {e}");
+            }
+        }
+        steered
     }
 
     /// Identify open sibling PRs in Review that are behind main for a given item's parent.
@@ -9860,7 +10025,7 @@ mod tests {
             Some("https://github.com/honr-app/honr/pull/202".into()),
         );
 
-        b.notify_main_advanced("refs/heads/main", Some("sha123".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("sha123".into()));
 
         let t2_updated = b.get(t2.id).unwrap();
         assert_eq!(t2_updated.state, State::Review);
@@ -9931,7 +10096,7 @@ mod tests {
             "tip-driven identify must include Review PRs without a Done sibling"
         );
 
-        b.notify_main_advanced("refs/heads/main", Some("tipdeadbeef".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("tipdeadbeef".into()));
 
         let after = b.get(review.id).unwrap();
         assert_eq!(after.state, State::Review);
@@ -9942,10 +10107,10 @@ mod tests {
         assert!(!after.awaiting_dispatch);
     }
 
-    /// MainAdvanced leaves live Running cards uninterrupted; Review waits for
+    /// MainAdvanced steers Running on the advancing upstream; Review waits for
     /// mergeable observation (Review is not parked onto a live steer path).
     #[test]
-    fn notify_main_advanced_leaves_running_uninterrupted() {
+    fn notify_main_advanced_steers_running_without_queuing_review_rebase() {
         let b = Board::new(
             schema_with_upstream("honr-app/honr"),
             std::env::temp_dir().join(format!(
@@ -10023,7 +10188,7 @@ mod tests {
         b.transition(running.id, State::Running, "agent", None)
             .unwrap();
 
-        b.notify_main_advanced("refs/heads/main", Some("bothpaths".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("bothpaths".into()));
 
         let review_after = b.get(review.id).unwrap();
         assert_eq!(review_after.state, State::Review);
@@ -10041,11 +10206,14 @@ mod tests {
         );
 
         let running_after = b.get(running.id).unwrap();
-        assert_eq!(running_after.state, State::Running);
-        assert!(!running_after.awaiting_dispatch);
+        assert_eq!(running_after.state, State::Backlog);
+        assert!(running_after.awaiting_dispatch);
         assert!(
-            running_after.notes.is_empty(),
-            "live runs must not be steered on main advance: {:?}",
+            running_after
+                .notes
+                .iter()
+                .any(|n| n.text.contains("bothpaths") && n.text.contains("upstream/main")),
+            "Running on matching upstream must be steered: {:?}",
             running_after.notes
         );
     }
@@ -10142,15 +10310,15 @@ mod tests {
     }
 
     #[test]
-    fn notify_main_advanced_leaves_claimed_and_running_uninterrupted() {
+    fn notify_main_advanced_steers_running_cards_with_fetch_rebase_note() {
         let b = Board::new(
             schema_with_upstream("honr-app/honr"),
-            std::env::temp_dir().join(format!("honr-test-main-live-{}.json", std::process::id())),
+            std::env::temp_dir().join(format!("honr-test-main-steer-{}.json", std::process::id())),
         );
         let project = b
             .create(
                 None,
-                "Live Main Proj",
+                "Steer Main Proj",
                 "intent",
                 None,
                 Origin::Human,
@@ -10202,32 +10370,288 @@ mod tests {
             .unwrap();
         b.transition(claimed.id, State::Claimed, "agent", None)
             .unwrap();
+
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("abcdeadbeef".into()));
+
+        let running_after = b.get(running.id).unwrap();
+        assert_eq!(
+            running_after.state,
+            State::Backlog,
+            "park+unpark must bounce the card to Backlog for resume"
+        );
+        assert!(
+            running_after.awaiting_dispatch,
+            "unpark must queue the supervisor"
+        );
+        assert!(!running_after.parked, "unpark clears the park hold");
+        assert!(
+            running_after.notes.iter().any(|n| {
+                n.text.contains("abcdeadbeef")
+                    && n.text.contains("fetch")
+                    && n.text.contains("upstream/main")
+                    && n.text.to_lowercase().contains("rebase")
+            }),
+            "Running card should have a fetch/rebase steer note with sha: {:?}",
+            running_after.notes
+        );
+
+        let claimed_after = b.get(claimed.id).unwrap();
+        assert_eq!(claimed_after.state, State::Backlog);
+        assert!(claimed_after.awaiting_dispatch);
+        assert!(
+            claimed_after
+                .notes
+                .iter()
+                .any(|n| n.text.contains("abcdeadbeef") && n.text.contains("upstream/main")),
+            "Claimed cards should also be steered: {:?}",
+            claimed_after.notes
+        );
+
+        let backlog_after = b.get(backlog.id).unwrap();
+        assert!(
+            backlog_after.notes.is_empty(),
+            "Backlog cards must not get a main-advanced steer: {:?}",
+            backlog_after.notes
+        );
+    }
+
+    #[test]
+    fn notify_main_advanced_parks_and_unparks_running_so_steer_takes_effect() {
+        let b = Board::new(
+            schema_with_upstream("honr-app/honr"),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-park-unpark-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Park Unpark Main Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let running = b
+            .create(
+                Some(project.id),
+                "Live Task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.transition(running.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(running.id, State::Running, "agent", None)
+            .unwrap();
         b.set_environment(running.id, Some("honr-card-150-sandbox".into()));
         b.set_conversation_id(running.id, Some("conv-main-adv".into()));
 
-        b.notify_main_advanced("refs/heads/main", Some("abcdeadbeef".into()));
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("def456abc".into()));
 
-        let running_after = b.get(running.id).unwrap();
-        assert_eq!(running_after.state, State::Running);
-        assert!(!running_after.awaiting_dispatch);
-        assert!(!running_after.parked);
+        let after = b.get(running.id).unwrap();
+        assert_eq!(after.state, State::Backlog);
+        assert!(
+            after.awaiting_dispatch,
+            "unpark must leave the card queued for the supervisor"
+        );
+        assert!(!after.parked);
         assert_eq!(
-            running_after.environment.as_deref(),
-            Some("honr-card-150-sandbox")
+            after.environment.as_deref(),
+            Some("honr-card-150-sandbox"),
+            "sandbox environment must survive park+unpark"
         );
         assert_eq!(
-            running_after.conversation_id.as_deref(),
-            Some("conv-main-adv")
+            after.conversation_id.as_deref(),
+            Some("conv-main-adv"),
+            "conversation_id must survive park+unpark"
         );
-        assert!(running_after.notes.is_empty());
+        assert!(
+            after.notes.iter().any(|n| {
+                n.text.contains("def456abc")
+                    && n.text.contains("upstream/main")
+                    && n.text.to_lowercase().contains("rebase")
+            }),
+            "notes must include the main-advanced steer: {:?}",
+            after.notes
+        );
+    }
 
-        let claimed_after = b.get(claimed.id).unwrap();
-        assert_eq!(claimed_after.state, State::Claimed);
-        assert!(!claimed_after.awaiting_dispatch);
-        assert!(claimed_after.notes.is_empty());
+    #[test]
+    fn notify_main_advanced_coalesce_skips_double_bounce_same_sha() {
+        let b = Board::new(
+            schema_with_upstream("honr-app/honr"),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-coalesce-same-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Coalesce Same Sha Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let running = b
+            .create(
+                Some(project.id),
+                "Live Task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.transition(running.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(running.id, State::Running, "agent", None)
+            .unwrap();
+        b.set_environment(running.id, Some("honr-card-coalesce-sandbox".into()));
+        b.set_conversation_id(running.id, Some("conv-coalesce".into()));
 
-        let backlog_after = b.get(backlog.id).unwrap();
-        assert!(backlog_after.notes.is_empty());
+        let sha = "cccccccccccccccccccccccccccccccccccccccc";
+        let steered = b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some(sha.into()));
+        assert_eq!(steered, vec![running.id]);
+
+        let after_first = b.get(running.id).unwrap();
+        let steer_notes_after_first = after_first
+            .notes
+            .iter()
+            .filter(|n| n.text.starts_with("Main advanced ("))
+            .count();
+        assert_eq!(steer_notes_after_first, 1);
+
+        let steered_again =
+            b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some(sha.into()));
+        assert!(
+            steered_again.is_empty(),
+            "same sha within dispatch window must not re-steer"
+        );
+
+        let after_second = b.get(running.id).unwrap();
+        assert_eq!(after_second.state, State::Backlog);
+        assert!(after_second.awaiting_dispatch);
+        assert!(!after_second.parked);
+        assert_eq!(
+            after_second
+                .notes
+                .iter()
+                .filter(|n| n.text.starts_with("Main advanced ("))
+                .count(),
+            1,
+            "must not append a duplicate steer note: {:?}",
+            after_second.notes
+        );
+        assert_eq!(
+            after_second.environment.as_deref(),
+            Some("honr-card-coalesce-sandbox")
+        );
+        assert_eq!(
+            after_second.conversation_id.as_deref(),
+            Some("conv-coalesce")
+        );
+    }
+
+    #[test]
+    fn notify_main_advanced_coalesce_refreshes_note_on_new_sha_without_second_bounce() {
+        let b = Board::new(
+            schema_with_upstream("honr-app/honr"),
+            std::env::temp_dir().join(format!(
+                "honr-test-main-coalesce-new-{}.json",
+                std::process::id()
+            )),
+        );
+        let project = b
+            .create(
+                None,
+                "Coalesce New Sha Proj",
+                "intent",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let running = b
+            .create(
+                Some(project.id),
+                "Live Task",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        b.transition(running.id, State::Shaping, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Backlog, "test", None)
+            .unwrap();
+        b.transition(running.id, State::Claimed, "agent", None)
+            .unwrap();
+        b.transition(running.id, State::Running, "agent", None)
+            .unwrap();
+        b.set_environment(running.id, Some("honr-card-coalesce2-sandbox".into()));
+        b.set_conversation_id(running.id, Some("conv-coalesce2".into()));
+
+        let sha1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let sha2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some(sha1.into()));
+
+        let steered_again =
+            b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some(sha2.into()));
+        assert_eq!(steered_again, vec![running.id]);
+
+        let after = b.get(running.id).unwrap();
+        assert_eq!(after.state, State::Backlog);
+        assert!(after.awaiting_dispatch, "dispatch must stay queued");
+        assert!(!after.parked);
+        assert!(
+            after
+                .notes
+                .iter()
+                .any(|n| n.text.contains(sha2) && n.text.starts_with("Main advanced (")),
+            "latest steer note must reflect the new sha: {:?}",
+            after.notes
+        );
+        assert_eq!(
+            after
+                .notes
+                .iter()
+                .filter(|n| n.text.contains("Parked: main advanced"))
+                .count(),
+            1,
+            "coalesce must not park again: {:?}",
+            after.notes
+        );
+        assert_eq!(
+            after.environment.as_deref(),
+            Some("honr-card-coalesce2-sandbox")
+        );
+        assert_eq!(
+            after.conversation_id.as_deref(),
+            Some("conv-coalesce2")
+        );
     }
 
     #[test]
@@ -10274,7 +10698,12 @@ mod tests {
             Some("https://github.com/other/widgets/pull/42".into()),
         );
 
-        b.notify_main_advanced("refs/heads/main", Some("crossskipsha".into()));
+        let steered = b.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("crossskipsha".into()),
+        );
+        assert!(steered.is_empty());
 
         let after = b.get(other.id).unwrap();
         assert_eq!(after.state, State::Running, "card must stay Running");
