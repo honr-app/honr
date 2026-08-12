@@ -75,8 +75,33 @@ An unbound card escalates rather than guessing an `owner/name`. Once
 `report.json` sets `pull_request`, that becomes the durable handle every later
 claim uses for resume, rebase, and request-changes.
 
-Standing policy — quality gates, invariants, house style — belongs in the
-Project's `project_prompt`, not repeated on every card.
+## Standing instructions and quality gates
+
+honr stacks configuration in layers ([Configuration](configuration.md)):
+
+1. **Process boot** — database URL, compile-time hierarchy.
+2. **Board Settings** — Policies, sandbox specs, agent runtime, Forge/providers.
+3. **Project fields** — `clone_repo`, optional sandbox override.
+4. **`project_prompt`** — standing agent policy for the Project.
+5. **Per-card intent / DoD** — clone target and card-specific work.
+
+Boot, Settings, and Project fields are operator setup — they do not belong in
+`project_prompt`. Agents read `project_prompt` on every claim; the supervisor
+puts it in the briefing **before** the Plan and the card's intent/DoD.
+
+Put Project-wide rules in `project_prompt`: escalation and invariants, how to
+name clone targets in Task prose, the `plan.json` / `split.json` /
+`report.json` protocol, and house style. New Projects seed the compiled default
+from `src/model.rs`; edit the field when your repo needs different standing
+instructions.
+
+**Quality gates** — commands agents must run before publish — go in
+`project_prompt` when they apply to every card in the Project. Name the
+commands explicitly (`cargo test && cargo clippy …`, `npm test`, …). honr does
+**not** assume `cargo` or any toolchain unless `project_prompt` or the card's
+definition of done names it. A one-off gate for a single card can live in that
+card's DoD instead. Repeat neither gates nor standing policy on every Task when
+`project_prompt` already covers them.
 
 ## Triage order
 
