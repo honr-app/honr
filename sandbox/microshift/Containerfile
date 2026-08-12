@@ -1,12 +1,14 @@
-# Microshift/OCP operator sandbox: cursor base + oc/kubectl.
+# Microshift/OCP operator sandbox: cursor base + stock oc/kubectl on PATH.
 #
-# Host-side seats reach the cluster through the Tailscale Kubernetes
-# operator API proxy (`https://microshift-operator.<tailnet>.ts.net`).
-# Pass that URL as KUBE_SERVER on the sandbox (image ENV does not reach
-# `openshell sandbox exec` — set it in the sandbox spec / agent_env).
-# Default below is in-cluster only.
+# No PATH wrappers. Clients are the upstream binaries. Auth and server URL
+# are normal kube concerns (`KUBECONFIG`, `--server` / `--token`, etc.).
+# Attach the `microshift-api` provider when the seat needs API egress + a
+# sealed `KUBE_TOKEN` for Bearer rewrite on the provider's endpoints.
 #
-# Ship the kube-apiserver CAs for any direct cluster TLS.
+# Host-side seats typically reach the cluster through the Tailscale
+# Kubernetes operator API proxy
+# (`https://microshift-operator.<tailnet>.ts.net`). Ship the kube-apiserver
+# CAs for any direct cluster TLS.
 #
 #   podman build -f sandbox/microshift/Containerfile -t quay.io/honr-app/sandbox-microshift:latest .
 
@@ -26,34 +28,15 @@ RUN update-ca-trust extract \
  && ln -sfn /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
       /etc/ssl/certs/ca-certificates.crt
 
-# Real clients under /opt; thin PATH wrappers pass server + sealed KUBE_TOKEN
-# (OpenShell rewrites Bearer on protocol:rest).
 RUN mkdir -p /opt/openshift \
  && curl -fsSL \
       "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OCP_CLIENT_VERSION}/openshift-client-linux.tar.gz" \
       | tar -xz -C /opt/openshift oc kubectl \
  && chmod 755 /opt/openshift/oc /opt/openshift/kubectl \
- && printf '%s\n' \
-'#!/bin/sh' \
-'server="${KUBE_SERVER:-https://kubernetes.default.svc}"' \
-'if [ -z "${KUBE_TOKEN:-}" ]; then' \
-'  echo "honr-oc: KUBE_TOKEN unset — attach the microshift-api provider" >&2' \
-'  exit 1' \
-'fi' \
-'exec /opt/openshift/oc --server="$server" --token="$KUBE_TOKEN" --insecure-skip-tls-verify=true "$@"' \
-      > /usr/local/bin/oc \
- && printf '%s\n' \
-'#!/bin/sh' \
-'server="${KUBE_SERVER:-https://kubernetes.default.svc}"' \
-'if [ -z "${KUBE_TOKEN:-}" ]; then' \
-'  echo "honr-kubectl: KUBE_TOKEN unset — attach the microshift-api provider" >&2' \
-'  exit 1' \
-'fi' \
-'exec /opt/openshift/kubectl --server="$server" --token="$KUBE_TOKEN" --insecure-skip-tls-verify=true "$@"' \
-      > /usr/local/bin/kubectl \
- && chmod 755 /usr/local/bin/oc /usr/local/bin/kubectl \
- && /opt/openshift/oc version --client \
- && /opt/openshift/kubectl version --client
+ && ln -sfn /opt/openshift/oc /usr/local/bin/oc \
+ && ln -sfn /opt/openshift/kubectl /usr/local/bin/kubectl \
+ && oc version --client \
+ && kubectl version --client
 
 USER sandbox
 WORKDIR /sandbox
