@@ -1,13 +1,12 @@
 # Microshift/OCP operator sandbox: cursor base + oc/kubectl.
 #
-# OpenShell MITM (credential rewrite) verifies upstream TLS with webpki-roots
-# plus the image system CA store. Host-side Podman seats reach CRC through a
-# local TLS proxy on host.containers.internal:8443 (OpenShell hard-blocks
-# control-plane port 6443). Trust that proxy CA here. Also ship CRC's
-# kube-apiserver-external-signer for any direct api.crc.testing paths.
+# Host-side seats reach the cluster through the Tailscale Kubernetes
+# operator API proxy (`https://microshift-operator.<tailnet>.ts.net`).
+# Pass that URL as KUBE_SERVER on the sandbox (image ENV does not reach
+# `openshell sandbox exec` — set it in the sandbox spec / agent_env).
+# Default below is in-cluster only.
 #
-# Host prerequisite: user systemd unit crc-api-proxy.service (see
-# ~/.config/honr/crc-api-proxy/).
+# Ship the kube-apiserver CAs for any direct cluster TLS.
 #
 #   podman build -f sandbox/microshift/Containerfile -t quay.io/honr-app/sandbox-microshift:latest .
 
@@ -17,8 +16,6 @@ USER root
 
 ARG OCP_CLIENT_VERSION=stable-4.18
 
-COPY sandbox/microshift/honr-crc-api-proxy-ca.crt \
-     /etc/pki/ca-trust/source/anchors/honr-crc-api-proxy-ca.crt
 COPY sandbox/microshift/kube-apiserver-external-signer.crt \
      /etc/pki/ca-trust/source/anchors/kube-apiserver-external-signer.crt
 COPY sandbox/microshift/kube-apiserver-service-network-signer.crt \
@@ -36,10 +33,9 @@ RUN mkdir -p /opt/openshift \
       "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OCP_CLIENT_VERSION}/openshift-client-linux.tar.gz" \
       | tar -xz -C /opt/openshift oc kubectl \
  && chmod 755 /opt/openshift/oc /opt/openshift/kubectl \
-# Default API: host TLS proxy → CRC. In-cluster: KUBE_SERVER=https://kubernetes.default.svc
  && printf '%s\n' \
 '#!/bin/sh' \
-'server="${KUBE_SERVER:-https://host.containers.internal:8443}"' \
+'server="${KUBE_SERVER:-https://kubernetes.default.svc}"' \
 'if [ -z "${KUBE_TOKEN:-}" ]; then' \
 '  echo "honr-oc: KUBE_TOKEN unset — attach the microshift-api provider" >&2' \
 '  exit 1' \
@@ -48,7 +44,7 @@ RUN mkdir -p /opt/openshift \
       > /usr/local/bin/oc \
  && printf '%s\n' \
 '#!/bin/sh' \
-'server="${KUBE_SERVER:-https://host.containers.internal:8443}"' \
+'server="${KUBE_SERVER:-https://kubernetes.default.svc}"' \
 'if [ -z "${KUBE_TOKEN:-}" ]; then' \
 '  echo "honr-kubectl: KUBE_TOKEN unset — attach the microshift-api provider" >&2' \
 '  exit 1' \

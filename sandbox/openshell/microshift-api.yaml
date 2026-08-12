@@ -2,12 +2,15 @@
 # Podman (or in-cluster) sandbox.
 #
 # Honr seals KUBE_TOKEN; the sandbox proxy rewrites Bearer on MITM
-# (protocol: rest). From a host-side Podman sandbox, oc talks to CRC via
-# host.containers.internal:8443 — OpenShell always blocks control-plane port
-# 6443, so the host runs crc-api-proxy (TLS terminator with a cert for
-# host.containers.internal, forwarding to 127.0.0.1:6443). The sandbox image
-# must trust that proxy CA (honr-crc-api-proxy-ca.crt). In-cluster seats still
-# use kubernetes.default.svc:443.
+# (protocol: rest). Host-side Podman seats reach the cluster through the
+# Tailscale Kubernetes operator's API proxy
+# (`https://microshift-operator.<tailnet>.ts.net`) — same trust pattern as
+# a Tailscale-exposed console. That proxy presents a Tailscale HTTPS cert
+# (MITM verifies with public CAs) and OpenShell does not block :443.
+#
+# Grant the gateway host's Tailscale identity RBAC on the cluster (see
+# `sandbox/microshift/tailscale-api-rbac.yaml`). Set sandbox `KUBE_SERVER`
+# to your operator MagicDNS URL. In-cluster seats use kubernetes.default.svc.
 id: microshift-api
 display_name: MicroShift / OCP API
 description: ServiceAccount token as KUBE_TOKEN (Bearer rewrite to the cluster API)
@@ -25,20 +28,16 @@ discovery:
   credentials:
     - kube_token
 endpoints:
-  # Host-side Podman → CRC/MicroShift via host proxy (not :6443; OpenShell
-  # hard-blocks that control-plane port even for host.containers.internal).
-  - host: host.containers.internal
-    port: 8443
+  # Host-side Podman → cluster via Tailscale operator API proxy.
+  # Wildcard matches any tailnet MagicDNS suffix; do not bake a personal
+  # `*.ts.net` FQDN into this file.
+  - host: microshift-operator.*.ts.net
+    port: 443
     protocol: rest
     access: read-write
     enforcement: enforce
-  - host: host.docker.internal
-    port: 8443
-    protocol: rest
-    access: read-write
-    enforcement: enforce
-  - host: api.crc.testing
-    port: 8443
+  - host: microshift-operator
+    port: 443
     protocol: rest
     access: read-write
     enforcement: enforce
