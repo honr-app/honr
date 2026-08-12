@@ -131,15 +131,15 @@ sticks; the seed only inserts what's missing.
 ### Model
 
 An optional **model** on the spec names the model honr passes to agent CLIs
-that accept a `--model` flag on launch (today: `agy`). Leave it unset to inherit
-the engine default — for `agy`, `gemini-3.6-flash-high`
-(`DEFAULT_SEAT_MODEL`).
+that accept a `--model` flag on launch (`agy`, `cursor` / `agent`). Leave it
+unset to inherit the engine default — for `agy`, `gemini-3.6-flash-high`
+(`DEFAULT_SEAT_MODEL`); for `cursor`, the account default for your API key.
 
 Resolution at claim/run:
 
 1. **`card.model`** on the Task (if set) — per-card override on claim
 2. **Sandbox spec `model`** — the winning profile for that card
-3. **Engine default** — compiled fallback when both are unset (`agy` only today)
+3. **Engine default** — compiled fallback when both are unset (`agy` only; `cursor` uses the account default)
 
 The board and card UI show the resolved value (`resolved_model`). Cockpit uses
 the same spec → default chain (no card).

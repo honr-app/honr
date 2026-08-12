@@ -240,8 +240,12 @@ pub fn default_model_for_engine(engine_id: &str) -> Option<&'static str> {
 }
 
 /// Whether this engine's CLI accepts a `--model` flag on launch argv.
+///
+/// Verified via `agent --help` (cursor), `agy --help`, and unit argv tests.
+/// `claude` and `opencode` reach models through OpenShell `inference.local`
+/// instead — see [`anthropic_inference_env`].
 pub fn engine_accepts_cli_model(engine_id: &str) -> bool {
-    matches!(engine_id.trim(), "agy")
+    matches!(engine_id.trim(), "agy" | "cursor")
 }
 
 fn shell_single_quote(s: &str) -> String {
@@ -249,7 +253,7 @@ fn shell_single_quote(s: &str) -> String {
 }
 
 /// `--model …` segment when the engine accepts it and a model is resolved.
-fn model_argv(engine_id: &str, model: Option<&str>) -> Option<String> {
+pub fn cli_model_argv(engine_id: &str, model: Option<&str>) -> Option<String> {
     if !engine_accepts_cli_model(engine_id) {
         return None;
     }
@@ -278,7 +282,7 @@ pub fn command_line(
 
     let mut parts: Vec<String> = Vec::new();
     parts.push(engine.prefix.to_string());
-    if let Some(argv) = model_argv(engine.id, model) {
+    if let Some(argv) = cli_model_argv(engine.id, model) {
         parts.push(argv);
     }
     if !engine.post_model.is_empty() {
@@ -354,6 +358,9 @@ mod tests {
         // Claude has no resume flag — conversation id must not change argv.
         let ignored = command_line("claude", PromptEnv::Briefing, Some("cid"), None).unwrap();
         assert_eq!(ignored, cmd);
+        // Model is chosen on the gateway via inference.local, not CLI argv.
+        let with_model = command_line("claude", PromptEnv::Briefing, None, Some("ignored")).unwrap();
+        assert_eq!(with_model, cmd);
         assert!(!supports_resume("claude"));
     }
 
@@ -400,13 +407,28 @@ mod tests {
     }
 
     #[test]
+    fn engine_accepts_cli_model_matrix() {
+        assert!(engine_accepts_cli_model("agy"));
+        assert!(engine_accepts_cli_model("cursor"));
+        assert!(!engine_accepts_cli_model("claude"));
+        assert!(!engine_accepts_cli_model("opencode"));
+    }
+
+    #[test]
     fn cursor_argv_fresh_and_resume() {
         let fresh = command_line("cursor", PromptEnv::Briefing, None, None).unwrap();
         assert_eq!(
             fresh,
             "agent -p --force --trust --approve-mcps --sandbox disabled --output-format stream-json \"$HONR_BRIEFING\""
         );
+        assert!(!fresh.contains("--model"), "{fresh}");
         assert!(!fresh.contains("--resume"));
+
+        let custom = command_line("cursor", PromptEnv::Briefing, None, Some("gpt-5")).unwrap();
+        assert!(custom.contains("--model 'gpt-5'"), "{custom}");
+        let model_at = custom.find("--model").expect("model");
+        let prompt_at = custom.find("\"$HONR_BRIEFING\"").expect("prompt");
+        assert!(model_at < prompt_at, "{custom}");
 
         let resume = command_line("cursor", PromptEnv::Prompt, Some("sid"), None).unwrap();
         assert!(
@@ -414,6 +436,15 @@ mod tests {
             "{resume}"
         );
         assert!(resume.ends_with("\"$HONR_PROMPT\""), "{resume}");
+        assert!(!resume.contains("--model"), "{resume}");
+
+        let resume_model =
+            command_line("cursor", PromptEnv::Prompt, Some("sid"), Some("sonnet-4")).unwrap();
+        assert!(resume_model.contains("--model 'sonnet-4'"), "{resume_model}");
+        assert!(
+            resume_model.contains("--resume \"$HONR_CONVERSATION\""),
+            "{resume_model}"
+        );
         assert!(supports_resume("cursor"));
         assert_eq!(pre_start_auth("cursor").unwrap(), PreStartAuth::None);
     }
@@ -434,7 +465,12 @@ mod tests {
             fresh,
             "opencode run --format json --auto \"$HONR_BRIEFING\""
         );
+        assert!(!fresh.contains("--model"), "{fresh}");
         assert!(!fresh.contains("--session"));
+
+        let with_model =
+            command_line("opencode", PromptEnv::Briefing, None, Some("ignored")).unwrap();
+        assert_eq!(with_model, fresh);
 
         let resume = command_line("opencode", PromptEnv::Prompt, Some("ses_abc"), None).unwrap();
         assert!(

@@ -147,13 +147,9 @@ pub(crate) fn attach_agent_command(
         ),
         "agy" => {
             let mut cmd = String::from("agy --dangerously-skip-permissions");
-            if let Some(m) = model
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .or_else(|| crate::engine::default_model_for_engine("agy"))
-            {
-                cmd.push_str(" --model ");
-                cmd.push_str(&shell_quote(m));
+            if let Some(argv) = crate::engine::cli_model_argv("agy", model) {
+                cmd.push(' ');
+                cmd.push_str(&argv);
             }
             if let Some(id) = cid {
                 cmd.push_str(" --conversation ");
@@ -168,6 +164,10 @@ pub(crate) fn attach_agent_command(
         // cursor (default): human-in-the-loop Cursor Agent CLI.
         _ => {
             let mut cmd = String::from("agent --trust --approve-mcps --sandbox disabled");
+            if let Some(argv) = crate::engine::cli_model_argv("cursor", model) {
+                cmd.push(' ');
+                cmd.push_str(&argv);
+            }
             if let Some(id) = cid {
                 cmd.push_str(" --resume ");
                 cmd.push_str(&shell_quote(id));
@@ -547,6 +547,30 @@ mod tests {
         let err = ready_environment(&b).unwrap_err();
         assert_eq!(err.status, StatusCode::CONFLICT);
         assert!(err.message.contains("parked"));
+    }
+
+    #[test]
+    fn attach_agent_command_cursor_injects_resolved_model() {
+        let cmd = attach_agent_command(
+            "cursor",
+            None,
+            Some("be the cockpit"),
+            "",
+            Some("gpt-5"),
+        );
+        let script = &cmd[2];
+        assert!(
+            script.contains("exec agent --trust --approve-mcps --sandbox disabled --model 'gpt-5'"),
+            "{script}"
+        );
+        assert!(script.contains("'be the cockpit'"), "{script}");
+    }
+
+    #[test]
+    fn attach_agent_command_cursor_omits_model_when_unset() {
+        let cmd = attach_agent_command("cursor", None, Some("be the cockpit"), "", None);
+        let script = &cmd[2];
+        assert!(!script.contains("--model"), "{script}");
     }
 
     #[test]

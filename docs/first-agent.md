@@ -99,7 +99,7 @@ per Sandbox spec.
 
 For **`claude`** and **`opencode`** sandboxes, point OpenShell's local router at
 your model (this is separate from the optional **Model** field on Sandbox
-specs, which only applies to CLIs that accept `--model` — today `agy`):
+specs, which only applies to CLIs that accept `--model` — `agy` and `cursor`):
 
 ```bash
 openshell provider create --name vertex --type google-vertex-ai --from-gcloud-adc \
@@ -112,8 +112,9 @@ swaps in the real credential on the way out. Details, including the one
 environment variable that will silently break this:
 [Sandbox](sandbox.md#how-credentials-reach-the-agent).
 
-For **`agy`**, model selection is on the Sandbox spec (or per card at claim);
-honr passes the resolved value as `agy --model …`. See
+For **`agy`** and **`cursor`**, model selection is on the Sandbox spec (or per
+card at claim); honr passes the resolved value as `agy --model …` or
+`agent --model …`. See
 [Configuration](configuration.md#model) and [Sandbox](sandbox.md#model-selection).
 
 For GitHub, add or edit the shipped **`github-app`** provider under
