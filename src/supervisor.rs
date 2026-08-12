@@ -6864,4 +6864,121 @@ mod tests {
             "UNKNOWN must queue rebase_requested for the next sweep"
         );
     }
+
+    /// Webhook-equivalent path: MainAdvanced steers a live run, park+unpark
+    /// queues resume, and the supervisor can claim again with sandbox preserved.
+    #[tokio::test]
+    async fn main_advanced_live_steer_resume_path_claimable_after_unpark() {
+        use crate::model::State;
+
+        let mut schema = crate::schema::Schema::default();
+        schema.execution.agents.repo.upstream = "honr-app/honr".into();
+        let board = Arc::new(crate::store::Board::new(
+            schema,
+            std::env::temp_dir().join(format!(
+                "honr-test-main-adv-resume-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        ));
+        let project = board
+            .create(
+                None,
+                "Resume Path Proj",
+                "why",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .unwrap();
+        let running = board
+            .create(
+                Some(project.id),
+                "Live Resume",
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        board
+            .transition(running.id, State::Shaping, "test", None)
+            .unwrap();
+        board
+            .transition(running.id, State::Backlog, "test", None)
+            .unwrap();
+        board
+            .transition(running.id, State::Claimed, "agent", None)
+            .unwrap();
+        board
+            .transition(running.id, State::Running, "agent", None)
+            .unwrap();
+        board.set_environment(running.id, Some("honr-card-resume-sandbox".into()));
+        board.set_conversation_id(running.id, Some("conv-resume-main".into()));
+
+        let steered = board.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("resume-path-sha".into()),
+        );
+        assert_eq!(steered, vec![running.id]);
+
+        let catch_up = process_main_advanced_review_catch_up_with(
+            &board,
+            &repo_cfg(),
+            "honr-app/honr",
+            fixed_mergeable_fetch(crate::github_app::PrConflictCheck {
+                mergeable: crate::github_app::PrMergeableState::Mergeable,
+                base_ref: Some("main".into()),
+            }),
+        )
+        .await;
+        assert!(
+            catch_up.is_empty(),
+            "no Review PRs in this fixture: {catch_up:?}"
+        );
+
+        let after_steer = board.get(running.id).unwrap();
+        assert_eq!(after_steer.state, State::Backlog);
+        assert!(after_steer.awaiting_dispatch);
+        assert!(!after_steer.parked);
+        assert_eq!(
+            after_steer.environment.as_deref(),
+            Some("honr-card-resume-sandbox")
+        );
+        assert_eq!(
+            after_steer.conversation_id.as_deref(),
+            Some("conv-resume-main")
+        );
+        assert!(
+            after_steer.notes.iter().any(|n| {
+                n.text.contains("resume-path-sha") && n.text.contains("Main advanced")
+            }),
+            "steer note must survive webhook path: {:?}",
+            after_steer.notes
+        );
+
+        let awaiting = board.list_awaiting_dispatch();
+        assert!(
+            awaiting.iter().any(|i| i.id == running.id),
+            "supervisor must see the steered card for resume: {awaiting:?}"
+        );
+        assert!(board.may_claim(running.id));
+
+        let grant = board
+            .claim(running.id, "agent-resume", None, 60)
+            .expect("resume claim after main-advanced steer");
+        assert_eq!(grant.item_id, running.id);
+        let after_claim = board.get(running.id).unwrap();
+        assert_eq!(after_claim.state, State::Claimed);
+        assert_eq!(
+            after_claim.conversation_id.as_deref(),
+            Some("conv-resume-main"),
+            "resume claim must keep conversation for reclaim"
+        );
+    }
 }

@@ -195,14 +195,28 @@ advance and same-parent sibling merge share this path):
 Repeated overlapping conflict files escalate to **Needs You** (decomposition
 failure) when those file lists are present.
 
-**3. Live runs stay put.** Claimed and Running cards are **not** steered or
-park/unparked when main advances — another card merging is normal. Rebase work
-is detected in Review via the `mergeable` check above; webhook responses list
-`steered_item_ids` only for Review cards bounced to Backlog on CONFLICTING.
+**3. Live runs (repo-scoped steer + coalesced bounce).** Claimed and Running
+cards on the **same upstream** that advanced get a binding steer note, a goal
+story line, and a park+unpark so the next claim carries rebase instructions.
+Steer alone does not inject mid-turn — the first interrupt on a Running card
+still happens via park+unpark. Cards on other upstreams stay Running; unbound
+live cards (no `pull_request` yet) steer only when the advanced repo matches
+the board default `execution.agents.repo.upstream`.
 
-Review cards stay in Review unless GitHub reports CONFLICTING (or a human
-bounces them). Live steering does not replace Review catch-up: both fire on
-the same `MainAdvanced`.
+| Situation | What happens |
+|---|---|
+| **Same upstream, first MainAdvanced while Running** | Steer note + goal story; park+unpark; card lands in Backlog with `awaiting_dispatch` (sandbox `environment` and `conversation_id` preserved). |
+| **Same upstream, repeat MainAdvanced while already `awaiting_dispatch` from a prior steer** | Coalesce: no second park/unpark. Steer note and story refresh only when the commit sha changes. |
+| **Different upstream** | No steer, no bounce — card stays Running. |
+
+The goal story names the advanced ref/sha and that the live run was interrupted
+for rebase (distinct from manual park). The Detail drawer and SSE upserts show
+the steer note and story without a full page reload.
+
+Webhook and poll responses list `steered_item_ids` for live-steered cards and
+for Review cards bounced to Backlog on CONFLICTING (deduped). Live steering
+does not replace Review catch-up: both fire on the same `MainAdvanced`, scoped
+to the advancing `owner/name`.
 
 ### Local webhook forwarding
 
