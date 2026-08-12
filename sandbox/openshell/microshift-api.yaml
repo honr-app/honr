@@ -9,8 +9,9 @@
 # (MITM verifies with public CAs) and OpenShell does not block :443.
 #
 # Grant the gateway host's Tailscale identity RBAC on the cluster (see
-# `sandbox/microshift/tailscale-api-rbac.yaml`). Set sandbox `KUBE_SERVER`
-# to your operator MagicDNS URL. In-cluster seats use kubernetes.default.svc.
+# `sandbox/microshift/tailscale-api-rbac.yaml`). Point `oc`/`kubectl` at your
+# operator MagicDNS URL (or in-cluster `kubernetes.default.svc`) via normal
+# kubeconfig / CLI flags — this provider only supplies `KUBE_TOKEN` + egress.
 id: microshift-api
 display_name: MicroShift / OCP API
 description: ServiceAccount token as KUBE_TOKEN (Bearer rewrite to the cluster API)
