@@ -36,7 +36,7 @@ export function Card({ item, column, now, agentTimeout, defaultEngine, defaultMo
   const idLabel = (id: number) => (labelOf ? labelOf(id) : `#${id}`);
 
   const engine = item.engine ?? defaultEngine;
-  const model = item.model ?? defaultModel;
+  const model = item.resolved_model ?? item.model ?? defaultModel;
 
   const deadline = item.run_deadline_at ?? item.lease?.expires_at ?? null;
   const remaining = deadline ? secsUntil(deadline, now) : null;
@@ -105,8 +105,13 @@ export function Card({ item, column, now, agentTimeout, defaultEngine, defaultMo
                     ? "◈ cursor"
                     : engine === "opencode"
                       ? "◐ opencode"
-                      : `◍ ${engine || model || "?"}`}
+                      : `◍ ${engine || "?"}`}
             </span>
+            {model && (
+              <span className="tag dim" data-testid="card-model-badge">
+                {model}
+              </span>
+            )}
             <span className={endingSoon ? "countdown ending-soon" : "countdown"}>
               {remaining !== null ? formatCountdown(remaining) : "—"}
             </span>

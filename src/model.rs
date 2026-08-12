@@ -1487,6 +1487,9 @@ pub struct WorkItem {
     pub engine: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Display-only: card.model → profile model → engine default. Set on snapshot/detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
     #[serde(default)]
     pub progress: f32,
 
@@ -1610,6 +1613,7 @@ impl WorkItem {
             run_deadline_at: None,
             engine: None,
             model: None,
+            resolved_model: None,
             progress: 0.0,
             escalation: None,
             gates: Vec::new(),

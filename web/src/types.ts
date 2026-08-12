@@ -402,6 +402,8 @@ export interface WorkItem {
   /** Hard end of this run (claim + agent_timeout). Not renewed. */
   run_deadline_at?: string | null;
   model: string | null;
+  /** Display-only: card.model → profile model → engine default. */
+  resolved_model?: string | null;
   progress: number;
   escalation: Escalation | null;
   gates: GateRun[];

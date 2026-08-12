@@ -6172,9 +6172,10 @@ facts are pasted, then unpark";
         let agents =
             Self::overlay_agent_runtime(&self.schema.execution.agents, s.agent_runtime.as_ref());
         drop(s);
-        // Card face engine comes from the sandbox profile, not WorkItem.engine.
+        // Card face engine/model come from resolution, not stale WorkItem fields.
         for item in &mut items {
             item.engine = Some(self.resolve_engine_for_card(item.id));
+            item.resolved_model = self.resolve_model_for_card(item.id);
         }
         Snapshot {
             items,

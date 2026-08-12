@@ -643,7 +643,8 @@ export function DetailDrawer({
   if (!d) return <aside className="drawer"><Head onClose={onClose} title={`#${id}`} /><div className="dim">loading…</div></aside>;
 
   const resolvedEngine = d.engine ?? d.default_engine ?? defaultEngine ?? "";
-  const resolvedModel = d.model ?? d.default_model ?? defaultModel ?? "";
+  const resolvedModel =
+    d.resolved_model ?? d.model ?? d.default_model ?? defaultModel ?? "";
 
   return (
     <aside className="drawer">
@@ -865,7 +866,12 @@ export function DetailDrawer({
           {d.level && <span className="pill">{d.level}</span>}
           {/* Engine only — same as the card face. Model falls back into the
               label when no engine is configured; never a second claude-opus-5 chip. */}
-          <span className="pill">{resolvedEngine || resolvedModel || "?"}</span>
+          <span className="pill">{resolvedEngine || "?"}</span>
+          {resolvedModel && (
+            <span className="pill" data-testid="detail-model-badge">
+              {resolvedModel}
+            </span>
+          )}
           {d.origin.kind !== "human" && <span className="pill machine">{d.origin.kind}-born</span>}
         </div>
 
