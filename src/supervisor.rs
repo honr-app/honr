@@ -24,7 +24,7 @@ use crate::openshell::{OpenShell, Output, SandboxSpec, LABEL_COCKPIT, LABEL_ITEM
 use crate::schema::{AgentConfig, ExecutionConfig};
 use crate::store::{ClaimGrant, SharedBoard};
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -806,7 +806,7 @@ fn sandbox_spec_for_card(
         from: resolved.image.clone(),
         providers: attach_providers.to_vec(),
         policy: Some(resolved.policy.clone()),
-        env: agent_env(engine),
+        env: sandbox_create_env(engine, &resolved.env),
         labels: vec![(LABEL_ITEM.to_string(), id.to_string())],
         cpu: resolved.cpu.clone(),
         memory: resolved.memory.clone(),
@@ -2069,6 +2069,19 @@ PY
     Ok(())
 }
 
+/// Create-time env: `agent_env(engine)` then profile overlay (profile wins on key clash).
+fn sandbox_create_env(engine: &str, profile_env: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    let mut env = agent_env(engine);
+    for (k, v) in profile_env {
+        if let Some(entry) = env.iter_mut().find(|(key, _)| key == k) {
+            entry.1 = v.clone();
+        } else {
+            env.push((k.clone(), v.clone()));
+        }
+    }
+    env
+}
+
 fn agent_env(engine: &str) -> Vec<(String, String)> {
     let mut env = vec![
         ("DISABLE_TELEMETRY".into(), "1".into()),
@@ -3025,7 +3038,7 @@ fn sandbox_spec_for_cockpit(
     attach_providers: &[String],
     engine: &str,
 ) -> SandboxSpec {
-    let env = agent_env(engine);
+    let env = sandbox_create_env(engine, &resolved.env);
     // Cockpit's honr MCP entry is stdio over a local Unix socket
     // (cockpit_mcp_tunnel::AGENT_SOCK_PATH baked into mcp.json) — no URL,
     // no env var to inject.
@@ -4810,6 +4823,113 @@ mod tests {
             spec.env
         );
         assert!(spec.providers.is_empty(), "test passes empty providers");
+    }
+
+    #[test]
+    fn sandbox_create_env_starts_with_agent_env_then_overlays_profile() {
+        let mut profile = BTreeMap::new();
+        profile.insert("CUSTOM_VAR".into(), "from-profile".into());
+        let env = sandbox_create_env("claude", &profile);
+        let agent = agent_env("claude");
+        for (k, v) in &agent {
+            let got = env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+            assert_eq!(got, Some(v.as_str()), "agent_env key {k} missing or wrong");
+        }
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "CUSTOM_VAR")
+                .map(|(_, v)| v.as_str()),
+            Some("from-profile")
+        );
+    }
+
+    #[test]
+    fn sandbox_create_env_profile_wins_on_key_clash() {
+        let mut profile = BTreeMap::new();
+        profile.insert("HOME".into(), "/custom-home".into());
+        profile.insert("EXTRA".into(), "added".into());
+        let env = sandbox_create_env("claude", &profile);
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "HOME").map(|(_, v)| v.as_str()),
+            Some("/custom-home"),
+            "profile must override agent_env on clash: {env:?}"
+        );
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "EXTRA").map(|(_, v)| v.as_str()),
+            Some("added")
+        );
+        assert!(
+            env.iter().any(|(k, v)| k == "DISABLE_TELEMETRY" && v == "1"),
+            "non-clashing agent_env keys must remain: {env:?}"
+        );
+    }
+
+    #[test]
+    fn card_sandbox_spec_passes_merged_env_to_openshell() {
+        let mut profile_env = BTreeMap::new();
+        profile_env.insert("HOME".into(), "/profile-home".into());
+        profile_env.insert("API_URL".into(), "https://api.example".into());
+        let resolved = crate::model::ResolvedSandboxCreate {
+            image: "img:1".into(),
+            policy: "version: 1\n".into(),
+            cpu: None,
+            memory: None,
+            engine: Some("claude".into()),
+            model: None,
+            profile_id: Some("test".into()),
+            providers: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            env: profile_env,
+            prompt: None,
+        };
+        let spec = sandbox_spec_for_card(42, "honr-card-42", &resolved, &[]);
+        assert_eq!(
+            spec.env.iter().find(|(k, _)| k == "HOME").map(|(_, v)| v.as_str()),
+            Some("/profile-home")
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|(k, _)| k == "API_URL")
+                .map(|(_, v)| v.as_str()),
+            Some("https://api.example")
+        );
+        assert!(
+            spec.env.iter().any(|(k, v)| k == "CARGO_HOME" && v == "/opt/cargo"),
+            "agent_env keys must be present: {:?}",
+            spec.env
+        );
+    }
+
+    #[test]
+    fn cockpit_sandbox_spec_passes_merged_env_to_openshell() {
+        let mut profile_env = BTreeMap::new();
+        profile_env.insert("PATH".into(), "/custom/bin".into());
+        let resolved = crate::model::ResolvedSandboxCreate {
+            image: "honr-sandbox:latest".into(),
+            policy: "version: 1\n".into(),
+            cpu: None,
+            memory: None,
+            engine: Some("agy".into()),
+            model: None,
+            profile_id: Some("cockpit".into()),
+            providers: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            env: profile_env,
+            prompt: None,
+        };
+        let spec = sandbox_spec_for_cockpit("honr-cockpit", &resolved, &[], "agy");
+        assert_eq!(
+            spec.env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_str()),
+            Some("/custom/bin")
+        );
+        assert!(
+            spec.env
+                .iter()
+                .any(|(k, v)| k == "DISABLE_TELEMETRY" && v == "1"),
+            "agent_env keys must remain when not overridden: {:?}",
+            spec.env
+        );
     }
 
     #[test]
