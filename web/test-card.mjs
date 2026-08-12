@@ -553,6 +553,59 @@ const deleteEv = { type: "delete", seq: 22, id: 7 };
 const deletedDetail = reduceDetail(updatedDetail, deleteEv, 7);
 assert.strictEqual(deletedDetail, null, "Delete event for matching id 7 must clear detail");
 
+// Test 14b: reduceDetail applies story events for the card's goal and preserves steer notes
+const mainAdvancedSteerNote =
+  "Main advanced (refs/heads/main @ deadbeefabc). First action: fetch upstream main and rebase this card's branch onto upstream/main (not origin/main alone — the fork's base freezes at create time), then continue the card.";
+const steerUpsertEv = {
+  type: "upsert",
+  seq: 24,
+  item: {
+    ...unblockedItem,
+    id: 7,
+    title: "Live Card",
+    state: "backlog",
+    awaiting_dispatch: true,
+    notes: [{ author: "human", text: mainAdvancedSteerNote }],
+  },
+};
+const steerDetail = reduceDetail(detailInitial, steerUpsertEv, 7);
+assert.strictEqual(
+  steerDetail.notes.at(-1)?.text,
+  mainAdvancedSteerNote,
+  "Detail drawer must show main-advanced steer note on live upsert",
+);
+assert(
+  steerDetail.notes.at(-1)?.text.toLowerCase().includes("rebase"),
+  "Main-advanced steer note must mention rebase",
+);
+
+const goalId = 1;
+const storyEv = {
+  type: "story",
+  seq: 25,
+  goal: goalId,
+  at: new Date().toISOString(),
+  text: "Live Card: refs/heads/main @ deadbeefabc advanced — live run interrupted for rebase (auto-steered; fetch upstream main and continue).",
+};
+const storyDetail = reduceDetail(steerDetail, storyEv, 7, goalId);
+assert.strictEqual(storyDetail.story?.length, 1, "Story event for goal must append to detail story");
+assert(
+  storyDetail.story?.[0]?.text.includes("auto-steered"),
+  "Goal story must describe main-advanced auto-steer",
+);
+assert(
+  storyDetail.story?.[0]?.text.includes("interrupted for rebase"),
+  "Goal story must name live-run rebase interrupt",
+);
+
+const unrelatedStoryEv = { ...storyEv, seq: 26, goal: 99, text: "Other goal story" };
+const unchangedStoryDetail = reduceDetail(storyDetail, unrelatedStoryEv, 7, goalId);
+assert.strictEqual(
+  unchangedStoryDetail.story?.length,
+  1,
+  "Story events for other goals must not alter this card's detail story",
+);
+
 // Test 15: subscribeBoardEvents and emitBoardEvent live drawer subscription
 let receivedEvent = null;
 const unsubscribe = subscribeBoardEvents((ev) => {

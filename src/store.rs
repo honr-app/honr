@@ -5630,6 +5630,8 @@ facts are pasted, then unpark";
     /// instructions. When a card is already `awaiting_dispatch` from a recent
     /// main-advanced steer on the same repo, a second event coalesces: no
     /// park/unpark; the steer note refreshes only when the commit sha changes.
+    /// Each steered card also gets a goal-story line naming the advanced ref/sha
+    /// and that the live run was interrupted for rebase (distinct from manual park).
     ///
     /// Returns steered card ids from the live path. Callers also run
     /// [`supervisor::process_main_advanced_review_catch_up`] with the advancing
@@ -5683,6 +5685,28 @@ facts are pasted, then unpark";
             "Main advanced ({where_main}). First action: fetch upstream {base} and rebase \
              this card's branch onto upstream/{base} (not origin/{base} alone — the fork's \
              base freezes at create time), then continue the card."
+        )
+    }
+
+    /// Goal-story line when main advance auto-steers a live run (distinct from manual park).
+    fn main_advanced_steer_story(
+        title: &str,
+        ref_name: &str,
+        commit_sha: Option<&str>,
+        base: &str,
+    ) -> String {
+        let where_main = match commit_sha {
+            Some(sha) if !sha.is_empty() => format!("{ref_name} @ {sha}"),
+            _ => ref_name.to_string(),
+        };
+        let base = if base.trim().is_empty() {
+            "main"
+        } else {
+            base.trim()
+        };
+        format!(
+            "{title}: {where_main} advanced — live run interrupted for rebase (auto-steered; \
+             fetch upstream {base} and continue)."
         )
     }
 
@@ -5760,12 +5784,17 @@ facts are pasted, then unpark";
             if !self.card_matches_main_advanced_repo(id, advanced_repo) {
                 continue;
             }
-            let base = self
-                .resolve_card_repo(id)
-                .ok()
-                .flatten()
-                .map(|r| r.base)
-                .unwrap_or_else(|| "main".into());
+            let (title, base) = {
+                let s = self.state.read();
+                let it = s.items.get(&id).expect("candidate card");
+                let base = self
+                    .resolve_card_repo(id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.base)
+                    .unwrap_or_else(|| "main".into());
+                (it.title.clone(), base)
+            };
             let note = Self::main_advanced_steer_note(ref_name, commit_sha, &base);
 
             let (state, awaiting, parked, prev_sha, has_steer_note) = {
@@ -5790,6 +5819,10 @@ facts are pasted, then unpark";
                     tracing::warn!("main-advanced steer refresh failed for #{id}: {e}");
                     continue;
                 }
+                self.story(
+                    id,
+                    Self::main_advanced_steer_story(&title, ref_name, commit_sha, &base),
+                );
                 steered.push(id);
                 continue;
             }
@@ -5798,6 +5831,10 @@ facts are pasted, then unpark";
                 tracing::warn!("main-advanced steer failed for #{id}: {e}");
                 continue;
             }
+            self.story(
+                id,
+                Self::main_advanced_steer_story(&title, ref_name, commit_sha, &base),
+            );
             steered.push(id);
             // Skip park/unpark for cards already parked — steer may have been a
             // no-op on a weird state, and a second park would be wrong.
@@ -10227,7 +10264,12 @@ mod tests {
         b.transition(running.id, State::Running, "agent", None)
             .unwrap();
 
-        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("bothpaths".into()));
+        let steered = b.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("bothpaths".into()),
+        );
+        assert_eq!(steered, vec![running.id]);
 
         let review_after = b.get(review.id).unwrap();
         assert_eq!(review_after.state, State::Review);
@@ -10248,12 +10290,24 @@ mod tests {
         assert_eq!(running_after.state, State::Backlog);
         assert!(running_after.awaiting_dispatch);
         assert!(
-            running_after
-                .notes
-                .iter()
-                .any(|n| n.text.contains("bothpaths") && n.text.contains("upstream/main")),
+            running_after.notes.iter().any(|n| {
+                n.text.contains("bothpaths")
+                    && n.text.contains("fetch")
+                    && n.text.contains("upstream/main")
+                    && n.text.to_lowercase().contains("rebase")
+            }),
             "Running on matching upstream must be steered: {:?}",
             running_after.notes
+        );
+        let story = b.stories_for(running.id);
+        assert!(
+            story.iter().any(|l| {
+                l.text.contains("bothpaths")
+                    && l.text.contains("auto-steered")
+                    && l.text.contains("interrupted for rebase")
+            }),
+            "goal story must describe main-advanced auto-steer: {:?}",
+            story
         );
     }
 
@@ -10410,7 +10464,14 @@ mod tests {
         b.transition(claimed.id, State::Claimed, "agent", None)
             .unwrap();
 
-        b.notify_main_advanced("honr-app/honr", "refs/heads/main", Some("abcdeadbeef".into()));
+        let steered = b.notify_main_advanced(
+            "honr-app/honr",
+            "refs/heads/main",
+            Some("abcdeadbeef".into()),
+        );
+        assert_eq!(steered.len(), 2);
+        assert!(steered.contains(&running.id));
+        assert!(steered.contains(&claimed.id));
 
         let running_after = b.get(running.id).unwrap();
         assert_eq!(
@@ -10433,9 +10494,18 @@ mod tests {
             "Running card should have a fetch/rebase steer note with sha: {:?}",
             running_after.notes
         );
+        let story = b.stories_for(running.id);
+        assert!(
+            story.iter().any(|l| {
+                l.text.contains("abcdeadbeef")
+                    && l.text.contains("auto-steered")
+                    && l.text.contains("interrupted for rebase")
+            }),
+            "goal story must describe main-advanced auto-steer: {:?}",
+            story
+        );
 
         let claimed_after = b.get(claimed.id).unwrap();
-        assert_eq!(claimed_after.state, State::Backlog);
         assert!(claimed_after.awaiting_dispatch);
         assert!(
             claimed_after
@@ -10523,6 +10593,16 @@ mod tests {
             }),
             "notes must include the main-advanced steer: {:?}",
             after.notes
+        );
+        let story = b.stories_for(running.id);
+        assert!(
+            story.iter().any(|l| {
+                l.text.contains("def456abc")
+                    && l.text.contains("auto-steered")
+                    && l.text.contains("interrupted for rebase")
+            }),
+            "goal story must describe main-advanced auto-steer: {:?}",
+            story
         );
     }
 
@@ -10690,6 +10770,12 @@ mod tests {
         assert_eq!(
             after.conversation_id.as_deref(),
             Some("conv-coalesce2")
+        );
+        let story = b.stories_for(running.id);
+        assert!(
+            story.iter().any(|l| l.text.contains(sha2) && l.text.contains("auto-steered")),
+            "coalesce refresh on new sha must append goal story: {:?}",
+            story
         );
     }
 

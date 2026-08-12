@@ -6538,7 +6538,7 @@ mod tests {
     /// Tip catch-up observes mergeable first: MERGEABLE is a silent Review no-op;
     /// live Running cards on the advancing upstream still get steer + park/unpark.
     #[tokio::test]
-    async fn main_advanced_review_mergeable_is_noop_while_running_uninterrupted() {
+    async fn main_advanced_review_mergeable_is_noop_while_live_run_steered() {
         let mut schema = crate::schema::Schema::default();
         schema.execution.agents.repo.upstream = "honr-app/honr".into();
         let board = Arc::new(crate::store::Board::new(

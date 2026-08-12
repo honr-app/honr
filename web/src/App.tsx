@@ -284,6 +284,8 @@ function AuthedApp({
                     navigateChrome({ view: "board", cardId: id })
                   }
                   items={b.items}
+                  stories={b.stories}
+                  goalOf={goalOf}
                   defaultEngine={b.defaultEngine}
                   defaultModel={b.defaultModel}
                 />

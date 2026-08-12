@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, since } from "../api.js";
-import type { BoardEvent, PlanTaskSpec, SandboxProfile, WorkItem } from "../types.js";
+import type { BoardEvent, PlanTaskSpec, SandboxProfile, StoryLine, WorkItem } from "../types.js";
 import { cardPrUrl } from "../types.js";
 import { subscribeBoardEvents } from "../useBoard.js";
 import { CreateTaskForm } from "./CreateTaskForm.js";
@@ -11,6 +11,7 @@ interface Detail extends WorkItem {
   children: number[];
   default_engine?: string;
   default_model?: string;
+  story?: StoryLine[];
 }
 
 type EditPlanTask = {
@@ -489,7 +490,8 @@ function coalesceAgentLogLines(lines: string[]): ParsedLogLine[] {
 export function reduceDetail<T extends Detail = Detail>(
   prev: T | null,
   ev: BoardEvent,
-  id: number
+  id: number,
+  goalId?: number,
 ): T | null {
   if (ev.type === "upsert" && ev.item && ev.item.id === id) {
     if (!prev) {
@@ -507,6 +509,10 @@ export function reduceDetail<T extends Detail = Detail>(
   if (ev.type === "delete" && ev.id === id) {
     return null;
   }
+  if (ev.type === "story" && goalId != null && ev.goal === goalId && prev) {
+    const story = [...(prev.story ?? []), { at: ev.at, text: ev.text }];
+    return { ...prev, story };
+  }
   return prev;
 }
 
@@ -520,6 +526,8 @@ export function DetailDrawer({
   onChanged,
   onOpen,
   items,
+  stories,
+  goalOf,
 }: {
   id: number;
   now: number;
@@ -531,6 +539,10 @@ export function DetailDrawer({
   onOpen?: (id: number) => void;
   /** Board items — sibling Tasks for Create Task blockers. */
   items?: Map<number, WorkItem>;
+  /** Goal swimlane stories keyed by project id. */
+  stories?: Map<number, StoryLine[]>;
+  /** Resolve a card id to its goal (project) id for story events. */
+  goalOf?: (id: number) => number;
 }) {
   const [d, setD] = useState<Detail | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -585,12 +597,15 @@ export function DetailDrawer({
     }
   }, [logs, userScrolledUp, logTab]);
 
+  const goalId = goalOf?.(id);
+
   const load = () =>
     api
       .detail(id)
       .then((x) => {
         const item = x as Detail;
-        setD(item);
+        const story = goalId != null ? stories?.get(goalId) ?? [] : [];
+        setD({ ...item, story });
         setEditTitle(item.title);
         setEditIntent(item.intent);
         setEditDod(item.definition_of_done ?? "");
@@ -629,12 +644,19 @@ export function DetailDrawer({
   useEffect(() => {
     if (!id) return;
     const unsubscribe = subscribeBoardEvents((ev) => {
-      setD((prev) => reduceDetail(prev, ev, id));
+      setD((prev) => reduceDetail(prev, ev, id, goalId));
     });
     return () => {
       unsubscribe();
     };
-  }, [id]);
+  }, [id, goalId]);
+
+  useEffect(() => {
+    if (!d || goalId == null || !stories) return;
+    const live = stories.get(goalId);
+    if (!live?.length) return;
+    setD((prev) => (prev ? { ...prev, story: live } : prev));
+  }, [stories, goalId, d?.id]);
 
   const act = (p: Promise<unknown>) =>
     p.then(() => { load(); onChanged(); }).catch((e) => setErr(String(e)));
@@ -1650,6 +1672,18 @@ export function DetailDrawer({
           <ul className="plain">
             {d.notes.map((n, i) => (
               <li key={i}><span className="dim">{n.author}</span> {n.text}</li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      {(d.story?.length ?? 0) > 0 && (
+        <Section title="Story">
+          <ul className="plain hist">
+            {d.story!.slice(-8).reverse().map((line, i) => (
+              <li key={i}>
+                <span className="dim">{since(line.at, now)} ago</span> {line.text}
+              </li>
             ))}
           </ul>
         </Section>
