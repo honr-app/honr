@@ -1998,6 +1998,8 @@ assert(createProjectFormHtml.includes('data-testid="create-project-intent"'),
   "Create Project form intent field");
 assert(createProjectFormHtml.includes('data-testid="create-project-clone-repo"'),
   "Create Project form clone_repo field");
+assert(createProjectFormHtml.includes('data-testid="create-project-prompt"'),
+  "Create Project form optional project_prompt field");
 assert(createProjectFormHtml.includes('data-testid="create-project-submit"'),
   "Create Project form submit control");
 assert(
@@ -2318,6 +2320,8 @@ assert(createProjectFormSrc.includes("clone_repo (<code>owner/name</code>)"),
   "Create Project form labels clone_repo as owner/name");
 assert(createProjectFormSrc.includes("api.createProject"),
   "Create Project form uses api.createProject");
+assert(createProjectFormSrc.includes("project_prompt"),
+  "Create Project form passes optional project_prompt to api.createProject");
 assert(
   /create-project-clone-repo[\s\S]*?required|required[\s\S]*?create-project-clone-repo/.test(
     createProjectFormSrc.replace(/\n/g, " "),
@@ -2348,6 +2352,8 @@ assert(apiSrc.includes("createProject:"),
   "api.ts has typed createProject helper");
 assert(apiSrc.includes("clone_repo:"),
   "api.createProject requires clone_repo");
+assert(apiSrc.includes("project_prompt"),
+  "api.createProject accepts optional project_prompt");
 assert(apiSrc.includes("createTask:"),
   "api.ts has typed createTask helper");
 assert(apiSrc.includes("definition_of_done: body.definition_of_done"),
