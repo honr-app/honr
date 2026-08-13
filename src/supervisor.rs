@@ -216,11 +216,14 @@ const INFRA_COOLDOWN: Duration = Duration::from_secs(60);
 ///
 /// It matters because the two get different treatment. A card that genuinely
 /// cannot be done should exhaust its retries and ask a human. A dead podman
-/// socket must not burn those retries — otherwise the board reports "failed to
-/// run 3 times without producing any work" about a card that never got the
+/// socket — or an OpenShell client `h2 protocol error` / `broken pipe` mid
+/// stream — must not burn those retries. Otherwise the board reports "failed
+/// to run 3 times without producing any work" about a card that never got the
 /// chance to run at all, which is exactly what it did report.
 fn is_infrastructure(err: &str) -> bool {
-    const SIGNS: [&str; 12] = [
+    // Compared case-insensitively so OS "Broken pipe" and Rust ErrorKind
+    // "broken pipe" both count. Strings below are lowercase on purpose.
+    const SIGNS: [&str; 15] = [
         "podman.sock",
         "connection error",
         "connection closed before message completed",
@@ -229,13 +232,19 @@ fn is_infrastructure(err: &str) -> bool {
         // OpenShell relay flakes during create→exec; not the card's fault.
         "exec relay closed",
         "sandbox is not ready",
-        "The service is currently unavailable",
+        "the service is currently unavailable",
         "ssh tar extract exited",
         "ssh exited with status",
-        "phase: Deleting",
-        "GitHub App token sync failed (infrastructure)",
+        "phase: deleting",
+        "github app token sync failed (infrastructure)",
+        // tonic/hyper on the OpenShell client: h2 reset, peer drop, or body
+        // truncated mid-exec — must not burn the card's 3-strike run budget.
+        "h2 protocol error",
+        "broken pipe",
+        "error reading a body from connection",
     ];
-    SIGNS.iter().any(|s| err.contains(s))
+    let lower = err.to_ascii_lowercase();
+    SIGNS.iter().any(|s| lower.contains(s))
 }
 
 /// What every run shares with the loop it belongs to.
@@ -435,10 +444,10 @@ fn adoptable<'a>(item: Option<&'a WorkItem>, sandbox: &str) -> Option<&'a WorkIt
 /// Should reconcile keep this sandbox?
 ///
 /// When the card has an `environment`, keep that name and any
-/// `{prefix}-card-{id}-*` sibling (mid-create races / prior attempts). Matching
+/// `honr-card-{id}-*` sibling (mid-create races / prior attempts). Matching
 /// only `environment` reaped sandboxes mid-setup. Halt clears `environment` so
 /// nothing is kept — park / Review / request-changes leave it set so caches survive.
-fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str, branch_prefix: &str) -> bool {
+fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str) -> bool {
     let Some(i) = item else { return false };
     if i.state.is_terminal() {
         return false;
@@ -446,7 +455,7 @@ fn should_keep_sandbox(item: Option<&WorkItem>, sandbox: &str, branch_prefix: &s
     let Some(env) = i.environment.as_deref() else {
         return false;
     };
-    let stem = crate::schema::card_sandbox_stem(branch_prefix, i.id);
+    let stem = crate::schema::card_sandbox_stem(i.id);
     env == sandbox || sandbox.starts_with(&stem)
 }
 
@@ -531,11 +540,10 @@ async fn reconcile(
     };
 
     let mut adopted = Vec::new();
-    let branch_prefix = board.effective_agents().branch_prefix.clone();
     for sb in ours {
         let Some(id) = sb.item_id() else { continue };
         let card = board.get(id);
-        if !should_keep_sandbox(card.as_ref(), &sb.name, &branch_prefix) {
+        if !should_keep_sandbox(card.as_ref(), &sb.name) {
             tracing::info!(
                 "reaping unneeded sandbox {} (card={:?} state={:?} env={:?})",
                 sb.name,
@@ -720,7 +728,7 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
         Ok(None) => agents.repo = Default::default(),
         Err(e) => return Err(anyhow::anyhow!("{e}")),
     }
-    let branch = crate::schema::card_branch_name(&agents.branch_prefix, id);
+    let branch = crate::schema::card_branch_name(id);
 
     ensure_board_owns_run(board, id)?;
 
@@ -744,7 +752,7 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
                 .get(id)
                 .map(|i| (i.run_failures + 1, i.environment.clone()))
                 .unwrap_or((1, None));
-            let new_name = crate::schema::card_sandbox_name(&agents.branch_prefix, id, attempt);
+            let new_name = crate::schema::card_sandbox_name(id, attempt);
             // Drop the previous attempt before renaming — reconcile used to
             // reap by exact environment match and raced the new create.
             if let Some(prev) = prev_env {
@@ -826,7 +834,7 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
         Ok(None) => agents.repo = Default::default(),
         Err(e) => return Err(anyhow::anyhow!("{e}")),
     }
-    let branch = crate::schema::card_branch_name(&agents.branch_prefix, id);
+    let branch = crate::schema::card_branch_name(id);
     let cfg = &agents;
     let result = async {
         let run = watch_agent(board, os, cfg, &a.agent_id, id, &a.sandbox, a.from_line).await?;
@@ -1106,6 +1114,10 @@ async fn watch_agent(
 
     let board2 = board.clone();
     let agent_owned = agent_id.to_string();
+    // Heartbeat at most every 2s — Claimed→Running still happens on the first
+    // due tick. Per-line heartbeats + SSE Upserts were locking the board hard
+    // enough that the card drawer hung on detail fetches.
+    let last_hb = std::sync::Mutex::new(None::<std::time::Instant>);
 
     let follow = follow_script(from_line);
     let stream = os.exec_streaming(name, &follow, timeout, move |line| {
@@ -1116,13 +1128,25 @@ async fn watch_agent(
         // Buffer live agent output lines for UI stream view.
         board2.append_agent_log(id, line.to_string());
 
+        let due = {
+            let mut slot = last_hb.lock().unwrap_or_else(|e| e.into_inner());
+            match *slot {
+                Some(t) if t.elapsed() < Duration::from_secs(2) => false,
+                _ => {
+                    *slot = Some(std::time::Instant::now());
+                    true
+                }
+            }
+        };
+        if !due {
+            return;
+        }
+
         // Liveness heartbeat — does not extend run_deadline_at.
-        if board2
-            .get(id)
-            .is_some_and(|i| board_still_owns_run(i.state))
-        {
-            let progress = board2.get(id).map(|i| i.progress).unwrap_or(0.0);
-            let _ = board2.heartbeat(id, &agent_owned, progress, 0);
+        if let Some(item) = board2.get(id) {
+            if board_still_owns_run(item.state) {
+                let _ = board2.heartbeat(id, &agent_owned, item.progress, 0);
+            }
         }
     });
     tokio::pin!(stream);
@@ -2808,9 +2832,9 @@ fn resume_briefing(grant: &ClaimGrant, repo: &crate::schema::RepoConfig) -> Stri
     b
 }
 
-/// Plan + Project prompt are the primary inputs; a fresh `claude -p` has none
-/// of them unless we put them here. Plan (breakdown) precedes project_prompt
-/// (standing agent policy) so card context comes before standing rules.
+/// Plan + standing prompts are the primary inputs; a fresh `claude -p` has none
+/// of them unless we put them here. Plan (breakdown) precedes protocol /
+/// board / project standing text so card context comes before standing rules.
 fn briefing(
     grant: &ClaimGrant,
     branch: BranchState,
@@ -2849,9 +2873,21 @@ fn briefing(
         b.push('\n');
     }
 
+    b.push_str("Protocol (hardwired):\n");
+    b.push_str(crate::model::PROTOCOL_MINIMUM.trim());
+    b.push_str("\n\n");
+
+    if let Some(prompt) = &grant.board_prompt {
+        if !prompt.trim().is_empty() {
+            b.push_str("Board prompt (standing agent policy):\n");
+            b.push_str(prompt.trim());
+            b.push('\n');
+        }
+    }
+
     if let Some(prompt) = &grant.project_prompt {
         if !prompt.trim().is_empty() {
-            b.push_str("Project prompt (standing agent policy):\n");
+            b.push_str("Project prompt (Project standing extras):\n");
             b.push_str(prompt.trim());
             b.push('\n');
         }
@@ -2980,9 +3016,10 @@ names an exact product repo; otherwise escalate (see Remotes) — do not guess.\
 `gates`.\n",
         );
         b.push_str(
-            "\nRun the project's own checks before you finish — Project-level quality gates \
-live in the Project prompt above; card-specific gates live in this card's definition of done. \
-Do not assume cargo or any other toolchain unless those instructions name it.\n",
+            "\nRun the project's own checks before you finish — board-wide quality gates live in \
+the Board prompt above; Project-specific gates live in the Project prompt; card-specific gates \
+live in this card's definition of done. Do not assume cargo or any other toolchain unless those \
+instructions name it.\n",
         );
         b.push_str(&format!(
             "\nWhen the work is done, publish it yourself:\n\
@@ -3016,16 +3053,12 @@ fn is_cockpit_stopped(err: &str) -> bool {
 /// Should reconcile keep this cockpit sandbox?
 ///
 /// Running and Parked keep the Board-named environment (and the stable
-/// `{prefix}-cockpit` singleton). No session → reap.
-fn should_keep_cockpit_sandbox(
-    session: Option<&CockpitSession>,
-    sandbox: &str,
-    branch_prefix: &str,
-) -> bool {
+/// `honr-cockpit` singleton). No session → reap.
+fn should_keep_cockpit_sandbox(session: Option<&CockpitSession>, sandbox: &str) -> bool {
     let Some(s) = session else {
         return false;
     };
-    let stem = crate::schema::cockpit_sandbox_name(branch_prefix);
+    let stem = crate::schema::cockpit_sandbox_name();
     if let Some(env) = s.environment.as_deref() {
         if env == sandbox {
             return true;
@@ -3097,8 +3130,7 @@ fn cockpit_delete_inflight() -> &'static parking_lot::Mutex<HashSet<String>> {
 /// True when Board still wants this cockpit sandbox (Running/Parked session).
 fn cockpit_session_wants_sandbox(board: &SharedBoard, name: &str) -> bool {
     let session = board.cockpit_session();
-    let branch_prefix = board.effective_agents().branch_prefix;
-    should_keep_cockpit_sandbox(session.as_ref(), name, &branch_prefix)
+    should_keep_cockpit_sandbox(session.as_ref(), name)
 }
 
 /// Delete a cockpit sandbox in the background, skipping if Start raced back in.
@@ -3137,9 +3169,8 @@ async fn reconcile_cockpit_inventory(os: &OpenShell, board: &SharedBoard) {
         return;
     };
     let session = board.cockpit_session();
-    let branch_prefix = board.effective_agents().branch_prefix.clone();
     for sb in cockpit_boxes {
-        if !should_keep_cockpit_sandbox(session.as_ref(), &sb.name, &branch_prefix) {
+        if !should_keep_cockpit_sandbox(session.as_ref(), &sb.name) {
             tracing::info!(
                 "reaping unneeded cockpit sandbox {} (session={:?})",
                 sb.name,
@@ -3168,7 +3199,7 @@ async fn run_cockpit_seat(board: SharedBoard) -> anyhow::Result<(String, anyhow:
         .cockpit_session()
         .ok_or_else(|| anyhow::anyhow!("{COCKPIT_CANCEL_STOPPED}"))?;
     let existing = session.environment.clone();
-    let default_name = crate::schema::cockpit_sandbox_name(&agents.branch_prefix);
+    let default_name = crate::schema::cockpit_sandbox_name();
 
     let (name, is_reused) = match existing {
         Some(ref env_name)
@@ -3466,20 +3497,19 @@ pub(crate) fn cockpit_briefing(sandbox_prompt: Option<&str>) -> String {
     );
     b.push_str(
         "When creating a Project, `create_project` requires `clone_repo` (`owner/name`) — \
-         the repository Initial plan clones for planning. Optional `project_prompt` overrides \
-         the compiled default standing instructions workers inherit on every claim. Do not \
-         dispatch Initial plan until that clone target is set.\n\n",
+         the repository Initial plan clones for planning. Optional `project_prompt` is \
+         Project-only standing extras; board-wide policy is Settings → Agent runtime \
+         standing prompt. Do not dispatch Initial plan until that clone target is set.\n\n",
     );
     b.push_str(
         "Configuration stacks in layers: process boot and board Settings (Policies, sandbox \
-         specs, agent runtime, Forge) are host/operator setup; Project fields (`clone_repo`, \
-         optional sandbox override) seed the Initial plan; `project_prompt` carries standing \
-         agent policy — escalation, clone-target protocol, plan/split/report paths, and where \
-         to name Project-wide quality gates; per-card intent/DoD names clone targets and \
-         card-specific gates. Boot, Settings, and Project fields do not belong in \
-         `project_prompt`. Name test/lint commands in `project_prompt` when they apply to every \
-         card; honr does not assume cargo or any toolchain unless `project_prompt` or a \
-         card's DoD names it.\n",
+         specs, agent runtime including standing prompt, Forge) are host/operator setup; \
+         Project fields (`clone_repo`, optional sandbox override) seed the Initial plan; \
+         `project_prompt` carries Project-only standing extras; per-card intent/DoD names \
+         clone targets and card-specific gates. Boot, Settings, and Project fields do not \
+         belong in `project_prompt`. Name test/lint commands in the board standing prompt or \
+         `project_prompt` when they apply broadly; honr does not assume cargo or any \
+         toolchain unless those instructions or a card's DoD name it.\n",
     );
     push_sandbox_prompt_section(&mut b, sandbox_prompt);
     b
@@ -4071,7 +4101,7 @@ mod tests {
         );
         assert!(
             b.contains("Do not assume cargo"),
-            "must point at Project prompt for gates: {b}"
+            "must point at Board prompt for gates: {b}"
         );
         assert!(
             b.contains("/sandbox/.honr/report.json"),
@@ -4080,7 +4110,7 @@ mod tests {
     }
 
     #[test]
-    fn briefing_presents_plan_before_project_prompt() {
+    fn briefing_presents_plan_before_standing_prompts() {
         let b = briefing(
             &grant(),
             BranchState::Fresh,
@@ -4088,20 +4118,22 @@ mod tests {
             &cross_fork_repo(),
         );
         let plan_pos = b.find("Project Plan").expect("must have Plan section");
+        let protocol_pos = b
+            .find("Protocol (hardwired):")
+            .expect("must have protocol heading");
+        let board_pos = b
+            .find("Board prompt (standing agent policy)")
+            .expect("must have board_prompt heading");
         let prompt_pos = b
-            .find("Project prompt (standing agent policy)")
+            .find("Project prompt (Project standing extras)")
             .expect("must have project_prompt heading");
         assert!(
-            plan_pos < prompt_pos,
-            "Plan must precede project_prompt: plan={plan_pos} prompt={prompt_pos}"
+            plan_pos < protocol_pos && protocol_pos < board_pos && board_pos < prompt_pos,
+            "Plan then protocol then board then project: plan={plan_pos} protocol={protocol_pos} board={board_pos} project={prompt_pos}"
         );
         assert!(
-            !b.contains("standing instructions"),
-            "must use standing agent policy heading: {b}"
-        );
-        assert!(
-            b.contains("Project-level quality gates live in the Project prompt"),
-            "must point at project_prompt for gates: {b}"
+            b.contains("board-wide quality gates live in the Board prompt"),
+            "must point at board prompt for gates: {b}"
         );
         assert!(
             b.contains("card-specific gates live in this card's definition of done"),
@@ -4110,32 +4142,21 @@ mod tests {
     }
 
     #[test]
-    fn card_names_come_from_branch_prefix_not_only_honr_literal() {
+    fn card_names_are_fixed_honr_stem() {
+        assert_eq!(crate::schema::card_branch_name(173), "honr/card-173");
         assert_eq!(
-            crate::schema::card_branch_name("honr", 173),
-            "honr/card-173"
-        );
-        assert_eq!(
-            crate::schema::card_branch_name("widgets", 173),
-            "widgets/card-173"
-        );
-        assert_eq!(
-            crate::schema::card_sandbox_name("widgets", 173, 2),
-            "widgets-card-173-a2"
+            crate::schema::card_sandbox_name(173, 2),
+            "honr-card-173-a2"
         );
         let b = briefing(
             &grant(),
             BranchState::Fresh,
-            &crate::schema::card_branch_name("widgets", 7),
+            &crate::schema::card_branch_name(7),
             &cross_fork_repo(),
         );
         assert!(
-            b.contains("widgets/card-7"),
-            "briefing must use configured prefix: {b}"
-        );
-        assert!(
-            !b.contains("honr/card-7"),
-            "must not force honr/card- hardcode: {b}"
+            b.contains("honr/card-7"),
+            "briefing must name the card branch: {b}"
         );
     }
 
@@ -4616,7 +4637,7 @@ mod tests {
         assert!(b.contains("Sandbox prompt (seat notes):"), "{b}");
         assert!(b.contains("Use oc with API_URL."), "{b}");
         let proj_pos = b
-            .find("Project prompt (standing agent policy):")
+            .find("Project prompt (Project standing extras):")
             .expect("project prompt");
         let sbx_pos = b.find("Sandbox prompt (seat notes):").expect("sandbox prompt");
         let card_pos = b.find("Your card:").expect("your card");
@@ -4812,83 +4833,63 @@ mod tests {
         item.state = State::Review;
         item.environment = Some("honr-card-9-a2".into());
 
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
 
         // Backlog with environment set (e.g. Request changes)
         item.state = State::Backlog;
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
 
         // Prior attempt for the same card is kept (prefix match) so create
         // cannot race reconcile; run_card deletes the previous name explicitly.
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a1", "honr"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a1"));
 
         // Halt clears environment — sweeper must not preserve the box.
         item.environment = None;
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1", "honr"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a1"));
         item.environment = Some("honr-card-9-a2".into());
 
         item.state = State::NeedsHuman;
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
-        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a3", "honr"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a2"));
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a3"));
 
         // Terminal card sandbox is not kept (reaped)
         item.state = State::Done;
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
 
         item.state = State::Retired;
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2", "honr"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-9-a2"));
 
         // Deleted item sandbox is not kept
-        assert!(!should_keep_sandbox(None, "honr-card-9-a2", "honr"));
+        assert!(!should_keep_sandbox(None, "honr-card-9-a2"));
 
         // Other cards' sandboxes are not kept
         item.state = State::Backlog;
-        assert!(!should_keep_sandbox(Some(&item), "honr-card-8-a1", "honr"));
+        assert!(!should_keep_sandbox(Some(&item), "honr-card-8-a1"));
 
-        // Configured non-honr prefix keeps matching sandboxes.
-        item.environment = Some("widgets-card-9-a2".into());
-        assert!(should_keep_sandbox(
-            Some(&item),
-            "widgets-card-9-a1",
-            "widgets"
-        ));
-        assert!(!should_keep_sandbox(
-            Some(&item),
-            "honr-card-9-a1",
-            "widgets"
-        ));
+        // Fixed stem is honr — foreign prefixes are not a keep match for this card.
+        item.environment = Some("honr-card-9-a2".into());
+        assert!(should_keep_sandbox(Some(&item), "honr-card-9-a1"));
+        assert!(!should_keep_sandbox(Some(&item), "widgets-card-9-a1"));
     }
 
     #[test]
     fn should_keep_cockpit_sandbox_follows_board_session() {
         let mut session = CockpitSession::new(Some("honr-cockpit".into()), Some("conv-1".into()));
-        assert!(should_keep_cockpit_sandbox(
-            Some(&session),
-            "honr-cockpit",
-            "honr"
-        ));
+        assert!(should_keep_cockpit_sandbox(Some(&session), "honr-cockpit"));
         // Stable singleton name kept even before Board records environment.
         let bare = CockpitSession::new(None, None);
-        assert!(should_keep_cockpit_sandbox(
-            Some(&bare),
-            "honr-cockpit",
-            "honr"
-        ));
-        assert!(!should_keep_cockpit_sandbox(
-            Some(&bare),
-            "honr-card-1-a1",
-            "honr"
-        ));
+        assert!(should_keep_cockpit_sandbox(Some(&bare), "honr-cockpit"));
+        assert!(!should_keep_cockpit_sandbox(Some(&bare), "honr-card-1-a1"));
 
         session.status = CockpitSessionStatus::Parked;
         assert!(
-            should_keep_cockpit_sandbox(Some(&session), "honr-cockpit", "honr"),
+            should_keep_cockpit_sandbox(Some(&session), "honr-cockpit"),
             "park keeps sandbox"
         );
 
         assert!(
-            !should_keep_cockpit_sandbox(None, "honr-cockpit", "honr"),
+            !should_keep_cockpit_sandbox(None, "honr-cockpit"),
             "stop/absent session reaps"
         );
     }
@@ -5185,6 +5186,22 @@ mod tests {
         assert!(!is_infrastructure("agent panicked in user code"));
     }
 
+    /// Without these matches, a flaky OpenShell h2/hyper drop burns the card's
+    /// 3-strike run budget even though the agent never ran.
+    #[test]
+    fn h2_broken_pipe_does_not_burn_card_run_budget() {
+        assert!(is_infrastructure(
+            "openshell sandbox exec: status: Unknown, message: \"h2 protocol error: error reading a body from connection\", details: [], metadata: MetadataMap { headers: {} }"
+        ));
+        assert!(is_infrastructure(
+            "openshell sandbox exec: error reading a body from connection: Broken pipe (os error 32)"
+        ));
+        assert!(is_infrastructure(
+            "openshell sandbox exec: connection closed before message completed"
+        ));
+        assert!(!is_infrastructure("agent exited 1: cargo test failed"));
+    }
+
     #[test]
     fn refresh_script_fetches_and_rebases_in_place() {
         let cfg = repo_cfg();
@@ -5415,6 +5432,9 @@ mod tests {
             intent: "why the card exists".into(),
             definition_of_done: None,
             project_title: Some("Test Project".into()),
+            board_prompt: Some(
+                "Do not assume cargo. Name quality gates in standing prompts.".into(),
+            ),
             project_prompt: Some("Follow the Plan.".into()),
             plan_summary: Some("Do the thing.".into()),
             plan_tasks: vec![crate::model::PlanTaskBrief {
@@ -6686,7 +6706,7 @@ mod tests {
                 base: Some(crate::model::PullRequestEnd::new("honr-app/honr", "main")),
                 head: Some(crate::model::PullRequestEnd::new(
                     "honr-app/honr",
-                    crate::schema::card_branch_name("honr", task.id),
+                    crate::schema::card_branch_name(task.id),
                 )),
             }),
         );
@@ -6893,7 +6913,7 @@ mod tests {
                 base: Some(crate::model::PullRequestEnd::new("honr-app/honr", "main")),
                 head: Some(crate::model::PullRequestEnd::new(
                     "honr-app/honr",
-                    crate::schema::card_branch_name("honr", review.id),
+                    crate::schema::card_branch_name(review.id),
                 )),
             }),
         );
@@ -7021,7 +7041,7 @@ mod tests {
                 base: Some(crate::model::PullRequestEnd::new("honr-app/honr", "main")),
                 head: Some(crate::model::PullRequestEnd::new(
                     "honr-app/honr",
-                    crate::schema::card_branch_name("honr", review.id),
+                    crate::schema::card_branch_name(review.id),
                 )),
             }),
         );
@@ -7108,7 +7128,7 @@ mod tests {
                 base: Some(crate::model::PullRequestEnd::new("honr-app/honr", "main")),
                 head: Some(crate::model::PullRequestEnd::new(
                     "honr-app/honr",
-                    crate::schema::card_branch_name("honr", review.id),
+                    crate::schema::card_branch_name(review.id),
                 )),
             }),
         );

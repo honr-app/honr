@@ -1259,7 +1259,7 @@ export function DetailDrawer({
             </Section>
           )}
 
-          <Section title="Project prompt">
+          <Section title="Project prompt (optional extras)">
             <p className="dim" style={{ marginBottom: 8 }}>
               Instructions every Task agent in this Project sees.
             </p>

@@ -7,10 +7,11 @@ Every term the rest of the docs assume, in one place.
 | Term | Meaning |
 |---|---|
 | **Card** | Any item on the board. A card is either a Project or a Task. |
-| **Project** | Groups Tasks, the Plan, `clone_repo`, standing instructions (`project_prompt`), and an optional sandbox override. Agents claim Tasks, not Projects. |
-| **`project_prompt`** | Standing agent instructions on a Project. Seeded from `DEFAULT_PROJECT_PROMPT` on create. Carries escalation rules, clone-target protocol, plan/split/report paths, and Project-wide quality gates — not boot config, Settings, or `clone_repo`. Inherited by every Task claim. |
-| **Quality gates** | Test/lint commands agents run before publish. Named in `project_prompt` when Project-wide, or in a card's definition of done when card-specific. honr does not assume `cargo` or any toolchain unless prose names it. |
-| **Configuration layers** | Stacked setup: process boot → board Settings → Project fields → `project_prompt` → per-card intent/DoD. Boot, Settings, and Project fields are operator concerns; agents read `project_prompt` and card prose at claim. See [Configuration](configuration.md). |
+| **Project** | Groups Tasks, the Plan, `clone_repo`, optional `project_prompt` extras, and an optional sandbox override. Agents claim Tasks, not Projects. |
+| **Standing prompt** | Optional board-wide agent policy on Settings → Agent runtime. Empty by default; hardwired protocol is separate. Injected on claim when non-empty. |
+| **`project_prompt`** | Optional Project-only standing extras. Not seeded with the board essay on create. |
+| **Quality gates** | Test/lint commands agents run before publish. Named in the board standing prompt, `project_prompt`, or a card's definition of done. honr does not assume `cargo` or any toolchain unless prose names it. |
+| **Configuration layers** | Stacked setup: process boot → board Settings (incl. standing prompt) → Project fields → optional `project_prompt` → per-card intent/DoD. See [Configuration](configuration.md). |
 | **Task** | The claimable leaf. Initial plan, implementation cards, and follow-ups are all Tasks under a Project. |
 | **Initial plan** | The Task honr creates with every Project. An agent claims it, reads the repo, and proposes the sibling Tasks. |
 | **Proposal** | The breakdown an Initial plan (or a split) hands back. Editable until you Approve; Approve turns it into real cards. |
@@ -71,7 +72,7 @@ and **steer** over both when the note can wait.
 | **Sandbox spec** | The named recipe for a sandbox: image, CPU, memory, engine, optional model / env / prompt, attached providers, and a reference to a Policy by id. Managed in Settings → OpenShell → Sandbox specs. Spec `env` is non-secret (overlaid after `agent_env` at create; profile wins on clash); secrets belong on Providers. |
 | **Engine** | Which agent CLI runs in the sandbox: `cursor`, `claude`, `opencode`, or `agy`. |
 | **Provider** | A credential OpenShell holds and injects on egress — inference, GitHub. Secrets never enter the sandbox. |
-| **Briefing** | What the supervisor assembles at claim time: Plan, `project_prompt`, optional sandbox-spec `prompt` as **Sandbox prompt (seat notes):** (cold / Cockpit only — omitted on resume), then card intent/DoD/notes, remotes, and protocol paths. Points at `project_prompt` and DoD for quality gates — does not invent them. |
+| **Briefing** | What the supervisor assembles at claim time: Plan, hardwired protocol, board standing prompt, optional `project_prompt`, optional sandbox-spec `prompt` as **Sandbox prompt (seat notes):** (cold / Cockpit only — omitted on resume), then card intent/DoD/notes and remotes. Points at standing text and DoD for quality gates — does not invent them. |
 | **Lease** | The claim an agent holds on a card. Expires if output stops, so another run can take the card. |
 | **Compute driver** | Whatever provides the Docker-compatible API OpenShell needs: podman, Colima, Docker. Your choice, outside honr. |
 

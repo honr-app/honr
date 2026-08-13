@@ -219,10 +219,6 @@ pub struct AgentConfig {
     /// problem. Without a count, early failures requeue forever.
     #[serde(default = "d_max_attempts")]
     pub max_attempts: u32,
-    /// Git branch / sandbox name stem. Branches are `{prefix}/card-{id}`;
-    /// sandboxes are `{slug}-card-{id}-a{n}`. Default `honr`.
-    #[serde(default = "d_branch_prefix")]
-    pub branch_prefix: String,
 }
 
 fn d_image() -> String { "honr-sandbox:latest".into() }
@@ -232,41 +228,28 @@ fn d_engine() -> String { "cursor".into() }
 fn d_concurrent() -> usize { 2 }
 fn d_agent_timeout() -> u64 { 1800 }
 fn d_max_attempts() -> u32 { 3 }
-fn d_branch_prefix() -> String { "honr".into() }
 
-/// Normalize a branch prefix: trim, strip surrounding `/`, fall back to `honr`.
-pub fn normalize_branch_prefix(prefix: &str) -> String {
-    let p = prefix.trim().trim_matches('/');
-    if p.is_empty() {
-        d_branch_prefix()
-    } else {
-        p.to_string()
-    }
+/// Fixed stem for card branches / sandboxes / cockpit (`honr/card-N`, …).
+pub const BRANCH_STEM: &str = "honr";
+
+/// Card feature branch: `honr/card-{id}`.
+pub fn card_branch_name(id: impl std::fmt::Display) -> String {
+    format!("{BRANCH_STEM}/card-{id}")
 }
 
-/// OpenShell-safe slug of the branch prefix (`/` → `-`).
-pub fn sandbox_prefix_slug(prefix: &str) -> String {
-    normalize_branch_prefix(prefix).replace('/', "-")
+/// Sandbox name: `honr-card-{id}-a{attempt}`.
+pub fn card_sandbox_name(id: impl std::fmt::Display, attempt: u32) -> String {
+    format!("{BRANCH_STEM}-card-{id}-a{attempt}")
 }
 
-/// Card feature branch: `{prefix}/card-{id}`.
-pub fn card_branch_name(prefix: &str, id: impl std::fmt::Display) -> String {
-    format!("{}/card-{}", normalize_branch_prefix(prefix), id)
+/// Prefix match stem for reconcile keep: `honr-card-{id}-`.
+pub fn card_sandbox_stem(id: impl std::fmt::Display) -> String {
+    format!("{BRANCH_STEM}-card-{id}-")
 }
 
-/// Sandbox name: `{slug}-card-{id}-a{attempt}`.
-pub fn card_sandbox_name(prefix: &str, id: impl std::fmt::Display, attempt: u32) -> String {
-    format!("{}-card-{}-a{}", sandbox_prefix_slug(prefix), id, attempt)
-}
-
-/// Prefix match stem for reconcile keep: `{slug}-card-{id}-`.
-pub fn card_sandbox_stem(prefix: &str, id: impl std::fmt::Display) -> String {
-    format!("{}-card-{}-", sandbox_prefix_slug(prefix), id)
-}
-
-/// Stable singleton name for the control-plane cockpit: `{slug}-cockpit`.
-pub fn cockpit_sandbox_name(prefix: &str) -> String {
-    format!("{}-cockpit", sandbox_prefix_slug(prefix))
+/// Stable singleton name for the control-plane cockpit: `honr-cockpit`.
+pub fn cockpit_sandbox_name() -> String {
+    format!("{BRANCH_STEM}-cockpit")
 }
 
 impl Default for AgentConfig {
@@ -281,7 +264,6 @@ impl Default for AgentConfig {
             max_concurrent: d_concurrent(),
             agent_timeout_secs: d_agent_timeout(),
             max_attempts: d_max_attempts(),
-            branch_prefix: d_branch_prefix(),
         }
     }
 }
@@ -441,17 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn card_branch_and_sandbox_names_use_prefix() {
-        assert_eq!(card_branch_name("honr", 7), "honr/card-7");
-        assert_eq!(card_branch_name("acme", 7), "acme/card-7");
-        assert_eq!(card_sandbox_name("honr", 7, 2), "honr-card-7-a2");
-        assert_eq!(card_sandbox_name("acme", 7, 1), "acme-card-7-a1");
-        assert_eq!(card_branch_name("  /acme/  ", 3), "acme/card-3");
-        assert_eq!(card_sandbox_name("acme/widgets", 3, 1), "acme-widgets-card-3-a1");
-        assert_eq!(card_branch_name("", 1), "honr/card-1");
-        assert_eq!(card_sandbox_stem("honr", 9), "honr-card-9-");
-        assert_eq!(cockpit_sandbox_name("honr"), "honr-cockpit");
-        assert_eq!(cockpit_sandbox_name("acme/widgets"), "acme-widgets-cockpit");
+    fn card_branch_and_sandbox_names_are_fixed_honr() {
+        assert_eq!(card_branch_name(7), "honr/card-7");
+        assert_eq!(card_sandbox_name(7, 2), "honr-card-7-a2");
+        assert_eq!(card_sandbox_stem(9), "honr-card-9-");
+        assert_eq!(cockpit_sandbox_name(), "honr-cockpit");
     }
 
     #[test]

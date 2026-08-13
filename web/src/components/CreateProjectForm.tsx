@@ -129,13 +129,13 @@ export function CreateProjectForm({
             />
           </label>
           <label>
-            Project prompt (optional)
+            Project prompt (optional extras)
             <textarea
               className="search-input"
               value={projectPrompt}
               disabled={busy}
               rows={4}
-              placeholder="Standing instructions for agents on this Project…"
+              placeholder="Project-only standing extras (board policy is Settings → Agent runtime)…"
               onChange={(e) => setProjectPrompt(e.target.value)}
               data-testid="create-project-prompt"
             />

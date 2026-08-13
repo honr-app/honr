@@ -33,7 +33,7 @@ The session is a singleton record on the Board, not a file or a wrapper script:
 
 | Field | Meaning |
 |---|---|
-| `environment` | Sandbox name — defaults to `{branch_prefix}-cockpit`, usually `honr-cockpit` |
+| `environment` | Sandbox name — defaults to `honr-cockpit` |
 | `conversation_id` | Chat id the session resumes; minted if missing |
 | `status` | `Running`, or `Parked` — a hold that keeps sandbox and conversation |
 
@@ -45,7 +45,7 @@ Which image, CPU, memory, engine, and **Policy** (by id) Cockpit gets comes
 from the **cockpit sandbox spec** (Settings → OpenShell → Sandbox specs). Edit
 allow-list YAML under **Policies**; the spec only references it. Live policy is
 set at create and fixed for that sandbox. The sandbox name stays
-`{branch_prefix}-cockpit` regardless of which spec built it, so you can point
+`honr-cockpit` regardless of which spec built it, so you can point
 Cockpit at any spec you like.
 
 ## Driving it from the CLI

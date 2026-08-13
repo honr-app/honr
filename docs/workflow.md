@@ -80,28 +80,24 @@ claim uses for resume, rebase, and request-changes.
 honr stacks configuration in layers ([Configuration](configuration.md)):
 
 1. **Process boot** — database URL, compile-time hierarchy.
-2. **Board Settings** — Policies, sandbox specs, agent runtime, Forge/providers.
+2. **Board Settings** — Policies, sandbox specs, agent runtime (standing prompt), Forge/providers.
 3. **Project fields** — `clone_repo`, optional sandbox override.
-4. **`project_prompt`** — standing agent policy for the Project.
+4. **`project_prompt`** — optional Project-only standing extras.
 5. **Per-card intent / DoD** — clone target and card-specific work.
 
 Boot, Settings, and Project fields are operator setup — they do not belong in
-`project_prompt`. Agents read `project_prompt` on every claim; the supervisor
-puts it in the briefing **before** the Plan and the card's intent/DoD.
+standing prompts. Cold briefings stack hardwired protocol, then the board
+standing prompt (Settings → Agent runtime), then optional `project_prompt`,
+then card prose.
 
-Put Project-wide rules in `project_prompt`: escalation and invariants, how to
-name clone targets in Task prose, the `plan.json` / `split.json` /
-`report.json` protocol, and house style. New Projects seed the compiled default
-from `src/model.rs`; edit the field when your repo needs different standing
-instructions.
+Put board-wide rules in the standing prompt when you want them: escalation,
+house style, and shared quality gates. Use `project_prompt` only when one
+Project needs extras. Fresh boards leave standing prompt empty.
 
-**Quality gates** — commands agents must run before publish — go in
-`project_prompt` when they apply to every card in the Project. Name the
-commands explicitly (`cargo test && cargo clippy …`, `npm test`, …). honr does
-**not** assume `cargo` or any toolchain unless `project_prompt` or the card's
-definition of done names it. A one-off gate for a single card can live in that
-card's DoD instead. Repeat neither gates nor standing policy on every Task when
-`project_prompt` already covers them.
+**Quality gates** — commands agents must run before publish — go in the board
+standing prompt when they apply everywhere, or in `project_prompt` / card DoD
+when narrower. Name the commands explicitly. honr does **not** assume `cargo`
+unless those instructions name it.
 
 ## Triage order
 

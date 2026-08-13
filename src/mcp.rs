@@ -658,12 +658,11 @@ impl Operator {
         description = "Create a Project container. Requires clone_repo (`owner/name`) — the \
                        repository Initial plan clones into for planning (and the default for \
                        proposed Tasks). Auto-seeds one Backlog Initial plan Task with that \
-                       clone target stamped in. Optional project_prompt overrides the compiled \
-                       default standing agent policy (escalation, clone-target protocol, \
-                       plan/split/report, Project-wide quality gates) — not boot config, \
-                       Settings, or clone_repo. Dispatch the Initial plan when ready; the \
-                       planner writes plan.json (each proposed Task names its clone target \
-                       in intent/DoD, usually the same clone_repo)."
+                       clone target stamped in. Optional project_prompt is Project-only standing \
+                       extras; board-wide policy is Settings → Agent runtime standing prompt. \
+                       Dispatch the Initial plan when ready; the planner writes plan.json (each \
+                       proposed Task names its clone target in intent/DoD, usually the same \
+                       clone_repo)."
     )]
     fn create_project(&self, Parameters(a): Parameters<CreateProjectArg>) -> Out<Ack> {
         if a.parent.is_some() {
@@ -1217,19 +1216,19 @@ impl ServerHandler for Operator {
                  mid-turn). MainAdvanced does not park live runs; Review catch-up observes \
                  GitHub mergeable and bounces only on CONFLICTING.\n\n\
                  Configuration layers: process boot and board Settings (Policies, sandbox \
-                 specs, agent runtime, Forge) are operator setup; Project fields (clone_repo, \
-                 optional sandbox override) seed the Initial plan; project_prompt is standing \
-                 agent policy workers inherit on every claim; per-card intent/DoD names clone \
+                 specs, agent runtime including standing prompt, Forge) are operator setup; \
+                 Project fields (clone_repo, optional sandbox override) seed the Initial plan; \
+                 project_prompt is Project-only standing extras; per-card intent/DoD names clone \
                  targets and card-specific gates. Boot, Settings, and Project fields do not \
-                 belong in project_prompt — put escalation rules, clone-target protocol, \
-                 plan/split/report paths, and Project-wide quality gates there (edit via \
-                 update on the Project). Name test/lint commands explicitly; honr does not \
-                 assume cargo or any toolchain unless project_prompt or a card's DoD names it. \
-                 Task inputs are the Plan. Initial plan and impl splits write a proposal on \
-                 the card → Review; Approve creates sibling Tasks. Read item_detail's \
-                 proposal/Plan before approving; a card that passes its gates can still be \
-                 building the wrong thing, because coherence is not a property of any single \
-                 card."
+                 belong in project_prompt — put board-wide escalation and quality gates in \
+                 Settings → Agent runtime standing prompt; Project-specific rules via update on \
+                 the Project. Name test/lint commands explicitly; honr does not assume cargo \
+                 or any toolchain unless the board standing prompt, project_prompt, or a card's \
+                 DoD names it. Task inputs are the Plan. Initial plan and impl splits write a \
+                 proposal on the card → Review; Approve creates sibling Tasks. Read \
+                 item_detail's proposal/Plan before approving; a card that passes its gates can \
+                 still be building the wrong thing, because coherence is not a property of any \
+                 single card."
             }
             McpSeat::Host => {
                 "honr — host MCP seat: operator tools plus worker verbs \
@@ -2090,6 +2089,10 @@ mod tests {
         assert!(
             instructions.contains("do not assume cargo") || instructions.contains("does not assume cargo"),
             "operator instructions must not invent cargo gates: {instructions}"
+        );
+        assert!(
+            instructions.contains("standing prompt") || instructions.contains("Agent runtime"),
+            "operator instructions must mention board standing prompt: {instructions}"
         );
         assert!(
             instructions.contains("Boot, Settings, and Project fields"),

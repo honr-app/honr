@@ -8,21 +8,21 @@ layers are what agents read at claim time. See also
 | Layer | Who sets it | Role |
 |---|---|---|
 | **Process boot** | Host / deploy | Database URL (`HONR_DATABASE_URL` else `sqlite:honr.db`). Hierarchy is compile-time Project + Task. |
-| **Board Settings** | Operator | Policies, sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval), OpenShell gateway/providers (incl. shipped `github-app`), and Forge. |
+| **Board Settings** | Operator | Policies, sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval, **standing prompt**), OpenShell gateway/providers (incl. shipped `github-app`), and Forge. |
 | **Project fields** | Operator | Default clone repo (`clone_repo`), optional sandbox spec override (`sandbox_profile_id`). Seeded into Project intent and the Initial plan. |
-| **`project_prompt`** | Operator | Standing agent policy for the Project — escalation rules, clone-target protocol, plan/split/report paths, and where to name **quality gates**. Seeded from [`DEFAULT_PROJECT_PROMPT`](../src/model.rs) on create; editable per Project. |
+| **`project_prompt`** | Operator | Optional Project-only standing extras. Board-wide policy lives in Agent runtime standing prompt. |
 | **Per-card intent / DoD** | Operator (per Task) | Card-specific work: clone target (`owner/name`), card-local gates, and the operational proof. Notes can override at claim time. |
 
-**Boot, Settings, and Project fields are operator concerns — not `project_prompt`.**
-Do not put database URLs, Policy YAML, or sandbox spec ids in `project_prompt`.
-Agents inherit `project_prompt` on every claim; the supervisor assembles it into
-the briefing ahead of the Plan and the card's own intent/DoD.
+**Boot, Settings, and Project fields are operator concerns — not agent essay text.**
+Do not put database URLs, Policy YAML, or sandbox spec ids in standing prompts.
+Cold briefings stack hardwired protocol, then the board standing prompt, then
+optional `project_prompt`, then card intent/DoD.
 
 **Quality gates** — test/lint commands agents should run before publish — belong
-in `project_prompt` when they apply Project-wide. Name the commands explicitly
-(`cargo test`, `npm test`, …). honr does **not** assume `cargo` or any other
-toolchain unless `project_prompt` (or a card's definition of done) names it.
-Card-specific gates can live in that card's DoD instead.
+in the board standing prompt when board-wide, or in `project_prompt` /
+card DoD when narrower. Name the commands explicitly (`cargo test`, `npm test`,
+…). honr does **not** assume `cargo` or any other toolchain unless those
+instructions name it.
 
 ## Board database
 
@@ -81,26 +81,26 @@ When you create a Project (board UI, REST `POST /api/items`, or MCP
 |---|---|---|
 | `clone_repo` | Project intent | Default `owner/name` for the Initial plan and for Tasks that omit an explicit clone line. Required on create. |
 | `sandbox_profile_id` | Project row | Optional override of the board default sandbox spec. Unset means inherit Settings. |
-| `project_prompt` | Project row | Standing instructions every worker sees. Defaults to compiled `DEFAULT_PROJECT_PROMPT` when omitted. |
+| `project_prompt` | Project row | Optional Project-only standing extras. Empty unless the operator supplies one. |
 
 `project_prompt` is **not** a substitute for Settings or Project fields. Keep
 boot-time config, OpenShell Policies, sandbox specs, and `clone_repo` where
-they belong. Use `project_prompt` for rules agents need on every card —
-invariants, escalation, naming clone targets in Task prose, the
-`plan.json` / `split.json` / `report.json` protocol, and Project-wide quality
-gates.
+they belong. Board-wide standing policy is **Settings → Agent runtime →
+standing prompt**. Use `project_prompt` only for rules that apply inside one
+Project.
 
 Per-card **intent** and **definition of done** carry the card's clone target
 and any gates that apply to that card only. The supervisor never invents gates;
-it points agents at `project_prompt` and the card DoD.
+it points agents at the board / Project standing text and the card DoD.
 
 ## Agent runtime
 
 **Settings → Agent runtime** (REST: `/api/agent-runtime`): default engine,
-concurrency, agent timeout, max attempts, branch prefix, and sweep interval.
-Fresh boards use built-in defaults; edits persist on the board. OpenShell
-gateway + a sandbox spec are the practical readiness gates before dispatch does
-anything useful.
+concurrency, agent timeout, max attempts, sweep interval, and **standing
+prompt** (optional board-wide agent policy; empty by default). Card branches /
+sandboxes use a fixed `honr` stem (`honr/card-*`, `honr-cockpit`) — not a
+Settings knob. OpenShell gateway + a sandbox spec are the practical readiness
+gates before dispatch does anything useful.
 
 ## Policies
 

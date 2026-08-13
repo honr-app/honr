@@ -1108,8 +1108,8 @@ const agentRuntimeHtml = renderToString(
       max_concurrent: 1,
       agent_timeout_secs: 1800,
       max_attempts: 3,
-      branch_prefix: "honr",
       sweep_interval_ms: 2000,
+      standing_prompt: "Board policy here.",
     },
     onDraftChange: () => {},
     onSave: () => {},
@@ -1121,7 +1121,8 @@ assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-enabled\"")
 assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-providers\""), "Providers field removed");
 assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-vertex-location\""), "Vertex fields removed");
 assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-quality-gates\""), "Quality gates removed");
-assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-branch-prefix\""), "Agent runtime branch prefix");
+assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-branch-prefix\""), "Branch prefix removed");
+assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-standing-prompt\""), "Agent runtime standing prompt");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-sweep\""), "Agent runtime sweep interval");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-save\""), "Agent runtime save control");
 
