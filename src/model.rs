@@ -294,92 +294,37 @@ mod initial_plan_title_tests {
     }
 }
 
-/// Default standing instructions seeded on every new Project (`project_prompt`).
-///
-/// Agent-facing standing policy only — not process boot or board Settings.
-/// Clone targets are named in each Task's intent/DoD. After report, card
-/// `pull_request` drives resume remotes. Name quality gates here when needed.
-pub const DEFAULT_PROJECT_PROMPT: &str = "\
+/// Hardwired protocol always injected into card briefings — works even when
+/// the board standing prompt is cleared. Shared agent policy belongs in
+/// Settings → Agent runtime (`standing_prompt`), not here.
+pub const PROTOCOL_MINIMUM: &str = "\
 Merging is a human action — approving in honr surfaces the PR; it never merges.\n\
-Do not weaken machine.rs invariants, supervisor budget enforcement, or the board sandbox-profile policy; escalate instead.\n\
 Sandbox stack failures present as hangs — treat silence as failure and escalate rather than looping.\n\
-Network / egress denials: escalate; do not invent workarounds. Humans decide policy changes.\n\
-Configuration layers: process boot (database URL, compile-time hierarchy); board Settings \
-(OpenShell policies/sandbox specs, agent runtime, forge/providers); Project fields (default clone \
-repo, sandbox override); project_prompt (this field — standing agent policy); per-card \
-intent/definition_of_done (clone targets, card-specific gates).\n\
-Boot, Settings, and Project fields are operator concerns — not project_prompt. Keep escalation \
-rules, clone-target naming, plan/split/report protocol, and quality-gate placeholders here.\n\
 Name the repository to clone in each Task's intent and/or definition of done \
 (`owner/name`, and push remote when it differs). Do not invent an owner/name from context; \
 if the card text is silent or ambiguous, escalate.\n\
-Name this Project's quality gates (test/lint commands) here when agents should run them before \
-publish — do not assume cargo or any other toolchain unless named.\n\
 Initial plan: write /sandbox/.honr/plan.json; each proposed task names its \
 clone target in intent/DoD; human Approve creates Tasks.\n\
 If impl work is bigger than one card, write /sandbox/.honr/split.json (same task shape; name \
 clone targets in each child's intent/DoD); card goes to Review — Approve creates siblings. \
 Never nest under a Task.\n\
+When the work is done, write /sandbox/.honr/report.json (url/base/head per report.schema.json) \
+and publish the PR on this card's branch.\n\
 ";
 
+/// Default board standing prompt (Settings → Agent runtime). Seeded into
+/// [`AgentRuntimeConfig::standing_prompt`] when Agent runtime is first created.
+/// Empty by default — board-wide policy is opt-in; hardwired protocol lives in
+/// [`PROTOCOL_MINIMUM`]. Project `project_prompt` remains Project-only extras.
+pub const DEFAULT_BOARD_STANDING_PROMPT: &str = "";
+
 #[cfg(test)]
-mod default_project_prompt_tests {
-    use super::DEFAULT_PROJECT_PROMPT;
+mod standing_prompt_tests {
+    use super::{DEFAULT_BOARD_STANDING_PROMPT, PROTOCOL_MINIMUM};
 
     #[test]
-    fn configuration_layers_are_explicit() {
-        let p = DEFAULT_PROJECT_PROMPT;
-        assert!(
-            p.contains("process boot"),
-            "must name process boot: {p}"
-        );
-        assert!(
-            p.contains("board Settings"),
-            "must name board Settings: {p}"
-        );
-        assert!(
-            p.contains("project_prompt"),
-            "must name project_prompt: {p}"
-        );
-        assert!(
-            p.contains("intent") && p.contains("definition_of_done"),
-            "must name per-card prose: {p}"
-        );
-        assert!(
-            p.contains("Boot, Settings, and Project fields are operator concerns"),
-            "must separate operator config from project_prompt: {p}"
-        );
-    }
-
-    #[test]
-    fn clone_targets_are_named_in_task_prose() {
-        let p = DEFAULT_PROJECT_PROMPT;
-        assert!(
-            p.contains("intent") && p.contains("definition of done"),
-            "must point at task text for clone targets: {p}"
-        );
-        assert!(
-            p.contains("Name the repository to clone"),
-            "must instruct naming the clone target: {p}"
-        );
-    }
-
-    #[test]
-    fn quality_gates_are_placeholders_not_defaults() {
-        let p = DEFAULT_PROJECT_PROMPT;
-        assert!(
-            p.contains("do not assume cargo"),
-            "must not mandate cargo in global default: {p}"
-        );
-        assert!(
-            p.contains("quality gates"),
-            "must explain where to name gates: {p}"
-        );
-    }
-
-    #[test]
-    fn plan_and_split_protocol_is_preserved() {
-        let p = DEFAULT_PROJECT_PROMPT;
+    fn protocol_minimum_covers_plan_split_report_and_clone() {
+        let p = PROTOCOL_MINIMUM;
         assert!(
             p.contains("plan.json") && p.contains("Approve creates Tasks"),
             "Initial plan must use plan.json then Approve: {p}"
@@ -387,6 +332,26 @@ mod default_project_prompt_tests {
         assert!(
             p.contains("split.json") && p.contains("Approve creates siblings"),
             "split must use split.json then Approve: {p}"
+        );
+        assert!(
+            p.contains("report.json"),
+            "must name report.json: {p}"
+        );
+        assert!(
+            p.contains("Name the repository to clone"),
+            "must instruct naming the clone target: {p}"
+        );
+        assert!(
+            p.contains("Merging is a human action"),
+            "must keep merge invariant: {p}"
+        );
+    }
+
+    #[test]
+    fn board_standing_prompt_default_is_empty() {
+        assert!(
+            DEFAULT_BOARD_STANDING_PROMPT.trim().is_empty(),
+            "board standing prompt must not ship an essay by default"
         );
     }
 }
@@ -564,7 +529,8 @@ impl OpenShellProviderDesired {
 ///
 /// Empty boards seed from compiled [`Default`]. Board is source of truth after.
 /// Image / policy / cpu / memory live on sandbox profiles; work remotes on
-/// card `pull_request`.
+/// card `pull_request`. Branch / sandbox names are fixed `honr/card-*` (not
+/// a Settings knob).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentRuntimeConfig {
     /// Primary agent CLI (`cursor`, `agy`, `claude`, or `opencode`).
@@ -576,12 +542,13 @@ pub struct AgentRuntimeConfig {
     pub agent_timeout_secs: u64,
     #[serde(default = "default_runtime_attempts")]
     pub max_attempts: u32,
-    /// Branch / sandbox name stem (default `honr` → `honr/card-N`).
-    #[serde(default = "default_runtime_branch_prefix")]
-    pub branch_prefix: String,
     /// How often the supervisor checks overdue run deadlines (ms).
     #[serde(default = "default_runtime_sweep")]
     pub sweep_interval_ms: u64,
+    /// Board-wide standing agent policy (briefing). Default essay from
+    /// [`DEFAULT_BOARD_STANDING_PROMPT`]. Project `project_prompt` is extras.
+    #[serde(default = "default_runtime_standing_prompt")]
+    pub standing_prompt: String,
 }
 
 fn default_runtime_engine() -> String {
@@ -596,11 +563,11 @@ fn default_runtime_timeout() -> u64 {
 fn default_runtime_attempts() -> u32 {
     3
 }
-fn default_runtime_branch_prefix() -> String {
-    "honr".into()
-}
 fn default_runtime_sweep() -> u64 {
     2000
+}
+fn default_runtime_standing_prompt() -> String {
+    DEFAULT_BOARD_STANDING_PROMPT.to_string()
 }
 
 impl Default for AgentRuntimeConfig {
@@ -610,20 +577,20 @@ impl Default for AgentRuntimeConfig {
             max_concurrent: default_runtime_concurrent(),
             agent_timeout_secs: default_runtime_timeout(),
             max_attempts: default_runtime_attempts(),
-            branch_prefix: default_runtime_branch_prefix(),
             sweep_interval_ms: default_runtime_sweep(),
+            standing_prompt: default_runtime_standing_prompt(),
         }
     }
 }
 
 impl AgentRuntimeConfig {
-    /// Trim string fields; normalize branch prefix and counters.
+    /// Trim string fields; normalize counters.
     pub fn normalized(mut self) -> Self {
         self.engine = self.engine.trim().to_string();
         if self.engine.is_empty() {
             self.engine = default_runtime_engine();
         }
-        self.branch_prefix = crate::schema::normalize_branch_prefix(&self.branch_prefix);
+        self.standing_prompt = self.standing_prompt.trim().to_string();
         if self.max_concurrent == 0 {
             self.max_concurrent = 1;
         }
@@ -1533,7 +1500,8 @@ pub struct WorkItem {
     pub notes: Vec<Note>,
 
     /// Standing agent instructions for this Project (Tasks inherit via claim).
-    /// Null on Tasks. Seeded from [`DEFAULT_PROJECT_PROMPT`] on Project create.
+    /// Null on Tasks. Optional Project-only standing extras (board policy is
+    /// Settings → Agent runtime `standing_prompt`).
     #[serde(default)]
     pub project_prompt: Option<String>,
 

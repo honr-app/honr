@@ -49,7 +49,7 @@ impl PostgresBoardStore {
         &self.pool
     }
 
-    /// Load durable board rows into an in-memory `BoardState` (no agent_logs).
+    /// Load durable board rows into an in-memory `BoardState` (no live agent logs).
     pub async fn load_board_state(&self) -> Result<BoardState, StoreError> {
         let next_id = self.get_next_id().await?;
         let mut items_list = self.load_all_items().await?;
@@ -115,14 +115,13 @@ impl PostgresBoardStore {
             webhook_poll_tips,
             webhook_poll_pr_reviews,
             cockpit_session,
-            agent_logs: BTreeMap::new(),
             ..Default::default()
         };
         state.rebuild_hot_indexes();
         Ok(state)
     }
 
-    /// Replace durable rows with the in-memory snapshot (agent_logs stay in-process).
+    /// Replace durable rows with the in-memory snapshot (live agent logs stay in-process).
     pub async fn save_board_state(&self, state: &BoardState) -> Result<(), StoreError> {
         let mut tx = self
             .pool

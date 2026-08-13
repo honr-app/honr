@@ -84,8 +84,8 @@ const emptyAgentRuntime = (): AgentRuntimeConfig => ({
   max_concurrent: 2,
   agent_timeout_secs: 1800,
   max_attempts: 3,
-  branch_prefix: "honr",
   sweep_interval_ms: 2000,
+  standing_prompt: "",
 });
 
 /**
@@ -694,9 +694,9 @@ export function AgentRuntimePanelView({
     <section aria-labelledby="agent-runtime-title" data-testid="agent-runtime-panel">
       <h2 id="agent-runtime-title">Agent runtime</h2>
       <p className="dim">
-        Concurrency, timeouts, branch prefix, sweep interval, and the fallback
-        engine when a sandbox spec does not set one. Per-run engine is on
-        OpenShell → Sandbox specs.
+        Concurrency, timeouts, sweep interval, the board standing prompt, and the
+        fallback engine when a sandbox spec does not set one. Per-run engine is on
+        OpenShell → Sandbox specs. Card branches are fixed <code>honr/card-*</code>.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -768,18 +768,20 @@ export function AgentRuntimePanelView({
         </div>
 
         <label>
-          Branch prefix
-          <input
+          Standing prompt
+          <textarea
             className="search-input"
-            value={draft.branch_prefix}
+            rows={12}
+            value={draft.standing_prompt}
             disabled={busy}
-            placeholder="honr"
-            onChange={(e) => onDraftChange({ ...draft, branch_prefix: e.target.value })}
-            data-testid="agent-runtime-field-branch-prefix"
+            onChange={(e) =>
+              onDraftChange({ ...draft, standing_prompt: e.target.value })
+            }
+            data-testid="agent-runtime-field-standing-prompt"
           />
           <span className="dim sandbox-field-hint">
-            Branches are <code>{"{prefix}/card-{id}"}</code>; sandboxes{" "}
-            <code>{"{prefix}-card-{id}-a{n}"}</code>. Default <code>honr</code>.
+            Board-wide agent policy injected on every claim. Project{" "}
+            <code>project_prompt</code> is for Project-only extras.
           </span>
         </label>
 
@@ -853,7 +855,7 @@ function AgentRuntimePanel() {
         setDraft({
           ...emptyAgentRuntime(),
           ...rt,
-          branch_prefix: rt.branch_prefix || "honr",
+          standing_prompt: rt.standing_prompt ?? "",
         });
         setError(null);
       })
@@ -894,9 +896,9 @@ function AgentRuntimePanel() {
             setDraft({
               ...emptyAgentRuntime(),
               ...saved,
-              branch_prefix: saved.branch_prefix || "honr",
+              standing_prompt: saved.standing_prompt ?? "",
             });
-            setSavedHint("Saved. Next runs use this engine, prefix, and timeouts.");
+            setSavedHint("Saved. Next runs use this engine, standing prompt, and timeouts.");
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));

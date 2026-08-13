@@ -20,7 +20,15 @@ than as "maybe a bit more time."
 ```bash
 openshell logs <sandbox> -n 60     # grep for DENIED, ALLOWED, ssrf, HTTP:
 openshell sandbox list             # phases; Deleting still shows up here
+journalctl -u honr | grep 'openshell exec failed'   # board-side ExecSandbox drops
 ```
+
+Failed `ExecSandbox` / interactive setup paths in `src/openshell.rs` emit a
+structured `openshell exec failed` line with `gateway_endpoint`, `sandbox_name`,
+`sandbox_id`, `elapsed_ms`, and `request_id` (client-generated `x-request-id`,
+overwritten by the gateway echo when response headers arrive). Use that
+`request_id` to align board logs with gateway journalctl around the same h2
+stream.
 
 The card carries its sandbox name, so you can go from a stuck card to its logs
 directly.

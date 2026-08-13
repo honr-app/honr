@@ -28,13 +28,14 @@ use openshell_core::proto::{
     SandboxSpec as ProtoSandboxSpec, SandboxTemplate, ServiceStatus,
     UpdateProviderProfilesRequest, UpdateProviderRequest, exec_sandbox_event, exec_sandbox_input,
 };
+use rand::Rng;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use prost_types::{Struct, Value, value::Kind};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
@@ -1534,42 +1535,69 @@ impl OpenShell {
         }
 
         let remote = timeout.as_secs().saturating_sub(5).max(1);
-        self.with_timeout(&format!("sandbox exec {name}"), timeout, || async {
-            let mut client = self.connect().await?;
-            let sb = get_sandbox(&mut client, name).await?;
-            let request = ExecSandboxRequest {
-                sandbox_id: sb.object_id().to_string(),
-                command: vec!["bash".into(), "-lc".into(), script.to_string()],
-                workdir: String::new(),
-                environment: Default::default(),
-                timeout_seconds: u32::try_from(remote).unwrap_or(u32::MAX),
-                stdin,
-                tty: false,
-                cols: 0,
-                rows: 0,
-            };
-            let mut stream = client
-                .exec_sandbox(request)
-                .await
-                .map_err(|e| Error::Failed {
-                    op: "sandbox exec".into(),
-                    message: e.to_string(),
-                })?
-                .into_inner();
+        let started = Instant::now();
+        let attempt = ExecAttemptCtx::new();
+        let result = self
+            .with_timeout(&format!("sandbox exec {name}"), timeout, || {
+                let attempt = attempt.clone();
+                let name = name.to_string();
+                async move {
+                    let mut client = self.connect().await?;
+                    let sb = get_sandbox(&mut client, &name).await?;
+                    let sandbox_id = sb.object_id().to_string();
+                    attempt.set_sandbox_id(sandbox_id.clone());
+                    // Client-generated id so journalctl can still correlate when the
+                    // gateway drops the h2 stream before response headers arrive.
+                    let client_request_id = new_exec_request_id();
+                    attempt.set_request_id(client_request_id.clone());
+                    let request = exec_sandbox_tonic_request(
+                        ExecSandboxRequest {
+                            sandbox_id,
+                            command: vec!["bash".into(), "-lc".into(), script.to_string()],
+                            workdir: String::new(),
+                            environment: Default::default(),
+                            timeout_seconds: u32::try_from(remote).unwrap_or(u32::MAX),
+                            stdin,
+                            tty: false,
+                            cols: 0,
+                            rows: 0,
+                        },
+                        &client_request_id,
+                    );
+                    let response = client.exec_sandbox(request).await.map_err(|status| {
+                        attempt.observe_status_metadata(&status);
+                        Error::Failed {
+                            op: "sandbox exec".into(),
+                            message: format_exec_status(&status),
+                        }
+                    })?;
+                    attempt.observe_metadata(response.metadata());
+                    let mut stream = response.into_inner();
 
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut code = -1;
-            while let Some(ev) = stream.next().await {
-                let ev = ev.map_err(|e| Error::Failed {
-                    op: "sandbox exec".into(),
-                    message: e.to_string(),
-                })?;
-                apply_exec_event(ev, &mut stdout, &mut stderr, &mut code);
-            }
-            Ok((code, stdout, stderr))
-        })
-        .await
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    let mut code = -1;
+                    while let Some(ev) = stream.next().await {
+                        let ev = ev.map_err(|status| {
+                            attempt.observe_status_metadata(&status);
+                            Error::Failed {
+                                op: "sandbox exec".into(),
+                                message: format_exec_status(&status),
+                            }
+                        })?;
+                        apply_exec_event(ev, &mut stdout, &mut stderr, &mut code);
+                    }
+                    Ok((code, stdout, stderr))
+                }
+            })
+            .await;
+        finish_exec_attempt(
+            result,
+            self.endpoint.as_deref(),
+            name,
+            &attempt,
+            started,
+        )
     }
 
     /// Run a command and hand every stdout line to `on_line` as it arrives.
@@ -1600,61 +1628,86 @@ impl OpenShell {
         }
 
         let remote = timeout.as_secs().saturating_sub(5).max(1);
-        self.with_timeout(&format!("sandbox exec {name}"), timeout, || async {
-            let mut client = self.connect().await?;
-            let sb = get_sandbox(&mut client, name).await?;
-            let request = ExecSandboxRequest {
-                sandbox_id: sb.object_id().to_string(),
-                command: vec!["bash".into(), "-lc".into(), script.to_string()],
-                workdir: String::new(),
-                environment: Default::default(),
-                timeout_seconds: u32::try_from(remote).unwrap_or(u32::MAX),
-                stdin: Vec::new(),
-                tty: false,
-                cols: 0,
-                rows: 0,
-            };
-            let mut stream = client
-                .exec_sandbox(request)
-                .await
-                .map_err(|e| Error::Failed {
-                    op: "sandbox exec".into(),
-                    message: e.to_string(),
-                })?
-                .into_inner();
+        let started = Instant::now();
+        let attempt = ExecAttemptCtx::new();
+        let result = self
+            .with_timeout(&format!("sandbox exec {name}"), timeout, || {
+                let attempt = attempt.clone();
+                let name = name.to_string();
+                async move {
+                    let mut client = self.connect().await?;
+                    let sb = get_sandbox(&mut client, &name).await?;
+                    let sandbox_id = sb.object_id().to_string();
+                    attempt.set_sandbox_id(sandbox_id.clone());
+                    let client_request_id = new_exec_request_id();
+                    attempt.set_request_id(client_request_id.clone());
+                    let request = exec_sandbox_tonic_request(
+                        ExecSandboxRequest {
+                            sandbox_id,
+                            command: vec!["bash".into(), "-lc".into(), script.to_string()],
+                            workdir: String::new(),
+                            environment: Default::default(),
+                            timeout_seconds: u32::try_from(remote).unwrap_or(u32::MAX),
+                            stdin: Vec::new(),
+                            tty: false,
+                            cols: 0,
+                            rows: 0,
+                        },
+                        &client_request_id,
+                    );
+                    let response = client.exec_sandbox(request).await.map_err(|status| {
+                        attempt.observe_status_metadata(&status);
+                        Error::Failed {
+                            op: "sandbox exec".into(),
+                            message: format_exec_status(&status),
+                        }
+                    })?;
+                    attempt.observe_metadata(response.metadata());
+                    let mut stream = response.into_inner();
 
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut code = -1;
-            let mut line_buf = String::new();
-            while let Some(ev) = stream.next().await {
-                let ev = ev.map_err(|e| Error::Failed {
-                    op: "sandbox exec".into(),
-                    message: e.to_string(),
-                })?;
-                if let Some(exec_sandbox_event::Payload::Stdout(chunk)) = &ev.payload {
-                    stdout.extend_from_slice(&chunk.data);
-                    let text = String::from_utf8_lossy(&chunk.data);
-                    line_buf.push_str(&text);
-                    while let Some(pos) = line_buf.find('\n') {
-                        let line = line_buf[..pos].to_string();
-                        line_buf.drain(..=pos);
-                        on_line(&line);
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    let mut code = -1;
+                    let mut line_buf = String::new();
+                    while let Some(ev) = stream.next().await {
+                        let ev = ev.map_err(|status| {
+                            attempt.observe_status_metadata(&status);
+                            Error::Failed {
+                                op: "sandbox exec".into(),
+                                message: format_exec_status(&status),
+                            }
+                        })?;
+                        if let Some(exec_sandbox_event::Payload::Stdout(chunk)) = &ev.payload {
+                            stdout.extend_from_slice(&chunk.data);
+                            let text = String::from_utf8_lossy(&chunk.data);
+                            line_buf.push_str(&text);
+                            while let Some(pos) = line_buf.find('\n') {
+                                let line = line_buf[..pos].to_string();
+                                line_buf.drain(..=pos);
+                                on_line(&line);
+                            }
+                        } else {
+                            apply_exec_event(ev, &mut stdout, &mut stderr, &mut code);
+                        }
                     }
-                } else {
-                    apply_exec_event(ev, &mut stdout, &mut stderr, &mut code);
+                    if !line_buf.is_empty() {
+                        on_line(&line_buf);
+                    }
+                    Ok(Output {
+                        code,
+                        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                    })
                 }
-            }
-            if !line_buf.is_empty() {
-                on_line(&line_buf);
-            }
-            Ok(Output {
-                code,
-                stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
             })
-        })
-        .await
+            .await;
+        finish_exec_attempt(
+            result,
+            self.endpoint.as_deref(),
+            name,
+            &attempt,
+            started,
+        )
     }
 
     /// Interactive TTY attach via `ExecSandboxInteractive` (no local OpenSSH).
@@ -1736,92 +1789,140 @@ impl OpenShell {
 
         // Setup (resolve sandbox + open stream) is deadline-bound; the session
         // itself lives until Exit / drop — same hang-vs-deadline rule as exec.
-        self.with_timeout(
-            &format!("exec interactive {name}"),
-            self.default_timeout,
-            || async {
-                let mut client = self.connect().await?;
-                let sb = get_sandbox(&mut client, name).await?;
-                let (input_tx, input_rx) = mpsc::channel::<ExecSandboxInput>(4096);
-                input_tx
-                    .send(ExecSandboxInput {
-                        payload: Some(exec_sandbox_input::Payload::Start(ExecSandboxRequest {
-                            sandbox_id: sb.object_id().to_string(),
-                            command,
-                            workdir: String::new(),
-                            environment: Default::default(),
-                            timeout_seconds: 0,
-                            stdin: Vec::new(),
-                            tty,
-                            cols,
-                            rows,
-                        })),
-                    })
-                    .await
-                    .map_err(|_| Error::Failed {
-                        op: "exec interactive".into(),
-                        message: "failed to queue start frame".into(),
-                    })?;
+        let started = Instant::now();
+        let attempt = ExecAttemptCtx::new();
+        let endpoint = self.endpoint.clone();
+        let result = self
+            .with_timeout(
+                &format!("exec interactive {name}"),
+                self.default_timeout,
+                || {
+                    let attempt = attempt.clone();
+                    let name = name.to_string();
+                    let endpoint = endpoint.clone();
+                    async move {
+                        let mut client = self.connect().await?;
+                        let sb = get_sandbox(&mut client, &name).await?;
+                        let sandbox_id = sb.object_id().to_string();
+                        attempt.set_sandbox_id(sandbox_id.clone());
+                        let client_request_id = new_exec_request_id();
+                        attempt.set_request_id(client_request_id.clone());
+                        let (input_tx, input_rx) = mpsc::channel::<ExecSandboxInput>(4096);
+                        input_tx
+                            .send(ExecSandboxInput {
+                                payload: Some(exec_sandbox_input::Payload::Start(
+                                    ExecSandboxRequest {
+                                        sandbox_id,
+                                        command,
+                                        workdir: String::new(),
+                                        environment: Default::default(),
+                                        timeout_seconds: 0,
+                                        stdin: Vec::new(),
+                                        tty,
+                                        cols,
+                                        rows,
+                                    },
+                                )),
+                            })
+                            .await
+                            .map_err(|_| Error::Failed {
+                                op: "exec interactive".into(),
+                                message: "failed to queue start frame".into(),
+                            })?;
 
-                let mut stream = client
-                    .exec_sandbox_interactive(ReceiverStream::new(input_rx))
-                    .await
-                    .map_err(|e| Error::Failed {
-                        op: "exec interactive".into(),
-                        message: e.to_string(),
-                    })?
-                    .into_inner();
-
-                let (event_tx, event_rx) = mpsc::channel(256);
-                let join = tokio::spawn(async move {
-                    while let Some(ev) = stream.next().await {
-                        let ev = match ev {
-                            Ok(e) => e,
-                            Err(e) => {
-                                let msg = e.to_string();
-                                // Cockpit Stop / sandbox delete tears the relay down
-                                // while attach or MCP still has an interactive stream
-                                // open — expected, not a fault to page on.
-                                if is_expected_interactive_disconnect(&msg) {
-                                    tracing::debug!(
-                                        "exec interactive stream closed on teardown: {msg}"
-                                    );
-                                } else {
-                                    tracing::warn!("exec interactive stream error: {msg}");
+                        let mut req = tonic::Request::new(ReceiverStream::new(input_rx));
+                        if let Ok(v) = client_request_id.parse() {
+                            req.metadata_mut().insert("x-request-id", v);
+                        }
+                        let response = client
+                            .exec_sandbox_interactive(req)
+                            .await
+                            .map_err(|status| {
+                                attempt.observe_status_metadata(&status);
+                                Error::Failed {
+                                    op: "exec interactive".into(),
+                                    message: format_exec_status(&status),
                                 }
-                                break;
-                            }
-                        };
-                        let mapped = match ev.payload {
-                            Some(exec_sandbox_event::Payload::Stdout(chunk)) => {
-                                InteractiveEvent::Stdout(chunk.data)
-                            }
-                            Some(exec_sandbox_event::Payload::Stderr(chunk)) => {
-                                InteractiveEvent::Stderr(chunk.data)
-                            }
-                            Some(exec_sandbox_event::Payload::Exit(exit)) => {
-                                InteractiveEvent::Exit(exit.exit_code)
-                            }
-                            None => continue,
-                        };
-                        let is_exit = matches!(mapped, InteractiveEvent::Exit(_));
-                        if event_tx.send(mapped).await.is_err() {
-                            break;
-                        }
-                        if is_exit {
-                            break;
-                        }
-                    }
-                });
+                            })?;
+                        attempt.observe_metadata(response.metadata());
+                        let mut stream = response.into_inner();
 
-                Ok(InteractiveExec {
-                    input_tx,
-                    events: event_rx,
-                    join: Some(join),
-                })
-            },
+                        let (event_tx, event_rx) = mpsc::channel(256);
+                        let log_sandbox_id = attempt.sandbox_id();
+                        let log_request_id = attempt.request_id();
+                        let join = tokio::spawn(async move {
+                            while let Some(ev) = stream.next().await {
+                                let ev = match ev {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        let status_rid = grpc_request_id(e.metadata());
+                                        let request_id = status_rid
+                                            .as_deref()
+                                            .or(log_request_id.as_deref())
+                                            .unwrap_or("");
+                                        let msg = format_exec_status(&e);
+                                        // Cockpit Stop / sandbox delete tears the relay down
+                                        // while attach or MCP still has an interactive stream
+                                        // open — expected, not a fault to page on.
+                                        if is_expected_interactive_disconnect(&msg) {
+                                            tracing::debug!(
+                                                gateway_endpoint = endpoint.as_deref().unwrap_or(""),
+                                                sandbox_name = %name,
+                                                sandbox_id = log_sandbox_id.as_deref().unwrap_or(""),
+                                                request_id,
+                                                "exec interactive stream closed on teardown: {msg}"
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                gateway_endpoint = endpoint.as_deref().unwrap_or(""),
+                                                sandbox_name = %name,
+                                                sandbox_id = log_sandbox_id.as_deref().unwrap_or(""),
+                                                request_id,
+                                                "exec interactive stream error: {msg}"
+                                            );
+                                        }
+                                        break;
+                                    }
+                                };
+                                let mapped = match ev.payload {
+                                    Some(exec_sandbox_event::Payload::Stdout(chunk)) => {
+                                        InteractiveEvent::Stdout(chunk.data)
+                                    }
+                                    Some(exec_sandbox_event::Payload::Stderr(chunk)) => {
+                                        InteractiveEvent::Stderr(chunk.data)
+                                    }
+                                    Some(exec_sandbox_event::Payload::Exit(exit)) => {
+                                        InteractiveEvent::Exit(exit.exit_code)
+                                    }
+                                    None => continue,
+                                };
+                                let is_exit = matches!(mapped, InteractiveEvent::Exit(_));
+                                if event_tx.send(mapped).await.is_err() {
+                                    break;
+                                }
+                                if is_exit {
+                                    break;
+                                }
+                            }
+                        });
+
+                        Ok(InteractiveExec {
+                            input_tx,
+                            events: event_rx,
+                            join: Some(join),
+                        })
+                    }
+                },
+            )
+            .await;
+        // Setup failures only — mid-stream errors log inside the join task.
+        finish_exec_attempt(
+            result,
+            self.endpoint.as_deref(),
+            name,
+            &attempt,
+            started,
         )
-        .await
     }
 }
 
@@ -1872,6 +1973,199 @@ fn format_transport_error(err: &tonic::transport::Error) -> String {
         );
     }
     out
+}
+
+/// Per-attempt correlation for ExecSandbox / interactive setup failures.
+///
+/// Populated as the call progresses so a timeout or mid-stream h2 drop can still
+/// log gateway endpoint + sandbox id + request id for journalctl greps. Never
+/// holds secrets (no PEMs, tokens, scripts, or stdin).
+#[derive(Clone, Default)]
+struct ExecAttemptCtx {
+    inner: Arc<Mutex<ExecAttemptInner>>,
+}
+
+#[derive(Default)]
+struct ExecAttemptInner {
+    sandbox_id: Option<String>,
+    request_id: Option<String>,
+}
+
+impl ExecAttemptCtx {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn set_sandbox_id(&self, id: String) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.sandbox_id = Some(id);
+        }
+    }
+
+    fn set_request_id(&self, id: String) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.request_id = Some(id);
+        }
+    }
+
+    fn sandbox_id(&self) -> Option<String> {
+        self.inner.lock().ok().and_then(|g| g.sandbox_id.clone())
+    }
+
+    fn request_id(&self) -> Option<String> {
+        self.inner.lock().ok().and_then(|g| g.request_id.clone())
+    }
+
+    fn observe_metadata(&self, md: &tonic::metadata::MetadataMap) {
+        if let Some(id) = grpc_request_id(md) {
+            self.set_request_id(id);
+        }
+    }
+
+    fn observe_status_metadata(&self, status: &tonic::Status) {
+        self.observe_metadata(status.metadata());
+    }
+}
+
+/// OpenShell gateway echoes `x-request-id` (tower-http SetRequestId). Also accept
+/// common trace headers when a proxy injects them instead.
+fn grpc_request_id(md: &tonic::metadata::MetadataMap) -> Option<String> {
+    const KEYS: &[&str] = &[
+        "x-request-id",
+        "x-correlation-id",
+        "request-id",
+        "traceparent",
+    ];
+    for key in KEYS {
+        if let Some(v) = md.get(*key).and_then(|val| val.to_str().ok()) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn new_exec_request_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn exec_sandbox_tonic_request(
+    body: ExecSandboxRequest,
+    request_id: &str,
+) -> tonic::Request<ExecSandboxRequest> {
+    let mut req = tonic::Request::new(body);
+    if let Ok(v) = request_id.parse() {
+        req.metadata_mut().insert("x-request-id", v);
+    }
+    req
+}
+
+fn format_exec_status(status: &tonic::Status) -> String {
+    // Prefer Display over Debug — avoids dumping the whole Status shape and
+    // keeps Authorization material out of the message if a proxy stuffed it
+    // into metadata we do not read.
+    status.to_string()
+}
+
+fn log_sandbox_exec_failure(
+    endpoint: Option<&str>,
+    sandbox_name: &str,
+    sandbox_id: Option<&str>,
+    elapsed: Duration,
+    request_id: Option<&str>,
+    err: &Error,
+) {
+    tracing::warn!(
+        gateway_endpoint = endpoint.unwrap_or(""),
+        sandbox_name,
+        sandbox_id = sandbox_id.unwrap_or(""),
+        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        request_id = request_id.unwrap_or(""),
+        error = %err,
+        "openshell exec failed"
+    );
+}
+
+/// Enrich + log a failed exec attempt. Success is returned unchanged.
+fn finish_exec_attempt<T>(
+    result: Result<T>,
+    endpoint: Option<&str>,
+    sandbox_name: &str,
+    attempt: &ExecAttemptCtx,
+    started: Instant,
+) -> Result<T> {
+    match result {
+        Ok(v) => Ok(v),
+        Err(err) => {
+            let sandbox_id = attempt.sandbox_id();
+            let request_id = attempt.request_id();
+            let elapsed = started.elapsed();
+            let err = enrich_exec_error(
+                err,
+                endpoint,
+                sandbox_name,
+                sandbox_id.as_deref(),
+                request_id.as_deref(),
+                elapsed,
+            );
+            log_sandbox_exec_failure(
+                endpoint,
+                sandbox_name,
+                sandbox_id.as_deref(),
+                elapsed,
+                request_id.as_deref(),
+                &err,
+            );
+            Err(err)
+        }
+    }
+}
+
+/// Append correlatable context to the error string (still no secrets).
+fn enrich_exec_error(
+    err: Error,
+    endpoint: Option<&str>,
+    sandbox_name: &str,
+    sandbox_id: Option<&str>,
+    request_id: Option<&str>,
+    elapsed: Duration,
+) -> Error {
+    let ctx = format!(
+        "endpoint={} sandbox_name={} sandbox_id={} elapsed_ms={} request_id={}",
+        endpoint.unwrap_or(""),
+        sandbox_name,
+        sandbox_id.unwrap_or(""),
+        elapsed.as_millis(),
+        request_id.unwrap_or(""),
+    );
+    match err {
+        Error::Failed { op, message } => Error::Failed {
+            op,
+            message: if message.contains("endpoint=") {
+                message
+            } else {
+                format!("{message} ({ctx})")
+            },
+        },
+        Error::Timeout { op, secs } => Error::Timeout {
+            op: if op.contains("endpoint=") {
+                op
+            } else {
+                format!("{op} ({ctx})")
+            },
+            secs,
+        },
+        Error::Connect(message) => Error::Connect(if message.contains("endpoint=") {
+            message
+        } else {
+            format!("{message} ({ctx})")
+        }),
+        other => other,
+    }
 }
 
 fn apply_exec_event(
@@ -2234,6 +2528,78 @@ mod tests {
         ));
         assert!(is_expected_interactive_disconnect("sandbox not found"));
         assert!(!is_expected_interactive_disconnect("permission denied writing tty"));
+    }
+
+    #[test]
+    fn grpc_request_id_prefers_x_request_id() {
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert("traceparent", "00-abc-def-01".parse().unwrap());
+        md.insert("x-request-id", "gw-corr-1".parse().unwrap());
+        assert_eq!(grpc_request_id(&md).as_deref(), Some("gw-corr-1"));
+    }
+
+    #[test]
+    fn grpc_request_id_falls_back_to_traceparent() {
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert("traceparent", "00-abc-def-01".parse().unwrap());
+        assert_eq!(grpc_request_id(&md).as_deref(), Some("00-abc-def-01"));
+        assert!(grpc_request_id(&tonic::metadata::MetadataMap::new()).is_none());
+    }
+
+    #[test]
+    fn exec_sandbox_request_injects_x_request_id() {
+        let req = exec_sandbox_tonic_request(
+            ExecSandboxRequest {
+                sandbox_id: "sb-1".into(),
+                command: vec!["true".into()],
+                workdir: String::new(),
+                environment: Default::default(),
+                timeout_seconds: 1,
+                stdin: Vec::new(),
+                tty: false,
+                cols: 0,
+                rows: 0,
+            },
+            "client-corr-9",
+        );
+        assert_eq!(
+            req.metadata()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("client-corr-9")
+        );
+    }
+
+    #[test]
+    fn enrich_exec_error_adds_correlation_context_without_secrets() {
+        let err = enrich_exec_error(
+            Error::Failed {
+                op: "sandbox exec".into(),
+                message: "transport error: h2 reset".into(),
+            },
+            Some("https://gateway.example.com"),
+            "honr-card-59-a1",
+            Some("sb-object-1"),
+            Some("req-abc"),
+            Duration::from_millis(1234),
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("https://gateway.example.com"), "{msg}");
+        assert!(msg.contains("honr-card-59-a1"), "{msg}");
+        assert!(msg.contains("sb-object-1"), "{msg}");
+        assert!(msg.contains("elapsed_ms=1234"), "{msg}");
+        assert!(msg.contains("request_id=req-abc"), "{msg}");
+        assert!(!msg.to_ascii_lowercase().contains("bearer"));
+        assert!(!msg.contains("BEGIN CERTIFICATE"));
+    }
+
+    #[test]
+    fn new_exec_request_id_is_hex_and_nonempty() {
+        let a = new_exec_request_id();
+        let b = new_exec_request_id();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert_ne!(a, b);
     }
 
     fn spec() -> SandboxSpec {

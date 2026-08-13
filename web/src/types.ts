@@ -259,10 +259,10 @@ export interface AgentRuntimeConfig {
   max_concurrent: number;
   agent_timeout_secs: number;
   max_attempts: number;
-  /** Branch/sandbox stem (default honr → honr/card-N). */
-  branch_prefix: string;
   /** Supervisor lease/reconcile tick (ms). */
   sweep_interval_ms: number;
+  /** Board-wide standing agent policy (briefing). */
+  standing_prompt: string;
 }
 
 /** GET /api/openshell/status — gateway health for Settings. */

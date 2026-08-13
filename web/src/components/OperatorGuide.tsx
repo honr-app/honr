@@ -76,7 +76,8 @@ export function OperatorGuide() {
         <h2 id="operator-guide-config-title">Configuration and standing instructions</h2>
         <p className="dim">
           honr stacks setup in layers. Lower layers are operator concerns; agents
-          read <code>project_prompt</code> and card prose at claim time.
+          read the board standing prompt, optional <code>project_prompt</code>, and
+          card prose at claim time.
         </p>
         <ol
           className="operator-guide-steps"
@@ -84,18 +85,17 @@ export function OperatorGuide() {
         >
           <li>
             <strong>Process boot</strong> and <strong>board Settings</strong>{" "}
-            (Policies, sandbox specs, agent runtime, Forge) — host/operator
-            setup, not <code>project_prompt</code>.
+            (Policies, sandbox specs, agent runtime including standing prompt,
+            Forge) — host/operator setup.
           </li>
           <li>
             <strong>Project fields</strong> — <code>clone_repo</code> and
             optional sandbox override seed the Initial plan.
           </li>
           <li>
-            <strong>project_prompt</strong> — standing agent policy every worker
-            inherits: escalation, clone-target protocol, plan/split/report
-            paths, and Project-wide quality gates. Optional on create; editable
-            on the Project afterward.
+            <strong>Standing prompt</strong> — board-wide agent policy on
+            Settings → Agent runtime. Optional <strong>project_prompt</strong>{" "}
+            is Project-only extras.
           </li>
           <li>
             <strong>Per-card intent / DoD</strong> — clone target and
@@ -103,9 +103,9 @@ export function OperatorGuide() {
           </li>
         </ol>
         <p className="dim" data-testid="operator-guide-quality-gates-note">
-          Name test/lint commands in <code>project_prompt</code> when they apply
-          to every card. honr does not assume <code>cargo</code> or any toolchain
-          unless <code>project_prompt</code> or a card&apos;s DoD names it.
+          Name test/lint quality gates in the board standing prompt when they
+          apply everywhere. honr does not assume <code>cargo</code> or any
+          toolchain unless standing text or a card&apos;s DoD names it.
         </p>
       </section>
 

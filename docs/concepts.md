@@ -18,7 +18,7 @@ One node type, two roles:
 
 | Kind | Role |
 |---|---|
-| **Project** | Container for the Plan, standing instructions (`project_prompt`), an optional sandbox override, and auto-dispatch. Not claimable work itself. |
+| **Project** | Container for the Plan, optional `project_prompt` extras, an optional sandbox override, and auto-dispatch. Not claimable work itself. |
 | **Task** | The claimable leaf. Initial plan, implementation cards, and follow-ups are all Tasks under a Project. |
 
 Tasks are flat siblings related by dependency edges, not a nested hierarchy.
@@ -42,21 +42,20 @@ workers read at claim time. Full detail: [Configuration](configuration.md).
 | Layer | Examples |
 |---|---|
 | **Process boot** | `HONR_DATABASE_URL`, compile-time Project + Task hierarchy |
-| **Board Settings** | OpenShell Policies, sandbox specs, agent runtime, Forge |
+| **Board Settings** | OpenShell Policies, sandbox specs, agent runtime (incl. standing prompt), Forge |
 | **Project fields** | `clone_repo`, optional `sandbox_profile_id` override |
-| **`project_prompt`** | Standing agent policy — escalation, clone-target protocol, plan/split/report paths, Project-wide quality gates |
+| **`project_prompt`** | Optional Project-only standing extras |
 | **Per-card intent / DoD** | Clone target for this card, card-specific gates, operational proof |
 
-Boot, Settings, and Project fields are **operator concerns** — not
-`project_prompt`. Do not put database URLs, Policy YAML, or sandbox spec ids in
-standing instructions.
+Boot, Settings, and Project fields are **operator concerns**. Do not put database
+URLs, Policy YAML, or sandbox spec ids in standing prompts.
 
-`project_prompt` is seeded from `DEFAULT_PROJECT_PROMPT` in `src/model.rs` when
-you create a Project and is editable afterward. The supervisor includes it in
-every worker briefing ahead of the Plan and the card prose. **Quality gates**
-(test/lint commands before publish) belong in `project_prompt` when they apply
-Project-wide; name the toolchain explicitly. honr does not assume `cargo` or
-any other tool unless `project_prompt` or the card's definition of done says so.
+Board-wide agent policy is Settings → Agent runtime **standing prompt** (empty by
+default). Briefings also inject a tiny hardwired protocol (`PROTOCOL_MINIMUM`).
+`project_prompt` is optional Project extras — not seeded on create. **Quality
+gates** belong in standing text when you want them; name the toolchain
+explicitly. honr does not assume `cargo` unless standing text or the card's DoD
+says so.
 
 ## Operator and worker
 

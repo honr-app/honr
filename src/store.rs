@@ -108,8 +108,6 @@ pub struct BoardState {
     /// Singleton — not a WorkItem; reconnect reads this, not a chatbot shim.
     #[serde(default)]
     pub cockpit_session: Option<CockpitSession>,
-    #[serde(skip)]
-    pub agent_logs: BTreeMap<ItemId, std::collections::VecDeque<String>>,
     /// Parent → child ids. Rebuilt after load; maintained on create/delete.
     /// Avoids full `items` scans in `children_of` / `has_children` / snapshot members.
     #[serde(skip)]
@@ -151,7 +149,6 @@ impl BoardState {
             webhook_poll_tips: self.webhook_poll_tips.clone(),
             webhook_poll_pr_reviews: self.webhook_poll_pr_reviews.clone(),
             cockpit_session: self.cockpit_session.clone(),
-            agent_logs: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
             ids_by_state: HashMap::new(),
         }
@@ -389,7 +386,9 @@ pub struct ClaimGrant {
     pub definition_of_done: Option<String>,
     /// Containing Project title (when this card is a Task).
     pub project_title: Option<String>,
-    /// Project standing instructions (`project_prompt`).
+    /// Board standing prompt from Settings → Agent runtime (`standing_prompt`).
+    pub board_prompt: Option<String>,
+    /// Project-only standing extras (`project_prompt`); board policy is separate.
     pub project_prompt: Option<String>,
     /// Resolved sandbox profile prompt at claim (seat notes for this run).
     pub sandbox_prompt: Option<String>,
@@ -461,6 +460,10 @@ pub enum CatchUpResult {
 
 pub struct Board {
     state: RwLock<BoardState>,
+    /// Live agent stdout rings for the drawer. Separate from `state` so the
+    /// per-line stream follower does not take the board write lock (that lock
+    /// serializes every `/api/items` / `/api/board` read and hung the UI).
+    live_agent_logs: Mutex<BTreeMap<ItemId, std::collections::VecDeque<String>>>,
     tx: broadcast::Sender<BoardEvent>,
     seq: AtomicU64,
     event_buffer: RwLock<std::collections::VecDeque<BoardEvent>>,
@@ -536,6 +539,7 @@ impl Board {
                 next_id: 1,
                 ..Default::default()
             }),
+            live_agent_logs: Mutex::new(BTreeMap::new()),
             tx,
             seq: AtomicU64::new(0),
             event_buffer: RwLock::new(std::collections::VecDeque::new()),
@@ -1118,25 +1122,24 @@ impl Board {
     }
 
     pub fn append_agent_log(&self, id: ItemId, line: impl Into<String>) {
-        let mut s = self.state.write();
-        let logs = s.agent_logs.entry(id).or_default();
-        if logs.len() >= 300 {
-            logs.pop_front();
+        let mut logs = self.live_agent_logs.lock();
+        let ring = logs.entry(id).or_default();
+        if ring.len() >= 300 {
+            ring.pop_front();
         }
-        logs.push_back(line.into());
+        ring.push_back(line.into());
     }
 
     pub fn get_agent_logs(&self, id: ItemId) -> Vec<String> {
-        let s = self.state.read();
-        s.agent_logs
+        self.live_agent_logs
+            .lock()
             .get(&id)
             .map(|l| l.iter().cloned().collect())
             .unwrap_or_default()
     }
 
     pub fn clear_agent_logs(&self, id: ItemId) {
-        let mut s = self.state.write();
-        s.agent_logs.remove(&id);
+        self.live_agent_logs.lock().remove(&id);
     }
 
     fn unresolved_blockers(s: &BoardState, item: &WorkItem) -> Vec<ItemId> {
@@ -1333,7 +1336,9 @@ impl Board {
             if parent.is_none() {
                 // Plan lives on the Initial plan Task (`proposal`), not the Project.
                 item.plan = None;
-                item.project_prompt = Some(crate::model::DEFAULT_PROJECT_PROMPT.to_string());
+                // Board standing prompt lives in Agent runtime; Project prompt
+                // starts empty unless the operator sets Project-only extras.
+                item.project_prompt = None;
             }
             s.insert_item(item.clone());
             let mut item_out = item;
@@ -1354,8 +1359,9 @@ impl Board {
 
     /// Create a Project with a required planning clone target (`owner/name`).
     ///
-    /// Stamps the repo into Project intent / `project_prompt` and into the
-    /// auto-seeded Initial plan so Remotes can clone without inventing a name.
+    /// Stamps the repo into Project intent and into the auto-seeded Initial
+    /// plan so Remotes can clone without inventing a name. Optional
+    /// `project_prompt` is Project-only extras (board policy is Agent runtime).
     pub fn create_project(
         &self,
         title: impl Into<String>,
@@ -1377,18 +1383,13 @@ impl Board {
                 format!("{trimmed}\n\n{stamp}")
             }
         };
-        let prompt = {
-            let base = project_prompt
-                .filter(|p| !p.trim().is_empty())
-                .unwrap_or_else(|| crate::model::DEFAULT_PROJECT_PROMPT.to_string());
-            if base.contains(&clone) {
-                base
-            } else {
-                format!("{}\nDefault clone repository: {clone}.\n", base.trim_end())
-            }
-        };
         let item = self.create(None, title, intent, None, Origin::Human, above_line, None)?;
-        let _ = self.update_item(item.id, None, None, None, None, Some(prompt));
+        let prompt = project_prompt
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| p.trim().to_string());
+        if let Some(prompt) = prompt {
+            let _ = self.update_item(item.id, None, None, None, None, Some(prompt));
+        }
         // Re-stamp Initial plan if create's auto-seed ran before prompt update —
         // seed reads clone from Project intent (already stamped).
         let _ = self.seed_initial_plan(item.id);
@@ -2995,7 +2996,6 @@ impl Board {
             max_concurrent: agents.max_concurrent,
             agent_timeout_secs: agents.agent_timeout_secs,
             max_attempts: agents.max_attempts,
-            branch_prefix: agents.branch_prefix.clone(),
             ..AgentRuntimeConfig::default()
         })
     }
@@ -3074,7 +3074,6 @@ impl Board {
         cfg.max_concurrent = rt.max_concurrent;
         cfg.agent_timeout_secs = rt.agent_timeout_secs;
         cfg.max_attempts = rt.max_attempts;
-        cfg.branch_prefix = rt.branch_prefix.clone();
         cfg
     }
 
@@ -4397,6 +4396,19 @@ impl Board {
         let engine = Some(self.resolve_engine_for_card(id));
         let model = self.resolve_model_for_card(id);
         let sandbox_prompt = self.resolve_sandbox_create(id).prompt;
+        if self.agent_runtime().is_none() {
+            let _ = self.seed_agent_runtime_if_empty();
+        }
+        let board_prompt = self
+            .agent_runtime()
+            .and_then(|rt| {
+                let t = rt.standing_prompt.trim().to_string();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
+            });
 
         Ok(ClaimGrant {
             item_id: id,
@@ -4404,6 +4416,7 @@ impl Board {
             intent: item.intent.clone(),
             definition_of_done: item.definition_of_done.clone(),
             project_title: ctx.project_title,
+            board_prompt,
             project_prompt: ctx.project_prompt,
             sandbox_prompt,
             plan_summary: ctx.plan_summary,
@@ -4478,6 +4491,11 @@ impl Board {
 
     /// `heartbeat` — progress only. Does **not** extend `run_deadline_at`.
     /// `lease_secs` is ignored (kept for MCP compatibility).
+    ///
+    /// Quiet while already Running with unchanged progress: still stamps
+    /// `last_heartbeat`, but skips the SSE Upsert. The agent stream used to
+    /// call this on every stdout line; emitting a full card each time wedged
+    /// the board lock and made the drawer hang on `/api/items/:id`.
     pub fn heartbeat(
         &self,
         id: ItemId,
@@ -4485,25 +4503,31 @@ impl Board {
         progress: f32,
         _lease_secs: i64,
     ) -> Result<WorkItem, TransitionError> {
-        let item = {
+        let (item, emit) = {
             let mut s = self.state.write();
+            let mut promoted = false;
             // First heartbeat promotes Claimed -> Running.
             if s.items.get(&id).map(|i| i.state) == Some(State::Claimed) {
                 Self::transition_locked(&mut s, id, State::Running, agent_id, None)?;
+                promoted = true;
             }
             let now = Utc::now();
+            let progress = progress.clamp(0.0, 1.0);
             let it = s
                 .items
                 .get_mut(&id)
                 .ok_or(TransitionError::NoSuchItem(id))?;
-            it.progress = progress.clamp(0.0, 1.0);
+            let progress_changed = (it.progress - progress).abs() > f32::EPSILON;
+            it.progress = progress;
             if let Some(l) = it.lease.as_mut() {
                 l.last_heartbeat = now;
                 // Do not touch expires_at / run_deadline_at — one fixed timeout.
             }
-            it.clone()
+            (it.clone(), promoted || progress_changed)
         };
-        self.emit(&item);
+        if emit {
+            self.emit(&item);
+        }
         Ok(item)
     }
 
@@ -6833,6 +6857,52 @@ mod tests {
     }
 
     #[test]
+    fn quiet_heartbeat_while_running_does_not_emit_upsert() {
+        let (b, id) = claimed_leaf();
+        let mut rx = b.subscribe();
+        // Claimed → Running emits once.
+        b.heartbeat(id, "agent", 0.25, 0).expect("promote");
+        let first = rx.try_recv().expect("Claimed→Running upsert");
+        assert!(matches!(first, BoardEvent::Upsert { .. }));
+        while rx.try_recv().is_ok() {}
+
+        // Same progress, already Running: stamp liveness only.
+        b.heartbeat(id, "agent", 0.25, 0).expect("quiet");
+        assert!(
+            rx.try_recv().is_err(),
+            "quiet heartbeat must not Upsert (drawer lock storm)"
+        );
+        let hb = b
+            .get(id)
+            .unwrap()
+            .lease
+            .as_ref()
+            .map(|l| l.last_heartbeat)
+            .expect("lease");
+        assert!(hb <= Utc::now());
+
+        // Progress change still notifies.
+        b.heartbeat(id, "agent", 0.5, 0).expect("progress");
+        assert!(matches!(
+            rx.try_recv().expect("progress upsert"),
+            BoardEvent::Upsert { .. }
+        ));
+    }
+
+    #[test]
+    fn agent_log_ring_lives_off_the_board_state_lock() {
+        let (b, id) = claimed_leaf();
+        for i in 0..10 {
+            b.append_agent_log(id, format!("line {i}"));
+        }
+        let logs = b.get_agent_logs(id);
+        assert_eq!(logs.len(), 10);
+        assert_eq!(logs[0], "line 0");
+        b.clear_agent_logs(id);
+        assert!(b.get_agent_logs(id).is_empty());
+    }
+
+    #[test]
     fn sweep_requeues_past_run_deadline() {
         let (b, id) = claimed_leaf();
         {
@@ -8223,10 +8293,10 @@ mod tests {
             "{}",
             project.intent
         );
-        let prompt = project.project_prompt.as_deref().unwrap_or("");
+        let prompt = project.project_prompt.as_deref();
         assert!(
-            prompt.contains("Default clone repository: honr-app/honr"),
-            "{prompt}"
+            prompt.is_none() || prompt.is_some_and(|p| p.trim().is_empty()),
+            "new Projects must not seed board essay into project_prompt: {prompt:?}"
         );
         let seed = b.initial_plan_of(project.id).expect("seeded");
         assert!(

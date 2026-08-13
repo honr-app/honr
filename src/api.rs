@@ -247,8 +247,7 @@ async fn item_logs(
     let agent = b.get_agent_logs(id);
 
     let env_name = item.environment.clone().unwrap_or_else(|| {
-        let prefix = b.effective_agents().branch_prefix;
-        crate::schema::card_sandbox_name(&prefix, id, item.run_failures + 1)
+        crate::schema::card_sandbox_name(id, item.run_failures + 1)
     });
 
     let os = b.openshell_client();
@@ -2289,8 +2288,11 @@ mod tests {
             "REST create must seed custom project_prompt: {prompt}"
         );
         assert!(
-            prompt.contains("Default clone repository: acme/widgets"),
-            "project_prompt must still stamp clone_repo: {prompt}"
+            custom_prompt
+                .intent
+                .contains("Clone repository: acme/widgets"),
+            "clone_repo must stamp into Project intent: {}",
+            custom_prompt.intent
         );
 
         let Err(ApiError(missing)) = create_item(
