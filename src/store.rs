@@ -104,6 +104,9 @@ pub struct BoardState {
     /// First observation seeds without applying historical reviews.
     #[serde(default)]
     pub webhook_poll_pr_reviews: BTreeMap<String, u64>,
+    /// GitHub App `owner/repo` → installation lookup (Settings → Repo access).
+    #[serde(default)]
+    pub github_repo_access: crate::github_app::GitHubRepoAccessCache,
     /// Durable control-plane cockpit (sandbox + conversation + hold).
     /// Singleton — not a WorkItem; reconnect reads this, not a chatbot shim.
     #[serde(default)]
@@ -148,6 +151,7 @@ impl BoardState {
             webhook_poll: self.webhook_poll.clone(),
             webhook_poll_tips: self.webhook_poll_tips.clone(),
             webhook_poll_pr_reviews: self.webhook_poll_pr_reviews.clone(),
+            github_repo_access: self.github_repo_access.clone(),
             cockpit_session: self.cockpit_session.clone(),
             children_by_parent: BTreeMap::new(),
             ids_by_state: HashMap::new(),
@@ -2706,6 +2710,19 @@ impl Board {
 
     pub fn set_github_app_token_cache(&self, cache: crate::github_app::TokenCache) {
         *self.github_app_token_cache.lock() = cache;
+    }
+
+    /// Durable GitHub App repo-access cache (`owner/repo` → installation).
+    pub fn github_repo_access_cache(&self) -> crate::github_app::GitHubRepoAccessCache {
+        self.state.read().github_repo_access.clone()
+    }
+
+    pub fn set_github_repo_access_cache(&self, cache: crate::github_app::GitHubRepoAccessCache) {
+        {
+            let mut s = self.state.write();
+            s.github_repo_access = cache;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     pub fn auth_sealed(&self) -> Option<String> {

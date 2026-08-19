@@ -10,7 +10,7 @@ use super::codec::{
     META_OPENSHELL_PROVIDERS, META_OPENSHELL_PROVIDER_TYPES,
     META_OPENSHELL_PROVIDER_TYPE_TOMBSTONES, META_SANDBOX_PROFILES,
     META_WEBHOOK_POLL, META_WEBHOOK_POLL_PR_REVIEWS, META_WEBHOOK_POLL_TIPS,
-    META_WORKSPACE_BINDING,
+    META_GITHUB_REPO_ACCESS, META_WORKSPACE_BINDING,
 };
 use super::config::DatabaseBackend;
 use super::store::{BoardStore, StoreError};
@@ -91,6 +91,7 @@ impl SqliteBoardStore {
         let webhook_poll = self.load_webhook_poll().await?;
         let webhook_poll_tips = self.load_webhook_poll_tips().await?;
         let webhook_poll_pr_reviews = self.load_webhook_poll_pr_reviews().await?;
+        let github_repo_access = self.load_github_repo_access().await?;
         let cockpit_session = self.load_cockpit_session().await?;
         let mut state = BoardState {
             next_id,
@@ -119,6 +120,7 @@ impl SqliteBoardStore {
             webhook_poll,
             webhook_poll_tips,
             webhook_poll_pr_reviews,
+            github_repo_access,
             cockpit_session,
             ..Default::default()
         };
@@ -297,6 +299,9 @@ impl SqliteBoardStore {
         let pr_reviews_json = serde_json::to_string(&state.webhook_poll_pr_reviews)
             .map_err(|e| StoreError::Query(format!("serialize webhook_poll_pr_reviews: {e}")))?;
         set_meta_tx(&mut tx, META_WEBHOOK_POLL_PR_REVIEWS, &pr_reviews_json).await?;
+        let repo_access_json = serde_json::to_string(&state.github_repo_access)
+            .map_err(|e| StoreError::Query(format!("serialize github_repo_access: {e}")))?;
+        set_meta_tx(&mut tx, META_GITHUB_REPO_ACCESS, &repo_access_json).await?;
         let cockpit_session_json = match &state.cockpit_session {
             None => String::new(),
             Some(session) => serde_json::to_string(session)
@@ -540,6 +545,19 @@ impl SqliteBoardStore {
             Some(raw) if raw.trim().is_empty() || raw == "null" => Ok(BTreeMap::new()),
             Some(raw) => serde_json::from_str(&raw)
                 .map_err(|e| StoreError::Query(format!("decode webhook_poll_pr_reviews: {e}"))),
+        }
+    }
+
+    async fn load_github_repo_access(
+        &self,
+    ) -> Result<crate::github_app::GitHubRepoAccessCache, StoreError> {
+        match self.meta_get(META_GITHUB_REPO_ACCESS).await? {
+            None => Ok(crate::github_app::GitHubRepoAccessCache::default()),
+            Some(raw) if raw.trim().is_empty() || raw == "null" => {
+                Ok(crate::github_app::GitHubRepoAccessCache::default())
+            }
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|e| StoreError::Query(format!("decode github_repo_access: {e}"))),
         }
     }
 

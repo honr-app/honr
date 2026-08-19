@@ -53,6 +53,7 @@ pub fn spawn(board: SharedBoard, cfg: ExecutionConfig) {
     // Webhook poll is independent of agent execution — always run so Forge
     // Settings can complete merges when `gh webhook forward` is down.
     tokio::spawn(crate::github_poll::poll_loop(board.clone()));
+    tokio::spawn(crate::github_app::repo_access_refresh_loop(board.clone()));
 
     // Durable Settings overlay (seeded from compiled defaults at board load).
     let agents = board.effective_agents();

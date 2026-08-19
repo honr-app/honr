@@ -8,7 +8,7 @@ layers are what agents read at claim time. See also
 | Layer | Who sets it | Role |
 |---|---|---|
 | **Process boot** | Host / deploy | Database URL (`HONR_DATABASE_URL` else `sqlite:honr.db`). Hierarchy is compile-time Project + Task. |
-| **Board Settings** | Operator | Policies, sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval, **standing prompt**), OpenShell gateway/providers (incl. shipped `github-app`), and Forge. |
+| **Board Settings** | Operator | Policies, sandbox specs, Agent runtime (engine, concurrency, timeouts, sweep interval, **standing prompt**), OpenShell gateway/providers (incl. shipped `github-app`), Forge, and GitHub App repo access. |
 | **Project fields** | Operator | Default clone repo (`clone_repo`), optional sandbox spec override (`sandbox_profile_id`). Seeded into Project intent and the Initial plan. |
 | **`project_prompt`** | Operator | Optional Project-only standing extras. Board-wide policy lives in Agent runtime standing prompt. |
 | **Per-card intent / DoD** | Operator (per Task) | Card-specific work: clone target (`owner/name`), card-local gates, and the operational proof. Notes can override at claim time. |
@@ -194,5 +194,11 @@ specs.
 ## OpenShell / Forge / GitHub App provider
 
 Connectivity, providers (including the shipped `github-app` type that mints
-`GH_TOKEN`), provider types, Policies, Sandbox specs, and Forge poll are board
-Settings — see the Settings UI and [Your first agent](first-agent.md).
+`GH_TOKEN`), provider types, Policies, Sandbox specs, Forge poll, and **Repo
+access** are board Settings — see the Settings UI and [Your first agent](first-agent.md).
+
+**Repo access** walks every GitHub App installation and caches `owner/repo` →
+installation id, permissions, and last-seen time. Refresh from Settings or wait
+for the background job. Use the GitHub install link to add missing
+repositories. Token minting is unchanged: the `github-app` provider still uses
+the configured `GITHUB_INSTALLATION_ID`.

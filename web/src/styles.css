@@ -842,6 +842,25 @@ textarea.sandbox-policy-textarea {
   margin-bottom: 0.75rem;
 }
 
+.repo-access-install-list,
+.repo-access-repo-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+}
+.repo-access-install {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+}
+.repo-access-repo-list {
+  margin: 0.5rem 0 0;
+}
+.repo-access-repo-list li {
+  padding: 0.2rem 0;
+}
+
 .workspace-webhook-hint {
   margin-top: 18px;
   padding-top: 14px;

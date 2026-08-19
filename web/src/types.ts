@@ -231,6 +231,30 @@ export interface GitHubAppSettings {
   token_status?: GitHubAppTokenStatus;
 }
 
+/** GET `/api/github-app/repo-access` — cached App installations and repos. */
+export interface GitHubRepoAccessRepo {
+  full_name: string;
+  installation_id: number;
+  permissions?: Record<string, string>;
+  last_seen_at: string;
+}
+
+export interface GitHubRepoAccessInstallation {
+  id: number;
+  account_login: string;
+  account_type?: string;
+  manage_url: string;
+  repos: GitHubRepoAccessRepo[];
+}
+
+export interface GitHubRepoAccessView {
+  refreshed_at?: string | null;
+  last_error?: string | null;
+  install_url: string;
+  token_installation_id?: number | null;
+  installations: GitHubRepoAccessInstallation[];
+}
+
 export interface AuthUser {
   kind: "admin" | "github";
   login: string;

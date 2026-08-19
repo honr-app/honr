@@ -5,6 +5,7 @@ import type {
   AgentRuntimeConfig,
   AuthSettings,
   GitHubAppTokenStatus,
+  GitHubRepoAccessView,
   OpenShellProviderView,
   WebhookPollConfig,
   WorkspaceBinding,
@@ -39,6 +40,7 @@ const SECTIONS: { id: SettingsSection; label: string; stub?: boolean }[] = [
   { id: "access", label: "Access" },
   // Nav label is Forge — "Workspace" implied a single work repo (upstream/fork).
   { id: "workspace", label: "Forge" },
+  { id: "repo-access", label: "Repo access" },
   { id: "agent-runtime", label: "Agent runtime" },
 ];
 
@@ -117,7 +119,8 @@ export function Settings({
       <header className="settings-hero">
         <h1>Settings</h1>
         <p className="settings-lede">
-          OpenShell, MCP servers, access, forge polling, and agent runtime.
+          OpenShell, MCP servers, access, forge polling, GitHub App repo access, and
+          agent runtime.
         </p>
       </header>
 
@@ -150,6 +153,8 @@ export function Settings({
             <AccessPanel />
           ) : section === "workspace" ? (
             <WorkspacePanel />
+          ) : section === "repo-access" ? (
+            <RepoAccessPanel />
           ) : (
             <AgentRuntimePanel />
           )}
@@ -666,6 +671,193 @@ function WorkspacePanel() {
             });
             setSavedHint("Saved. Forge and poll settings update board state.");
             return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
+    />
+  );
+}
+
+const emptyRepoAccess = (): GitHubRepoAccessView => ({
+  install_url: "https://github.com/settings/installations",
+  installations: [],
+});
+
+function permissionSummary(permissions?: Record<string, string>): string {
+  if (!permissions) return "";
+  const granted = Object.entries(permissions)
+    .filter(([, v]) => v === "true" || v === "write" || v === "admin")
+    .map(([k]) => k);
+  return granted.length ? granted.join(", ") : "";
+}
+
+/** Presentational GitHub App repo-access cache — exported for UI tests. */
+export function RepoAccessPanelView({
+  view,
+  busy,
+  error,
+  onRefresh,
+}: {
+  view: GitHubRepoAccessView;
+  busy?: boolean;
+  error?: string | null;
+  onRefresh: () => void;
+}) {
+  const refreshed = view.refreshed_at
+    ? new Date(view.refreshed_at).toLocaleString()
+    : "never";
+  return (
+    <section aria-labelledby="repo-access-title" data-testid="repo-access-panel">
+      <h2 id="repo-access-title">Repo access</h2>
+      <p className="dim">
+        Repositories each GitHub App installation can see. This cache is visibility
+        only — sandbox <code>GH_TOKEN</code> still mints from the{" "}
+        <code>github-app</code> provider&apos;s selected installation. Add missing
+        repos on GitHub, then Refresh.
+      </p>
+
+      {error && <div className="err">{error}</div>}
+      {view.last_error && (
+        <p className="err" data-testid="repo-access-last-error">
+          Last refresh error: {view.last_error}
+        </p>
+      )}
+
+      <div className="openshell-health" data-testid="repo-access-status">
+        <div className="openshell-health-row">
+          <span className="dim">Last refresh</span>
+          <strong data-testid="repo-access-refreshed-at">{refreshed}</strong>
+        </div>
+        {view.token_installation_id ? (
+          <p className="dim" data-testid="repo-access-token-installation">
+            Token minting uses installation #{view.token_installation_id}.
+          </p>
+        ) : (
+          <p className="dim" data-testid="repo-access-token-installation">
+            No installation selected for token minting yet (OpenShell → Providers).
+          </p>
+        )}
+      </div>
+
+      <div className="btns">
+        <button
+          type="button"
+          className="primary"
+          disabled={busy}
+          onClick={onRefresh}
+          data-testid="repo-access-refresh"
+        >
+          Refresh
+        </button>
+        <a
+          className="button-link"
+          href={view.install_url || "https://github.com/settings/installations"}
+          target="_blank"
+          rel="noreferrer"
+          data-testid="repo-access-install-link"
+        >
+          Install / add repos on GitHub
+        </a>
+      </div>
+
+      {view.installations.length === 0 ? (
+        <div className="settings-placeholder" data-testid="repo-access-empty">
+          No installations cached yet. Configure the <code>github-app</code>{" "}
+          provider, then Refresh — or install the App on GitHub first.
+        </div>
+      ) : (
+        <ul className="repo-access-install-list" data-testid="repo-access-installations">
+          {view.installations.map((inst) => (
+            <li
+              key={inst.id}
+              className="repo-access-install"
+              data-testid={`repo-access-install-${inst.id}`}
+            >
+              <div className="openshell-health-row">
+                <strong>
+                  {inst.account_login || "unknown"}{" "}
+                  <span className="dim">
+                    ({inst.account_type || "account"}) #{inst.id}
+                  </span>
+                </strong>
+                <a
+                  href={inst.manage_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  data-testid={`repo-access-manage-${inst.id}`}
+                >
+                  Manage repos
+                </a>
+              </div>
+              {inst.repos.length === 0 ? (
+                <p className="dim">No repositories visible to this installation.</p>
+              ) : (
+                <ul className="repo-access-repo-list">
+                  {inst.repos.map((repo) => (
+                    <li key={repo.full_name} data-testid={`repo-access-repo-${repo.full_name}`}>
+                      <code>{repo.full_name}</code>
+                      {permissionSummary(repo.permissions) ? (
+                        <span className="dim"> {permissionSummary(repo.permissions)}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function RepoAccessPanel() {
+  const [view, setView] = useState<GitHubRepoAccessView>(emptyRepoAccess);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    return api
+      .getGitHubRepoAccess()
+      .then((next) => {
+        setView(next);
+        setError(null);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => {
+        setBusy(false);
+        setLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (loading && !error) {
+    return (
+      <section aria-labelledby="repo-access-title" data-testid="repo-access-panel">
+        <h2 id="repo-access-title">Repo access</h2>
+        <p className="dim">loading…</p>
+      </section>
+    );
+  }
+
+  return (
+    <RepoAccessPanelView
+      view={view}
+      busy={busy}
+      error={error}
+      onRefresh={() => {
+        setBusy(true);
+        setError(null);
+        api
+          .refreshGitHubRepoAccess()
+          .then((next) => {
+            setView(next);
+            setError(null);
           })
           .catch((e) => setError(String(e)))
           .finally(() => setBusy(false));

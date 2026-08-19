@@ -7,6 +7,7 @@ export type SettingsSection =
   | "mcp-servers"
   | "access"
   | "workspace"
+  | "repo-access"
   | "agent-runtime";
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "openshell";
@@ -17,6 +18,7 @@ const SETTINGS_SECTIONS = new Set<string>([
   "mcp-servers",
   "access",
   "workspace",
+  "repo-access",
   "agent-runtime",
 ]);
 
