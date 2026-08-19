@@ -3,6 +3,7 @@ import type {
   AuthSettings,
   AuthStatus,
   GitHubAppSettings,
+  GitHubRepoAccessView,
   McpAudience,
   McpServerDesired,
   McpServersOut,
@@ -270,6 +271,10 @@ export const api = {
     put("/github-app", settings),
   syncGitHubAppToken: (): Promise<GitHubAppSettings> =>
     post("/github-app/sync-token"),
+  getGitHubRepoAccess: (): Promise<GitHubRepoAccessView> =>
+    fetch("/api/github-app/repo-access", fetchOpts).then(jsonOrThrow),
+  refreshGitHubRepoAccess: (): Promise<GitHubRepoAccessView> =>
+    post("/github-app/repo-access/refresh"),
 
   listOpenShellPolicies: (): Promise<OpenShellPoliciesOut> =>
     fetch("/api/openshell/policies", fetchOpts).then(jsonOrThrow),

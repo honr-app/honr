@@ -13,6 +13,7 @@ use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration as StdDuration;
 
 /// OpenShell provider **instance** name (sandbox attach name).
 pub const PROVIDER_NAME: &str = "github-app";
@@ -38,6 +39,10 @@ pub const CRED_CLIENT_ID: &str = "GITHUB_APP_CLIENT_ID";
 pub const CRED_CLIENT_SECRET: &str = "GITHUB_APP_CLIENT_SECRET";
 /// Remint when this close to expiry (installation tokens last ~1h).
 pub const REFRESH_SKEW: Duration = Duration::minutes(10);
+/// How often the repo-access cache walks installations (visibility only).
+pub const REPO_ACCESS_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(10 * 60);
+/// GitHub page for installing the App / adding repositories to an installation.
+pub const INSTALLATIONS_MANAGE_URL: &str = "https://github.com/settings/installations";
 
 /// Config keys that stay on the board and must not be sent to OpenShell.
 pub fn board_only_config_keys() -> &'static [&'static str] {
@@ -70,6 +75,53 @@ pub struct InstallationInfo {
     pub account_login: String,
     #[serde(default)]
     pub account_type: String,
+}
+
+/// One `owner/repo` row in the GitHub App access cache (later stages look this up).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubRepoAccessEntry {
+    pub installation_id: u64,
+    #[serde(default)]
+    pub permissions: BTreeMap<String, String>,
+    pub last_seen_at: DateTime<Utc>,
+}
+
+/// Durable App installation → repo visibility cache. Not used for token minting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubRepoAccessCache {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub installations: Vec<InstallationInfo>,
+    /// `owner/repo` → installation + permissions (GitHub `full_name` as returned).
+    #[serde(default)]
+    pub repos: BTreeMap<String, GitHubRepoAccessEntry>,
+}
+
+impl GitHubRepoAccessCache {
+    /// Lookup `owner/repo` (case-insensitive). Later stages mint from this id.
+    pub fn installation_id_for(&self, owner_repo: &str) -> Option<u64> {
+        let key = owner_repo.trim();
+        if key.is_empty() {
+            return None;
+        }
+        if let Some(e) = self.repos.get(key) {
+            return Some(e.installation_id);
+        }
+        self.repos
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, e)| e.installation_id)
+    }
+}
+
+/// Repo listed by `GET /installation/repositories`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallationRepo {
+    pub full_name: String,
+    pub permissions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +238,201 @@ pub async fn list_installations(jwt: &str) -> Result<Vec<InstallationInfo>, Erro
                 .unwrap_or_default(),
         })
         .collect())
+}
+
+/// Deep link to manage one installation (add/remove repos) on GitHub.
+pub fn installation_manage_url(account_login: &str, account_type: &str, id: u64) -> String {
+    if account_type.eq_ignore_ascii_case("Organization") && !account_login.trim().is_empty() {
+        format!(
+            "https://github.com/organizations/{}/settings/installations/{id}",
+            account_login.trim()
+        )
+    } else {
+        format!("https://github.com/settings/installations/{id}")
+    }
+}
+
+fn permissions_from_json(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    let Some(serde_json::Value::Object(map)) = value else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for (k, v) in map {
+        let s = match v {
+            serde_json::Value::Bool(true) => "true".to_string(),
+            serde_json::Value::Bool(false) => "false".to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        out.insert(k.clone(), s);
+    }
+    out
+}
+
+/// Fold one installation's repo list into a cache snapshot (pure mapping).
+pub fn apply_installation_repos(
+    cache: &mut GitHubRepoAccessCache,
+    installation: &InstallationInfo,
+    repos: &[InstallationRepo],
+    now: DateTime<Utc>,
+) {
+    if !cache.installations.iter().any(|i| i.id == installation.id) {
+        cache.installations.push(installation.clone());
+    }
+    for repo in repos {
+        let full_name = repo.full_name.trim();
+        if full_name.is_empty() || !full_name.contains('/') {
+            continue;
+        }
+        cache.repos.insert(
+            full_name.to_string(),
+            GitHubRepoAccessEntry {
+                installation_id: installation.id,
+                permissions: repo.permissions.clone(),
+                last_seen_at: now,
+            },
+        );
+    }
+}
+
+/// `GET /installation/repositories` — repos this installation token can see.
+///
+/// Uses an installation access token (App JWT mint), never the sandbox `GH_TOKEN`
+/// provider path. Paginates until a short page.
+pub async fn list_installation_repositories(
+    installation_token: &str,
+) -> Result<Vec<InstallationRepo>, Error> {
+    #[derive(Deserialize)]
+    struct Page {
+        #[serde(default)]
+        repositories: Vec<serde_json::Value>,
+    }
+    let mut out = Vec::new();
+    let mut page: u32 = 1;
+    loop {
+        let url = format!(
+            "{}/installation/repositories?per_page=100&page={page}",
+            api_base()
+        );
+        let resp = client()?
+            .get(&url)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {installation_token}"),
+            )
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| Error::Api(format!("list installation repos: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api(format!(
+                "list installation repos HTTP {status}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+        let body: Page = resp
+            .json()
+            .await
+            .map_err(|e| Error::Api(format!("list installation repos json: {e}")))?;
+        let n = body.repositories.len();
+        for row in body.repositories {
+            let full_name = row
+                .get("full_name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let Some(full_name) = full_name else {
+                continue;
+            };
+            out.push(InstallationRepo {
+                full_name,
+                permissions: permissions_from_json(row.get("permissions")),
+            });
+        }
+        if n < 100 {
+            break;
+        }
+        page = page.saturating_add(1);
+        if page > 50 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Walk every App installation and cache `owner/repo` → installation + permissions.
+///
+/// Mints per-installation tokens only to call `GET /installation/repositories`.
+/// Does not call [`ensure_github_provider`] or write sandbox `GH_TOKEN`.
+pub async fn refresh_repo_access_cache(board: &SharedBoard) -> Result<GitHubRepoAccessCache, Error> {
+    let Some(bundle) = board.github_app_bundle() else {
+        return Ok(board.github_repo_access_cache());
+    };
+    if bundle.app_id.trim().is_empty() || bundle.private_key_pem.trim().is_empty() {
+        return Ok(board.github_repo_access_cache());
+    }
+    let jwt = make_app_jwt(&bundle, Utc::now())?;
+    let installations = match list_installations(&jwt).await {
+        Ok(list) => list,
+        Err(e) => {
+            let mut cache = board.github_repo_access_cache();
+            cache.last_error = Some(e.to_string());
+            board.set_github_repo_access_cache(cache.clone());
+            return Err(e);
+        }
+    };
+
+    let now = Utc::now();
+    let mut next = GitHubRepoAccessCache {
+        refreshed_at: Some(now),
+        last_error: None,
+        installations: Vec::new(),
+        repos: BTreeMap::new(),
+    };
+
+    for inst in &installations {
+        let token = match create_installation_token(&jwt, inst.id).await {
+            Ok(t) => t,
+            Err(e) => {
+                let mut cache = board.github_repo_access_cache();
+                cache.last_error = Some(format!("installation {}: {e}", inst.id));
+                board.set_github_repo_access_cache(cache.clone());
+                return Err(e);
+            }
+        };
+        let repos = match list_installation_repositories(&token.token).await {
+            Ok(r) => r,
+            Err(e) => {
+                let mut cache = board.github_repo_access_cache();
+                cache.last_error = Some(format!("repos for installation {}: {e}", inst.id));
+                board.set_github_repo_access_cache(cache.clone());
+                return Err(e);
+            }
+        };
+        apply_installation_repos(&mut next, inst, &repos, now);
+    }
+
+    board.set_github_repo_access_cache(next.clone());
+    tracing::info!(
+        installations = next.installations.len(),
+        repos = next.repos.len(),
+        "refreshed GitHub App repo-access cache"
+    );
+    Ok(next)
+}
+
+/// Background loop: refresh the repo-access cache on an interval.
+pub async fn repo_access_refresh_loop(board: SharedBoard) {
+    loop {
+        match refresh_repo_access_cache(&board).await {
+            Ok(_) => {}
+            Err(e) => tracing::warn!("GitHub App repo-access cache refresh: {e}"),
+        }
+        tokio::time::sleep(REPO_ACCESS_REFRESH_INTERVAL).await;
+    }
 }
 
 /// `POST /app/installations/{id}/access_tokens`.
@@ -1047,6 +1294,176 @@ mod tests {
         assert_eq!(list[0].id, 99);
         assert_eq!(list[0].account_login, "clankrshq");
         handle.abort();
+    }
+
+    fn perms(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn apply_installation_repos_maps_owner_repo_to_installation() {
+        let now = Utc::now();
+        let mut cache = GitHubRepoAccessCache::default();
+        let inst = InstallationInfo {
+            id: 42,
+            account_login: "acme".into(),
+            account_type: "Organization".into(),
+        };
+        apply_installation_repos(
+            &mut cache,
+            &inst,
+            &[
+                InstallationRepo {
+                    full_name: "acme/widgets".into(),
+                    permissions: perms(&[("push", "true"), ("pull", "true")]),
+                },
+                InstallationRepo {
+                    full_name: "acme/core".into(),
+                    permissions: perms(&[("admin", "true")]),
+                },
+                InstallationRepo {
+                    full_name: "not-a-repo".into(),
+                    permissions: BTreeMap::new(),
+                },
+            ],
+            now,
+        );
+        assert_eq!(cache.installations.len(), 1);
+        assert_eq!(cache.repos.len(), 2);
+        let widgets = cache.repos.get("acme/widgets").expect("widgets");
+        assert_eq!(widgets.installation_id, 42);
+        assert_eq!(widgets.permissions.get("push").map(String::as_str), Some("true"));
+        assert_eq!(widgets.last_seen_at, now);
+        assert_eq!(cache.installation_id_for("acme/core"), Some(42));
+        assert_eq!(cache.installation_id_for("ACME/widgets"), Some(42));
+        assert_eq!(cache.installation_id_for("missing/repo"), None);
+        assert_eq!(
+            installation_manage_url("acme", "Organization", 42),
+            "https://github.com/organizations/acme/settings/installations/42"
+        );
+        assert_eq!(
+            installation_manage_url("alice", "User", 7),
+            "https://github.com/settings/installations/7"
+        );
+    }
+
+    async fn spawn_repo_access_mock() -> (String, tokio::task::JoinHandle<()>) {
+        use axum::http::HeaderMap;
+        let app = Router::new()
+            .route(
+                "/app/installations",
+                get(|| async {
+                    Json(serde_json::json!([
+                        {
+                            "id": 99,
+                            "account": { "login": "clankrshq", "type": "Organization" }
+                        },
+                        {
+                            "id": 100,
+                            "account": { "login": "shanemcd", "type": "User" }
+                        }
+                    ]))
+                }),
+            )
+            .route(
+                "/app/installations/{id}/access_tokens",
+                post(
+                    |axum::extract::Path(id): axum::extract::Path<u64>| async move {
+                        let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
+                        Json(serde_json::json!({
+                            "token": format!("ghs_inst_{id}"),
+                            "expires_at": expires,
+                        }))
+                    },
+                ),
+            )
+            .route(
+                "/installation/repositories",
+                get(|headers: HeaderMap| async move {
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    let repositories = if auth.contains("ghs_inst_99") {
+                        serde_json::json!([{
+                            "full_name": "clankrshq/honr",
+                            "permissions": { "admin": true, "push": true, "pull": true }
+                        }])
+                    } else if auth.contains("ghs_inst_100") {
+                        serde_json::json!([{
+                            "full_name": "shanemcd/notes",
+                            "permissions": { "admin": false, "push": true, "pull": true }
+                        }])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    Json(serde_json::json!({ "repositories": repositories }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn refresh_repo_access_cache_maps_installations_without_sandbox_token() {
+        let (dir, board, _env) = test_board("repo-access");
+        seal_test_app(&board);
+        board.set_github_app_installation_id(Some(99));
+
+        let (base, handle) = spawn_repo_access_mock().await;
+        let _api = github_api_env::Guard::set(&base);
+
+        let cache = refresh_repo_access_cache(&board).await.expect("refresh");
+        assert_eq!(cache.installations.len(), 2);
+        assert_eq!(cache.repos.len(), 2);
+        assert_eq!(cache.installation_id_for("clankrshq/honr"), Some(99));
+        assert_eq!(cache.installation_id_for("shanemcd/notes"), Some(100));
+        let honr = cache.repos.get("clankrshq/honr").expect("honr");
+        assert_eq!(honr.permissions.get("admin").map(String::as_str), Some("true"));
+        assert!(cache.last_error.is_none());
+        assert!(cache.refreshed_at.is_some());
+
+        // Visibility walk must not mint the sandbox GH_TOKEN provider credential.
+        let providers = board.openshell_providers();
+        let github = providers.iter().find(|p| p.name == PROVIDER_NAME);
+        if let Some(p) = github {
+            let opened = p
+                .credentials_sealed
+                .as_deref()
+                .and_then(|s| open_string_map(s).ok())
+                .unwrap_or_default();
+            assert!(
+                !opened.contains_key(CREDENTIAL_KEY),
+                "repo-access refresh must not write GH_TOKEN"
+            );
+        }
+
+        // Singleton minting still uses GITHUB_INSTALLATION_ID (99), not routing.
+        let ok = ensure_github_provider(&board).await.expect("ensure");
+        assert!(ok);
+        let p = board
+            .openshell_providers()
+            .into_iter()
+            .find(|p| p.name == PROVIDER_NAME)
+            .expect("provider");
+        let opened = open_string_map(p.credentials_sealed.as_deref().unwrap()).expect("open");
+        assert_eq!(
+            opened.get(CREDENTIAL_KEY).map(String::as_str),
+            Some("ghs_inst_99")
+        );
+        assert_eq!(board.github_app_installation_id(), Some(99));
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

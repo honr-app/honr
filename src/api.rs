@@ -174,6 +174,11 @@ pub fn routes() -> Router<SharedBoard> {
         )
         .route("/github-app", get(get_github_app).put(put_github_app))
         .route("/github-app/sync-token", post(sync_github_app_token))
+        .route("/github-app/repo-access", get(get_github_repo_access))
+        .route(
+            "/github-app/repo-access/refresh",
+            post(refresh_github_repo_access),
+        )
         .nest("/auth", crate::auth::api_settings_routes())
 }
 
@@ -1023,6 +1028,112 @@ async fn sync_github_app_token(
             axum::http::StatusCode::BAD_GATEWAY,
             format!("sync token: {e}"),
         )),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubRepoAccessRepoView {
+    pub full_name: String,
+    pub installation_id: u64,
+    #[serde(default)]
+    pub permissions: BTreeMap<String, String>,
+    pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubRepoAccessInstallationView {
+    pub id: u64,
+    pub account_login: String,
+    #[serde(default)]
+    pub account_type: String,
+    pub manage_url: String,
+    pub repos: Vec<GitHubRepoAccessRepoView>,
+}
+
+/// GET `/api/github-app/repo-access` — cached installations + repos (visibility).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubRepoAccessView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub install_url: String,
+    /// Singleton used by `github-app` token minting — unchanged by this cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_installation_id: Option<u64>,
+    pub installations: Vec<GitHubRepoAccessInstallationView>,
+}
+
+fn github_repo_access_view(b: &SharedBoard) -> GitHubRepoAccessView {
+    let cache = b.github_repo_access_cache();
+    let mut installations: Vec<GitHubRepoAccessInstallationView> = cache
+        .installations
+        .iter()
+        .map(|inst| GitHubRepoAccessInstallationView {
+            id: inst.id,
+            account_login: inst.account_login.clone(),
+            account_type: inst.account_type.clone(),
+            manage_url: crate::github_app::installation_manage_url(
+                &inst.account_login,
+                &inst.account_type,
+                inst.id,
+            ),
+            repos: Vec::new(),
+        })
+        .collect();
+    for (full_name, entry) in &cache.repos {
+        let repo = GitHubRepoAccessRepoView {
+            full_name: full_name.clone(),
+            installation_id: cache
+                .installation_id_for(full_name)
+                .unwrap_or(entry.installation_id),
+            permissions: entry.permissions.clone(),
+            last_seen_at: entry.last_seen_at.to_rfc3339(),
+        };
+        if let Some(inst) = installations
+            .iter_mut()
+            .find(|i| i.id == entry.installation_id)
+        {
+            inst.repos.push(repo);
+        } else {
+            installations.push(GitHubRepoAccessInstallationView {
+                id: entry.installation_id,
+                account_login: String::new(),
+                account_type: String::new(),
+                manage_url: crate::github_app::installation_manage_url("", "", entry.installation_id),
+                repos: vec![repo],
+            });
+        }
+    }
+    for inst in &mut installations {
+        inst.repos.sort_by(|a, b| a.full_name.cmp(&b.full_name));
+    }
+    installations.sort_by(|a, b| a.account_login.cmp(&b.account_login).then(a.id.cmp(&b.id)));
+    GitHubRepoAccessView {
+        refreshed_at: cache.refreshed_at.map(|t| t.to_rfc3339()),
+        last_error: cache.last_error,
+        install_url: crate::github_app::INSTALLATIONS_MANAGE_URL.to_string(),
+        token_installation_id: b.github_app_installation_id(),
+        installations,
+    }
+}
+
+async fn get_github_repo_access(AxState(b): AxState<SharedBoard>) -> Json<GitHubRepoAccessView> {
+    Json(github_repo_access_view(&b))
+}
+
+async fn refresh_github_repo_access(
+    AxState(b): AxState<SharedBoard>,
+) -> Result<Json<GitHubRepoAccessView>, (axum::http::StatusCode, String)> {
+    match crate::github_app::refresh_repo_access_cache(&b).await {
+        Ok(_) => Ok(Json(github_repo_access_view(&b))),
+        Err(e) => {
+            // Cache may still hold a last_error; surface the walk failure.
+            Err((
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("refresh repo access: {e}"),
+            ))
+        }
     }
 }
 
@@ -4331,6 +4442,58 @@ mod tests {
 
         drop(_env);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn github_repo_access_view_groups_repos_under_installations() {
+        let path = std::env::temp_dir().join(format!(
+            "honr-test-api-repo-access-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let b = std::sync::Arc::new(crate::store::Board::new(
+            crate::schema::Schema::default(),
+            path,
+        ));
+        let now = chrono::Utc::now();
+        let mut cache = crate::github_app::GitHubRepoAccessCache {
+            refreshed_at: Some(now),
+            last_error: None,
+            installations: vec![crate::github_app::InstallationInfo {
+                id: 99,
+                account_login: "acme".into(),
+                account_type: "Organization".into(),
+            }],
+            repos: Default::default(),
+        };
+        cache.repos.insert(
+            "acme/widgets".into(),
+            crate::github_app::GitHubRepoAccessEntry {
+                installation_id: 99,
+                permissions: {
+                    let mut m = BTreeMap::new();
+                    m.insert("push".into(), "true".into());
+                    m
+                },
+                last_seen_at: now,
+            },
+        );
+        b.set_github_repo_access_cache(cache);
+        b.set_github_app_installation_id(Some(99));
+        let view = github_repo_access_view(&b);
+        assert_eq!(view.install_url, crate::github_app::INSTALLATIONS_MANAGE_URL);
+        assert_eq!(view.token_installation_id, Some(99));
+        assert_eq!(view.installations.len(), 1);
+        assert_eq!(view.installations[0].account_login, "acme");
+        assert_eq!(
+            view.installations[0].manage_url,
+            "https://github.com/organizations/acme/settings/installations/99"
+        );
+        assert_eq!(view.installations[0].repos.len(), 1);
+        assert_eq!(view.installations[0].repos[0].full_name, "acme/widgets");
+        assert_eq!(view.installations[0].repos[0].installation_id, 99);
     }
 
     #[tokio::test]

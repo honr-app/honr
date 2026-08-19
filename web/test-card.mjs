@@ -28,7 +28,7 @@ import {
   stampCloneIntoIntent,
 } from "./dist-test/components/CreateTaskForm.js";
 import { OperatorGuide } from "./dist-test/components/OperatorGuide.js";
-import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellPoliciesPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, OpenShellReadinessStripView, gatewayReady, gatewayMtlsReady, sandboxSpecReady, sandboxHasNoProviders } from "./dist-test/components/Settings.js";
+import { ProjectSandboxPicker, SandboxesPanelView, Settings, WorkspacePanelView, OpenShellPanelView, OpenShellProvidersPanelView, OpenShellPoliciesPanelView, OpenShellProviderTypesPanelView, AgentRuntimePanelView, RepoAccessPanelView, OpenShellReadinessStripView, gatewayReady, gatewayMtlsReady, sandboxSpecReady, sandboxHasNoProviders } from "./dist-test/components/Settings.js";
 import { initial, reduce, isSequenceGap, subscribeBoardEvents, emitBoardEvent } from "./dist-test/useBoard.js";
 import { honrWsHost, honrWsUrl } from "./dist-test/wsUrl.js";
 import {
@@ -1094,6 +1094,7 @@ assert(settingsHtml.includes("data-testid=\"openshell-connectivity\""), "Default
 assert(settingsHtml.includes("Connectivity"), "Settings OpenShell names Connectivity");
 assert(settingsHtml.includes("Forge"), "Settings should include Forge section");
 assert(settingsHtml.includes("data-testid=\"settings-nav-workspace\""), "Settings should nav to Forge (workspace id)");
+assert(settingsHtml.includes("data-testid=\"settings-nav-repo-access\""), "Settings should nav to Repo access");
 assert(settingsHtml.includes("OpenShell"), "Settings should include OpenShell section");
 assert(settingsHtml.includes("MCP servers"), "Settings should include MCP servers section");
 assert(settingsHtml.includes("Agent runtime"), "Settings should include Agent runtime section");
@@ -1125,6 +1126,39 @@ assert(!agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-branch-pref
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-standing-prompt\""), "Agent runtime standing prompt");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-field-sweep\""), "Agent runtime sweep interval");
 assert(agentRuntimeHtml.includes("data-testid=\"agent-runtime-save\""), "Agent runtime save control");
+
+const repoAccessHtml = renderToString(
+  React.createElement(RepoAccessPanelView, {
+    view: {
+      refreshed_at: "2026-08-19T00:00:00Z",
+      install_url: "https://github.com/settings/installations",
+      token_installation_id: 99,
+      installations: [
+        {
+          id: 99,
+          account_login: "acme",
+          account_type: "Organization",
+          manage_url: "https://github.com/organizations/acme/settings/installations/99",
+          repos: [
+            {
+              full_name: "acme/widgets",
+              installation_id: 99,
+              permissions: { push: "true", pull: "true" },
+              last_seen_at: "2026-08-19T00:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
+    onRefresh: () => {},
+  }),
+);
+assert(repoAccessHtml.includes("data-testid=\"repo-access-panel\""), "Repo access panel should render");
+assert(repoAccessHtml.includes("data-testid=\"repo-access-refresh\""), "Repo access refresh action");
+assert(repoAccessHtml.includes("data-testid=\"repo-access-install-link\""), "Repo access GitHub install deep link");
+assert(repoAccessHtml.includes("https://github.com/settings/installations"), "Repo access install URL");
+assert(repoAccessHtml.includes("acme/widgets"), "Repo access lists cached repos");
+assert(repoAccessHtml.includes("data-testid=\"repo-access-manage-99\""), "Per-installation manage link");
 
 const openshellPanelProps = {
   gatewayEndpoint: "https://127.0.0.1:17670",
@@ -2607,6 +2641,12 @@ assert.deepStrictEqual(parseChromeLocation("/settings/workspace"), {
   view: "settings",
   cardId: null,
   settingsSection: "workspace",
+  openShellTab: "connectivity",
+});
+assert.deepStrictEqual(parseChromeLocation("/settings/repo-access"), {
+  view: "settings",
+  cardId: null,
+  settingsSection: "repo-access",
   openShellTab: "connectivity",
 });
 assert.deepStrictEqual(parseChromeLocation("/settings/agent-runtime"), {
