@@ -1228,6 +1228,37 @@ const openshellUnhealthyHtml = renderToString(
 );
 assert(openshellUnhealthyHtml.includes("Unhealthy"), "OpenShell unhealthy label");
 
+const openshellOidcPasteHtml = renderToString(
+  React.createElement(OpenShellPanelView, {
+    ...openshellPanelProps,
+    authMode: "oidc",
+    oidc: {
+      issuer: "https://idp.example/realms/openshell",
+      client_id: "openshell-cli",
+      audience: "openshell-cli",
+    },
+    oidcAwaitingPaste: true,
+    oidcPaste: "",
+    oidcRedirectUri: "http://127.0.0.1:48539/callback",
+    oidcAuthorizeUrl: "https://idp.example/auth",
+    onOidcPasteChange: () => {},
+    onOidcCompletePaste: () => {},
+    status: { healthy: false, summary: "", not_configured: false },
+  }),
+);
+assert(
+  openshellOidcPasteHtml.includes("data-testid=\"openshell-oidc-paste\""),
+  "OIDC paste-back after Log in",
+);
+assert(
+  openshellOidcPasteHtml.includes("data-testid=\"openshell-oidc-paste-url\""),
+  "OIDC paste textarea",
+);
+assert(
+  openshellOidcPasteHtml.includes("http://127.0.0.1:48539/callback"),
+  "OIDC paste hint shows loopback redirect_uri",
+);
+
 const openshellProvidersHtml = renderToString(
   React.createElement(OpenShellProvidersPanelView, {
     providers: [

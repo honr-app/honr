@@ -58,6 +58,12 @@ export function OpenShellPanelView({
   onClearMtls,
   onOidcLogin,
   onOidcLogout,
+  oidcAwaitingPaste = false,
+  oidcPaste = "",
+  oidcAuthorizeUrl = "",
+  oidcRedirectUri = "",
+  onOidcPasteChange,
+  onOidcCompletePaste,
   providers,
   providerTypes,
   policies,
@@ -89,6 +95,12 @@ export function OpenShellPanelView({
   onClearMtls: () => void;
   onOidcLogin: () => void;
   onOidcLogout: () => void;
+  oidcAwaitingPaste?: boolean;
+  oidcPaste?: string;
+  oidcAuthorizeUrl?: string;
+  oidcRedirectUri?: string;
+  onOidcPasteChange?: (next: string) => void;
+  onOidcCompletePaste?: () => void;
   providers?: ReactNode;
   providerTypes?: ReactNode;
   policies?: ReactNode;
@@ -366,15 +378,65 @@ export function OpenShellPanelView({
                     ? "Logged in (tokens encrypted in board DB)."
                     : "Not logged in — Save settings, then Log in."}
                 </p>
-                <p className="dim" data-testid="openshell-oidc-redirect-hint">
-                  Keycloak Valid Redirect URIs must include{" "}
-                  <code>
-                    {typeof window !== "undefined"
-                      ? `${window.location.origin}/oauth/openshell/callback`
-                      : "/oauth/openshell/callback"}
-                  </code>
-                  .
-                </p>
+                {oidcAwaitingPaste ? (
+                  <div data-testid="openshell-oidc-paste">
+                    <p className="dim" data-testid="openshell-oidc-redirect-hint">
+                      IdP login opened in a new tab. The browser will land on a
+                      loopback URL that fails to load (
+                      <code>
+                        {oidcRedirectUri || "http://127.0.0.1:…/callback"}
+                      </code>
+                      ). Paste that address bar URL (or the{" "}
+                      <code>?code=…&state=…</code> portion) here.
+                    </p>
+                    {oidcAuthorizeUrl && (
+                      <p className="dim">
+                        If no tab opened, open{" "}
+                        <a
+                          href={oidcAuthorizeUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          data-testid="openshell-oidc-authorize-link"
+                        >
+                          the authorize URL
+                        </a>{" "}
+                        yourself.
+                      </p>
+                    )}
+                    {onOidcPasteChange && (
+                      <label>
+                        Redirect URL
+                        <textarea
+                          className="search-input"
+                          rows={3}
+                          value={oidcPaste}
+                          disabled={busy}
+                          placeholder="http://127.0.0.1:…/callback?code=…&state=…"
+                          onChange={(e) => onOidcPasteChange(e.target.value)}
+                          data-testid="openshell-oidc-paste-url"
+                        />
+                      </label>
+                    )}
+                    {onOidcCompletePaste && (
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={busy || !oidcPaste.trim()}
+                        onClick={onOidcCompletePaste}
+                        data-testid="openshell-oidc-paste-complete"
+                      >
+                        Complete login
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <p className="dim" data-testid="openshell-oidc-redirect-hint">
+                    Log in uses a loopback callback (same as the OpenShell CLI).
+                    After Keycloak, paste the{" "}
+                    <code>http://127.0.0.1:…/callback</code> URL that fails to
+                    load.
+                  </p>
+                )}
               </>
             )}
 
@@ -475,6 +537,10 @@ export function OpenShellPanel({
   const [error, setError] = useState<string | null>(null);
   const [savedHint, setSavedHint] = useState<string | null>(null);
   const [tab, setTab] = useState<OpenShellTab>("connectivity");
+  const [oidcAwaitingPaste, setOidcAwaitingPaste] = useState(false);
+  const [oidcPaste, setOidcPaste] = useState("");
+  const [oidcAuthorizeUrl, setOidcAuthorizeUrl] = useState("");
+  const [oidcRedirectUri, setOidcRedirectUri] = useState("");
 
   const applySaved = useCallback((cfg: OpenShellSettings, st?: OpenShellStatus) => {
     setGatewayEndpoint(cfg.gateway_endpoint ?? st?.gateway_endpoint ?? "");
@@ -628,10 +694,37 @@ export function OpenShellPanel({
           "Cleared sealed mTLS material.",
         );
       }}
+      oidcAwaitingPaste={oidcAwaitingPaste}
+      oidcPaste={oidcPaste}
+      oidcAuthorizeUrl={oidcAuthorizeUrl}
+      oidcRedirectUri={oidcRedirectUri}
+      onOidcPasteChange={setOidcPaste}
+      onOidcCompletePaste={() => {
+        const redirect = oidcPaste.trim();
+        if (!redirect) {
+          setError("paste the loopback redirect URL from the address bar");
+          return;
+        }
+        setBusy(true);
+        setError(null);
+        api
+          .openshellOidcComplete({ redirect })
+          .then(() => {
+            setOidcAwaitingPaste(false);
+            setOidcPaste("");
+            setOidcAuthorizeUrl("");
+            setOidcRedirectUri("");
+            setSavedHint("OIDC login complete.");
+            return refresh();
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      }}
       onOidcLogin={() => {
         setBusy(true);
         setError(null);
         setSavedHint(null);
+        setOidcPaste("");
         const body: OpenShellSettings = {
           gateway_endpoint: gatewayEndpoint.trim() || null,
           auth_mode: "oidc",
@@ -645,12 +738,16 @@ export function OpenShellPanel({
           .putOpenShell(body)
           .then(() => api.openshellOidcLogin())
           .then((out) => {
-            window.location.href = out.authorize_url;
+            window.open(out.authorize_url, "_blank", "noopener,noreferrer");
+            setOidcAuthorizeUrl(out.authorize_url);
+            setOidcRedirectUri(out.redirect_uri);
+            setOidcAwaitingPaste(true);
+            setSavedHint(
+              "IdP login opened in a new tab. Paste the loopback redirect URL here when the page fails to load.",
+            );
           })
-          .catch((e) => {
-            setError(String(e));
-            setBusy(false);
-          });
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
       }}
       onOidcLogout={() => {
         setBusy(true);
@@ -658,6 +755,10 @@ export function OpenShellPanel({
         api
           .openshellOidcLogout()
           .then(() => {
+            setOidcAwaitingPaste(false);
+            setOidcPaste("");
+            setOidcAuthorizeUrl("");
+            setOidcRedirectUri("");
             setSavedHint("Logged out of OpenShell OIDC.");
             return refresh();
           })

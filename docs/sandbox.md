@@ -50,8 +50,11 @@ an explicit auth mode:
 
 - **mTLS** — HTTPS with sealed client PEMs (board DB).
 - **OIDC** — HTTPS with `authorization: Bearer` (via
-  `openshell_core::auth::EdgeAuthInterceptor`); browser PKCE login seals tokens
-  in the board DB; refresh uses `openshell-sdk` OIDC helpers.
+  `openshell_core::auth::EdgeAuthInterceptor`); browser PKCE uses a loopback
+  `redirect_uri` (`http://127.0.0.1:<port>/callback`, same shape as the
+  OpenShell CLI). Paste the callback URL into Settings — the loopback page will
+  not load on a remote/Tailscale board. Tokens seal in the board DB; refresh
+  uses `openshell-sdk` OIDC helpers.
 
 Endpoint must be `https://`. The only host secret file is
 `~/.config/honr/master.key`. Upload/download use exec + tar over that same

@@ -43,13 +43,21 @@ FROM registry.access.redhat.com/ubi9/ubi:latest AS shared
 
 USER root
 
-# Matches the old community base's user setup — OpenShell's default policy
-# resolves `process.run_as_user`/`run_as_group` by name ("sandbox"), and each
-# leaf stage below switches to that user before the agent runs.
+# OpenShell policy looks up `process.run_as_user`/`run_as_group` by name
+# ("sandbox"). OpenShift restricted SCC ignores image USER and assigns a
+# random UID in supplementary group 0. Files owned by a baked-in uid (the
+# Cursor installer tarball uses 2000) are unreadable to that UID; Landlock
+# then *skips* the path at apply (`skipped:1`) and every later open is
+# EACCES. Keep the named user for local/podman, add group 0, and never
+# preserve foreign uids from `cp -a`.
 RUN groupadd -r supervisor \
  && useradd -r -g supervisor -s /usr/sbin/nologin supervisor \
  && groupadd -r sandbox \
- && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox
+ && useradd -r -g sandbox -G root -d /sandbox -s /bin/bash sandbox \
+ && mkdir -p /sandbox \
+ && chown sandbox:root /sandbox \
+ && chmod 0775 /sandbox \
+ && chmod g+s /sandbox
 
 # OS-level tools. `iproute` (network namespace management) and `nftables`
 # (bypass detection) are OpenShell's own documented minimum for a custom
@@ -95,13 +103,17 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
            --default-toolchain "${RUST_VERSION}" \
            --component clippy \
  && cargo --version && clippy-driver --version \
- && chmod -R a+rX /opt/rust
+ && chmod -R a+rX /opt/rust \
+ && chgrp -R 0 /opt/rust \
+ && chmod -R g=u /opt/rust
 
 # $CARGO_HOME / $CARGO_TARGET_DIR / $NPM_CONFIG_CACHE start empty — a card's
 # own `cargo build` / `npm ci` populate them at runtime as the unprivileged
 # `sandbox` user, so they need to be writable from the start.
 RUN mkdir -p /opt/cargo /opt/cargo-target /opt/npm-cache \
- && chmod -R a+rwX /opt/cargo /opt/cargo-target /opt/npm-cache
+ && chmod -R a+rwX /opt/cargo /opt/cargo-target /opt/npm-cache \
+ && chgrp -R 0 /opt/cargo /opt/cargo-target /opt/npm-cache \
+ && chmod -R g=u /opt/cargo /opt/cargo-target /opt/npm-cache
 
 # ---- rustup shims & environment --------------------------------------------
 
@@ -148,7 +160,8 @@ FROM shared AS cursor
 # EACCES creating projects/ at runtime.
 RUN HOME=/root curl -fsSL https://cursor.com/install | HOME=/root bash \
  && mkdir -p /opt/cursor-agent \
- && cp -a /root/.local/share/cursor-agent/. /opt/cursor-agent/ \
+ && cp -a --no-preserve=ownership /root/.local/share/cursor-agent/. /opt/cursor-agent/ \
+ && chown -R root:root /opt/cursor-agent \
  && AGENT_BIN="$(find /opt/cursor-agent/versions -type f -name cursor-agent | sort | tail -1)" \
  && test -n "$AGENT_BIN" \
  && ln -sfn "$AGENT_BIN" /usr/local/bin/agent \
@@ -157,7 +170,9 @@ RUN HOME=/root curl -fsSL https://cursor.com/install | HOME=/root bash \
  && HOME=/tmp /usr/local/bin/agent --version \
  && rm -rf /sandbox/.cursor /sandbox/.cache \
  && mkdir -p /sandbox \
- && chown -R sandbox:sandbox /sandbox
+ && chown -R sandbox:root /sandbox \
+ && chmod -R g=u /sandbox \
+ && chmod g+s /sandbox
 
 USER sandbox
 WORKDIR /sandbox
@@ -191,7 +206,8 @@ FROM shared AS opencode
 # HOME=/root — see cursor stage.
 RUN HOME=/root curl -fsSL https://opencode.ai/install | HOME=/root bash -s -- --no-modify-path \
  && mkdir -p /opt/opencode \
- && cp -a /root/.opencode/. /opt/opencode/ \
+ && cp -a --no-preserve=ownership /root/.opencode/. /opt/opencode/ \
+ && chown -R root:root /opt/opencode \
  && test -x /opt/opencode/bin/opencode \
  && ln -sfn /opt/opencode/bin/opencode /usr/local/bin/opencode \
  && chmod -R a+rX /opt/opencode \
