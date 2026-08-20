@@ -44,7 +44,9 @@ resulting image only carries the binary it will actually run.
 OpenShift restricted SCC assigns a random UID in group 0 and ignores image
 `USER`. Installer tarballs that unpack as uid 2000 (Cursor) must be
 `chown root:root` — `cp -a` would keep 2000, Landlock skips `/opt/cursor-agent`,
-and `agent` is Permission denied. Writable paths are group 0 with `g=u`.
+and `agent` is Permission denied. Writable paths are group-owned by 0 with
+`g=u` so the random UID can write; the named `sandbox` user is **not** in
+GID 0, because OpenShell's local podman driver refuses that membership.
 
 The toolchain is baked in; honr's own source and dependency cache are not — a
 card's own `cargo build`/`npm ci` populate `/opt/cargo`, `/opt/cargo-target`,

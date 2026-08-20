@@ -48,12 +48,16 @@ USER root
 # random UID in supplementary group 0. Files owned by a baked-in uid (the
 # Cursor installer tarball uses 2000) are unreadable to that UID; Landlock
 # then *skips* the path at apply (`skipped:1`) and every later open is
-# EACCES. Keep the named user for local/podman, add group 0, and never
-# preserve foreign uids from `cp -a`.
+# EACCES. Keep the named user for local rootless podman. Do not add that
+# user to GID 0 (`-G root`): OpenShell's supervisor refuses
+# "OCI user is a member of prohibited GID 0". OpenShift still gets group-0
+# *file* ownership (`chown *:root` / `chgrp 0` + `g=u`) — SCC injects group
+# 0 for the random UID; the passwd entry does not need it. Never preserve
+# foreign uids from `cp -a`.
 RUN groupadd -r supervisor \
  && useradd -r -g supervisor -s /usr/sbin/nologin supervisor \
  && groupadd -r sandbox \
- && useradd -r -g sandbox -G root -d /sandbox -s /bin/bash sandbox \
+ && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox \
  && mkdir -p /sandbox \
  && chown sandbox:root /sandbox \
  && chmod 0775 /sandbox \
