@@ -262,6 +262,9 @@ export const api = {
     authorize_url: string;
     redirect_uri: string;
   }> => post("/openshell/oidc/login"),
+  openshellOidcComplete: (body: {
+    redirect: string;
+  }): Promise<{ ok: boolean }> => post("/openshell/oidc/complete", body),
   openshellOidcLogout: (): Promise<{ ok: boolean; error?: string | null }> =>
     post("/openshell/oidc/logout"),
 

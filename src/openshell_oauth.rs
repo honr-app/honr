@@ -1,41 +1,43 @@
 //! Host-mediated OpenShell gateway OIDC login (Authorization Code + PKCE).
 //!
-//! Operator browser completes the IdP flow; honr exchanges the code on a
-//! public board callback (`/oauth/openshell/callback`). Same shape as
-//! [`crate::mcp_client_oauth`] — no host `xdg-open`, no `127.0.0.1` listener.
-//! Distinct from [`crate::antigravity_oauth`] (Google paste-code).
+//! The IdP client (OpenShell CLI / Keycloak) already allows loopback
+//! `redirect_uri`s. Honr asks for `http://127.0.0.1:<port>/callback` — the
+//! same shape as `openshell gateway login` / Hermes — and the operator pastes
+//! the callback URL (the loopback page will not load on a Tailscale board).
+//! Token exchange still uses that exact redirect_uri. Distinct from
+//! [`crate::antigravity_oauth`] (Google hosted paste-code) and from MCP
+//! client OAuth (honr as the authorization server).
 
 use crate::secrets::OpenShellOidcBundle;
 use crate::store::SharedBoard;
 use axum::extract::{Query, State};
-use axum::http::{header::HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier,
-    RedirectUrl, Scope, TokenResponse, TokenUrl,
+    RedirectUrl, TokenResponse, TokenUrl,
 };
 use parking_lot::Mutex;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CALLBACK_PATH: &str = "/oauth/openshell/callback";
 const RETURN_PATH: &str = "/settings/openshell/connectivity";
 const PENDING_TTL_SECS: u64 = 600;
+const LOOPBACK_PORT_MIN: u16 = 49152;
+const LOOPBACK_PORT_MAX: u16 = 65535;
 
-/// `offline_access` gets a refresh token independent of the IdP's SSO
-/// session (Keycloak default `ssoSessionIdleTimeout` is commonly 30
-/// minutes; an offline token instead lives for `offlineSessionIdleTimeout`,
-/// commonly 30 days). Without it, login looks fine and then silently starts
-/// failing token refresh after the first idle gap — same failure the
-/// OpenShell CLI hits without `--oidc-scopes "openid offline_access"`.
-/// Requesting a scope the client isn't allowed returns `invalid_scope`, so
-/// this is opt-in on the IdP client, not assumed.
-const DEFAULT_SCOPES: &[&str] = &["openid", "offline_access"];
+// Do not send `scope` on authorize. Requesting `openid` / `offline_access`
+// returns `invalid_scope` on IdP clients that do not assign those as
+// optional client scopes (the OpenShell-provisioned Keycloak client is
+// one). The IdP then uses its default client scopes. A refresh token is
+// still required at exchange — Keycloak often issues a session-bound
+// refresh without `offline_access`; if it does not, complete will say so.
 
 fn pending() -> &'static Mutex<HashMap<String, PendingOAuth>> {
     static STORE: OnceLock<Mutex<HashMap<String, PendingOAuth>>> = OnceLock::new();
@@ -58,10 +60,13 @@ struct PendingOAuth {
 pub fn routes() -> Router<SharedBoard> {
     Router::new()
         .route("/login", post(oauth_login))
+        .route("/complete", post(oauth_complete))
         .route("/logout", post(oauth_logout))
 }
 
-/// Browser callback under `/oauth/openshell/…` (not `/api` — IdP redirect).
+/// Browser callback under `/oauth/openshell/…` (not `/api` — leftover for
+/// an IdP that still redirects at the board origin). Loopback paste is the
+/// live path; this GET is a no-op unless something still hits it with code.
 pub fn callback_routes() -> Router<SharedBoard> {
     Router::new().route("/callback", get(oauth_callback))
 }
@@ -77,6 +82,17 @@ pub struct OidcLogoutOut {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcCompleteOut {
+    pub ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OidcCompleteReq {
+    /// Full loopback redirect URL, or the `?code=…&state=…` query (Hermes).
+    pub redirect: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,10 +111,7 @@ impl IntoResponse for ApiErr {
     }
 }
 
-async fn oauth_login(
-    State(board): State<SharedBoard>,
-    headers: HeaderMap,
-) -> Result<Json<OidcLoginOut>, ApiErr> {
+async fn oauth_login(State(board): State<SharedBoard>) -> Result<Json<OidcLoginOut>, ApiErr> {
     if board.openshell_auth_mode() != Some(crate::model::OpenShellAuthMode::Oidc) {
         return Err(ApiErr::Msg(
             "auth mode must be OIDC before logging in (Settings → OpenShell)".into(),
@@ -107,14 +120,7 @@ async fn oauth_login(
     let cfg = board.openshell_oidc_config().unwrap_or_default().trimmed();
     cfg.validate().map_err(ApiErr::Msg)?;
 
-    let origin = crate::mcp_oauth::public_origin(&headers);
-    if origin.is_empty() {
-        return Err(ApiErr::Msg(
-            "cannot resolve public origin (Host / Origin / X-Forwarded-Host, or HONR_PUBLIC_URL)"
-                .into(),
-        ));
-    }
-    let redirect_uri = callback_redirect_uri(&origin);
+    let redirect_uri = loopback_redirect_uri();
 
     let discovery = openshell_sdk::oidc::discover(&cfg.issuer, false)
         .await
@@ -135,12 +141,9 @@ async fn oauth_login(
         );
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let mut auth_request = client
+    let auth_request = client
         .authorize_url(CsrfToken::new_random)
         .set_pkce_challenge(pkce_challenge);
-    for scope in DEFAULT_SCOPES {
-        auth_request = auth_request.add_scope(Scope::new((*scope).into()));
-    }
     let (mut auth_url, csrf_token) = auth_request.url();
     let audience = cfg.audience.trim();
     if !audience.is_empty() {
@@ -181,6 +184,26 @@ async fn oauth_logout(State(board): State<SharedBoard>) -> Json<OidcLogoutOut> {
     })
 }
 
+async fn oauth_complete(
+    State(board): State<SharedBoard>,
+    Json(req): Json<OidcCompleteReq>,
+) -> Result<Json<OidcCompleteOut>, ApiErr> {
+    let parsed = parse_pasted_callback(&req.redirect).map_err(ApiErr::Msg)?;
+    if let Some(err) = parsed.error.as_deref() {
+        let desc = parsed.error_description.as_deref().unwrap_or(err);
+        return Err(ApiErr::Msg(desc.to_string()));
+    }
+    let (Some(code), Some(state)) = (parsed.code.as_deref(), parsed.state.as_deref()) else {
+        return Err(ApiErr::Msg(
+            "paste the redirect URL (or ?code=…&state=…) from the address bar".into(),
+        ));
+    };
+    finish_login(&board, code, state)
+        .await
+        .map_err(ApiErr::Msg)?;
+    Ok(Json(OidcCompleteOut { ok: true }))
+}
+
 #[derive(Debug, Deserialize)]
 struct CallbackQuery {
     code: Option<String>,
@@ -205,25 +228,7 @@ async fn oauth_callback(
         return (StatusCode::BAD_REQUEST, "missing code or state").into_response();
     };
 
-    let pending_row = {
-        let mut st = pending().lock();
-        st.remove(state)
-    };
-    let Some(p) = pending_row else {
-        return Redirect::to(&format!(
-            "{RETURN_PATH}?openshell_oidc=error&message=expired_or_unknown_state"
-        ))
-        .into_response();
-    };
-
-    if now_secs().saturating_sub(p.created_at) >= PENDING_TTL_SECS {
-        return Redirect::to(&format!(
-            "{RETURN_PATH}?openshell_oidc=error&message=login_expired"
-        ))
-        .into_response();
-    }
-
-    match exchange_and_seal(&board, &p, code).await {
+    match finish_login(&board, code, state).await {
         Ok(()) => Redirect::to(&format!("{RETURN_PATH}?openshell_oidc=ok")).into_response(),
         Err(e) => Redirect::to(&format!(
             "{RETURN_PATH}?openshell_oidc=error&message={}",
@@ -231,6 +236,22 @@ async fn oauth_callback(
         ))
         .into_response(),
     }
+}
+
+async fn finish_login(board: &SharedBoard, code: &str, state: &str) -> Result<(), String> {
+    let pending_row = {
+        let mut st = pending().lock();
+        st.remove(state)
+    };
+    let Some(p) = pending_row else {
+        return Err("expired_or_unknown_state".into());
+    };
+
+    if now_secs().saturating_sub(p.created_at) >= PENDING_TTL_SECS {
+        return Err("login_expired".into());
+    }
+
+    exchange_and_seal(board, &p, code).await
 }
 
 async fn exchange_and_seal(
@@ -276,8 +297,44 @@ async fn exchange_and_seal(
     Ok(())
 }
 
-fn callback_redirect_uri(origin: &str) -> String {
-    format!("{}{CALLBACK_PATH}", origin.trim_end_matches('/'))
+fn loopback_redirect_uri() -> String {
+    let port = rand::rng().random_range(LOOPBACK_PORT_MIN..=LOOPBACK_PORT_MAX);
+    format!("http://127.0.0.1:{port}/callback")
+}
+
+struct ParsedCallback {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// Pull `code` + `state` from a pasted loopback URL or query string.
+fn parse_pasted_callback(raw: &str) -> Result<ParsedCallback, String> {
+    let raw = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    if raw.is_empty() {
+        return Err("paste the redirect URL (or ?code=…&state=…) from the address bar".into());
+    }
+    let query = if raw.contains("://") {
+        let uri: axum::http::Uri = raw.parse().map_err(|e| format!("not a URL: {e}"))?;
+        uri.query().unwrap_or("").to_string()
+    } else {
+        raw.trim_start_matches('?').to_string()
+    };
+    if query.is_empty() {
+        return Err("URL has no query — paste the full redirect from the address bar".into());
+    }
+    let q: HashMap<String, String> =
+        serde_urlencoded::from_str(&query).map_err(|e| format!("query parse: {e}"))?;
+    Ok(ParsedCallback {
+        code: q.get("code").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        state: q
+            .get("state")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        error: q.get("error").cloned(),
+        error_description: q.get("error_description").cloned(),
+    })
 }
 
 fn urlencoding(s: &str) -> String {
@@ -305,15 +362,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn callback_redirect_uri_joins_origin() {
-        assert_eq!(
-            callback_redirect_uri("https://tot.example:5173"),
-            "https://tot.example:5173/oauth/openshell/callback"
-        );
-        assert_eq!(
-            callback_redirect_uri("https://tot.example:5173/"),
-            "https://tot.example:5173/oauth/openshell/callback"
-        );
+    fn loopback_redirect_uri_is_cli_shaped() {
+        let uri = loopback_redirect_uri();
+        let parsed: axum::http::Uri = uri.parse().unwrap();
+        assert_eq!(parsed.scheme_str(), Some("http"));
+        assert_eq!(parsed.host(), Some("127.0.0.1"));
+        assert_eq!(parsed.path(), "/callback");
+        let port = parsed.port_u16().unwrap();
+        assert!((LOOPBACK_PORT_MIN..=LOOPBACK_PORT_MAX).contains(&port));
+    }
+
+    #[test]
+    fn parse_pasted_callback_full_url_and_query() {
+        let url = "http://127.0.0.1:48539/callback?code=YoXURL&state=o0_LXjFH";
+        let a = parse_pasted_callback(url).unwrap();
+        assert_eq!(a.code.as_deref(), Some("YoXURL"));
+        assert_eq!(a.state.as_deref(), Some("o0_LXjFH"));
+
+        let b = parse_pasted_callback("?code=YoXURL&state=o0_LXjFH").unwrap();
+        assert_eq!(b.code, a.code);
+        assert_eq!(b.state, a.state);
+
+        let c = parse_pasted_callback("code=YoXURL&state=o0_LXjFH").unwrap();
+        assert_eq!(c.code, a.code);
+        assert_eq!(c.state, a.state);
+    }
+
+    #[test]
+    fn parse_pasted_callback_idp_error() {
+        let p = parse_pasted_callback(
+            "http://127.0.0.1:1/callback?error=access_denied&error_description=nope",
+        )
+        .unwrap();
+        assert_eq!(p.error.as_deref(), Some("access_denied"));
+        assert_eq!(p.error_description.as_deref(), Some("nope"));
+        assert!(p.code.is_none());
+    }
+
+    #[test]
+    fn parse_pasted_callback_rejects_empty() {
+        assert!(parse_pasted_callback("").is_err());
+        assert!(parse_pasted_callback("http://127.0.0.1:1/callback").is_err());
     }
 
     #[test]
@@ -333,7 +422,7 @@ mod tests {
                 code_verifier: "v".into(),
                 client_id: "openshell-cli".into(),
                 issuer: "https://idp.example/realms/openshell".into(),
-                redirect_uri: "https://board/oauth/openshell/callback".into(),
+                redirect_uri: "http://127.0.0.1:49152/callback".into(),
                 auth_url: "https://idp.example/auth".into(),
                 token_url: "https://idp.example/token".into(),
                 created_at: now_secs().saturating_sub(PENDING_TTL_SECS + 1),
@@ -345,7 +434,7 @@ mod tests {
                 code_verifier: "v2".into(),
                 client_id: "openshell-cli".into(),
                 issuer: "https://idp.example/realms/openshell".into(),
-                redirect_uri: "https://board/oauth/openshell/callback".into(),
+                redirect_uri: "http://127.0.0.1:49152/callback".into(),
                 auth_url: "https://idp.example/auth".into(),
                 token_url: "https://idp.example/token".into(),
                 created_at: now_secs(),

@@ -41,6 +41,11 @@ packages (`git`, `nodejs`/`npm`, `gh`, `gcc`/`make`, `iproute`, `nftables`,
 `agy`, `claude`, `opencode`) installs only that engine's CLI on top, so each
 resulting image only carries the binary it will actually run.
 
+OpenShift restricted SCC assigns a random UID in group 0 and ignores image
+`USER`. Installer tarballs that unpack as uid 2000 (Cursor) must be
+`chown root:root` — `cp -a` would keep 2000, Landlock skips `/opt/cursor-agent`,
+and `agent` is Permission denied. Writable paths are group 0 with `g=u`.
+
 The toolchain is baked in; honr's own source and dependency cache are not — a
 card's own `cargo build`/`npm ci` populate `/opt/cargo`, `/opt/cargo-target`,
 and `/opt/npm-cache` at runtime by fetching crates.io/npm live. Full rationale
