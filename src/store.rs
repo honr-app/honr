@@ -1932,6 +1932,7 @@ impl Board {
 
     /// Replace the card's PR list. `None` / empty clears. A single `Some` is
     /// the one-PR test helper (does not append).
+    #[cfg(test)]
     pub fn set_pull_request(&self, id: ItemId, pr: Option<crate::model::PullRequest>) {
         self.set_pull_requests(id, pr.into_iter().collect());
     }

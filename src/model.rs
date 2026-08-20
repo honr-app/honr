@@ -1695,10 +1695,10 @@ impl WorkItem {
     /// Fold legacy singular `pull_request` / top-level `pr_url` into [`Self::pull_requests`].
     pub fn migrate_legacy_pr_url(&mut self) {
         if let Some(pr) = self.legacy_pull_request.take() {
-            if self.pull_requests.is_empty() {
-                if pr.url_str().is_some() || pr.has_forge_ends() {
-                    self.pull_requests.push(pr);
-                }
+            if self.pull_requests.is_empty()
+                && (pr.url_str().is_some() || pr.has_forge_ends())
+            {
+                self.pull_requests.push(pr);
             }
         }
         let Some(url) = self.legacy_pr_url.take() else {
