@@ -1,7 +1,7 @@
 import { formatCountdown, secsUntil, since } from "../api.js";
 import { friendlyState, humanizeEscalation } from "../humanize.js";
 import type { ColumnKey, WorkItem } from "../types";
-import { cardPrUrl } from "../types.js";
+import { cardPullRequests } from "../types.js";
 
 interface Props {
   item: WorkItem;
@@ -156,20 +156,18 @@ export function Card({ item, column, now, agentTimeout, defaultEngine, defaultMo
           </div>
           {/* Review *is* the PR. Without a way to reach it the column asks a
               question you cannot answer from the board. */}
-          {(() => {
-            const url = cardPrUrl(item);
-            return url ? (
+          {cardPullRequests(item).map((pr) => (
             <a
+              key={pr.url}
               className="pr-link"
-              href={url}
+              href={pr.url}
               target="_blank"
               rel="noreferrer"
               onClick={(e) => e.stopPropagation()}
             >
-              ↗ {prLabel(url)}
+              ↗ {prLabel(pr.url)}{pr.merged ? " (merged)" : ""}
             </a>
-            ) : null;
-          })()}
+          ))}
           {/* Where it ran. The sandbox is gone by now, but the name is what
               the logs and any post-mortem are filed under. */}
           {item.environment && <div className="sandbox">⬚ {item.environment}</div>}

@@ -179,8 +179,11 @@ pub struct ItemExtras {
     #[serde(default)]
     pub github_issue_url: Option<String>,
     #[serde(default)]
+    pub pull_requests: Vec<crate::model::PullRequest>,
+    /// Legacy extras field — migrated into `pull_requests` on apply.
+    #[serde(default)]
     pub pull_request: Option<crate::model::PullRequest>,
-    /// Legacy extras field — migrated into `pull_request` on apply.
+    /// Legacy extras field — migrated into `pull_requests` on apply.
     #[serde(default)]
     pub pr_url: Option<String>,
     /// Task-scoped product remotes (`RepoConfig`). Never a Project product-repo.
@@ -210,7 +213,8 @@ impl ItemExtras {
             conversation_id: item.conversation_id.clone(),
             beads_id: None,
             github_issue_url: None,
-            pull_request: item.pull_request.clone(),
+            pull_requests: item.pull_requests.clone(),
+            pull_request: None,
             pr_url: None,
             repo: item.repo.clone(),
         }
@@ -234,7 +238,8 @@ impl ItemExtras {
         item.conversation_id = self.conversation_id;
         // Legacy beads_id / github_issue_url in extras_json are ignored.
         let _ = (self.beads_id, self.github_issue_url);
-        item.pull_request = self.pull_request;
+        item.pull_requests = self.pull_requests;
+        item.legacy_pull_request = self.pull_request;
         item.legacy_pr_url = self.pr_url;
         item.migrate_legacy_pr_url();
         // Projects never carry a product-repo / Task repo binding.
@@ -492,7 +497,8 @@ where
         parked: parked != 0,
         awaiting_dispatch: awaiting_dispatch != 0,
         rebase_requested: rebase_requested != 0,
-        pull_request: None,
+        pull_requests: Vec::new(),
+        legacy_pull_request: None,
         legacy_pr_url: None,
         repo: None,
         plan,

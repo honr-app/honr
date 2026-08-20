@@ -226,7 +226,7 @@ fn collect_targets(board: &SharedBoard) -> Targets {
     for item in items {
         match item.state {
             State::Review | State::NeedsHuman => {
-                if let Some(url) = item.pr_url() {
+                for url in item.pr_urls() {
                     if let Some((owner_repo, number)) = parse_github_pr_url(url) {
                         repos.insert(owner_repo.clone());
                         prs.insert(PrTarget { owner_repo, number });
@@ -234,10 +234,10 @@ fn collect_targets(board: &SharedBoard) -> Targets {
                 }
             }
             State::Claimed | State::Running => {
-                if let Some(url) = item.pr_url() {
+                for url in item.pr_urls() {
                     if let Some((owner_repo, number)) = parse_github_pr_url(url) {
                         // Live cards with a PR: poll reviews (merge complete still
-                        // only matches Review/NeedsHuman on the Board).
+                        // only Done when every listed PR is merged).
                         prs.insert(PrTarget {
                             owner_repo: owner_repo.clone(),
                             number,
@@ -618,6 +618,7 @@ mod tests {
                 url: "https://github.com/acme/widgets/pull/7".into(),
                 base: Some(crate::model::PullRequestEnd::new("acme/widgets", "main")),
                 head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/t")),
+                ..Default::default()
             }),
         );
         t.id
@@ -697,6 +698,7 @@ mod tests {
                 url: "https://github.com/acme/widgets/pull/7".into(),
                 base: Some(crate::model::PullRequestEnd::new("acme/widgets", "main")),
                 head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/t")),
+                ..Default::default()
             }),
         );
         board.set_pull_request(
@@ -705,6 +707,7 @@ mod tests {
                 url: "https://github.com/acme/widgets/pull/8".into(),
                 base: Some(crate::model::PullRequestEnd::new("acme/widgets", "main")),
                 head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/sib")),
+                ..Default::default()
             }),
         );
 
@@ -775,6 +778,7 @@ mod tests {
                 url: "https://github.com/acme/widgets/pull/7".into(),
                 base: Some(crate::model::PullRequestEnd::new("acme/widgets", "main")),
                 head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/t")),
+                ..Default::default()
             }),
         );
 

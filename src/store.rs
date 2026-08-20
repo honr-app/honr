@@ -1930,22 +1930,79 @@ impl Board {
         self.emit(&item);
     }
 
-    /// Replace the card's [`crate::model::PullRequest`] (url + optional base/head).
+    /// Replace the card's PR list. `None` / empty clears. A single `Some` is
+    /// the one-PR test helper (does not append).
     pub fn set_pull_request(&self, id: ItemId, pr: Option<crate::model::PullRequest>) {
+        self.set_pull_requests(id, pr.into_iter().collect());
+    }
+
+    /// Replace the card's [`crate::model::PullRequest`] list.
+    pub fn set_pull_requests(&self, id: ItemId, prs: Vec<crate::model::PullRequest>) {
         let item = {
             let mut s = self.state.write();
             let Some(it) = s.items.get_mut(&id) else {
                 return;
             };
-            it.pull_request = pr;
+            it.pull_requests = prs;
+            it.legacy_pull_request = None;
             it.legacy_pr_url = None;
             it.clone()
         };
         self.emit(&item);
     }
 
+    /// Append a PR opened mid-run. Same URL updates forge ends without
+    /// replacing siblings or clearing `merged`. Does not change card state.
+    pub fn report_pull_request(
+        &self,
+        id: ItemId,
+        mut pr: crate::model::PullRequest,
+    ) -> Result<WorkItem, String> {
+        let url = pr
+            .url_str()
+            .ok_or_else(|| format!("card #{id} report_pull_request needs a PR url"))?
+            .to_string();
+        let needle = Self::normalize_pr_url(&url);
+        if pr.reported_at.is_none() {
+            pr.reported_at = Some(Utc::now());
+        }
+        let item = {
+            let mut s = self.state.write();
+            let it = s
+                .items
+                .get_mut(&id)
+                .ok_or_else(|| format!("no such item #{id}"))?;
+            if let Some(existing) = it
+                .pull_requests
+                .iter_mut()
+                .find(|p| p.url_str().is_some_and(|u| Self::normalize_pr_url(u) == needle))
+            {
+                if pr.base.is_some() {
+                    existing.base = pr.base;
+                }
+                if pr.head.is_some() {
+                    existing.head = pr.head;
+                }
+                if existing.url.trim().is_empty() {
+                    existing.url = pr.url;
+                }
+            } else {
+                it.pull_requests.push(pr);
+            }
+            it.legacy_pull_request = None;
+            it.legacy_pr_url = None;
+            it.clone()
+        };
+        self.emit(&item);
+        self.story(
+            id,
+            format!("{}: recorded PR {url} ({})", item.title, item.pull_requests.len()),
+        );
+        Ok(item)
+    }
+
     /// Test helper: write the unused `WorkItem.repo` field for DB round-trips.
-    /// [`Self::resolve_card_repo`] reads `pull_request` only.
+    /// [`Self::resolve_card_repo`] reads `pull_requests` only.
     #[cfg(test)]
     pub fn set_task_repo(&self, id: ItemId, repo: Option<RepoConfig>) -> Result<WorkItem, String> {
         let normalized = match repo {
@@ -1978,21 +2035,25 @@ impl Board {
         Ok(item)
     }
 
-    /// Set or clear `pull_request.url`, preserving base/head when present.
+    /// Set or clear the first listed PR URL, preserving base/head when present.
+    /// `None` clears the whole list (legacy single-PR helper).
     pub fn set_pr_url(&self, id: ItemId, url: Option<String>) {
         let url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
         let next = {
-            let cur = self.get(id).and_then(|i| i.pull_request);
-            match (url, cur) {
-                (None, _) => None,
-                (Some(u), Some(mut pr)) => {
-                    pr.url = u;
-                    Some(pr)
+            let mut cur = self.get(id).map(|i| i.pull_requests).unwrap_or_default();
+            match url {
+                None => Vec::new(),
+                Some(u) => {
+                    if let Some(pr) = cur.first_mut() {
+                        pr.url = u;
+                    } else {
+                        cur.push(crate::model::PullRequest::from_url(u));
+                    }
+                    cur
                 }
-                (Some(u), None) => Some(crate::model::PullRequest::from_url(u)),
             }
         };
-        self.set_pull_request(id, next);
+        self.set_pull_requests(id, next);
     }
 
     pub fn set_blocked_by(&self, id: ItemId, blockers: Vec<ItemId>) {
@@ -2264,7 +2325,7 @@ impl Board {
     // ------------------------------------------------ workspace binding (board state)
 
     /// Seed Forge binding when unbound. Always `github` — not from `honr.yaml`.
-    /// Card work remotes come from `pull_request` after publish.
+    /// Card work remotes come from `pull_requests` after publish.
     pub fn seed_workspace_binding_if_empty(&self) -> bool {
         self.seed_workspace_binding_from(&AgentConfig::default())
     }
@@ -3097,18 +3158,23 @@ impl Board {
     /// Per-card work remotes for clone / push / rebase / PR-lookup.
     ///
     /// Resolution order:
-    /// 1. `pull_request` base/head (or URL-only same-repo stub)
-    /// 2. else `Ok(None)` — unbound; briefing tells the agent to clone from
+    /// 1. oldest unmerged `pull_requests` entry's base/head (or URL-only stub)
+    /// 2. else first listed PR
+    /// 3. else `Ok(None)` — unbound; briefing tells the agent to clone from
     ///    card intent/DoD/notes or escalate
     ///
-    /// `Err` only for a malformed `pull_request.url`. Does not invent remotes
-    /// from yaml or Settings when the card has no `pull_request`.
+    /// `Err` only for a malformed PR url. Does not invent remotes
+    /// from yaml or Settings when the card has no `pull_requests`.
     pub fn resolve_card_repo(&self, item_id: ItemId) -> Result<Option<RepoConfig>, String> {
         let item = self
             .get(item_id)
             .ok_or_else(|| format!("no such item #{item_id}"))?;
 
-        if let Some(pr) = item.pull_request.as_ref() {
+        let pr = item
+            .unmerged_prs()
+            .next()
+            .or_else(|| item.pull_requests.first());
+        if let Some(pr) = pr {
             if let Some(repo) = pr.to_repo_config() {
                 return Ok(Some(repo));
             }
@@ -3129,7 +3195,7 @@ impl Board {
             }
         }
 
-        // Unbound until pull_request exists — briefing uses card prose / escalate.
+        // Unbound until pull_requests exist — briefing uses card prose / escalate.
         Ok(None)
     }
 
@@ -6209,14 +6275,36 @@ facts are pasted, then unpark";
         url.trim().trim_end_matches('/').to_ascii_lowercase()
     }
 
-    /// When a PR merges on GitHub, complete the matching Review/NeedsHuman card.
-    /// Done may materialize sibling Tasks from a frozen proposal.
-    /// Returns the completed item id, or `None` if no eligible card matched.
+    /// When a PR merges on GitHub, mark that entry on the matching card.
+    /// Done only when every listed PR is merged (gate-like Review).
+    /// Returns the completed item id, or `None` if no eligible card matched
+    /// or remaining PRs are still open.
     ///
     /// History `by` is `github-webhook` (webhook ingress). Polling uses
     /// [`Self::complete_for_merged_pr_by`] with `github-poll`.
     pub fn complete_for_merged_pr(&self, pr_url: &str, pr_number: Option<u64>) -> Option<ItemId> {
         self.complete_for_merged_pr_by(pr_url, pr_number, "github-webhook")
+    }
+
+    fn item_lists_pr(item: &WorkItem, needle: &str) -> bool {
+        item.pull_requests.iter().any(|p| {
+            p.url_str()
+                .is_some_and(|u| Self::normalize_pr_url(u) == needle)
+        })
+    }
+
+    fn mark_listed_pr_merged(item: &mut WorkItem, needle: &str) -> bool {
+        let mut changed = false;
+        for p in &mut item.pull_requests {
+            if p.url_str()
+                .is_some_and(|u| Self::normalize_pr_url(u) == needle)
+                && !p.merged
+            {
+                p.merged = true;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Same as [`Self::complete_for_merged_pr`] with an explicit history actor.
@@ -6236,12 +6324,41 @@ facts are pasted, then unpark";
             s.items
                 .values()
                 .find(|i| {
-                    matches!(i.state, State::Review | State::NeedsHuman)
-                        && i.pr_url()
-                            .is_some_and(|u| Self::normalize_pr_url(u) == needle)
+                    !i.state.is_terminal() && Self::item_lists_pr(i, &needle)
                 })
                 .map(|i| i.id)?
         };
+
+        let (all_merged, in_review_lane, title) = {
+            let mut s = self.state.write();
+            let it = s.items.get_mut(&id)?;
+            Self::mark_listed_pr_merged(it, &needle);
+            let all_merged = it.all_pull_requests_merged();
+            let in_review_lane = matches!(it.state, State::Review | State::NeedsHuman);
+            let title = it.title.clone();
+            let item = it.clone();
+            drop(s);
+            self.emit(&item);
+            (all_merged, in_review_lane, title)
+        };
+
+        if !all_merged {
+            let remain = self
+                .get(id)
+                .map(|i| i.unmerged_prs().count())
+                .unwrap_or(0);
+            self.story(
+                id,
+                format!(
+                    "{title} — PR merged; {remain} still open. Card stays in Review until all listed PRs merge."
+                ),
+            );
+            return None;
+        }
+
+        if !in_review_lane {
+            return None;
+        }
 
         let reason = match pr_number {
             Some(n) => format!("PR merged (#{n})"),
@@ -6254,7 +6371,7 @@ facts are pasted, then unpark";
         };
         match self.transition(id, State::Done, by, Some(reason)) {
             Ok(item) => {
-                self.story(id, format!("{} — PR merged; card Done.", item.title));
+                self.story(id, format!("{} — all listed PRs merged; card Done.", item.title));
                 Some(id)
             }
             Err(e) => {
@@ -6330,9 +6447,7 @@ facts are pasted, then unpark";
                     matches!(
                         i.state,
                         State::Review | State::NeedsHuman | State::Claimed | State::Running
-                    ) && i
-                        .pr_url()
-                        .is_some_and(|u| Self::normalize_pr_url(u) == needle)
+                    ) && Self::item_lists_pr(i, &needle)
                 })
                 .map(|i| i.id)?
         };
@@ -6560,7 +6675,13 @@ facts are pasted, then unpark";
         }
         let oldest = items
             .iter()
-            .map(|i| i.time_in_state(now))
+            .map(|i| {
+                if column == Column::Review {
+                    i.oldest_unmerged_age(now)
+                } else {
+                    i.time_in_state(now)
+                }
+            })
             .max()
             .unwrap_or_else(Duration::zero);
 
@@ -9576,6 +9697,208 @@ mod tests {
         );
     }
 
+    fn review_leaf(b: &Board, title: &str) -> WorkItem {
+        let p = b
+            .create(None, "Multi PR Proj", "intent", None, Origin::Human, true, None)
+            .unwrap();
+        let t = b
+            .create(
+                Some(p.id),
+                title,
+                "intent",
+                Some("dod".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .unwrap();
+        let _ = b.transition(t.id, State::Shaping, "human", None);
+        let _ = b.transition(t.id, State::Backlog, "human", None);
+        let _ = b.transition(t.id, State::Claimed, "agent", None);
+        let _ = b.transition(t.id, State::Running, "agent", None);
+        let _ = b.transition(t.id, State::Review, "agent", None);
+        t
+    }
+
+    #[test]
+    fn report_pull_request_appends_without_replacing() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-report-pr-append-{}.json",
+                std::process::id()
+            )),
+        );
+        let t = review_leaf(&b, "Two PRs");
+        b.report_pull_request(
+            t.id,
+            crate::model::PullRequest::from_url("https://github.com/honr-app/honr/pull/1"),
+        )
+        .unwrap();
+        b.report_pull_request(
+            t.id,
+            crate::model::PullRequest::from_url("https://github.com/other/widgets/pull/2"),
+        )
+        .unwrap();
+        let item = b.get(t.id).unwrap();
+        assert_eq!(item.pull_requests.len(), 2);
+        assert_eq!(
+            item.pr_urls(),
+            vec![
+                "https://github.com/honr-app/honr/pull/1",
+                "https://github.com/other/widgets/pull/2"
+            ]
+        );
+        // Same URL updates rather than duplicating.
+        let mut again = crate::model::PullRequest::from_url("https://github.com/honr-app/honr/pull/1");
+        again.base = Some(crate::model::PullRequestEnd::new("honr-app/honr", "main"));
+        again.head = Some(crate::model::PullRequestEnd::new("honr-app/honr", "honr/card-1"));
+        b.report_pull_request(t.id, again).unwrap();
+        let item = b.get(t.id).unwrap();
+        assert_eq!(item.pull_requests.len(), 2);
+        assert!(item.pull_requests[0].has_forge_ends());
+        assert_eq!(item.state, State::Review);
+    }
+
+    #[test]
+    fn complete_for_merged_pr_partial_stays_review_all_merged_done() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-multi-pr-merge-{}.json",
+                std::process::id()
+            )),
+        );
+        let t = review_leaf(&b, "Wait for both");
+        b.report_pull_request(
+            t.id,
+            crate::model::PullRequest::from_url("https://github.com/honr-app/honr/pull/10"),
+        )
+        .unwrap();
+        b.report_pull_request(
+            t.id,
+            crate::model::PullRequest::from_url("https://github.com/other/widgets/pull/11"),
+        )
+        .unwrap();
+
+        assert!(
+            b.complete_for_merged_pr("https://github.com/honr-app/honr/pull/10", Some(10))
+                .is_none(),
+            "one merge must not Done the card"
+        );
+        let item = b.get(t.id).unwrap();
+        assert_eq!(item.state, State::Review);
+        assert!(item.pull_requests[0].merged);
+        assert!(!item.pull_requests[1].merged);
+        assert_eq!(item.pr_url(), Some("https://github.com/other/widgets/pull/11"));
+
+        let done = b
+            .complete_for_merged_pr("https://github.com/other/widgets/pull/11", Some(11))
+            .expect("all merged");
+        assert_eq!(done, t.id);
+        assert_eq!(b.get(t.id).unwrap().state, State::Done);
+        assert!(b.get(t.id).unwrap().all_pull_requests_merged());
+    }
+
+    #[test]
+    fn apply_pr_review_feedback_keeps_sibling_prs() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-multi-pr-bounce-{}.json",
+                std::process::id()
+            )),
+        );
+        let t = review_leaf(&b, "Bounce one");
+        b.report_pull_request(
+            t.id,
+            crate::model::PullRequest::from_url("https://github.com/honr-app/honr/pull/20"),
+        )
+        .unwrap();
+        b.report_pull_request(
+            t.id,
+            crate::model::PullRequest::from_url("https://github.com/other/widgets/pull/21"),
+        )
+        .unwrap();
+        b.complete_for_merged_pr("https://github.com/honr-app/honr/pull/20", Some(20));
+
+        let id = b
+            .apply_pr_review_feedback(
+                "https://github.com/other/widgets/pull/21",
+                Some(21),
+                "CHANGES_REQUESTED",
+            )
+            .expect("bounce");
+        assert_eq!(id, t.id);
+        let item = b.get(t.id).unwrap();
+        assert_eq!(item.state, State::Backlog);
+        assert_eq!(item.pull_requests.len(), 2);
+        assert!(item.pull_requests[0].merged);
+        assert!(!item.pull_requests[1].merged);
+        assert_eq!(item.pull_requests[1].url, "https://github.com/other/widgets/pull/21");
+    }
+
+    #[test]
+    fn migrate_legacy_singular_pull_request_into_vec() {
+        let json = r#"{
+            "id": 1,
+            "parent": null,
+            "title": "legacy",
+            "intent": "i",
+            "state": "review",
+            "origin": {"kind": "human"},
+            "created_at": "2026-01-01T00:00:00Z",
+            "entered_state_at": "2026-01-01T00:00:00Z",
+            "pull_request": {"url": "https://github.com/honr-app/honr/pull/3"}
+        }"#;
+        let mut item: WorkItem = serde_json::from_str(json).unwrap();
+        item.migrate_legacy_pr_url();
+        assert_eq!(item.pull_requests.len(), 1);
+        assert_eq!(item.pr_url(), Some("https://github.com/honr-app/honr/pull/3"));
+    }
+
+    #[test]
+    fn review_chunk_oldest_uses_unmerged_pr_reported_at() {
+        let b = Board::new(
+            Schema::default(),
+            std::env::temp_dir().join(format!(
+                "honr-test-oldest-unmerged-{}.json",
+                std::process::id()
+            )),
+        );
+        let t = review_leaf(&b, "Stale list");
+        let old = Utc::now() - Duration::hours(2);
+        let young = Utc::now() - Duration::minutes(5);
+        b.set_pull_requests(
+            t.id,
+            vec![
+                crate::model::PullRequest {
+                    url: "https://github.com/honr-app/honr/pull/30".into(),
+                    reported_at: Some(old),
+                    ..Default::default()
+                },
+                crate::model::PullRequest {
+                    url: "https://github.com/other/widgets/pull/31".into(),
+                    reported_at: Some(young),
+                    ..Default::default()
+                },
+            ],
+        );
+        let item = b.get(t.id).unwrap();
+        let age = item.oldest_unmerged_age(Utc::now());
+        assert!(
+            age >= Duration::minutes(110),
+            "oldest unmerged should be ~2h, got {age:?}"
+        );
+        b.complete_for_merged_pr("https://github.com/honr-app/honr/pull/30", Some(30));
+        let item = b.get(t.id).unwrap();
+        let age = item.oldest_unmerged_age(Utc::now());
+        assert!(
+            age < Duration::minutes(15),
+            "after first merge, oldest unmerged is the young PR, got {age:?}"
+        );
+    }
+
     /// Review card + CHANGES_REQUESTED → Backlog with a pointer-style steer note
     /// (no review-body dump). COMMENT shares the same path. APPROVED / unknown
     /// URL are no-ops; duplicate apply is safe.
@@ -11751,6 +12074,7 @@ mod tests {
                     "bot/widgets",
                     "honr/card-1",
                 )),
+                ..Default::default()
             }),
         );
         let repo = b.resolve_card_repo(t.id).unwrap().unwrap();
@@ -11868,6 +12192,7 @@ mod tests {
                     "bot/widgets",
                     "honr/card-1",
                 )),
+                ..Default::default()
             }),
         );
 
@@ -11926,6 +12251,7 @@ mod tests {
                 url: "https://github.com/acme/frontend/pull/1".into(),
                 base: Some(crate::model::PullRequestEnd::new("acme/frontend", "main")),
                 head: Some(crate::model::PullRequestEnd::new("acme/frontend", "honr/a")),
+                ..Default::default()
             }),
         );
         b.set_pull_request(
@@ -11934,6 +12260,7 @@ mod tests {
                 url: "https://github.com/acme/backend/pull/2".into(),
                 base: Some(crate::model::PullRequestEnd::new("acme/backend", "develop")),
                 head: Some(crate::model::PullRequestEnd::new("bot/backend", "honr/c")),
+                ..Default::default()
             }),
         );
 
@@ -11977,6 +12304,7 @@ mod tests {
                 url: "https://github.com/acme/widgets/pull/1".into(),
                 base: Some(crate::model::PullRequestEnd::new("acme/widgets", "main")),
                 head: Some(crate::model::PullRequestEnd::new("acme/widgets", "honr/t")),
+                ..Default::default()
             }),
         );
 

@@ -2803,7 +2803,7 @@ mod tests {
         let Json(snap) = board(AxState(b.clone())).await;
         let on_the_card = serde_json::to_value(&snap).unwrap();
         assert_eq!(
-            on_the_card["items"][0]["pull_request"]["url"],
+            on_the_card["items"][0]["pull_requests"][0]["url"],
             "https://github.com/honr-app/honr/pull/1"
         );
         assert_eq!(on_the_card["items"][0]["environment"], "honr-card-8-a1");
@@ -2813,7 +2813,7 @@ mod tests {
         };
         let in_the_drawer = serde_json::to_value(&detail).unwrap();
         assert_eq!(
-            in_the_drawer["pull_request"]["url"],
+            in_the_drawer["pull_requests"][0]["url"],
             "https://github.com/honr-app/honr/pull/1"
         );
         assert_eq!(in_the_drawer["environment"], "honr-card-8-a1");
