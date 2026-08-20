@@ -158,6 +158,13 @@ image is just `iproute2` (required) and `nftables` (optional) — see
 Building from `ubi9/ubi` plus exactly what honr needs cuts each image from
 ~15GB (the community-base version) to under 2GB.
 
+OpenShift restricted SCC ignores image `USER` and runs as a random UID in
+supplementary group 0, so installer trees must not keep foreign uids (`cp -a
+--no-preserve=ownership`) and writable paths are `chown sandbox:root` /
+`chgrp 0` with `g=u`. The named `sandbox` account is **not** a member of GID
+0: OpenShell's local podman supervisor refuses that (`OCI user is a member of
+prohibited GID 0`). Local runs use owner bits; OpenShift uses group 0 bits.
+
 ```bash
 # from the repo root
 make sandbox        # builds all four quay.io/honr-app/sandbox-<engine>:latest
