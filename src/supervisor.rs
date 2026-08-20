@@ -740,6 +740,16 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
     let engine = grant.engine.as_deref().unwrap_or(&cfg.engine);
     crate::engine::lookup(engine).map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    let route = match crate::github_app::ensure_push_token(board, id, &agent_id, None, None).await {
+        Ok(crate::github_app::EnsurePushToken::Parked) => {
+            tracing::info!("#{id}: parked Needs You — GitHub App not installed for push target");
+            return Ok(());
+        }
+        Ok(crate::github_app::EnsurePushToken::Skipped) => None,
+        Ok(crate::github_app::EnsurePushToken::Ready(o)) => Some(o),
+        Err(e) => anyhow::bail!("GitHub App repo routing failed: {e}"),
+    };
+
     let existing_env = board.get(id).and_then(|i| i.environment);
     let (name, is_reused) = match existing_env {
         Some(ref env_name)
@@ -787,7 +797,25 @@ async fn run_card(f: Fleet, agent_id: String, grant: ClaimGrant) -> anyhow::Resu
 
     let resolved = board.resolve_sandbox_create(id);
     let attach = board.attach_providers_for_resolved(&resolved);
-    let spec = sandbox_spec_for_card(id, &name, &resolved, &attach);
+    let mut spec = sandbox_spec_for_card(id, &name, &resolved, &attach);
+    if let Some(o) = &route {
+        crate::github_app::overlay_routed_provider(&mut spec.providers, o);
+    }
+    if is_reused {
+        if let Some(crate::github_app::RepoTokenOutcome::Ready {
+            provider_name,
+            routed: true,
+            ..
+        }) = &route
+        {
+            if let Err(e) =
+                crate::github_app::attach_routed_provider_to_sandbox(board, &name, provider_name)
+                    .await
+            {
+                anyhow::bail!("GitHub App routed token attach failed: {e}");
+            }
+        }
+    }
 
     let result = run_inside(
         board, os, cfg, &agent_id, &grant, &name, &branch, &spec, is_reused,
@@ -837,6 +865,24 @@ async fn adopt_card(f: Fleet, a: Adoption) -> anyhow::Result<()> {
     }
     let branch = crate::schema::card_branch_name(id);
     let cfg = &agents;
+    match crate::github_app::ensure_push_token(
+        board,
+        id,
+        &a.agent_id,
+        Some(&a.sandbox),
+        None,
+    )
+    .await
+    {
+        Ok(crate::github_app::EnsurePushToken::Parked) => {
+            tracing::info!(
+                "#{id}: adopted sandbox parked Needs You — App not installed for push target"
+            );
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(e) => anyhow::bail!("GitHub App repo routing failed: {e}"),
+    }
     let result = async {
         let run = watch_agent(board, os, cfg, &a.agent_id, id, &a.sandbox, a.from_line).await?;
         finish(board, os, cfg, &a.agent_id, id, &a.sandbox, &branch, &run).await
@@ -1751,8 +1797,9 @@ async fn process_verdict(
                 pr.ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?;
             let pr_url = pr.url.clone();
             board
-                .report_pull_request(id, pr)
+                .report_pull_request(id, pr.clone())
                 .map_err(|e| anyhow::anyhow!("report_pull_request: {e}"))?;
+            attach_token_for_reported_pr(board, id, &pr).await;
             let mut finish_cfg = cfg.clone();
             if let Ok(Some(repo)) = board.resolve_card_repo(id) {
                 finish_cfg.repo = repo;
@@ -1836,9 +1883,11 @@ async fn finish(
         // A Review card with no PR is a card you cannot action, so this is a
         // failure rather than a quietly empty field.
         .ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?;
+    let recorded = crate::model::PullRequest::from_url(url.clone());
     board
-        .report_pull_request(id, crate::model::PullRequest::from_url(url.clone()))
+        .report_pull_request(id, recorded.clone())
         .map_err(|e| anyhow::anyhow!("report_pull_request: {e}"))?;
+    attach_token_for_reported_pr(board, id, &recorded).await;
 
     // Refuse hollow Review while GitHub still reports CONFLICTING. UNKNOWN
     // (and null/missing) must not hard-fail — the API is eventually consistent.
@@ -1856,6 +1905,31 @@ async fn finish(
     board.report(id, agent_id, added, removed, vec!["ci-on-pr".into()])?;
     tracing::info!("#{id} reported; pr={url}");
     Ok(())
+}
+
+/// Attach a cache-routed GH_TOKEN after a PR is recorded. Does not park:
+/// the agent already opened the PR. Uncovered clone targets park at dispatch
+/// / `report_pull_request` instead.
+async fn attach_token_for_reported_pr(
+    board: &SharedBoard,
+    id: ItemId,
+    pr: &crate::model::PullRequest,
+) {
+    let Some(repo) = pr.push_owner_repo() else {
+        return;
+    };
+    let sandbox = board.get(id).and_then(|i| i.environment);
+    match crate::github_app::sync_sandbox_token_for_repo(board, sandbox.as_deref(), &repo).await {
+        Ok(crate::github_app::RepoTokenOutcome::Ready { installation_id, .. }) => {
+            tracing::info!("#{id}: attached GH_TOKEN for {repo} via installation {installation_id}");
+        }
+        Ok(crate::github_app::RepoTokenOutcome::Uncovered { .. }) => {
+            tracing::warn!(
+                "#{id}: {repo} is not in the GitHub App repo-access cache; singleton GH_TOKEN unchanged"
+            );
+        }
+        Err(e) => tracing::warn!("#{id}: repo routing after PR {repo} failed: {e}"),
+    }
 }
 
 // --------------------------------------------------------------- scripts

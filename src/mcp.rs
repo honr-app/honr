@@ -332,7 +332,6 @@ pub struct ReportPullRequestEndArg {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReportPullRequestArg {
     pub item_id: ItemId,
-    #[allow(dead_code)]
     pub agent_id: String,
     /// PR HTML URL.
     pub url: String,
@@ -1188,9 +1187,12 @@ impl Operator {
         name = "report_pull_request",
         description = "WORKER VERB. Record a PR this running card just opened. Appends to the \
                        card's pull_requests list without replacing earlier PRs or leaving Running. \
-                       Nothing is pre-selected by a human. Final `report` still hands the card to Review."
+                       Resolves GitHub App installation from the repo-access cache and attaches \
+                       GH_TOKEN for that installation to the live sandbox. Uncovered owner/name \
+                       parks Needs You (Settings → Repo access). Nothing is pre-selected by a human. \
+                       Final `report` still hands the card to Review."
     )]
-    fn report_pull_request(&self, Parameters(a): Parameters<ReportPullRequestArg>) -> Out<Ack> {
+    async fn report_pull_request(&self, Parameters(a): Parameters<ReportPullRequestArg>) -> Out<Ack> {
         self.deny_worker("report_pull_request")?;
         let mut pr = crate::model::PullRequest::from_url(a.url);
         if let Some(b) = a.base {
@@ -1201,8 +1203,31 @@ impl Operator {
         }
         let item = self
             .board
-            .report_pull_request(a.item_id, pr)
+            .report_pull_request(a.item_id, pr.clone())
             .map_err(bad)?;
+        if let Some(repo) = pr.push_owner_repo() {
+            match crate::github_app::ensure_push_token(
+                &self.board,
+                a.item_id,
+                &a.agent_id,
+                item.environment.as_deref(),
+                Some(&repo),
+            )
+            .await
+            {
+                Ok(crate::github_app::EnsurePushToken::Parked) => {
+                    return self.ack(
+                        a.item_id,
+                        format!(
+                            "recorded PR; parked Needs You — App not installed on {repo} \
+(Settings → Repo access)"
+                        ),
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => return Err(bad(e.to_string())),
+            }
+        }
         let n = item.pull_requests.len();
         self.ack(a.item_id, format!("recorded PR ({n} on card)"))
     }

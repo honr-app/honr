@@ -446,6 +446,19 @@ impl PullRequest {
             .normalized(),
         )
     }
+
+    /// `owner/name` to push against: head (fork), else base, else the PR URL.
+    pub fn push_owner_repo(&self) -> Option<String> {
+        if let Some(h) = self.head.as_ref().filter(|h| !h.repo.trim().is_empty()) {
+            return crate::schema::parse_owner_name(&h.repo).ok();
+        }
+        if let Some(b) = self.base.as_ref().filter(|b| !b.repo.trim().is_empty()) {
+            return crate::schema::parse_owner_name(&b.repo).ok();
+        }
+        self.url_str()
+            .and_then(crate::store::parse_github_pr_url)
+            .map(|(owner_repo, _)| owner_repo)
+    }
 }
 
 /// One Task row as shown to an agent from the Project Plan.
@@ -1753,6 +1766,15 @@ pub fn humanize(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_request_push_owner_repo_prefers_head() {
+        let mut pr = PullRequest::from_url("https://github.com/acme/base/pull/9");
+        assert_eq!(pr.push_owner_repo().as_deref(), Some("acme/base"));
+        pr.base = Some(PullRequestEnd::new("acme/base", "main"));
+        pr.head = Some(PullRequestEnd::new("forks/base", "honr/card-1"));
+        assert_eq!(pr.push_owner_repo().as_deref(), Some("forks/base"));
+    }
 
     #[test]
     fn legacy_ready_wire_value_loads_as_backlog() {

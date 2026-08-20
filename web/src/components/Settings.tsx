@@ -711,10 +711,13 @@ export function RepoAccessPanelView({
     <section aria-labelledby="repo-access-title" data-testid="repo-access-panel">
       <h2 id="repo-access-title">Repo access</h2>
       <p className="dim">
-        Repositories each GitHub App installation can see. This cache is visibility
-        only — sandbox <code>GH_TOKEN</code> still mints from the{" "}
-        <code>github-app</code> provider&apos;s selected installation. Add missing
-        repos on GitHub, then Refresh.
+        Repositories each GitHub App installation can see. When an agent needs
+        to push or calls <code>report_pull_request</code>, honr looks up{" "}
+        <code>owner/name</code> here and mints <code>GH_TOKEN</code> for that
+        installation onto the live sandbox.{" "}
+        <code>GITHUB_INSTALLATION_ID</code> remains the fallback for the{" "}
+        <code>github-app</code> provider — not the routing source. If a repo is
+        missing, install the App, Refresh, then Unpark.
       </p>
 
       {error && <div className="err">{error}</div>}
@@ -731,7 +734,8 @@ export function RepoAccessPanelView({
         </div>
         {view.token_installation_id ? (
           <p className="dim" data-testid="repo-access-token-installation">
-            Token minting uses installation #{view.token_installation_id}.
+            Singleton <code>github-app</code> fallback uses installation #
+            {view.token_installation_id}.
           </p>
         ) : (
           <p className="dim" data-testid="repo-access-token-installation">

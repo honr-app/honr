@@ -4,8 +4,15 @@
 //! installation tokens and upserts them into the gateway provider instance
 //! [`PROVIDER_NAME`] (`github-app`, shipped type [`PROVIDER_TYPE`]).
 //! Only `GH_TOKEN` is pushed to the gateway — never the App private key.
+//!
+//! Push / `report_pull_request` routing looks up `owner/repo` in the repo-access
+//! cache and mints for **that** installation. [`CONFIG_INSTALLATION_ID`] stays
+//! the fallback for the singleton [`PROVIDER_NAME`] provider — it is not the
+//! routing source.
 
-use crate::model::{OpenShellProviderDesired, GITHUB_APP_PROVIDER_TYPE};
+use crate::model::{
+    EscalationOption, ItemId, OpenShellProviderDesired, WorkItem, GITHUB_APP_PROVIDER_TYPE,
+};
 use crate::secrets::{open_string_map, seal_string_map, GitHubAppBundle};
 use crate::store::{Board, SharedBoard};
 
@@ -43,6 +50,10 @@ pub const REFRESH_SKEW: Duration = Duration::minutes(10);
 pub const REPO_ACCESS_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(10 * 60);
 /// GitHub page for installing the App / adding repositories to an installation.
 pub const INSTALLATIONS_MANAGE_URL: &str = "https://github.com/settings/installations";
+/// Board Settings surface that lists the cache and the install deep link.
+pub const SETTINGS_REPO_ACCESS_PATH: &str = "/settings/repo-access";
+/// Gateway provider instance for a cache-resolved installation (not the singleton).
+pub const ROUTED_PROVIDER_PREFIX: &str = "github-app-install-";
 
 /// Config keys that stay on the board and must not be sent to OpenShell.
 pub fn board_only_config_keys() -> &'static [&'static str] {
@@ -86,7 +97,7 @@ pub struct GitHubRepoAccessEntry {
     pub last_seen_at: DateTime<Utc>,
 }
 
-/// Durable App installation → repo visibility cache. Not used for token minting.
+/// Durable App installation → repo visibility cache. Stage 3 mints from this lookup.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitHubRepoAccessCache {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -968,6 +979,304 @@ pub(crate) async fn fetch_pr_conflict_check_with_token(
     }))
 }
 
+/// Gateway provider name for a cache-resolved installation token.
+pub fn routed_provider_name(installation_id: u64) -> String {
+    format!("{ROUTED_PROVIDER_PREFIX}{installation_id}")
+}
+
+/// Cache lookup for push routing. Does **not** read [`CONFIG_INSTALLATION_ID`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoInstallRoute {
+    Covered {
+        owner_repo: String,
+        installation_id: u64,
+    },
+    Uncovered {
+        owner_repo: String,
+    },
+}
+
+pub fn route_repo_installation(cache: &GitHubRepoAccessCache, owner_repo: &str) -> RepoInstallRoute {
+    let owner_repo = owner_repo.trim().to_string();
+    match cache.installation_id_for(&owner_repo) {
+        Some(installation_id) => RepoInstallRoute::Covered {
+            owner_repo,
+            installation_id,
+        },
+        None => RepoInstallRoute::Uncovered { owner_repo },
+    }
+}
+
+/// Outcome of minting a token for a cached (or uncovered) `owner/repo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoTokenOutcome {
+    Uncovered {
+        owner_repo: String,
+    },
+    Ready {
+        owner_repo: String,
+        installation_id: u64,
+        provider_name: String,
+        /// Distinct from the singleton [`PROVIDER_NAME`] / `GITHUB_INSTALLATION_ID`.
+        routed: bool,
+    },
+}
+
+/// Replace singleton `github-app` on a create-spec with the routed provider.
+pub fn overlay_routed_provider(providers: &mut Vec<String>, outcome: &RepoTokenOutcome) {
+    let RepoTokenOutcome::Ready {
+        provider_name,
+        routed: true,
+        ..
+    } = outcome
+    else {
+        return;
+    };
+    providers.retain(|n| n != PROVIDER_NAME);
+    if !providers.iter().any(|n| n == provider_name) {
+        providers.push(provider_name.clone());
+    }
+}
+
+/// Clone/push `owner/name` already known on the card (PR list, then intent/DoD/notes).
+pub fn owner_repo_from_card(item: &WorkItem) -> Option<String> {
+    if let Some(pr) = item
+        .unmerged_prs()
+        .next()
+        .or_else(|| item.pull_requests.first())
+    {
+        if let Some(r) = pr.push_owner_repo() {
+            return Some(r);
+        }
+    }
+    if let Some(r) = crate::schema::clone_repo_from_prose(&item.intent) {
+        return Some(r);
+    }
+    if let Some(dod) = item.definition_of_done.as_deref() {
+        if let Some(r) = crate::schema::clone_repo_from_prose(dod) {
+            return Some(r);
+        }
+    }
+    for n in item.notes.iter().rev() {
+        if let Some(r) = crate::schema::clone_repo_from_prose(&n.text) {
+            return Some(r);
+        }
+        if let Some(r) = owner_repo_from_decision_note(&n.text) {
+            return Some(r);
+        }
+    }
+    None
+}
+
+fn owner_repo_from_decision_note(text: &str) -> Option<String> {
+    let raw = text.trim();
+    let after_decision = raw
+        .strip_prefix("Decision:")
+        .or_else(|| raw.strip_prefix("decision:"))
+        .map(str::trim)
+        .unwrap_or(raw);
+    let after_clone = after_decision
+        .strip_prefix("Clone ")
+        .or_else(|| after_decision.strip_prefix("clone "))
+        .or_else(|| {
+            after_decision
+                .strip_prefix("Clone target:")
+                .or_else(|| after_decision.strip_prefix("clone target:"))
+        })
+        .map(str::trim)?;
+    let token = after_clone.split_whitespace().next()?;
+    let token = token.trim_matches(|c: char| matches!(c, ')' | '(' | ',' | ';' | '.'));
+    crate::schema::parse_owner_name(token).ok()
+}
+
+pub fn uncovered_escalation(owner_repo: &str) -> (String, Vec<EscalationOption>, usize) {
+    let question = format!(
+        "Agent wants to push to {owner_repo} but the GitHub App is not installed there. \
+Open Settings → Repo access ({SETTINGS_REPO_ACCESS_PATH}), install the App / add this \
+repo, Refresh the cache, then Unpark."
+    );
+    let options = vec![
+        EscalationOption {
+            label: "Install the App and refresh".into(),
+            detail: format!(
+                "Open {SETTINGS_REPO_ACCESS_PATH}. Use the GitHub install page \
+({INSTALLATIONS_MANAGE_URL}) to add {owner_repo}, Refresh repo access, then Unpark."
+            ),
+        },
+        EscalationOption {
+            label: "Push a covered repo instead".into(),
+            detail: "Change the clone/PR target to an owner/name already listed under \
+Settings → Repo access, then Unpark."
+                .into(),
+        },
+    ];
+    (question, options, 0)
+}
+
+pub fn escalate_uncovered_repo(
+    board: &Board,
+    id: ItemId,
+    agent_id: &str,
+    owner_repo: &str,
+) -> Result<WorkItem, String> {
+    let (question, options, recommended) = uncovered_escalation(owner_repo);
+    board.escalate(id, agent_id, question, options, recommended)
+}
+
+async fn route_with_optional_refresh(
+    board: &SharedBoard,
+    owner_repo: &str,
+) -> RepoInstallRoute {
+    let first = route_repo_installation(&board.github_repo_access_cache(), owner_repo);
+    if matches!(first, RepoInstallRoute::Covered { .. }) {
+        return first;
+    }
+    if refresh_repo_access_cache(board).await.is_ok() {
+        return route_repo_installation(&board.github_repo_access_cache(), owner_repo);
+    }
+    first
+}
+
+/// Mint a token for `installation_id` onto a dedicated gateway provider.
+/// Does not change [`CONFIG_INSTALLATION_ID`] or the singleton GH_TOKEN cache.
+pub async fn apply_routed_installation_token(
+    board: &SharedBoard,
+    installation_id: u64,
+) -> Result<String, Error> {
+    let Some(bundle) = board.github_app_bundle() else {
+        return Err(Error::Config(
+            "GitHub App credentials missing; cannot mint a routed GH_TOKEN".into(),
+        ));
+    };
+    if bundle.app_id.trim().is_empty() || bundle.private_key_pem.trim().is_empty() {
+        return Err(Error::Config(
+            "GitHub App credentials incomplete; cannot mint a routed GH_TOKEN".into(),
+        ));
+    }
+    let minted = mint_installation_token(&bundle, installation_id).await?;
+    let name = routed_provider_name(installation_id);
+    let os = board.openshell_client();
+    os.apply_provider(
+        &name,
+        PROVIDER_TYPE,
+        provider_credentials(&minted.token),
+        BTreeMap::new(),
+        None,
+    )
+    .await
+    .map_err(|e| Error::Api(format!("openshell apply {name}: {e}")))?;
+    tracing::info!(
+        installation_id,
+        provider = %name,
+        "minted GitHub App installation token for repo-access routing"
+    );
+    Ok(name)
+}
+
+pub async fn attach_routed_provider_to_sandbox(
+    board: &SharedBoard,
+    sandbox: &str,
+    provider_name: &str,
+) -> Result<(), Error> {
+    let sandbox = sandbox.trim();
+    if sandbox.is_empty() {
+        return Ok(());
+    }
+    let os = board.openshell_client();
+    os.attach_sandbox_provider(sandbox, provider_name)
+        .await
+        .map_err(|e| Error::Api(format!("openshell attach {provider_name} to {sandbox}: {e}")))?;
+    if provider_name != PROVIDER_NAME {
+        if let Err(e) = os.detach_sandbox_provider(sandbox, PROVIDER_NAME).await {
+            tracing::debug!(
+                sandbox,
+                "detach singleton `{PROVIDER_NAME}` after routed attach: {e}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Look up the access cache (not `GITHUB_INSTALLATION_ID`), mint, and attach
+/// to a live sandbox when `sandbox` is set.
+pub async fn sync_sandbox_token_for_repo(
+    board: &SharedBoard,
+    sandbox: Option<&str>,
+    owner_repo: &str,
+) -> Result<RepoTokenOutcome, Error> {
+    let owner_repo = owner_repo.trim();
+    if owner_repo.is_empty() {
+        return Err(Error::Config("empty owner/repo for installation routing".into()));
+    }
+    let route = route_with_optional_refresh(board, owner_repo).await;
+    match route {
+        RepoInstallRoute::Uncovered { owner_repo } => {
+            Ok(RepoTokenOutcome::Uncovered { owner_repo })
+        }
+        RepoInstallRoute::Covered {
+            owner_repo,
+            installation_id,
+        } => {
+            let singleton = board.github_app_installation_id();
+            let (provider_name, routed) = if singleton == Some(installation_id) {
+                (PROVIDER_NAME.to_string(), false)
+            } else {
+                let name = apply_routed_installation_token(board, installation_id).await?;
+                (name, true)
+            };
+            if routed {
+                if let Some(box_name) = sandbox.map(str::trim).filter(|s| !s.is_empty()) {
+                    attach_routed_provider_to_sandbox(board, box_name, &provider_name).await?;
+                }
+            }
+            Ok(RepoTokenOutcome::Ready {
+                owner_repo,
+                installation_id,
+                provider_name,
+                routed,
+            })
+        }
+    }
+}
+
+/// Result of ensuring a card/sandbox can push to a known repo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnsurePushToken {
+    /// No `owner/name` on the card yet — agent may still escalate for remotes.
+    Skipped,
+    /// App does not cover the repo; card is in Needs You.
+    Parked,
+    Ready(RepoTokenOutcome),
+}
+
+/// Resolve clone/PR repo, mint/attach, or park Needs You on cache miss.
+pub async fn ensure_push_token(
+    board: &SharedBoard,
+    item_id: ItemId,
+    agent_id: &str,
+    sandbox: Option<&str>,
+    owner_repo: Option<&str>,
+) -> Result<EnsurePushToken, Error> {
+    let repo = match owner_repo
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+    {
+        Some(r) => r,
+        None => match board.get(item_id).as_ref().and_then(owner_repo_from_card) {
+            Some(r) => r,
+            None => return Ok(EnsurePushToken::Skipped),
+        },
+    };
+    let outcome = sync_sandbox_token_for_repo(board, sandbox, &repo).await?;
+    if let RepoTokenOutcome::Uncovered { owner_repo } = &outcome {
+        escalate_uncovered_repo(board, item_id, agent_id, owner_repo)
+            .map_err(Error::Config)?;
+        return Ok(EnsurePushToken::Parked);
+    }
+    Ok(EnsurePushToken::Ready(outcome))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1534,5 +1843,274 @@ mod tests {
         assert!(missing.is_none());
 
         handle.abort();
+    }
+
+    fn cache_repo(full_name: &str, installation_id: u64) -> GitHubRepoAccessCache {
+        let mut repos = BTreeMap::new();
+        repos.insert(
+            full_name.to_string(),
+            GitHubRepoAccessEntry {
+                installation_id,
+                permissions: BTreeMap::new(),
+                last_seen_at: Utc::now(),
+            },
+        );
+        GitHubRepoAccessCache {
+            installations: vec![InstallationInfo {
+                id: installation_id,
+                account_login: full_name.split('/').next().unwrap_or("org").into(),
+                account_type: "Organization".into(),
+            }],
+            repos,
+            ..Default::default()
+        }
+    }
+
+    fn running_card(board: &SharedBoard, intent: &str) -> crate::model::WorkItem {
+        use crate::model::{Origin, State};
+        let p = board
+            .create_project("Route proj", "p", "honr-app/honr", true, None)
+            .expect("project");
+        let t = board
+            .create(
+                Some(p.id),
+                "Route task",
+                intent,
+                Some("DoD".into()),
+                Origin::Human,
+                false,
+                None,
+            )
+            .expect("task");
+        let _ = board.transition(t.id, State::Shaping, "human", None);
+        let _ = board.transition(t.id, State::Backlog, "human", None);
+        let _ = board.transition(t.id, State::Claimed, "agent-1", None);
+        let _ = board.transition(t.id, State::Running, "agent-1", None);
+        board.get(t.id).expect("item")
+    }
+
+    #[test]
+    fn route_repo_installation_ignores_board_singleton() {
+        let cache = cache_repo("acme/other", 100);
+        assert_eq!(
+            route_repo_installation(&cache, "acme/other"),
+            RepoInstallRoute::Covered {
+                owner_repo: "acme/other".into(),
+                installation_id: 100,
+            }
+        );
+        assert_eq!(
+            route_repo_installation(&cache, "missing/repo"),
+            RepoInstallRoute::Uncovered {
+                owner_repo: "missing/repo".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn uncovered_escalation_points_at_settings_repo_access() {
+        let (q, opts, rec) = uncovered_escalation("acme/secret");
+        assert!(q.contains("acme/secret"), "{q}");
+        assert!(q.contains(SETTINGS_REPO_ACCESS_PATH), "{q}");
+        assert_eq!(opts.len(), 2);
+        assert_eq!(rec, 0);
+        assert!(opts[0].detail.contains(INSTALLATIONS_MANAGE_URL));
+        assert!(opts[0].detail.contains("Refresh"));
+        assert!(opts[0].detail.contains("Unpark"));
+    }
+
+    #[test]
+    fn overlay_routed_provider_replaces_singleton() {
+        let mut providers = vec!["vertex".into(), PROVIDER_NAME.into()];
+        overlay_routed_provider(
+            &mut providers,
+            &RepoTokenOutcome::Ready {
+                owner_repo: "acme/other".into(),
+                installation_id: 100,
+                provider_name: routed_provider_name(100),
+                routed: true,
+            },
+        );
+        assert_eq!(
+            providers,
+            vec!["vertex".to_string(), "github-app-install-100".to_string()]
+        );
+        let mut keep = vec![PROVIDER_NAME.into()];
+        overlay_routed_provider(
+            &mut keep,
+            &RepoTokenOutcome::Ready {
+                owner_repo: "acme/core".into(),
+                installation_id: 99,
+                provider_name: PROVIDER_NAME.into(),
+                routed: false,
+            },
+        );
+        assert_eq!(keep, vec![PROVIDER_NAME.to_string()]);
+    }
+
+    #[test]
+    fn owner_repo_from_card_reads_clone_prose() {
+        use crate::model::Origin;
+        let (dir, board, _env) = test_board("prose-repo");
+        let item = board
+            .create(
+                None,
+                "proj",
+                "Clone repository: widgets-org/core into /sandbox/repo",
+                None,
+                Origin::Human,
+                true,
+                None,
+            )
+            .expect("create");
+        assert_eq!(
+            owner_repo_from_card(&item).as_deref(),
+            Some("widgets-org/core")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn uncovered_repo_parks_needs_you_without_minting() {
+        let (dir, board, _env) = test_board("uncovered");
+        seal_test_app(&board);
+        board.set_github_app_installation_id(Some(99));
+        let item = running_card(
+            &board,
+            "Clone repository: missing-org/missing into /sandbox/repo",
+        );
+        board.set_environment(item.id, Some("honr-card-uncovered".into()));
+        let _api = github_api_env::Guard::set("http://127.0.0.1:1");
+        let outcome = ensure_push_token(&board, item.id, "agent-1", Some("honr-card-uncovered"), None)
+            .await
+            .expect("ensure");
+        assert_eq!(outcome, EnsurePushToken::Parked);
+        let parked = board.get(item.id).expect("card");
+        assert_eq!(parked.state, crate::model::State::NeedsHuman);
+        let q = parked.escalation.as_ref().expect("esc").question.clone();
+        assert!(q.contains("missing-org/missing"), "{q}");
+        assert!(q.contains(SETTINGS_REPO_ACCESS_PATH), "{q}");
+        assert_eq!(board.github_app_installation_id(), Some(99));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn covered_repo_mints_routed_token_not_singleton_installation() {
+        use std::sync::{Arc, Mutex};
+        let dir = std::env::temp_dir().join(format!(
+            "honr-test-ghapp-route-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let key_path = dir.join("master.key");
+        let _env = crate::secrets::master_key_env::Guard::with_key_path(&key_path);
+        let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_c = Arc::clone(&seen);
+        let mut board_inner = Board::new(crate::schema::Schema::default(), dir.join("board.json"));
+        board_inner.openshell = Some(OpenShell::mock(
+            move |argv| {
+                seen_c.lock().unwrap().push(argv.to_vec());
+                if argv.first().map(String::as_str) == Some("provider")
+                    && argv.get(1).map(String::as_str) == Some("list")
+                {
+                    return Output {
+                        code: 0,
+                        stdout: "[]".into(),
+                        stderr: String::new(),
+                    };
+                }
+                Output {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }
+            },
+            StdDuration::from_secs(5),
+        ));
+        let board: SharedBoard = std::sync::Arc::new(board_inner);
+        seal_test_app(&board);
+        board.set_github_app_installation_id(Some(99));
+        board.set_github_repo_access_cache(cache_repo("acme/other", 100));
+
+        let (base, handle) = spawn_github_mock().await;
+        let _api = github_api_env::Guard::set(&base);
+
+        let item = running_card(
+            &board,
+            "Clone repository: acme/other into /sandbox/repo",
+        );
+        board.set_environment(item.id, Some("honr-card-route".into()));
+
+        let outcome = ensure_push_token(
+            &board,
+            item.id,
+            "agent-1",
+            Some("honr-card-route"),
+            Some("acme/other"),
+        )
+        .await
+        .expect("ensure");
+        match outcome {
+            EnsurePushToken::Ready(RepoTokenOutcome::Ready {
+                installation_id,
+                provider_name,
+                routed,
+                ..
+            }) => {
+                assert_eq!(installation_id, 100);
+                assert_eq!(provider_name, "github-app-install-100");
+                assert!(routed);
+            }
+            other => panic!("expected routed ready, got {other:?}"),
+        }
+        assert_eq!(board.github_app_installation_id(), Some(99));
+        let calls = seen.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|a| {
+                a.windows(2).any(|w| {
+                    w[0] == "--name" && w[1] == "github-app-install-100"
+                })
+            }),
+            "must create/update routed provider: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|a| {
+                a.first().map(String::as_str) == Some("sandbox")
+                    && a.get(1).map(String::as_str) == Some("provider")
+                    && a.get(2).map(String::as_str) == Some("attach")
+                    && a.iter().any(|s| s == "github-app-install-100")
+                    && a.iter().any(|s| s == "honr-card-route")
+            }),
+            "must attach routed GH_TOKEN to live sandbox: {calls:?}"
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn covered_same_as_singleton_does_not_open_routed_provider() {
+        let (dir, board, _env) = test_board("same-install");
+        seal_test_app(&board);
+        board.set_github_app_installation_id(Some(99));
+        board.set_github_repo_access_cache(cache_repo("honr-app/honr", 99));
+        let _api = github_api_env::Guard::set("http://127.0.0.1:1");
+        let outcome = sync_sandbox_token_for_repo(&board, Some("box"), "honr-app/honr")
+            .await
+            .expect("sync");
+        assert_eq!(
+            outcome,
+            RepoTokenOutcome::Ready {
+                owner_repo: "honr-app/honr".into(),
+                installation_id: 99,
+                provider_name: PROVIDER_NAME.into(),
+                routed: false,
+            }
+        );
+        assert_eq!(board.github_app_installation_id(), Some(99));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
