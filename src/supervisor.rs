@@ -1277,7 +1277,12 @@ fn report_to_pull_request(rep: &ReportFile) -> Option<crate::model::PullRequest>
         .to_string();
     let base = rep.base.as_ref().and_then(report_end_to_model);
     let head = rep.head.as_ref().and_then(report_end_to_model);
-    Some(crate::model::PullRequest { url, base, head })
+    Some(crate::model::PullRequest {
+        url,
+        base,
+        head,
+        ..Default::default()
+    })
 }
 
 /// Sidecar written by Initial plan agents — becomes Project Plan awaiting approval.
@@ -1650,7 +1655,7 @@ async fn process_verdict(
 
             // Stash PR early so an escalate on missing plan.json still surfaces it.
             if let Some(pr) = report_to_pull_request(&rep) {
-                board.set_pull_request(id, Some(pr));
+                let _ = board.report_pull_request(id, pr);
             }
 
             let is_initial = board.get(id).is_some_and(|i| i.is_initial_plan_task());
@@ -1745,7 +1750,9 @@ async fn process_verdict(
             let pr =
                 pr.ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?;
             let pr_url = pr.url.clone();
-            board.set_pull_request(id, Some(pr));
+            board
+                .report_pull_request(id, pr)
+                .map_err(|e| anyhow::anyhow!("report_pull_request: {e}"))?;
             let mut finish_cfg = cfg.clone();
             if let Ok(Some(repo)) = board.resolve_card_repo(id) {
                 finish_cfg.repo = repo;
@@ -1829,7 +1836,9 @@ async fn finish(
         // A Review card with no PR is a card you cannot action, so this is a
         // failure rather than a quietly empty field.
         .ok_or_else(|| anyhow::anyhow!("agent finished but opened no PR for {branch}"))?;
-    board.set_pr_url(id, Some(url.clone()));
+    board
+        .report_pull_request(id, crate::model::PullRequest::from_url(url.clone()))
+        .map_err(|e| anyhow::anyhow!("report_pull_request: {e}"))?;
 
     // Refuse hollow Review while GitHub still reports CONFLICTING. UNKNOWN
     // (and null/missing) must not hard-fail — the API is eventually consistent.
@@ -2528,6 +2537,7 @@ fn parse_pr_binding_line(stdout: &str) -> Option<crate::model::PullRequest> {
             url: url.to_string(),
             base: Some(crate::model::PullRequestEnd::new(base_repo, base_ref)),
             head: Some(crate::model::PullRequestEnd::new(head_repo, head_ref)),
+            ..Default::default()
         });
     }
     None
@@ -3014,7 +3024,10 @@ names an exact product repo; otherwise escalate (see Remotes) — do not guess.\
         b.push_str(
             "\nWhen the work is done, write `/sandbox/.honr/report.json` with `url`, `base`, \
 `head` (see `/sandbox/.honr/report.schema.json`), diffstat (`added`/`removed`), and optional \
-`gates`.\n",
+`gates`. That PR is appended to the card — it does not replace PRs already recorded.\n\
+Whenever you open a PR during the run (including an additional repo), record it immediately \
+via honr MCP `report_pull_request` (url + base/head) so the card keeps a list. Review does \
+not leave until every listed PR is merged.\n",
         );
         b.push_str(
             "\nRun the project's own checks before you finish — board-wide quality gates live in \
@@ -3484,7 +3497,7 @@ pub(crate) fn cockpit_briefing(sandbox_prompt: Option<&str>) -> String {
          no Bearer. Do **not** run browser OAuth inside this sandbox. That endpoint is \
          operator tools only: board_snapshot, dispatch, park, steer, approve_*, \
          answer_escalation, and related triage tools. Do not call worker verbs (claim, \
-         heartbeat, report, split, escalate, release, list_ready) — they are denied on \
+         heartbeat, report, report_pull_request, split, escalate, release, list_ready) — they are denied on \
          this seat.\n\n",
     );
     b.push_str(
@@ -5098,6 +5111,7 @@ mod tests {
             "claim",
             "heartbeat",
             "report",
+            "report_pull_request",
             "split",
             "escalate",
             "release",
@@ -6709,6 +6723,7 @@ mod tests {
                     "honr-app/honr",
                     crate::schema::card_branch_name(task.id),
                 )),
+                ..Default::default()
             }),
         );
         board.dispatch_rebase(task.id).unwrap();
@@ -6916,6 +6931,7 @@ mod tests {
                     "honr-app/honr",
                     crate::schema::card_branch_name(review.id),
                 )),
+                ..Default::default()
             }),
         );
 
@@ -7044,6 +7060,7 @@ mod tests {
                     "honr-app/honr",
                     crate::schema::card_branch_name(review.id),
                 )),
+                ..Default::default()
             }),
         );
 
@@ -7131,6 +7148,7 @@ mod tests {
                     "honr-app/honr",
                     crate::schema::card_branch_name(review.id),
                 )),
+                ..Default::default()
             }),
         );
 

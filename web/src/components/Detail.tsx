@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, since } from "../api.js";
 import type { BoardEvent, PlanTaskSpec, SandboxProfile, StoryLine, WorkItem } from "../types.js";
-import { cardPrUrl } from "../types.js";
+import { cardPullRequests } from "../types.js";
 import { subscribeBoardEvents } from "../useBoard.js";
 import { CreateTaskForm } from "./CreateTaskForm.js";
 import { ProjectSandboxPicker } from "./Settings.js";
@@ -958,15 +958,16 @@ export function DetailDrawer({
         </Section>
       )}
 
-      {(cardPrUrl(d) || d.environment) && (
+      {(cardPullRequests(d).length > 0 || d.environment) && (
         <Section title="This run">
-          {cardPrUrl(d) && (
-            <p>
-              <a className="pr-link" href={cardPrUrl(d)!} target="_blank" rel="noreferrer">
-                ↗ {cardPrUrl(d)}
+          {cardPullRequests(d).map((pr) => (
+            <p key={pr.url}>
+              <a className="pr-link" href={pr.url} target="_blank" rel="noreferrer">
+                ↗ {pr.url}
               </a>
+              {pr.merged ? <span className="dim"> (merged)</span> : null}
             </p>
-          )}
+          ))}
           {d.environment && <p className="dim">sandbox {d.environment} ({resolvedEngine})</p>}
         </Section>
       )}
@@ -1497,12 +1498,15 @@ export function DetailDrawer({
               </ol>
             </div>
           )}
-          {cardPrUrl(d) && (
-            <p>
-              <a className="pr-link" href={cardPrUrl(d)!} target="_blank" rel="noreferrer">
-                ↗ review the pull request
+          {cardPullRequests(d).length > 0 && (
+            cardPullRequests(d).map((pr) => (
+            <p key={pr.url}>
+              <a className="pr-link" href={pr.url} target="_blank" rel="noreferrer">
+                ↗ review {pr.url}
               </a>
+              {pr.merged ? <span className="dim"> (merged)</span> : null}
             </p>
+            ))
           )}
           {/* The note lives with the button that sends it. Previously it was a
               shared textarea in a different section, so it was not obvious

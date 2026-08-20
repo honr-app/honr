@@ -5,7 +5,7 @@
 //! Two families share one state machine; seats gate which family is visible:
 //!   * operator tools — what a liaison needs to triage and decide
 //!   * worker verbs  — `list_ready` `claim` `heartbeat` `split` `escalate`
-//!     `report` `release`, and nothing else
+//!     `report` `report_pull_request` `release`, and nothing else
 //!
 //! `/mcp` (OAuth) is the **operator seat**: operator tools only. Worker verbs
 //! stay on the host seat for supervisor/host tooling; the live supervisor path
@@ -46,7 +46,7 @@ type Out<T> = Result<ToolJson<T>, ErrorData>;
 /// between a container and an HTTP route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum McpSeat {
-    /// Operator tools only — no claim/heartbeat/report/split/escalate/release/list_ready.
+    /// Operator tools only — no claim/heartbeat/report/report_pull_request/split/escalate/release/list_ready.
     #[default]
     Operator,
     /// Operator tools plus worker verbs (host / supervisor tooling).
@@ -63,6 +63,7 @@ pub const WORKER_VERB_TOOLS: &[&str] = &[
     "split",
     "escalate",
     "report",
+    "report_pull_request",
     "release",
 ];
 
@@ -317,6 +318,28 @@ pub struct ReportArg {
     pub lines_added: u32,
     #[serde(default)]
     pub lines_removed: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReportPullRequestEndArg {
+    /// `owner/name` (`full_name`).
+    pub repo: String,
+    /// Branch name (GitHub JSON field `ref`).
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReportPullRequestArg {
+    pub item_id: ItemId,
+    #[allow(dead_code)]
+    pub agent_id: String,
+    /// PR HTML URL.
+    pub url: String,
+    #[serde(default)]
+    pub base: Option<ReportPullRequestEndArg>,
+    #[serde(default)]
+    pub head: Option<ReportPullRequestEndArg>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1162,6 +1185,29 @@ impl Operator {
     }
 
     #[tool(
+        name = "report_pull_request",
+        description = "WORKER VERB. Record a PR this running card just opened. Appends to the \
+                       card's pull_requests list without replacing earlier PRs or leaving Running. \
+                       Nothing is pre-selected by a human. Final `report` still hands the card to Review."
+    )]
+    fn report_pull_request(&self, Parameters(a): Parameters<ReportPullRequestArg>) -> Out<Ack> {
+        self.deny_worker("report_pull_request")?;
+        let mut pr = crate::model::PullRequest::from_url(a.url);
+        if let Some(b) = a.base {
+            pr.base = Some(crate::model::PullRequestEnd::new(b.repo, b.git_ref));
+        }
+        if let Some(h) = a.head {
+            pr.head = Some(crate::model::PullRequestEnd::new(h.repo, h.git_ref));
+        }
+        let item = self
+            .board
+            .report_pull_request(a.item_id, pr)
+            .map_err(bad)?;
+        let n = item.pull_requests.len();
+        self.ack(a.item_id, format!("recorded PR ({n} on card)"))
+    }
+
+    #[tool(
         name = "release",
         description = "WORKER VERB. Graceful surrender — give the card back to Backlog without \
                        waiting for your lease to expire. Operator must dispatch again to restart."
@@ -1191,7 +1237,7 @@ impl ServerHandler for Operator {
         .with_instructions(match self.seat {
             McpSeat::Operator => {
                 "honr — an agent orchestration board. You are the operator seat: the \
-                 human's liaison over operator tools only (no claim/heartbeat/report/split/escalate/\
+                 human's liaison over operator tools only (no claim/heartbeat/report/report_pull_request/split/escalate/\
                  release/list_ready — those are worker verbs on the host/supervisor path).\n\n\
                  Start with board_snapshot. Live goals expose recent_retired for mid-project \
                  cuts (retired leaves are not in column rollups). Use search_items when you \
@@ -1231,8 +1277,8 @@ impl ServerHandler for Operator {
                  single card."
             }
             McpSeat::Host => {
-                "honr — host MCP seat: operator tools plus worker verbs \
-                 (list_ready/claim/heartbeat/split/escalate/report/release). \
+                 "honr — host MCP seat: operator tools plus worker verbs \
+                 (list_ready/claim/heartbeat/split/escalate/report/report_pull_request/release). \
                  Card lifecycle mutations still go through Board; this seat is for \
                  supervisor/host tooling, not the operator chatbot."
             }

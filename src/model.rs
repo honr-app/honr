@@ -388,14 +388,24 @@ impl PullRequestEnd {
 
 /// Pull request on a card — forge facts for resume/clone/rebase.
 /// Shape matches `report.json` / GitHub base&head naming. URL lives here, not
-/// as a top-level `pr_url` field.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+/// as a top-level `pr_url` field. Cards own a list; `merged` is set by
+/// webhook/poll, not by human Approve.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 pub struct PullRequest {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<PullRequestEnd>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<PullRequestEnd>,
+    /// True after GitHub reports this PR merged. Review stays until every
+    /// listed PR is merged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merged: bool,
+    /// When the agent recorded this PR on the card. Oldest unmerged timestamp
+    /// drives Review staleness reporting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub reported_at: Option<DateTime<Utc>>,
 }
 
 impl PullRequest {
@@ -404,6 +414,8 @@ impl PullRequest {
             url: url.into().trim().to_string(),
             base: None,
             head: None,
+            merged: false,
+            reported_at: None,
         }
     }
 
@@ -529,7 +541,7 @@ impl OpenShellProviderDesired {
 ///
 /// Empty boards seed from compiled [`Default`]. Board is source of truth after.
 /// Image / policy / cpu / memory live on sandbox profiles; work remotes on
-/// card `pull_request`. Branch / sandbox names are fixed `honr/card-*` (not
+/// card `pull_requests`. Branch / sandbox names are fixed `honr/card-*` (not
 /// a Settings knob).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentRuntimeConfig {
@@ -1550,10 +1562,14 @@ pub struct WorkItem {
     /// set when main advances under a still-MERGEABLE Review PR.
     #[serde(default)]
     pub rebase_requested: bool,
-    /// Pull request the agent opened (url + base/head). Approving surfaces it;
-    /// merging stays a human action. Legacy top-level `pr_url` migrates here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_request: Option<PullRequest>,
+    /// Pull requests the agent opened (url + base/head). Approving surfaces
+    /// them; merging stays a human action. Review does not leave until every
+    /// listed PR is merged. Legacy singular `pull_request` / `pr_url` migrate here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_requests: Vec<PullRequest>,
+    /// Legacy singular wire field — read on load, never written.
+    #[serde(default, rename = "pull_request", skip_serializing)]
+    pub legacy_pull_request: Option<PullRequest>,
     /// Legacy wire field — read on load, never written.
     #[serde(default, rename = "pr_url", skip_serializing)]
     pub legacy_pr_url: Option<String>,
@@ -1561,7 +1577,7 @@ pub struct WorkItem {
     /// Durable product remotes for a claimable Task (`upstream` required;
     /// optional `fork`; `base` defaults to `main`). Null on Projects — remotes
     /// are task-scoped, never a Project `product_repo`. After report,
-    /// [`Self::pull_request`] still wins for resume (see `resolve_card_repo`).
+    /// [`Self::pull_requests`] still wins for resume (see `resolve_card_repo`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<crate::schema::RepoConfig>,
 
@@ -1620,7 +1636,8 @@ impl WorkItem {
             parked: false,
             awaiting_dispatch: false,
             rebase_requested: false,
-            pull_request: None,
+            pull_requests: Vec::new(),
+            legacy_pull_request: None,
             legacy_pr_url: None,
             repo: None,
             plan: None,
@@ -1635,13 +1652,55 @@ impl WorkItem {
         self.parent.is_none() && self.level.as_deref() != Some("Task")
     }
 
-    /// PR HTML URL, if any (`pull_request.url`).
+    /// Primary PR HTML URL: oldest unmerged, else first listed (`pull_requests`).
     pub fn pr_url(&self) -> Option<&str> {
-        self.pull_request.as_ref().and_then(PullRequest::url_str)
+        self.unmerged_prs()
+            .find_map(PullRequest::url_str)
+            .or_else(|| self.pull_requests.iter().find_map(PullRequest::url_str))
     }
 
-    /// Fold legacy top-level `pr_url` into [`Self::pull_request`].
+    /// Every listed PR with a non-empty URL.
+    pub fn pr_urls(&self) -> Vec<&str> {
+        self.pull_requests
+            .iter()
+            .filter_map(PullRequest::url_str)
+            .collect()
+    }
+
+    /// Listed PRs that GitHub has not yet marked merged.
+    pub fn unmerged_prs(&self) -> impl Iterator<Item = &PullRequest> {
+        self.pull_requests
+            .iter()
+            .filter(|p| !p.merged && p.url_str().is_some())
+    }
+
+    /// True when the card lists at least one PR and every listed PR is merged.
+    pub fn all_pull_requests_merged(&self) -> bool {
+        !self.pull_requests.is_empty()
+            && self
+                .pull_requests
+                .iter()
+                .all(|p| p.merged || p.url_str().is_none())
+    }
+
+    /// Age for Review staleness: oldest unmerged PR `reported_at`, else time in state.
+    pub fn oldest_unmerged_age(&self, now: DateTime<Utc>) -> Duration {
+        self.unmerged_prs()
+            .filter_map(|p| p.reported_at)
+            .min()
+            .map(|at| now - at)
+            .unwrap_or_else(|| self.time_in_state(now))
+    }
+
+    /// Fold legacy singular `pull_request` / top-level `pr_url` into [`Self::pull_requests`].
     pub fn migrate_legacy_pr_url(&mut self) {
+        if let Some(pr) = self.legacy_pull_request.take() {
+            if self.pull_requests.is_empty()
+                && (pr.url_str().is_some() || pr.has_forge_ends())
+            {
+                self.pull_requests.push(pr);
+            }
+        }
         let Some(url) = self.legacy_pr_url.take() else {
             return;
         };
@@ -1649,10 +1708,14 @@ impl WorkItem {
         if url.is_empty() {
             return;
         }
-        match &mut self.pull_request {
-            Some(pr) if pr.url.trim().is_empty() => pr.url = url,
-            None => self.pull_request = Some(PullRequest::from_url(url)),
-            Some(_) => {}
+        if self.pull_requests.is_empty() {
+            self.pull_requests.push(PullRequest::from_url(url));
+            return;
+        }
+        if let Some(pr) = self.pull_requests.first_mut() {
+            if pr.url.trim().is_empty() {
+                pr.url = url;
+            }
         }
     }
 

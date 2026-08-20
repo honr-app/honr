@@ -137,7 +137,7 @@ export interface SandboxProfilesOut {
 
 /**
  * Per-install forge binding (Settings → Forge).
- * Work remotes live on each card's `pull_request` after the agent reports.
+ * Work remotes live on each card's `pull_requests` after the agent reports.
  */
 export interface WorkspaceBinding {
   forge: string;
@@ -371,6 +371,10 @@ export interface PullRequest {
   url: string;
   base?: PullRequestEnd | null;
   head?: PullRequestEnd | null;
+  /** True after GitHub reports this PR merged. */
+  merged?: boolean;
+  /** When the agent recorded this PR on the card. */
+  reported_at?: string | null;
 }
 
 export type PlanStatus = "empty" | "awaiting_approval" | "approved";
@@ -455,8 +459,10 @@ export interface WorkItem {
   /** Board UI asked supervisor to start this Backlog card. */
   awaiting_dispatch?: boolean;
   engine?: string | null;
+  pull_requests?: PullRequest[];
+  /** @deprecated legacy wire — prefer pull_requests */
   pull_request?: PullRequest | null;
-  /** @deprecated legacy wire — prefer pull_request.url */
+  /** @deprecated legacy wire — prefer pull_requests[].url */
   pr_url?: string | null;
   /** Legacy unused field; remotes come from pull_request after report. */
   repo?: RepoConfig | null;
@@ -467,12 +473,31 @@ export interface WorkItem {
   history: Transition[];
 }
 
-/** PR HTML URL from card (`pull_request.url`, else legacy `pr_url`). */
+/** Listed PRs on a card (`pull_requests`, else legacy singular `pull_request`). */
+export function cardPullRequests(item: {
+  pull_requests?: PullRequest[] | null;
+  pull_request?: PullRequest | null;
+  pr_url?: string | null;
+}): PullRequest[] {
+  if (item.pull_requests && item.pull_requests.length > 0) {
+    return item.pull_requests;
+  }
+  if (item.pull_request?.url?.trim()) {
+    return [item.pull_request];
+  }
+  const legacy = item.pr_url?.trim();
+  return legacy ? [{ url: legacy }] : [];
+}
+
+/** PR HTML URL from card (oldest unmerged, else first listed, else legacy `pr_url`). */
 export function cardPrUrl(item: {
+  pull_requests?: PullRequest[] | null;
   pull_request?: PullRequest | null;
   pr_url?: string | null;
 }): string | null {
-  const u = item.pull_request?.url?.trim() || item.pr_url?.trim();
+  const prs = cardPullRequests(item);
+  const open = prs.find((p) => !p.merged && p.url?.trim());
+  const u = (open ?? prs[0])?.url?.trim() || item.pr_url?.trim();
   return u ? u : null;
 }
 
